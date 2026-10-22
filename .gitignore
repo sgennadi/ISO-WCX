@@ -1,0 +1,10 @@
+build/
+build-*/
+.vs/
+.idea/
+*.obj
+*.pdb
+*.ilk
+*.suo
+*.user
+__pycache__/
