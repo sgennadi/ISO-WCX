@@ -13,7 +13,7 @@ Modern C++20 foundation for a read-only Total Commander WCX disc-image plugin.
 
 ## Current contents
 
-A small independent endian-safe binary-reader foundation and tests are included. The existing legacy ISO.WCX implementation and experimental UDF prototype are **not** published here. The migration requires separate validation of original code redistribution rights and regression testing.
+An endian-safe binary-reader foundation, a standalone ISO9660/Joliet listing and extraction prototype, and synthetic regression tests are included. The ISO reader is not yet integrated with WCX and does not claim support for Rock Ridge, multi-extent files, or all physical sector layouts. The existing legacy ISO.WCX implementation and experimental UDF prototype are **not** published here. The migration requires separate validation of original code redistribution rights and regression testing.
 
 ## Build
 
@@ -32,3 +32,9 @@ ctest --test-dir build -C Release --output-on-failure
 5. Add complex UDF partitions, fuzzing and release packaging.
 
 This is **not** a fork claiming ownership of the original ISO.WCX code. See [PROVENANCE.md](PROVENANCE.md).
+
+## Standalone ISO9660 / Joliet reader
+
+After a CMake build, run `iso9660_reader image.iso` to list entries, or `iso9660_reader image.iso --extract output_dir` to extract files. It currently expects 2048-byte logical sectors; extraction from untrusted images should be performed in an isolated test directory. UDF is not yet integrated in this GitHub repository.
+
+[Migration tracking issue](https://github.com/sgennadi/ISO-WCX/issues/1).
