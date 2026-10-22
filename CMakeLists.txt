@@ -33,3 +33,12 @@ if(ISO_BUILD_ISO9660_TOOL)
     target_compile_options(iso9660_reader PRIVATE -Wall -Wextra -Wpedantic)
   endif()
 endif()
+
+if(BUILD_TESTING AND ISO_BUILD_ISO9660_TOOL)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME iso9660_synthetic_extract
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iso9660.py"
+              "$<TARGET_FILE:iso9660_reader>")
+  endif()
+endif()
