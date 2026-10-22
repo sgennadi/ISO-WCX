@@ -22,3 +22,14 @@ if(BUILD_TESTING)
 endif()
 
 # WCX plugin targets will be enabled only after ABI migration and license review.
+
+option(ISO_BUILD_ISO9660_TOOL "Build independent ISO9660/Joliet reader" ON)
+if(ISO_BUILD_ISO9660_TOOL)
+  add_executable(iso9660_reader tools/iso9660_reader.cpp)
+  target_compile_features(iso9660_reader PRIVATE cxx_std_20)
+  if(MSVC)
+    target_compile_options(iso9660_reader PRIVATE /W4 /EHsc)
+  else()
+    target_compile_options(iso9660_reader PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endif()
