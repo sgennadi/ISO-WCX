@@ -78,7 +78,7 @@ Record parse(const Bytes& b,size_t p,bool joliet) {
     if(p>=b.size()||b[p]<34||b[p]>b.size()-p) throw std::runtime_error("invalid directory record");
     uint8_t len=b[p], n=b[p+32];
     if(size_t(33)+n>len) throw std::runtime_error("invalid filename field");
-    return {le32(b,p+2),le32(b,p+10),bool(b[p+25]&2),name(b,p+33,n,joliet)};
+    return {le32(b,p+2),le32(b,p+10),bool(b[p+25]&2), (n==1 && (b[p+33]==0 || b[p+33]==1)) ? std::string(".") : name(b,p+33,n,joliet)};
 }
 void extract(Image& im,uint64_t off,uint32_t size,const fs::path& path) {
     fs::create_directories(path.parent_path());
