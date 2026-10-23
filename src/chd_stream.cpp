@@ -102,6 +102,7 @@ ChdStream::ChdStream(const std::filesystem::path& path) {
             header->totalhunks > 0,
             "CHD logical hunk or optical sector geometry is unsupported");
 
+    hunk_.resize(hunk_bytes_);
     const std::uint64_t frames = header->logicalbytes / unit_bytes_;
     if (unit_bytes_ == iso_sector) {
         // CHD image with a straight 2048-byte cooked optical stream.
@@ -142,8 +143,47 @@ ChdStream::ChdStream(const std::filesystem::path& path) {
                 "CHD track exceeds logical frame count");
         logical_size_ = used_frames * iso_sector;
         label_ = "CHD v5 / compressed single-track CD Mode 1/2 Form 1";
+
+        // Some CHD CD containers represent a 150-sector CD lead-in and
+        // cooked vs. raw track offsets differently. Trust a validated ISO
+        // PVD or UDF anchor instead of guessing a fixed frame offset.
+        auto probe = [&](std::uint64_t frame, std::uint32_t offset,
+                         bool udf) -> bool {
+            if (frame >= used_frames || offset > unit_bytes_ - 16)
+                return false;
+            const auto pos = frame * unit_bytes_ + offset;
+            if (pos > header->logicalbytes ||
+                16 > header->logicalbytes - pos) return false;
+            const auto idx = pos / hunk_bytes_;
+            if (cached_hunk_ != idx) load_hunk(idx);
+            const auto within = static_cast<std::size_t>(pos % hunk_bytes_);
+            if (within > hunk_.size() || 16 > hunk_.size() - within)
+                return false;
+            const auto* p = hunk_.data() + within;
+            if (!udf)
+                return p[0] == 1 && std::memcmp(p+1,"CD001",5) == 0 &&
+                       p[6] == 1;
+            if (p[0] != 2 || p[1] != 0) return false;
+            unsigned sum = 0;
+            for (int i=0; i<16; ++i) if (i!=4) sum += p[i];
+            return (sum & 255u) == p[4];
+        };
+        bool found = false;
+        for (const auto lead : {0u,150u}) {
+            if (used_frames <= std::uint64_t(lead) + 16) continue;
+            for (const auto offset : {data_offset_,0u,16u,24u}) {
+                if (probe(std::uint64_t(lead) + 16,offset,false) ||
+                    probe(std::uint64_t(lead) + 256,offset,true)) {
+                    data_offset_ = offset;
+                    leading_frames_ = lead;
+                    logical_size_ = (used_frames - lead) * iso_sector;
+                    found = true;
+                    break;
+                }
+            }
+            if (found) break;
+        }
     }
-    hunk_.resize(hunk_bytes_);
 }
 
 ChdStream::~ChdStream() = default;
@@ -169,7 +209,8 @@ std::vector<std::uint8_t> ChdStream::read(
         const std::uint64_t position = start + done;
         const std::uint64_t sector = position / iso_sector;
         const auto in_sector = static_cast<std::uint32_t>(position % iso_sector);
-        const auto physical = sector * unit_bytes_ + data_offset_ + in_sector;
+        const auto physical =
+            (sector + leading_frames_) * unit_bytes_ + data_offset_ + in_sector;
         const std::uint64_t index = physical / hunk_bytes_;
         if (cached_hunk_ != index) load_hunk(index);
         const auto within_hunk = static_cast<std::size_t>(physical % hunk_bytes_);
