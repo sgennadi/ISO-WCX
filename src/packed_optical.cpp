@@ -107,7 +107,7 @@ PackedOptical::PackedOptical(const std::filesystem::path& path)
 std::string PackedOptical::label() const {
     switch (type_) {
     case Type::isz: return "ISZ v1 / native stored-zlib";
-    case Type::daa_v1: return "DAA v1 / native zlib";
+    case Type::daa_v1: return "DAA v1 / native raw DEFLATE";
     case Type::chd_v5: return "CHD v5 / uncompressed hunks";
     }
     return "packed optical";
@@ -262,7 +262,7 @@ void PackedOptical::parse_daa() {
                   pos <= physical_size_ &&
                   compressed <= physical_size_ - pos,
                   "DAA v1 compressed chunk out of bounds");
-            chunks_.push_back({pos,compressed,Codec::zlib});
+            chunks_.push_back({pos,compressed,Codec::raw_deflate});
             pos += compressed;
         }
         base += count;
