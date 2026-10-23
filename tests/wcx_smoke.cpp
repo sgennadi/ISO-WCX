@@ -97,9 +97,62 @@ int main(int argc,char** argv){
     std::string cue_content((std::istreambuf_iterator<char>(cue_output)),std::istreambuf_iterator<char>());
     cue_output.close();
     if(cue_content!="world") {std::cerr<<"CUE extraction mismatch\n";return 13;}
+
+    // NRG v1/ETNF test: the Nero metadata trailer must not be seen as ISO data.
+    auto append_be32=[](std::vector<std::uint8_t>& bytes,std::uint32_t n){
+        for(int i=3;i>=0;--i)bytes.push_back(static_cast<std::uint8_t>(n>>(i*8)));
+    };
+    auto append_ascii=[](std::vector<std::uint8_t>& bytes,const char* p,std::size_t n){
+        bytes.insert(bytes.end(),p,p+n);
+    };
+    std::vector<std::uint8_t> nrg=image;
+    append_ascii(nrg,"ETNF",4);append_be32(nrg,20);
+    append_be32(nrg,0);append_be32(nrg,static_cast<std::uint32_t>(image.size()));
+    append_be32(nrg,0);append_be32(nrg,0);append_be32(nrg,0);
+    append_ascii(nrg,"END!",4);append_be32(nrg,0);
+    append_ascii(nrg,"NERO",4);append_be32(nrg,static_cast<std::uint32_t>(image.size()));
+    const auto nrg_path=folder/L"sample.nrg";
+    {std::ofstream f(nrg_path,std::ios::binary);
+     f.write(reinterpret_cast<const char*>(nrg.data()),static_cast<std::streamsize>(nrg.size()));}
+    // MDS v1 paired with an MDF containing the same 2048-byte ISO data.
+    const auto mdf_path=folder/L"sample.mdf";
+    {std::ofstream f(mdf_path,std::ios::binary);
+     f.write(reinterpret_cast<const char*>(image.data()),static_cast<std::streamsize>(image.size()));}
+    std::vector<std::uint8_t> mds(216+6,0);
+    std::memcpy(mds.data(),"MEDIA DESCRIPTOR",16);mds[16]=1;
+    mds[0x14]=1;put32(mds,0x50,88); // 1 session, table at offset 88
+    mds[88+10]=1;put32(mds,88+20,112); // 1 track, table at offset 112
+    mds[112]=0xaa;mds[112+4]=1; // Mode 1, Track 1
+    put32(mds,112+0x0c,192);mds[112+0x10]=0;mds[112+0x11]=8; // 2048-byte sectors
+    put32(mds,112+0x34,200);put32(mds,192+4,32); // 32 data sectors
+    put32(mds,200,216);std::memcpy(mds.data()+216,"*.mdf",6);
+    const auto mds_path=folder/L"sample.mds";
+    {std::ofstream f(mds_path,std::ios::binary);
+     f.write(reinterpret_cast<const char*>(mds.data()),static_cast<std::streamsize>(mds.size()));}
+    auto verify_container=[&](const fs::path& input,const wchar_t* result_name)->bool {
+        source=input.wstring();options=OpenW{};options.ArcName=source.data();
+        HANDLE archive=open(&options);
+        if(!archive||options.OpenResult!=0) {std::cerr<<"Container OpenArchiveW failed\n";return false;}
+        item=HeaderExW{};
+        if(header(archive,&item)!=0||std::wstring(item.FileName)!=L"HELLO.TXT") {
+            std::cerr<<"Container ReadHeaderExW failed\n";close(archive);return false;
+        }
+        auto destination=(folder/result_name).wstring();
+        if(process(archive,2,nullptr,destination.data())!=0 || header(archive,&item)!=10) {
+            std::cerr<<"Container ProcessFileW failed\n";close(archive);return false;
+        }
+        close(archive);
+        std::ifstream output_file(folder/result_name,std::ios::binary);
+        const std::string actual((std::istreambuf_iterator<char>(output_file)),
+                                 std::istreambuf_iterator<char>());
+        output_file.close();
+        return actual=="world";
+    };
+    if(!verify_container(nrg_path,L"from-nrg.txt"))return 14;
+    if(!verify_container(mds_path,L"from-mds.txt"))return 15;
     fs::remove_all(folder);
     std::cerr << "wcx smoke: unloading DLL\n" << std::flush;
     FreeLibrary(dll);
-    std::cout<<"WCX load/export/list/extract test passed\n";return 0;
+    std::cout<<"WCX ISO/CUE/NRG/MDS load/export/list/extract test passed\n";return 0;
 }
 #endif
