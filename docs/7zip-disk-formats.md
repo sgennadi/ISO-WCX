@@ -17,7 +17,8 @@ This is the architecture we are following in ISO-WCX:
    System libvhdi is a Linux-only experimental opt-in for dynamic VHD/VHDX.
 2. Partitions: inspect_partition_table interprets GPT and MBR and now
    validates and follows bounded extended MBR (EBR) links.
-3. Filesystems: dedicated FAT/exFAT/NTFS/ext4 readers (future work).
+3. Filesystems: FAT12/16/32 standalone browser/extractor now implemented;
+   exFAT/NTFS/ext4 readers are future work.
 4. WCX: only register container formats after their filesystem readers,
    extraction behavior, ABI and cancellation tests all pass.
 
@@ -34,10 +35,10 @@ file signature and validated metadata.
 | VmdkHandler.cpp | Sparse grain mapping | Separate read-only implementation later |
 | QcowHandler.cpp | L1/L2 clusters and decompression | Separate read-only QCOW2 later |
 | VdiHandler.cpp | Block allocation maps | Separate read-only VDI later |
-| GptHandler.cpp | GUIDs, CRC32, extents | GPT primary validated; backup fallback later |
+| GptHandler.cpp | GUIDs, CRC32, extents | Independent primary/backup GPT CRC and recovery |
 | MbrHandler.cpp | Primary partitions and EBR links | Independent bounded EBR implementation |
 | NtfsHandler.cpp | MFT and attribute runlists | File reader not yet implemented |
-| FatHandler.cpp | FAT12/16/32 cluster chaining | Candidate first filesystem reader |
+| FatHandler.cpp | FAT12/16/32 cluster chaining | Independent FAT12/16/32 CLI list/extract implemented |
 | ExtHandler.cpp | Inodes/extents | Future independent Linux filesystem reader |
 | ApfsHandler.cpp, HfsHandler.cpp, DmgHandler.cpp | macOS disks/images | Separate milestones |
 
@@ -49,7 +50,9 @@ Read handlers at https://github.com/ip7z/7zip/tree/main/CPP/7zip/Archive.
 - Raw HDD IMG GPT/MBR and extended EBR, fixed VHD GPT/MBR:
   read-only CLI/library only, not registered as WCX archives.
 - Dynamic VHD/VHDX: research-only Linux system libvhdi optional backend.
-- VMDK/QCOW2/VDI and FAT/exFAT/NTFS/ext filesystems within virtual disks:
+- FAT12/16/32 file listing and extraction: available in separate CLI for
+  partitioned raw IMG/fixed VHD, **not** registered in WCX.
+- VMDK/QCOW2/VDI and exFAT/NTFS/ext filesystems within virtual disks:
   not yet supported.
 - Differencing parents and snapshot chains: explicitly disabled.
 
@@ -74,5 +77,6 @@ needs file-level provenance and compliance with the relevant license terms.
 - No writes, no physical-drive access, no disk mounts, no automatic
   cross-file parent resolution.
 
-Next objective: read-only FAT file browsing and extraction from partitions,
-followed by exFAT and NTFS with strict corruption handling.
+Next objective: validate FAT with independent real-world images and integrate
+verified extraction into a separate WCX adapter; then add exFAT and NTFS with
+strict corruption handling. The stable optical ISO/UDF handler stays isolated.
