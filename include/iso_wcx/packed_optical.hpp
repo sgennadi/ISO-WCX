@@ -23,7 +23,7 @@ public:
                                                  std::size_t length);
 private:
     enum class Type { isz, daa_v1, chd_v5 };
-    enum class Codec : std::uint8_t { zeros, stored, zlib, raw_deflate };
+    enum class Codec : std::uint8_t { zeros, stored, zlib, raw_deflate, bzip2 };
     struct Chunk {
         std::uint64_t offset = 0;
         std::uint32_t encoded_size = 0;
