@@ -161,6 +161,16 @@ non-contiguous file cluster chains. No disk is mounted and no host path is
 created from the image. The FAT reader is still **not included in the WCX
 DLL**, so Total Commander continues to use its validated optical engine.
 
+### Experimental MDS v2 / MDX metadata inspection
+
+The new `mds_descriptor_inspect` utility safely distinguishes Alcohol MDS
+v1, DAEMON Tools MDS v2, and embedded MDX. It reports the version and bounded
+packed/encrypted metadata offsets without attempting to decrypt content.
+The WCX plugin gives explicit unsupported-format errors for MDS v2 and MDX.
+**This is not working MDS v2/MDX extraction, and no new .mdx association is installed.**
+See the [Aaru issue #256 / mdsx research](docs/mds-v2-mdx-research.md)
+for current limitations, TrueCrypt licensing notes, and the decoding roadmap.
+
 ### Consolidated optical metadata regression checks
 
 RRIP PX (mode), TF (7/17-byte modification time), and mirrored CE pointers now have a dedicated integration + malformed-image regression in `tests/rock_ridge_metadata.cpp`. `tests/test_nrg_mds.py` no longer pretends that twice-running an MDS v1 fixture tests MDS v2; major version 2 is explicitly rejected. The supported MDS parser remains **v1 only** until independently validated v2 descriptors are implemented.
