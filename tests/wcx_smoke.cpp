@@ -34,7 +34,10 @@ static void put32(std::vector<std::uint8_t>& b,std::size_t p,std::uint32_t n) {
 static std::vector<std::uint8_t> record(std::uint32_t lba,std::uint32_t size,std::uint8_t flags,const std::string& name){
     std::size_t count=33+name.size()+(name.size()%2==0?1:0);
     std::vector<std::uint8_t> b(count,0);b[0]=static_cast<std::uint8_t>(count);b[18]=126;b[19]=10;b[20]=23;b[21]=12;b[22]=34;b[23]=58;
-    put32(b,2,lba);put32(b,10,size);b[25]=flags;b[28]=1;b[32]=static_cast<std::uint8_t>(name.size());
+    put32(b,2,lba);put32(b,10,size);
+    for(int i=0;i<4;i++) { b[6+i]=static_cast<std::uint8_t>(lba>>(8*(3-i)));
+                       b[14+i]=static_cast<std::uint8_t>(size>>(8*(3-i))); }
+    b[25]=flags;b[28]=1;b[31]=1;b[32]=static_cast<std::uint8_t>(name.size());
     std::memcpy(b.data()+33,name.data(),name.size());return b;
 }
 int main(int argc,char** argv){

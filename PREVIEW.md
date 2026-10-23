@@ -1,4 +1,4 @@
-# ISO-WCX v0.11.0 C++20 preview
+# ISO-WCX v0.12.0 C++20 preview
 
 Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
@@ -95,3 +95,10 @@ CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list
 - If multiple data tracks contain readable ISO/UDF filesystems, they appear under virtual `sessionN/` folders. The `.sub` sidecar, audio frames, copy-protection subchannels, scrambled data, multiple CCD sessions and other CloneCD versions are not supported.
 - Rejects descriptors with out-of-order/overlapping tracks, invalid physical lengths, missing sidecars, unsafe symbolic links and unsupported encoding/scrambling.
 - New synthetic tests cover physical-sector boundaries and per-track extraction, but manual validation using real CloneCD dumps remains necessary.
+
+## v0.12.0 ISO 9660 and CloneCD
+
+- ISO 9660 directory record byte 1 (Extended Attribute Record Length) is honored before reading the actual extent. Mirrored extent offsets/lengths and volume sequence bytes are validated in both endian encodings.
+- CloneCD `DataTracksScrambled=1` uses the standard CD-ROM scrambling XOR specified by ECMA-130 Annex B (sector bytes 12–2351 only). No proprietary media-key decryption, scrambled audio, or nonstandard sector modes are claimed.
+- CloneCD `.sub` data is exposed as a byte-for-byte *raw* P-W sidecar under `subchannels/disc.sub`. No interpreted Q/CRC, CD-Text, or copy-protection metadata is generated yet. Missing `.sub` is permitted; truncated or unsafe `.sub` sidecars are rejected.
+- Full CloneCD multisession, audio extraction, and vendor-specific protection methods remain unsupported. Experimental synthetic tests do not replace vendor-disc testing.

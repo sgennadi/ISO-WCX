@@ -19,6 +19,7 @@ struct Item {
     std::uint32_t dos_time = 0; // Packed DOS local date/time exposed by WCX.
     std::uint32_t attributes = 0; // Windows FILE_ATTRIBUTE_* mask.
     std::uint32_t source_index = 0xffffffffu; // Descriptor track for multisession views.
+    std::filesystem::path direct_source; // Validated raw sidecar, e.g. CloneCD .sub
     std::vector<Extent> extents;
     std::vector<std::uint8_t> inline_data;
 };

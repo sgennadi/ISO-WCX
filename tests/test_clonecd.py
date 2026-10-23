@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent synthetic CloneCD CCD/IMG fixtures; .SUB is deliberately ignored."""
+"""Independent CloneCD CCD/IMG/SUB and scrambling fixtures."""
 from __future__ import annotations
 import pathlib
 import random
@@ -10,6 +10,22 @@ import tempfile
 import test_images as iso
 
 FRAME = 2352
+
+def scramble(frame):
+    """ECMA-130 Annex B: same reversible physical XOR applied per 2352-byte sector."""
+    assert len(frame)%FRAME==0
+    state=1
+    mask=bytearray(2340)
+    for i in range(len(mask)):
+        for bit in range(8):
+            mask[i] |= (state & 1) << bit
+            state=(state>>1)|(((state^(state>>1))&1)<<14)
+    assert mask[:6]==b'\x01\x80\x00\x60\x00\x28'
+    data=bytearray(frame)
+    for start in range(0,len(data),FRAME):
+        for i,key in enumerate(mask):
+            data[start+12+i]^=key
+    return data
 
 def descriptor(tracks, *, scrambled=0, sessions=1, version=3):
     lines = ["[CloneCD]", f"Version={version}", "[Disc]", f"Sessions={sessions}",
@@ -48,6 +64,9 @@ def run(exe):
         inspect(exe,root,descriptor([(1,2,0,None)]),mode2,
                 expected={"HELLO.TXT":b"world"})
         (root/"output"/"HELLO.TXT").unlink()
+        inspect(exe,root,descriptor([(1,1,0,None)],scrambled=1),scramble(frame),
+                expected={"HELLO.TXT":b"world"})
+        (root/"output"/"HELLO.TXT").unlink()
         # A mixed-mode image: audio frames precede an ISO data track.
         prefix=bytes(FRAME*150)
         inspect(exe,root,descriptor([(1,0,0,None),(2,1,150,145)]),
@@ -63,6 +82,16 @@ def run(exe):
                                 "session2/NEXT.BIN":b"world"})
         # Remove leftovers so a wrong source doesn't pass from stale files.
         import shutil
+        shutil.rmtree(root/"output")
+        # The optional .sub must be byte-for-byte preserved, never interpreted
+        # as the ISO file content. Each IMG frame has 96 P-W subchannel bytes.
+        raw_sub=bytes(range(96))*(len(frame)//FRAME)
+        (root/"test.sub").write_bytes(raw_sub)
+        inspect(exe,root,descriptor([(1,1,0,None)]),frame,
+                expected={"HELLO.TXT":b"world","subchannels/disc.sub":raw_sub})
+        (root/"test.sub").write_bytes(raw_sub[:-1])
+        inspect(exe,root,descriptor([(1,1,0,None)]),frame,bad=True)
+        (root/"test.sub").unlink()
         shutil.rmtree(root/"output")
         reject=[
             descriptor([(1,1,0,None)],scrambled=1),
@@ -91,7 +120,7 @@ def run(exe):
             (root/"test.img").write_bytes(frame)
             outcome=subprocess.run([exe,str(root/"test.ccd")],capture_output=True,timeout=15)
             assert outcome.returncode in (0,1,2),(outcome.returncode,outcome.stderr[-200:])
-    print("PASS: CloneCD CCD/IMG Mode1, Mode2, mixed/audio, two data tracks, malformed descriptors")
+    print("PASS: CloneCD CCD/IMG/SUB and ECMA-130 scrambling, mixed mode, corruption")
 
 if __name__=="__main__":
     run(sys.argv[1])

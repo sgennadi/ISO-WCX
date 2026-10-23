@@ -1,6 +1,6 @@
 [plugininstall]
-description=ISO-WCX v0.11.0 Preview - ISO/UDF recovery, Joliet, Rock Ridge, CUE, CCD, NRG, MDS
-version=0.11.0-preview
+description=ISO-WCX v0.12.0 Preview - ISO/UDF recovery, Joliet, Rock Ridge, CUE, CCD, NRG, MDS
+version=0.12.0-preview
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX

@@ -1,4 +1,5 @@
 #include "iso_wcx/disc.hpp"
+#include "iso_wcx/cd_sector.hpp"
 #include "iso_wcx/compressed_image.hpp"
 #include "iso_wcx/cue.hpp"
 #include "iso_wcx/image_tracks.hpp"
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -73,6 +75,7 @@ class Source {
     std::uint32_t data_offset_ = 0;
     std::uint32_t leading_sectors_ = 0;
     std::uint8_t mode_ = 0;
+    bool scrambled_ = false;
     std::optional<unsigned> cue_track_number_;
 
     Bytes raw_read(std::uint64_t p, std::size_t n) {
@@ -85,6 +88,16 @@ class Source {
         file_.seekg(static_cast<std::streamoff>(p));
         require(bool(file_) && (n==0 || bool(file_.read(reinterpret_cast<char*>(b.data()),
                 static_cast<std::streamsize>(n)))),"raw image read failed");
+        if(scrambled_) {
+            // Do not trust the raw header: the LFSR is reset per physical
+            // sector, including when the caller only reads a small slice.
+            require(p>=raw_base_,"CloneCD scrambled sector offset precedes track");
+            const auto& mask=cd_scramble_mask();
+            for(std::size_t i=0;i<b.size();++i) {
+                const auto local=(p-raw_base_+i)%2352u;
+                if(local>=12) b[i]^=mask[static_cast<std::size_t>(local-12)];
+            }
+        }
         return b;
     }
     bool candidate(std::uint32_t physical,std::uint32_t data_offset,
@@ -146,7 +159,7 @@ class Source {
         require(file_.is_open(),"cannot open disc image");
         auto n=file_.tellg();require(n>=0,"cannot stat disc image");
         raw_length_=static_cast<std::uint64_t>(n);
-        raw_base_=0;raw_end_=raw_length_;session_lba_.reset();track_label_.clear();
+        raw_base_=0;raw_end_=raw_length_;session_lba_.reset();track_label_.clear();scrambled_=false;
         logical_length_=raw_length_;
         if(is_compressed_image_path(p)) {
             compressed_=std::make_unique<CompressedImage>(p);
@@ -169,6 +182,9 @@ public:
                 require(it->begin<=it->end && it->end<=raw_length_,
                         "descriptor track range exceeds image");
                 raw_base_=it->begin;raw_end_=it->end;
+                scrambled_=it->scrambled;
+                require(!scrambled_ || it->physical_sector==2352,
+                        "scrambled CloneCD requires 2352-byte sectors");
                 choose(it->physical_sector,it->data_offset,0,it->mode);
                 if(candidate(it->physical_sector,it->data_offset,0,it->mode) ||
                    candidate_udf(it->physical_sector,it->data_offset,0,it->mode)) {
@@ -274,7 +290,7 @@ void append(std::vector<Item>& out,Item entry) {
 }
 struct IsoRecord {
     std::uint32_t lba{},size{};
-    std::uint8_t flags{},unit{},gap{};
+    std::uint8_t flags{},unit{},gap{},ext_attr_blocks{};
     std::uint32_t dos_time{};
     std::string name;
 };
@@ -305,7 +321,20 @@ IsoRecord record(const Bytes& b,std::size_t p,bool joliet) {
     bounds(b,p,34);
     std::uint8_t len=b[p];require(len>=34 && len<=b.size()-p,"invalid ISO directory record");
     auto n=b[p+32];require(33u+n<=len,"invalid ISO filename field");
-    IsoRecord r;r.lba=u32(b,p+2);r.size=u32(b,p+10);r.dos_time=iso_dos_timestamp({b.data()+p+18,7});
+    IsoRecord r;r.lba=u32(b,p+2);r.size=u32(b,p+10);
+    // ECMA-119 stores the location and length in both endian orders. Treat
+    // disagreement as malformed media instead of trusting whichever half a
+    // damaged image happened to corrupt.
+    auto big32=[&](std::size_t at)->std::uint32_t {
+        return (std::uint32_t(b[at])<<24)|(std::uint32_t(b[at+1])<<16)|
+               (std::uint32_t(b[at+2])<<8)|std::uint32_t(b[at+3]);
+    };
+    require(r.lba==big32(p+6) && r.size==big32(p+14),
+            "mismatched ISO directory extent/length byte orders");
+    require(u16(b,p+28)==be16(b,p+30) && u16(b,p+28)>0,
+            "mismatched ISO file interleave sequence number");
+    r.ext_attr_blocks=b[p+1];
+    r.dos_time=iso_dos_timestamp({b.data()+p+18,7});
     r.flags=b[p+25];r.unit=b[p+26];r.gap=b[p+27];
     require(!r.gap || r.unit,"interleaved ISO file requires nonzero file unit size");
     require(!(r.flags&2) || !r.gap,"interleaved ISO directory unsupported");
@@ -336,7 +365,7 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
         const auto root=record(primary,156,false);
         auto root_ok=[&](std::uint32_t pos)->bool {
             try {
-                const auto data=src.read(std::uint64_t(pos)*iso_sector,iso_sector);
+                const auto data=src.read((std::uint64_t(pos)+root.ext_attr_blocks)*iso_sector,iso_sector);
                 if(data[0]<34 || data[0]>data.size())return false;
                 const auto dot=record(data,0,false);
                 return dot.name=="." && (dot.flags&2) && dot.lba==root.lba;
@@ -353,6 +382,13 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
     auto read_record=[&](const Bytes& data,std::size_t pos,bool use_joliet)->IsoRecord {
         auto r=record(data,pos,use_joliet);
         r.lba=adjusted_lba(r.lba,r.size);
+        // ECMA-119 directory record byte 1: the Extended Attribute Record
+        // occupies this many logical blocks before the actual file or
+        // directory data. The directory's logical block index points at the
+        // start of the attribute blocks, not the first content block.
+        require(r.lba<=std::numeric_limits<std::uint32_t>::max()-r.ext_attr_blocks,
+                "ISO extended-attribute extent overflow");
+        r.lba+=r.ext_attr_blocks;
         return r;
     };
     auto read_susp=[&](std::uint64_t pos,std::size_t length)->Bytes {
@@ -1064,6 +1100,27 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
             entries_=std::move(views[0].entries);
             for(auto& item:entries_)item.source_index=views[0].index;
         }
+        if(ccd) {
+            const auto sub=ccd_subchannels(image_);
+            if(sub) {
+                // Keep the raw 96-byte-per-sector P-W stream intact. We do
+                // not mistake intentionally nonstandard Q data for a damaged
+                // ISO filesystem or attempt to follow sidecar links.
+                const bool collision=std::any_of(entries_.begin(),entries_.end(),
+                    [](const Item& item) {
+                        return item.path=="subchannels" ||
+                               item.path.rfind("subchannels/",0)==0;
+                    });
+                if(!collision) {
+                    Item dir;dir.path="subchannels";dir.directory=true;dir.attributes=0x10;
+                    append(entries_,std::move(dir));
+                    Item raw;raw.path="subchannels/disc.sub";raw.size=sub->size;
+                    raw.attributes=0x20;raw.direct_source=sub->source;
+                    raw.extents.push_back({0,sub->size,false});
+                    append(entries_,std::move(raw));
+                }
+            }
+        }
         return;
     }
     Source source(image_);
@@ -1099,7 +1156,18 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
     }
     std::optional<std::size_t> track;
     if(entry.source_index!=0xffffffffu) track.emplace(entry.source_index);
-    Source source(image_,track);
+    std::unique_ptr<Source> source;
+    std::ifstream direct;
+    if(entry.direct_source.empty())source=std::make_unique<Source>(image_,track);
+    else {
+        require(std::filesystem::is_regular_file(entry.direct_source) &&
+                !std::filesystem::is_symlink(entry.direct_source),
+                "unsafe raw CloneCD sidecar source");
+        direct.open(entry.direct_source,std::ios::binary|std::ios::ate);
+        require(direct.is_open() && direct.tellg()>=0 &&
+                static_cast<std::uint64_t>(direct.tellg())>=entry.size,
+                "truncated raw CloneCD sidecar");
+    }
     std::ofstream sink;
     std::filesystem::path pending;
     // Keep the original destination intact until every extent is read,
@@ -1161,7 +1229,17 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
                 auto n=static_cast<std::size_t>(std::min<std::uint64_t>(remain,zeros.size()));
                 if(ex.sparse) {if(!deliver(zeros.data(),n))return false;}
                 else {
-                    auto b=source.read(offset,n);
+                    Bytes b;
+                    if(direct.is_open()) {
+                        require(offset<=static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()),
+                                "invalid raw subchannel stream offset");
+                        b.resize(n);
+                        direct.clear();
+                        direct.seekg(static_cast<std::streamoff>(offset));
+                        require(bool(direct) && bool(direct.read(reinterpret_cast<char*>(b.data()),
+                                       static_cast<std::streamsize>(n))),
+                                "raw subchannel read failure");
+                    } else b=source->read(offset,n);
                     if(!deliver(b.data(),n))return false;
                 }
                 offset+=n;remain-=n;

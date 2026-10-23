@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,7 @@ struct ImageTrack {
     std::uint32_t session_lba{}; // Optional absolute LBA for later sessions
     unsigned track_number{};
     std::string container;
+    bool scrambled=false; // ECMA-130 CD data scrambler indicated by CloneCD CCD
 };
 [[nodiscard]] bool is_nrg_path(const std::filesystem::path& image);
 [[nodiscard]] bool is_mds_path(const std::filesystem::path& descriptor);
@@ -27,4 +29,12 @@ struct ImageTrack {
 [[nodiscard]] std::vector<ImageTrack> mds_data_tracks(const std::filesystem::path& descriptor);
 // CloneCD v3, single-session, unscrambled 2352-byte .img tracks only.
 [[nodiscard]] std::vector<ImageTrack> ccd_data_tracks(const std::filesystem::path& descriptor);
+struct CloneCdSub {
+    std::filesystem::path source;
+    std::uint64_t size=0;
+};
+// The optional .sub contains 96 raw P-W bytes per physical .img sector.
+// We only expose the original bytes. Q decoding, corrected Q-CRC and
+// copy-protection interpretation are separate tasks.
+[[nodiscard]] std::optional<CloneCdSub> ccd_subchannels(const std::filesystem::path& descriptor);
 }
