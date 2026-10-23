@@ -16,7 +16,7 @@ Modern, read-only Total Commander WCX plugin. The codebase is clean-room and doe
 ## Limits and cautions
 
 - This is a **preview** tested primarily with deterministic synthetic image fixtures. Real DVD/BD/UDF compatibility is not yet guaranteed, especially rewritable/packet-written and damaged media.
-- RAW Mode 2 Form 2, audio extraction, subchannel processing, full subchannel/scrambled/multisession CCD and nonstandard CUE/MDS layouts are not supported. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
+- RAW Mode 2 Form 2, CD-Audio extraction, CD-Text and full CloneCD multisession are not supported. CloneCD raw `.sub` is preserved and position-type Q frames are CRC-checked; damaged Q data is not treated as an ISO failure. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
 - UDF VAT historical chains, every version of Metadata/Sparable, UDF pseudo-overwrite behavior and fragmented descriptor edge cases are not yet exhaustively covered.
 - Rock Ridge POSIX permissions, TF timestamps and symlink extraction are not implemented.
 - Unsupported image containers remain ISZ, DAA, DMG and encrypted/compressed NRG/MDF variations. Indexed CSO/ZSO are supported. Only uncompressed NRG and MDS/MDF track subsets are implemented.
@@ -87,18 +87,18 @@ CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list
 - Read-only `.cso` v1 (including legacy version 0 headers), `.cso` v2 (mixed raw DEFLATE/LZ4) and `.zso` LZ4. A fixed-size block index is validated before any on-demand decompression; individual blocks are decoded only when the filesystem parser or extractor needs them.
 - Zlib is linked statically on Windows using a pinned upstream source version, while Linux uses the system package. No runtime Python process, full-image unpack or additional DLL is needed by Total Commander.
 - 2448-byte physical sectors are accepted for unswizzled raw MODE1/MODE2 Form 1 data, including supported MDS v1 subchannel layouts. Extra subchannel bytes are not exposed as ISO data.
-- Does not support `.isz`, `.daa`, `.mdx`, `.chd`, proprietary encryption, mixed audio extraction, scrambling or all vendor MDF sector patterns. The bchunk and mdf2iso projects are useful test references; their GPL source is not included.
+- Does not support `.isz`, `.daa`, `.mdx`, `.chd`, proprietary encryption, mixed audio extraction or all vendor MDF sector patterns. The bchunk and mdf2iso projects are useful test references; their GPL source is not included.
 
 ## v0.11.0 CloneCD CCD/IMG preview
 
 - Open a `.ccd` descriptor paired with a same-base `.img` file. Parses CloneCD version 3 `[Disc]` / `[TRACK N]` fields, including MODE and INDEX 0/1. Validated Mode 1 and Mode 2 Form 1 data tracks use the existing sector reader.
-- If multiple data tracks contain readable ISO/UDF filesystems, they appear under virtual `sessionN/` folders. The `.sub` sidecar, audio frames, copy-protection subchannels, scrambled data, multiple CCD sessions and other CloneCD versions are not supported.
-- Rejects descriptors with out-of-order/overlapping tracks, invalid physical lengths, missing sidecars, unsafe symbolic links and unsupported encoding/scrambling.
+- If multiple data tracks contain readable ISO/UDF filesystems, they appear under virtual `sessionN/` folders. The `.sub` sidecar and standard scrambled Mode 1/2 sectors are now supported in v0.12. Audio, CD-Text, copy-protection interpretation, multiple CCD sessions and other CloneCD versions are not supported.
+- Rejects descriptors with out-of-order/overlapping tracks, invalid physical lengths, missing sidecars, unsafe symbolic links and unsupported encoding / sector modes.
 - New synthetic tests cover physical-sector boundaries and per-track extraction, but manual validation using real CloneCD dumps remains necessary.
 
 ## v0.12.0 ISO 9660 and CloneCD
 
 - ISO 9660 directory record byte 1 (Extended Attribute Record Length) is honored before reading the actual extent. Mirrored extent offsets/lengths and volume sequence bytes are validated in both endian encodings.
 - CloneCD `DataTracksScrambled=1` uses the standard CD-ROM scrambling XOR specified by ECMA-130 Annex B (sector bytes 12–2351 only). No proprietary media-key decryption, scrambled audio, or nonstandard sector modes are claimed.
-- CloneCD `.sub` data is exposed as a byte-for-byte *raw* P-W sidecar under `subchannels/disc.sub`. No interpreted Q/CRC, CD-Text, or copy-protection metadata is generated yet. Missing `.sub` is permitted; truncated or unsafe `.sub` sidecars are rejected.
+- CloneCD `.sub` data is exposed as a byte-for-byte *raw* P-W sidecar under `subchannels/disc.sub`. An additional `subchannels/q-index.csv` lists CRC-valid Q position frames grouped by track/index; no CD-Text or copy-protection metadata is interpreted. Missing `.sub` is permitted; truncated or unsafe `.sub` sidecars are rejected.
 - Full CloneCD multisession, audio extraction, and vendor-specific protection methods remain unsupported. Experimental synthetic tests do not replace vendor-disc testing.
