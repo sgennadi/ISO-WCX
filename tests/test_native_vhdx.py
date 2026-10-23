@@ -31,7 +31,7 @@ GUID_METADATA = bytes.fromhex("06a27c8b90479a4bb8fe575f050f886e")
 GUID_PARAMS = bytes.fromhex("3767a1ca36fa434db3b633f0aa44e76b")
 GUID_SIZE = bytes.fromhex("2442a52f1bcd7648b2115dbed83bf4b8")
 GUID_SECTOR = bytes.fromhex("1dbf41816fa90947ba47f233a8faab5f")
-GUID_PHYSICAL = bytes.fromhex("c748a3cd5d44719cc9e9885251c556")
+GUID_PHYSICAL = bytes.fromhex("c748a3cd5d4471449cc9e9885251c556")
 GUID_DISK = bytes.fromhex("ab12cabee6b2234593efc309e000c746")
 GUID_PARENT = bytes.fromhex("2d5fd3a80bb34d45abf7d3d84834ab0c")
 
@@ -106,6 +106,7 @@ def make_metadata(logical_size: int, sector: int, fixed: bool) -> bytearray:
     )
     offset = 65536
     for i, (guid, data, flags) in enumerate(items):
+        assert len(guid) == 16, "a VHDX metadata GUID must contain 16 bytes"
         at = 32 + 32 * i
         content[at:at + 16] = guid
         struct.pack_into("<III", content, at + 16,
