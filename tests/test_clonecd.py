@@ -89,6 +89,19 @@ def run(exe):
         (root/"test.sub").write_bytes(raw_sub)
         inspect(exe,root,descriptor([(1,1,0,None)]),frame,
                 expected={"HELLO.TXT":b"world","subchannels/disc.sub":raw_sub})
+        assert (root/"output"/"subchannels"/"q-index.csv").is_file()
+        # Published CRC-valid Q position frame; leave all other sectors
+        # invalid to test that corrupt copy-protection subcodes are preserved.
+        q=bytes.fromhex("41 01 01 00 00 00 00 00 02 00 28 32")
+        sample=bytearray(raw_sub)
+        sample[12:24]=q
+        (root/"test.sub").write_bytes(sample)
+        shutil.rmtree(root/"output")
+        inspect(exe,root,descriptor([(1,1,0,None)]),frame,
+                expected={"HELLO.TXT":b"world","subchannels/disc.sub":bytes(sample)})
+        csv=(root/"output"/"subchannels"/"q-index.csv").read_text(encoding="utf-8")
+        assert "deinterleaved,1,1,0,0,1" in csv,csv
+        assert "# crc_valid,1" in csv,csv
         (root/"test.sub").write_bytes(raw_sub[:-1])
         inspect(exe,root,descriptor([(1,1,0,None)]),frame,bad=True)
         (root/"test.sub").unlink()
