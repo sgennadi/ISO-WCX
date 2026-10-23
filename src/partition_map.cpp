@@ -123,10 +123,14 @@ void read_extended(Input& disk,std::uint32_t logical_sector_size,
     throw std::runtime_error("EBR chain exceeds 128 entries");
 }
 
-std::vector<PartitionEntry> read_gpt(Input& disk,std::uint32_t sector) {
+std::vector<PartitionEntry> read_gpt_copy(Input& disk,std::uint32_t sector,
+                                          std::uint64_t header_lba,
+                                          std::uint64_t other_header_lba) {
     const auto sectors=disk.size()/sector;
     require(sectors>=8,"virtual disk too small for GPT");
-    auto h=disk.read(sector,sector);
+    require(header_lba<sectors && other_header_lba<sectors &&
+            header_lba!=other_header_lba,"invalid GPT header location");
+    auto h=disk.read(header_lba*sector,sector);
     const std::string_view signature(reinterpret_cast<const char*>(h.data()),8);
     require(signature=="EFI PART","protective MBR without GPT header");
     const auto size=le32(h.data()+12);
@@ -136,9 +140,9 @@ std::vector<PartitionEntry> read_gpt(Input& disk,std::uint32_t sector) {
     require(crc32_ieee(h.data(),size)==header_crc,"GPT header CRC32 mismatch");
     const auto current=le64(h.data()+24),backup=le64(h.data()+32);
     const auto usable_start=le64(h.data()+40),usable_end=le64(h.data()+48);
-    require(current==1 && backup<sectors && backup!=current,
-            "invalid GPT primary/backup header LBAs");
-    require(usable_start>=2 && usable_start<=usable_end && usable_end<sectors,
+    require(current==header_lba && backup==other_header_lba,
+            "inconsistent GPT primary/backup header LBAs");
+    require(usable_start>=2 && usable_start<=usable_end && usable_end<sectors-1,
             "invalid GPT usable sector bounds");
     const auto array_lba=le64(h.data()+72);
     const auto count=le32(h.data()+80),entry_size=le32(h.data()+84);
@@ -150,6 +154,12 @@ std::vector<PartitionEntry> read_gpt(Input& disk,std::uint32_t sector) {
             array_lba>=2 && array_lba<sectors &&
             table_bytes<=disk.size()-array_lba*sector,
             "GPT partition array outside image");
+    const auto last_table_lba=array_lba+(table_bytes+sector-1)/sector-1;
+    require(last_table_lba<sectors &&
+            (last_table_lba<usable_start || array_lba>usable_end) &&
+            !(array_lba<=header_lba && header_lba<=last_table_lba) &&
+            !(array_lba<=other_header_lba && other_header_lba<=last_table_lba),
+            "GPT entry array overlaps data or headers");
     auto table=disk.read(array_lba*sector,static_cast<std::size_t>(table_bytes));
     require(crc32_ieee(table.data(),table.size())==le32(h.data()+88),
             "GPT partition entry array CRC32 mismatch");
@@ -171,6 +181,25 @@ std::vector<PartitionEntry> read_gpt(Input& disk,std::uint32_t sector) {
     }
     check_ranges(partitions);
     return partitions;
+}
+
+// UEFI keeps a second GPT header at the last logical block and a separate
+// partition-entry array. Recover only if that copy is independently CRC-valid,
+// bounds-checked and correctly points back at the primary header (LBA 1).
+std::vector<PartitionEntry> read_gpt(Input& disk,std::uint32_t sector) {
+    const auto count=disk.size()/sector;
+    require(count>=8,"virtual disk too small for GPT");
+    try {
+        return read_gpt_copy(disk,sector,1,count-1);
+    }catch(const std::exception& primary_error){
+        try {
+            return read_gpt_copy(disk,sector,count-1,1);
+        }catch(const std::exception& secondary_error){
+            throw std::runtime_error(
+                std::string("GPT primary and backup invalid: primary: ")+
+                primary_error.what()+"; backup: "+secondary_error.what());
+        }
+    }
 }
 } // namespace
 
