@@ -1,0 +1,32 @@
+ISO-WCX v0.12.1 Preview - repairing an old Total Commander association
+========================================================================
+
+If Total Commander shows "File iso.wcx not found!" or "Error, could
+not load plugin!" for ...\plugins\wcx\ISO\iso.wcx, it is attempting to load
+the LEGACY ISO.WCX plugin, not this ISO-WCX project.
+
+1. Open Configuration > Options > Packer > Configure packer extension WCXs.
+2. Enter extension "iso". Select the OLD entry pointing to
+   ...\plugins\wcx\ISO\iso.wcx and press Delete.
+3. Click New type... and select the installed
+   ...\plugins\wcx\ISO-WCX\ISO-WCX.wcx.
+   The corresponding ISO-WCX.wcx64 must be in the same folder for
+   64-bit Total Commander, which picks up the sibling DLL automatically.
+4. Confirm, restart Total Commander, and open a test ISO with Ctrl+PgDn.
+
+The number 192 in "192,path" is the WCX capability bitfield; it is not
+part of the filename and must not be typed into a file picker.
+
+Check extensions cue, ccd, nrg, mds, cso and zso only if they also point
+to the missing old DLL. Preserve unrelated working plugin associations.
+
+The pluginst.inf auto-installer installs the new WCX but does not remove
+obsolete associations from wincmd.ini. Do not delete all wincmd.ini entries.
+The correct INI location is shown in Help > About Total Commander.
+
+If a correctly registered file still will not load, examine Windows
+architecture (WCX vs WCX64), DLL dependencies and runtime errors separately.
+
+Sources:
+https://github.com/sgennadi/ISO-WCX
+https://www.ghisler.ch/wiki/index.php/Plugins_Automated_Installation
