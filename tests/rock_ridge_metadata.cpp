@@ -88,6 +88,92 @@ iso_wcx::RockRidgeEntry parse(const Bytes& rec) {
             throw std::runtime_error("unexpected CE");
         });
 }
+
+void iso_record(Bytes& image,std::size_t pos,std::uint32_t lba,
+                std::uint32_t size,std::uint8_t flags,const Bytes& name,
+                const Bytes& susp = {}) {
+    const auto length=33u+name.size()+(name.size()%2u==0 ? 1u : 0u)+susp.size();
+    expect(length<=255 && pos<=image.size() && length<=image.size()-pos,
+           "synthetic RRIP directory record exceeds image");
+    auto* r=image.data()+pos;
+    r[0]=static_cast<std::uint8_t>(length);
+    for(unsigned j=0;j<4;++j) {
+        r[2+j]=static_cast<std::uint8_t>(lba>>(j*8));
+        r[6+j]=static_cast<std::uint8_t>(lba>>(24-j*8));
+        r[10+j]=static_cast<std::uint8_t>(size>>(j*8));
+        r[14+j]=static_cast<std::uint8_t>(size>>(24-j*8));
+    }
+    r[25]=flags;
+    r[28]=1;r[31]=1;
+    r[32]=static_cast<std::uint8_t>(name.size());
+    std::copy(name.begin(),name.end(),r+33);
+    std::copy(susp.begin(),susp.end(),r+33+name.size()+
+              (name.size()%2u==0 ? 1u : 0u));
+}
+void disc_integration() {
+    constexpr std::size_t sector=2048;
+    Bytes image(36*sector,0);
+    const auto descriptor=16*sector;
+    image[descriptor]=1;
+    std::copy_n("CD001",5,image.begin()+descriptor+1);
+    image[descriptor+6]=1;
+    iso_record(image,descriptor+156,20,sector,2,{0});
+    const auto terminal=17*sector;
+    image[terminal]=255;
+    std::copy_n("CD001",5,image.begin()+terminal+1);
+    image[terminal+6]=1;
+    const auto sp=entry('S','P',{0xbe,0xef,0});
+    Bytes er{10,0,0,1};
+    constexpr char rr_id[]="RRIP_1991A";
+    er.insert(er.end(),rr_id,rr_id+10);
+    const auto root_susp=concat(sp,entry('E','R',er));
+    std::size_t pos=20*sector;
+    iso_record(image,pos,20,sector,2,{0},root_susp);
+    pos+=image[pos];
+    iso_record(image,pos,20,sector,2,{1});
+    pos+=image[pos];
+    Bytes nm{0};
+    constexpr char rr_name[]="readme-linux.txt";
+    nm.insert(nm.end(),rr_name,rr_name+sizeof(rr_name)-1);
+    auto file_susp=concat(entry('N','M',nm),concat(px(0100444u),tf_short()));
+    const std::string file_name="README.TXT;1";
+    iso_record(image,pos,21,5,0,Bytes(file_name.begin(),file_name.end()),file_susp);
+    pos+=image[pos];
+    // A device node must not be exposed as a file that WCX might extract.
+    iso_record(image,pos,21,5,0,Bytes{'D','E','V','I','C','E','.','T','X','T',';','1'},
+               concat(entry('N','M',{0,'d','e','v','i','c','e'}),px(0020666u)));
+    std::copy_n("world",5,image.begin()+21*sector);
+    const auto file=std::filesystem::temp_directory_path()/
+        ("iso-wcx-rrip-"+std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count())+".iso");
+    struct Cleanup {
+        std::filesystem::path file;
+        ~Cleanup() {
+            std::error_code ec;
+            std::filesystem::remove(file,ec);
+        }
+    } cleanup{file};
+    {
+        std::ofstream out(file,std::ios::binary|std::ios::trunc);
+        expect(bool(out),"cannot create synthetic RRIP image");
+        out.write(reinterpret_cast<const char*>(image.data()),
+                  static_cast<std::streamsize>(image.size()));
+        expect(bool(out),"failed to write synthetic RRIP image");
+    }
+    const iso_wcx::Disc disc(file);
+    expect(disc.format().find("Rock Ridge")!=std::string::npos,
+           "RRIP not detected in integration image");
+    const auto& items=disc.items();
+    expect(items.size()==1 && items[0].path=="readme-linux.txt" &&
+           items[0].size==5 && !items[0].directory,
+           "RRIP PX special file was not excluded or NM not decoded");
+    expect((items[0].attributes & 0x21u)==0x21u,
+           "RRIP PX non-writable mode not mapped to DOS readonly");
+    const auto stamp=iso_wcx::iso_dos_timestamp(
+        std::array<std::uint8_t,7>{126,10,23,12,34,58,0});
+    expect(items[0].dos_time==stamp,
+           "RRIP TF modification date not passed into WCX Item");
+}
 }
 
 int main() {
@@ -164,6 +250,7 @@ int main() {
             '2','0','2','6','1','0','2','3','1','2','3','4','5','8','0','0',127};
         expect(iso_wcx::iso_long_dos_timestamp(invalid_timezone)==0,
                "out of range ISO timezone accepted");
+        disc_integration();
         std::cout<<"PASS: RRIP PX mirrored metadata, TF 7/17-byte timestamps and mirrored CE validation\n";
         return 0;
     }catch(const std::exception& error) {
