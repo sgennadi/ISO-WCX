@@ -1,0 +1,207 @@
+// Public Total Commander WCX ABI adapter. Modern parsers live in iso_disc.
+#ifdef _WIN32
+#include "iso_wcx/disc.hpp"
+#include <windows.h>
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <memory>
+#include <stdexcept>
+#include <new>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace {
+constexpr int E_END_ARCHIVE=10,E_BAD_ARCHIVE=13,E_UNKNOWN_FORMAT=14,E_ECREATE=16,E_EABORTED=21,E_SMALL_BUF=20;
+constexpr int PK_SKIP=0,PK_TEST=1,PK_EXTRACT=2;
+constexpr int PK_CAPS_BY_CONTENT=64,PK_CAPS_SEARCHTEXT=128;
+constexpr int ATTR_DIR=0x10,ATTR_ARCHIVE=0x20;
+
+struct OpenA {char* ArcName;int OpenMode,OpenResult;char* CmtBuf;int CmtBufSize,CmtSize,CmtState;};
+struct OpenW {wchar_t* ArcName;int OpenMode,OpenResult;wchar_t* CmtBuf;int CmtBufSize,CmtSize,CmtState;};
+struct HeaderA {char ArcName[260],FileName[260];int Flags,PackSize,UnpSize,HostOS,FileCRC,FileTime,UnpVer,Method,FileAttr;char* CmtBuf;int CmtBufSize,CmtSize,CmtState;};
+struct HeaderExA {char ArcName[1024],FileName[1024];int Flags;unsigned int PackSize,PackSizeHigh,UnpSize,UnpSizeHigh;int HostOS,FileCRC,FileTime,UnpVer,Method,FileAttr;char* CmtBuf;int CmtBufSize,CmtSize,CmtState;char Reserved[1024];};
+struct HeaderExW {wchar_t ArcName[1024],FileName[1024];int Flags;unsigned int PackSize,PackSizeHigh,UnpSize,UnpSizeHigh;int HostOS,FileCRC,FileTime,UnpVer,Method,FileAttr;char* CmtBuf;int CmtBufSize,CmtSize,CmtState;char Reserved[1024];};
+using ProgressA=int (__stdcall*)(char*,int);
+using ProgressW=int (__stdcall*)(wchar_t*,int);
+using ChangeA=int (__stdcall*)(char*,int);
+using ChangeW=int (__stdcall*)(wchar_t*,int);
+struct State {
+    explicit State(std::filesystem::path p):disc(std::move(p)){}
+    iso_wcx::Disc disc;
+    std::size_t cursor=0;
+    ProgressA progress_a=nullptr;
+    ProgressW progress_w=nullptr;
+    ChangeA change_a=nullptr;
+    ChangeW change_w=nullptr;
+};
+
+std::wstring from_bytes(const char* s,UINT encoding) {
+    if(!s)return {};
+    int len=MultiByteToWideChar(encoding,MB_ERR_INVALID_CHARS,s,-1,nullptr,0);
+    if(len<=0)throw std::runtime_error("invalid path encoding");
+    std::wstring out(static_cast<std::size_t>(len),L'\0');
+    if(!MultiByteToWideChar(encoding,MB_ERR_INVALID_CHARS,s,-1,out.data(),len))throw std::runtime_error("path conversion error");
+    out.pop_back();return out;
+}
+std::string to_ansi(const std::wstring& s) {
+    int len=WideCharToMultiByte(CP_ACP,0,s.c_str(),-1,nullptr,0,nullptr,nullptr);
+    if(len<=0)throw std::runtime_error("path conversion error");
+    std::string out(static_cast<std::size_t>(len),'\0');
+    if(!WideCharToMultiByte(CP_ACP,0,s.c_str(),-1,out.data(),len,nullptr,nullptr))throw std::runtime_error("path conversion error");
+    out.pop_back();return out;
+}
+std::wstring item_path(const iso_wcx::Item& item) {
+    auto wide=from_bytes(item.path.c_str(),CP_UTF8);
+    std::replace(wide.begin(),wide.end(),L'/',L'\\');
+    return wide;
+}
+template<typename C, std::size_t N> bool copy_fixed(C (&out)[N],const std::basic_string<C>& in) {
+    if(in.size()>=N)return false;
+    std::fill_n(out,N,C{});
+    std::copy(in.begin(),in.end(),out);
+    return true;
+}
+void fill_common(HeaderExW& h,const iso_wcx::Item& item) {
+    h.PackSize=static_cast<unsigned>(item.size);
+    h.UnpSize=static_cast<unsigned>(item.size);
+    h.PackSizeHigh=static_cast<unsigned>(item.size>>32);
+    h.UnpSizeHigh=static_cast<unsigned>(item.size>>32);
+    h.FileAttr=item.directory?ATTR_DIR:ATTR_ARCHIVE;
+}
+int header_w(State* state,HeaderExW* result) {
+    if(!state||!result)return E_BAD_ARCHIVE;
+    if(state->cursor>=state->disc.items().size())return E_END_ARCHIVE;
+    *result={};
+    const auto& item=state->disc.items()[state->cursor];
+    auto wname=item_path(item);
+    if(!copy_fixed(result->FileName,wname))return E_SMALL_BUF;
+    fill_common(*result,item);
+    return 0;
+}
+int header_a(State* state,HeaderExA* result) {
+    if(!result)return E_BAD_ARCHIVE;
+    HeaderExW wide{};
+    int rc=header_w(state,&wide);
+    if(rc)return rc;
+    *result={};
+    auto name=to_ansi(wide.FileName);
+    if(!copy_fixed(result->FileName,name))return E_SMALL_BUF;
+    result->PackSize=wide.PackSize;result->PackSizeHigh=wide.PackSizeHigh;
+    result->UnpSize=wide.UnpSize;result->UnpSizeHigh=wide.UnpSizeHigh;
+    result->FileAttr=wide.FileAttr;
+    return 0;
+}
+std::filesystem::path destination(const iso_wcx::Item& item,const wchar_t* dest_path,const wchar_t* dest_name) {
+    if(dest_name && *dest_name) {
+        std::filesystem::path name(dest_name);
+        if(name.is_absolute() || !dest_path || !*dest_path)return name;
+        return std::filesystem::path(dest_path)/name;
+    }
+    std::filesystem::path root=dest_path&&*dest_path?std::filesystem::path(dest_path):std::filesystem::current_path();
+    return root/std::filesystem::path(item_path(item));
+}
+int do_process(State* state,int operation,const wchar_t* dest_path,const wchar_t* dest_name) {
+    if(!state || state->cursor>=state->disc.items().size())return E_END_ARCHIVE;
+    auto pos=state->cursor++;
+    if(operation==PK_SKIP)return 0;
+    if(operation!=PK_TEST && operation!=PK_EXTRACT)return E_BAD_ARCHIVE;
+    const auto& item=state->disc.items()[pos];
+    try {
+        std::wstring wide=item_path(item);
+        auto ansi=to_ansi(wide);
+        std::uint64_t prior=0;
+        auto callback=[&](std::uint64_t done) {
+            auto delta=static_cast<int>(done-prior);
+            prior=done;
+            if(state->progress_w && !state->progress_w(wide.data(),delta))return false;
+            if(state->progress_a && !state->progress_a(ansi.data(),delta))return false;
+            return true;
+        };
+        bool test_only=operation==PK_TEST;
+        auto output=test_only?std::filesystem::path{}:destination(item,dest_path,dest_name);
+        if(!state->disc.copy(pos,output,callback,test_only))return E_EABORTED;
+        return 0;
+    }catch(const std::filesystem::filesystem_error&){return E_ECREATE;}
+     catch(const std::exception&){return E_BAD_ARCHIVE;}
+}
+}
+
+#define WCX_EXPORT extern "C" __declspec(dllexport)
+WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
+    if(!d)return nullptr;
+    d->OpenResult=E_UNKNOWN_FORMAT;
+    try {
+        if(!d->ArcName)return nullptr;
+        auto state=std::make_unique<State>(std::filesystem::path(d->ArcName));
+        d->OpenResult=0;
+        return reinterpret_cast<HANDLE>(state.release());
+    }catch(...){return nullptr;}
+}
+WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
+    if(!d)return nullptr;
+    d->OpenResult=E_UNKNOWN_FORMAT;
+    try {
+        if(!d->ArcName)return nullptr;
+        auto state=std::make_unique<State>(std::filesystem::path(from_bytes(d->ArcName,CP_ACP)));
+        d->OpenResult=0;
+        return reinterpret_cast<HANDLE>(state.release());
+    }catch(...){return nullptr;}
+}
+WCX_EXPORT int __stdcall ReadHeaderExW(HANDLE handle,HeaderExW* result) {
+    try{return header_w(reinterpret_cast<State*>(handle),result);}catch(...){return E_BAD_ARCHIVE;}
+}
+WCX_EXPORT int __stdcall ReadHeaderEx(HANDLE handle,HeaderExA* result) {
+    try{return header_a(reinterpret_cast<State*>(handle),result);}catch(...){return E_BAD_ARCHIVE;}
+}
+WCX_EXPORT int __stdcall ReadHeader(HANDLE handle,HeaderA* result) {
+    if(!result)return E_BAD_ARCHIVE;
+    try {
+        HeaderExA ex{};auto rc=header_a(reinterpret_cast<State*>(handle),&ex);if(rc)return rc;
+        *result={};
+        if(std::strlen(ex.FileName)>=sizeof(result->FileName))return E_SMALL_BUF;
+        std::memcpy(result->FileName,ex.FileName,std::strlen(ex.FileName)+1);
+        result->PackSize=static_cast<int>(ex.PackSize);result->UnpSize=static_cast<int>(ex.UnpSize);
+        result->FileAttr=ex.FileAttr;return 0;
+    }catch(...){return E_BAD_ARCHIVE;}
+}
+WCX_EXPORT int __stdcall ProcessFileW(HANDLE handle,int operation,wchar_t* path,wchar_t* name) {
+    return do_process(reinterpret_cast<State*>(handle),operation,path,name);
+}
+WCX_EXPORT int __stdcall ProcessFile(HANDLE handle,int operation,char* path,char* name) {
+    try {
+        std::wstring wpath=path?from_bytes(path,CP_ACP):L"";
+        std::wstring wname=name?from_bytes(name,CP_ACP):L"";
+        return do_process(reinterpret_cast<State*>(handle),operation,
+                          path?wpath.c_str():nullptr,name?wname.c_str():nullptr);
+    }catch(...){return E_BAD_ARCHIVE;}
+}
+WCX_EXPORT int __stdcall CloseArchive(HANDLE handle) {
+    delete reinterpret_cast<State*>(handle);return 0;
+}
+WCX_EXPORT void __stdcall SetProcessDataProcW(HANDLE handle,ProgressW proc) {
+    if(auto* state=reinterpret_cast<State*>(handle))state->progress_w=proc;
+}
+WCX_EXPORT void __stdcall SetProcessDataProc(HANDLE handle,ProgressA proc) {
+    if(auto* state=reinterpret_cast<State*>(handle))state->progress_a=proc;
+}
+WCX_EXPORT void __stdcall SetChangeVolProcW(HANDLE handle,ChangeW proc) {
+    if(auto* state=reinterpret_cast<State*>(handle))state->change_w=proc;
+}
+WCX_EXPORT void __stdcall SetChangeVolProc(HANDLE handle,ChangeA proc) {
+    if(auto* state=reinterpret_cast<State*>(handle))state->change_a=proc;
+}
+WCX_EXPORT int __stdcall GetPackerCaps() {return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT;}
+WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
+    if(!path)return 0;
+    try{iso_wcx::Disc test{std::filesystem::path(path)};return 1;}catch(...){return 0;}
+}
+WCX_EXPORT int __stdcall CanYouHandleThisFile(char* path) {
+    if(!path)return 0;
+    try{iso_wcx::Disc test{std::filesystem::path(from_bytes(path,CP_ACP))};return 1;}catch(...){return 0;}
+}
+#else
+#error "WCX adapter must be compiled for Windows"
+#endif
