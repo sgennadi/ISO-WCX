@@ -19,6 +19,15 @@ constexpr std::uint64_t max_logical = std::uint64_t(1) << 44;
 constexpr std::uint32_t max_hunk = 1024u * 1024u;
 constexpr std::uint32_t iso_sector = 2048;
 constexpr std::uint32_t cd_frame = 2448;
+constexpr std::uint64_t max_hunks = 4'000'000;
+
+std::uint32_t header_be32(const std::uint8_t* p) {
+    return (std::uint32_t(p[0]) << 24) | (std::uint32_t(p[1]) << 16) |
+           (std::uint32_t(p[2]) << 8) | p[3];
+}
+std::uint64_t header_be64(const std::uint8_t* p) {
+    return (std::uint64_t(header_be32(p)) << 32) | header_be32(p+4);
+}
 
 // Limited, conservative CHD CD track interpretation. Do not guess offsets on
 // audio, mixed-mode or disc images with pregap arrangements we do not yet map.
@@ -80,6 +89,38 @@ ChdStream::ChdStream(const std::filesystem::path& path) {
     file_.reset(std::fopen(path.c_str(), "rb"));
     require(bool(file_), "cannot open CHD optical image");
 #endif
+    // Fail before libchdr allocates/expands an untrusted compressed hunk map.
+    // A crafted header can otherwise request millions of 12-byte entries or
+    // huge buffers before the caller has a chance to inspect the CHD header.
+    const auto on_disk_bytes = std::filesystem::file_size(path);
+    require(on_disk_bytes >= 124, "CHD v5 header is truncated");
+    std::array<std::uint8_t,124> header_bytes{};
+    require(std::fread(header_bytes.data(),1,header_bytes.size(),file_.get())
+                == header_bytes.size(),
+            "CHD v5 header could not be read");
+    const auto* raw_header = header_bytes.data();
+    require(std::memcmp(raw_header,"MComprHD",8) == 0 &&
+            header_be32(raw_header+8) == 124 &&
+            header_be32(raw_header+12) == 5,
+            "CHD v5 header signature, version or length is invalid");
+    const auto bytes = header_be64(raw_header+32);
+    const auto map_at = header_be64(raw_header+40);
+    const auto metadata_at = header_be64(raw_header+48);
+    const auto hunk_bytes = header_be32(raw_header+56);
+    const auto unit_bytes = header_be32(raw_header+60);
+    require(bytes > 0 && bytes <= max_logical &&
+            (unit_bytes == iso_sector || unit_bytes == cd_frame) &&
+            hunk_bytes >= iso_sector && hunk_bytes <= max_hunk &&
+            hunk_bytes % unit_bytes == 0 && bytes % unit_bytes == 0 &&
+            (bytes-1)/hunk_bytes + 1 <= max_hunks &&
+            map_at >= 124 && map_at < on_disk_bytes &&
+            (metadata_at == 0 || metadata_at < on_disk_bytes),
+            "CHD v5 image geometry, map or metadata offsets exceed safety limits");
+    require(std::all_of(header_bytes.begin()+104,header_bytes.end(),
+            [](std::uint8_t c){return c==0;}),
+            "CHD v5 has an unsupported parent reference");
+    require(std::fseek(file_.get(),0,SEEK_SET) == 0,
+            "CHD input seek failed");
     chd_file* opened = nullptr;
     const chd_error status = chd_open_file(file_.get(), CHD_OPEN_READ,
                                            nullptr, &opened);

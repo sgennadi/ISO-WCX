@@ -114,6 +114,16 @@ def main(reader: pathlib.Path) -> None:
         raw[104] = 0x42  # CHD v5 parentsha1 is nonzero.
         negative(reader, root / "parent.chd", bytes(raw),
                  root / "bad-parent")
+        # These formerly reached libchdr before our format-specific bounds
+        # checks; now they must be rejected by the preflight header parser.
+        oversized = bytearray(cd.read_bytes())
+        struct.pack_into(">I", oversized, 56, 0xffffffff)
+        negative(reader, root / "huge-hunk.chd", bytes(oversized),
+                 root / "bad-hunk")
+        oversized = bytearray(cd.read_bytes())
+        struct.pack_into(">Q", oversized, 40, 0x7fffffffffffffff)
+        negative(reader, root / "huge-map.chd", bytes(oversized),
+                 root / "bad-map")
         print("PASS: MAME chdman compressed CHD v5 DVD zlib/lzma, "
               "UDF lzma, CD cdlz Mode1 and malformed/parent rejection")
 
