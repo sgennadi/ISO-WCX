@@ -75,20 +75,6 @@ add_library(iso_virtual_partitions STATIC src/partition_map.cpp src/virtual_disk
 target_include_directories(iso_virtual_partitions PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_virtual_partitions PUBLIC cxx_std_20)
 
-# The libyal/libvhdi adapter is opt-in research for dynamic VHD/VHDX.
-# Do NOT add it to Windows WCX packages or silently fetch/redistribute LGPL
-# dependencies. Linux builds using system libvhdi only.
-option(ISO_WCX_WITH_LIBVHDI "Experimental system libvhdi dynamic VHD/VHDX reader (Linux only)" OFF)
-if(ISO_WCX_WITH_LIBVHDI)
-  if(WIN32)
-    message(FATAL_ERROR "libvhdi backend is not packaged or validated on Windows")
-  endif()
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(LIBVHDI REQUIRED IMPORTED_TARGET libvhdi)
-  target_link_libraries(iso_virtual_partitions PUBLIC PkgConfig::LIBVHDI)
-  target_compile_definitions(iso_virtual_partitions PRIVATE ISO_WCX_WITH_LIBVHDI=1)
-endif()
-
 if(MSVC)
   target_compile_options(iso_virtual_partitions PRIVATE /W4 /EHsc)
 else()
@@ -102,17 +88,7 @@ if(BUILD_TESTING)
   add_executable(virtual_disk_tests tests/virtual_disk.cpp)
   target_link_libraries(virtual_disk_tests PRIVATE iso_virtual_partitions)
   add_test(NAME raw_fixed_vhd_read_only COMMAND virtual_disk_tests)
-  if(ISO_WCX_WITH_LIBVHDI)
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    find_program(ISO_WCX_QEMU_IMG qemu-img)
-    if(ISO_WCX_QEMU_IMG)
-      add_test(NAME dynamic_vhd_vhdx_libvhdi
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_libvhdi_backend.py"
-                "$<TARGET_FILE:virtual_partition_inspect>" "${ISO_WCX_QEMU_IMG}")
-    else()
-      message(STATUS "qemu-img missing; optional real dynamic VHD/VHDX tests unavailable")
-    endif()
-  endif()
+
 endif()
 
 add_executable(virtual_partition_inspect tools/virtual_partition_inspect.cpp)
