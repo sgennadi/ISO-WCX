@@ -388,7 +388,7 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
         require(entry.inline_data.size()==entry.size,"invalid inline data length");
         if(!deliver(entry.inline_data.data(),entry.inline_data.size()))return false;
     } else {
-        std::array<std::uint8_t,1024*1024> zeros{};
+        std::vector<std::uint8_t> zeros(1024*1024,0); // Heap storage avoids Windows 1 MiB stack overflow.
         for(const auto& ex:entry.extents) {
             std::uint64_t remain=ex.length, offset=ex.offset;
             while(remain) {
