@@ -1,6 +1,6 @@
 [plugininstall]
-description=ISO-WCX preview - read-only ISO9660, Joliet and UDF Type 1 image browsing
-version=0.2.0-preview
+description=ISO-WCX preview - ISO9660, Joliet, Rock Ridge, UDF Type 1
+version=0.3.0-preview
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX

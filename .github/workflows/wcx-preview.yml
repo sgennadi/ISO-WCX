@@ -2,7 +2,8 @@ name: WCX preview builds
 on:
   push:
     branches:
-      - feature/wcx-native-iso-udf
+      - main
+      - 'feature/**'
   pull_request:
     paths:
       - 'src/**'

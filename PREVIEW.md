@@ -4,8 +4,8 @@ This clean-room preview implements a read-only Total Commander packer plugin wit
 
 ## Working preview functionality
 
-- ISO9660 (logical 2048-byte sectors), Joliet Unicode, and contiguous or multi-extent file data.
-- UDF Type-1 partition mapping with supported File Entry/Extended File Entry, inline or short/long extents, and OSTA CS0 filenames.
+- ISO9660 (logical 2048-byte sectors), Joliet Unicode, Rock Ridge RRIP NM/CE filenames, and contiguous or multi-extent file data.
+- UDF Type-1 partition mapping with supported File Entry/Extended File Entry, inline or short/long extents, allocation-continuation AED (tag 258) and OSTA CS0 filenames.
 - Extraction, test, skip, folder enumeration, WCX Unicode and ANSI entrypoints.
 - Large file (64-bit) sizes in `ReadHeaderExW` and streamed extraction.
 - Basic malformed-image validation, UTF-8 paths, filtering unsafe Windows filenames, CRC16 for non-empty UDF descriptor CRC fields.
@@ -13,8 +13,8 @@ This clean-room preview implements a read-only Total Commander packer plugin wit
 
 ## Explicit limitations
 
-- UDF VAT / metadata / sparable partitions are not yet supported, nor continuation allocation extents.
-- Rock Ridge, El Torito virtual folders, multisession offsets, 2352-byte sector BIN, compressed container formats are not implemented yet.
+- UDF VAT / metadata / sparable partitions are not yet supported. Basic continuation allocation extents are supported, but not all allocation descriptor variants or real-world edge cases.
+- Rock Ridge names are supported using RRIP NM and CE; POSIX symlinks are deliberately omitted, while CL/RE relocated directory trees are not supported. Rock Ridge PX modes, SL targets and TF timestamps are not exposed. El Torito virtual folders, multisession offsets, 2352-byte sector BIN, and compressed container formats are not implemented yet.
 - The WCX adapter must be built and tested on Windows. Core smoke tests on Linux do not establish Windows compatibility.
 - For untrusted ISO images, test on disposable filesystems: the extraction path validates symbolic links but cannot eliminate races with another process changing directories.
 - This is a preview, not an official ISO.WCX release.
