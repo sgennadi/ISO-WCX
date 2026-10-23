@@ -182,6 +182,9 @@ void VhdxReader::parse() {
                 "invalid VHDX transaction log extent");
     }
 
+    log_offset_=active.log_offset;
+    log_length_=active.log_length;
+
     const auto regions1=parse_regions(file_read(0x30000,65536),file_size_);
     const auto regions2=parse_regions(file_read(0x40000,65536),file_size_);
     require(regions1 || regions2,"both VHDX region tables invalid");
@@ -302,8 +305,10 @@ std::vector<std::uint8_t> VhdxReader::read(
                     "VHDX BAT payload extent out of file bounds");
             require(!overlap(physical,block_size_,0,MiB) &&
                     !overlap(physical,block_size_,bat_offset_,bat_length_) &&
-                    !overlap(physical,block_size_,metadata_offset_,metadata_length_),
-                    "VHDX payload overlaps reserved region");
+                    !overlap(physical,block_size_,metadata_offset_,metadata_length_) &&
+                    (!log_length_ ||
+                     !overlap(physical,block_size_,log_offset_,log_length_)),
+                    "VHDX payload overlaps reserved region or transaction log");
             const auto bytes=file_read(physical+local,count);
             std::copy(bytes.begin(),bytes.end(),out.begin()+done);
             break;
