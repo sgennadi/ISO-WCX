@@ -62,7 +62,8 @@ void inflate_exact(const std::vector<std::uint8_t>& encoded,
     const auto output_bytes = state.total_out;
     const auto remaining_bytes = state.avail_in;
     inflateEnd(&state);
-    check(status == Z_STREAM_END && output_bytes == expected &&
+    check(status == Z_STREAM_END &&
+          (output_bytes == expected || output_bytes == decoded.size()) &&
           remaining_bytes == 0, "invalid packed ISO compressed block");
 }
 } // namespace
@@ -309,7 +310,8 @@ void PackedOptical::parse_chd() {
             const auto at = std::uint64_t(index)*block_bytes_;
             check(at >= 124 && at <= physical_size_ &&
                   block_bytes_ <= physical_size_-at &&
-                  (at >= map_end || block_bytes_ <= map_offset-at),
+                  (at >= map_end || (at <= map_offset &&
+                                     block_bytes_ <= map_offset-at)),
                   "CHD hunk overlaps map, header or end of image");
             chunks_.push_back({at,block_bytes_,Codec::stored});
         }
