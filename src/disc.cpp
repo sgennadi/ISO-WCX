@@ -11,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <cctype>
@@ -1099,6 +1100,27 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
             entries_=std::move(views[0].entries);
             for(auto& item:entries_)item.source_index=views[0].index;
         }
+        if(ccd) {
+            const auto sub=ccd_subchannels(image_);
+            if(sub) {
+                // Keep the raw 96-byte-per-sector P-W stream intact. We do
+                // not mistake intentionally nonstandard Q data for a damaged
+                // ISO filesystem or attempt to follow sidecar links.
+                const bool collision=std::any_of(entries_.begin(),entries_.end(),
+                    [](const Item& item) {
+                        return item.path=="subchannels" ||
+                               item.path.rfind("subchannels/",0)==0;
+                    });
+                if(!collision) {
+                    Item dir;dir.path="subchannels";dir.directory=true;dir.attributes=0x10;
+                    append(entries_,std::move(dir));
+                    Item raw;raw.path="subchannels/disc.sub";raw.size=sub->size;
+                    raw.attributes=0x20;raw.direct_source=sub->source;
+                    raw.extents.push_back({0,sub->size,false});
+                    append(entries_,std::move(raw));
+                }
+            }
+        }
         return;
     }
     Source source(image_);
@@ -1134,7 +1156,18 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
     }
     std::optional<std::size_t> track;
     if(entry.source_index!=0xffffffffu) track.emplace(entry.source_index);
-    Source source(image_,track);
+    std::unique_ptr<Source> source;
+    std::ifstream direct;
+    if(entry.direct_source.empty())source=std::make_unique<Source>(image_,track);
+    else {
+        require(std::filesystem::is_regular_file(entry.direct_source) &&
+                !std::filesystem::is_symlink(entry.direct_source),
+                "unsafe raw CloneCD sidecar source");
+        direct.open(entry.direct_source,std::ios::binary|std::ios::ate);
+        require(direct.is_open() && direct.tellg()>=0 &&
+                static_cast<std::uint64_t>(direct.tellg())>=entry.size,
+                "truncated raw CloneCD sidecar");
+    }
     std::ofstream sink;
     std::filesystem::path pending;
     // Keep the original destination intact until every extent is read,
@@ -1196,7 +1229,17 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
                 auto n=static_cast<std::size_t>(std::min<std::uint64_t>(remain,zeros.size()));
                 if(ex.sparse) {if(!deliver(zeros.data(),n))return false;}
                 else {
-                    auto b=source.read(offset,n);
+                    Bytes b;
+                    if(direct.is_open()) {
+                        require(offset<=static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()),
+                                "invalid raw subchannel stream offset");
+                        b.resize(n);
+                        direct.clear();
+                        direct.seekg(static_cast<std::streamoff>(offset));
+                        require(bool(direct) && bool(direct.read(reinterpret_cast<char*>(b.data()),
+                                       static_cast<std::streamsize>(n))),
+                                "raw subchannel read failure");
+                    } else b=source->read(offset,n);
                     if(!deliver(b.data(),n))return false;
                 }
                 offset+=n;remain-=n;
