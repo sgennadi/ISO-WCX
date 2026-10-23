@@ -56,10 +56,10 @@ else()
   set(ISO_WCX_ZLIB_TARGET ZLIB::ZLIB)
 endif()
 
-# bzip2 ISZ support: compiled statically into WCX on Windows.
+# bzip2 ISZ support: compiled statically for all platforms.
 # Pin official 1.0.8 source by digest; do not ship DLLs or EXEs.
-if(WIN32)
-  include(FetchContent)
+include(FetchContent)
+if(TRUE)
   FetchContent_Declare(iso_wcx_bzip2
     URL https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz
     URL_HASH SHA256=ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269)
@@ -77,9 +77,6 @@ if(WIN32)
     "${iso_wcx_bzip2_SOURCE_DIR}/bzlib.c")
   target_include_directories(iso_wcx_bzip2 PUBLIC "${iso_wcx_bzip2_SOURCE_DIR}")
   set(ISO_WCX_BZIP2_TARGET iso_wcx_bzip2)
-else()
-  find_package(BZip2 REQUIRED)
-  set(ISO_WCX_BZIP2_TARGET BZip2::BZip2)
 endif()
 
 include(CTest)
