@@ -245,7 +245,11 @@ void append(std::vector<Item>& out,Item entry) {
     require(out.size()<max_entries,"too many disc entries");
     out.push_back(std::move(entry));
 }
-struct IsoRecord {std::uint32_t lba{},size{};std::uint8_t flags{};std::string name;};
+struct IsoRecord {
+    std::uint32_t lba{},size{};
+    std::uint8_t flags{},unit{},gap{};
+    std::string name;
+};
 std::string iso_name(const Bytes& data,std::size_t p,std::size_t n,bool joliet) {
     bounds(data,p,n);
     std::string name;
@@ -273,7 +277,10 @@ IsoRecord record(const Bytes& b,std::size_t p,bool joliet) {
     bounds(b,p,34);
     std::uint8_t len=b[p];require(len>=34 && len<=b.size()-p,"invalid ISO directory record");
     auto n=b[p+32];require(33u+n<=len,"invalid ISO filename field");
-    IsoRecord r;r.lba=u32(b,p+2);r.size=u32(b,p+10);r.flags=b[p+25];
+    IsoRecord r;r.lba=u32(b,p+2);r.size=u32(b,p+10);
+    r.flags=b[p+25];r.unit=b[p+26];r.gap=b[p+27];
+    require(!r.gap || r.unit,"interleaved ISO file requires nonzero file unit size");
+    require(!(r.flags&2) || !r.gap,"interleaved ISO directory unsupported");
     if(n==1&&(b[p+33]==0||b[p+33]==1)) r.name=".";
     else r.name=iso_name(b,p+33,n,joliet);
     return r;
@@ -393,13 +400,33 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
             }
             p+=length;
             Item item;item.path=base+r.name;item.directory=bool(r.flags&2);item.size=item.directory?0:r.size;
-            if(!item.directory)item.extents.push_back({std::uint64_t(r.lba)*iso_sector,r.size,false});
+            if(!item.directory) {
+                if(!r.gap) {
+                    item.extents.push_back({std::uint64_t(r.lba)*iso_sector,r.size,false});
+                } else {
+                    // ISO9660: file units alternate with interleave gaps.
+                    const auto unit_bytes=std::uint64_t(r.unit)*iso_sector;
+                    auto remaining=std::uint64_t(r.size);
+                    auto sector=std::uint64_t(r.lba);
+                    while(remaining) {
+                        const auto chunk=std::min(remaining,unit_bytes);
+                        require(sector<=std::numeric_limits<std::uint64_t>::max()/iso_sector,
+                                "interleaved ISO extent offset overflow");
+                        item.extents.push_back({sector*iso_sector,chunk,false});
+                        require(item.extents.size()<=max_entries,
+                                "too many ISO interleaved file units");
+                        remaining-=chunk;
+                        if(remaining)sector+=std::uint64_t(r.unit)+r.gap;
+                    }
+                }
+            }
             if(!pending_multiextent.empty()) {
                 require(!item.directory && item.path==pending_multiextent,"invalid ISO multi-extent sequence");
                 auto& previous=out.back();
                 require(previous.size<=std::numeric_limits<std::uint64_t>::max()-item.size,"ISO file size overflow");
                 previous.size+=item.size;
-                previous.extents.push_back(item.extents.front());
+                previous.extents.insert(previous.extents.end(),item.extents.begin(),item.extents.end());
+                require(previous.extents.size()<=max_entries,"too many ISO file extents");
             } else {
                 require(item.directory || !(r.flags&0x80u) || r.size,"invalid empty ISO multi-extent");
                 append(out,std::move(item));
@@ -411,7 +438,20 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
         require(pending_multiextent.empty(),"missing final ISO multi-extent record");
         active.erase(key);
     };
-    walk(walk,root,"",0);
+    try {
+        walk(walk,root,"",0);
+    } catch(const std::exception&) {
+        // A valid ISO9660 primary descriptor may accompany a broken Joliet
+        // tree. Fall back to PVD atomically without leaking a partial listing.
+        if(!joliet || primary.empty())throw;
+        out.clear();active.clear();
+        joliet=false;
+        root=read_record(primary,156,false);
+        require(root.flags&2,"ISO root is not a directory");
+        format="ISO 9660 (Joliet fallback)";
+        if(absolute_lba)format+=" / session absolute-LBA";
+        walk(walk,root,"",0);
+    }
     return out;
 }
 
@@ -439,7 +479,16 @@ std::string udf_name(const Bytes& b,std::size_t p,std::size_t n) {
     std::string result;
     for(std::size_t i=0;i<n;) {
         std::uint32_t cp=(compression==8)?b[p+i++]:be16(b,p+i);
-        if(compression==16)i+=2;
+        if(compression==16) {
+            i+=2;
+            if(cp>=0xd800 && cp<=0xdbff) {
+                require(i+2<=n,"truncated UDF UTF-16 surrogate pair");
+                const auto low=be16(b,p+i);
+                require(low>=0xdc00 && low<=0xdfff,"invalid UDF UTF-16 surrogate pair");
+                cp=0x10000u+((cp-0xd800u)<<10)+(low-0xdc00u);
+                i+=2;
+            }
+        }
         result+=utf8(cp);
     }
     safe_name(result);return result;
@@ -842,7 +891,9 @@ public:
                 try {
                     auto a=src_.read(anchor*sector,sector);
                     check_tag(a,0,2);
-                    auto length=u32(a,16),start=u32(a,20);
+                    for(unsigned copy=0;copy<2;copy++) {
+                        try {
+                    auto length=u32(a,16+8*copy),start=u32(a,20+8*copy);
                     require(length>0 && length<=16*1024*1024,"invalid UDF volume descriptor span");
                     partitions_.clear();mapping_.clear();metadata_.clear();virtual_.clear();sparable_.clear();
                     entries_.clear();active_.clear();
@@ -900,7 +951,9 @@ public:
                     check_tag(fsd,0,256);
                     walk(u32(fsd,404),u16(fsd,408),"",0);
                     return true;
-                } catch(const std::exception&) {/* Try backup anchor, then ISO fallback. */}
+                        } catch(const std::exception&) { /* Try reserve VDS or backup anchor. */ }
+                    }
+                } catch(const std::exception&) {/* Try next backup anchor, then ISO fallback. */}
             }
         }
         return false;
