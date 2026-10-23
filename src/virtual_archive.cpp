@@ -44,7 +44,7 @@ private:
 };
 
 void check_path(std::string_view path) {
-    require(!path.empty() && path.size() <= 2048, "invalid FAT path length");
+    require(!path.empty() && path.size() <= 1000, "invalid FAT path length");
     std::size_t start = 0;
     while (start < path.size()) {
         const auto slash = path.find('/', start);

@@ -13,14 +13,14 @@ possible GPT, MBR, or ext content, but probing is NOT file extraction.
 This is the architecture we are following in ISO-WCX:
 
 1. Container: VirtualDiskReader supplies bounded logical bytes. Raw HDD IMG
-   and native fixed-size VHD are supported in the standalone inspector.
+   and native fixed-size VHD are supported in the built-in WCX reader.
    No external virtual disk library is linked or loaded.
 2. Partitions: inspect_partition_table interprets GPT and MBR and now
    validates and follows bounded extended MBR (EBR) links.
-3. Filesystems: FAT12/16/32 standalone browser/extractor now implemented;
+3. Filesystems: FAT12/16/32 reader is built into WCX and developer tools;
    exFAT/NTFS/ext4 readers are future work.
-4. WCX: only register container formats after their filesystem readers,
-   extraction behavior, ABI and cancellation tests all pass.
+4. WCX: FAT-backed IMG/VHD/VHDX handlers are integrated in v0.13 Preview;
+   other formats require independent parser and extraction tests.
 
 Keep optical CD sector handling (2048/2336/2352/2448 bytes) separate from
 512/4096-byte HDD logical sectors. File extension is not a substitute for
@@ -31,14 +31,14 @@ file signature and validated metadata.
 | Official 7-Zip source (CPP/7zip/Archive) | Key structure | ISO-WCX |
 | --- | --- | --- |
 | VhdHandler.cpp | VHD footer, BAT, bitmaps | Native fixed VHD, dynamic VHD needs a future native BAT reader |
-| VhdxHandler.cpp | CRC32C regions, metadata/BAT | Native clean fixed/dynamic VHDX reader in experimental CLI; no WCX association |
+| VhdxHandler.cpp | CRC32C regions, metadata/BAT | Native clean fixed/dynamic VHDX reader linked directly into WCX |
 | VmdkHandler.cpp | Sparse grain mapping | Separate read-only implementation later |
 | QcowHandler.cpp | L1/L2 clusters and decompression | Separate read-only QCOW2 later |
 | VdiHandler.cpp | Block allocation maps | Separate read-only VDI later |
 | GptHandler.cpp | GUIDs, CRC32, extents | Independent primary/backup GPT CRC and recovery |
 | MbrHandler.cpp | Primary partitions and EBR links | Independent bounded EBR implementation |
 | NtfsHandler.cpp | MFT and attribute runlists | File reader not yet implemented |
-| FatHandler.cpp | FAT12/16/32 cluster chaining | Independent FAT12/16/32 CLI list/extract implemented |
+| FatHandler.cpp | FAT12/16/32 cluster chaining | Native FAT12/16/32 WCX and CLI list/extract implemented |
 | ExtHandler.cpp | Inodes/extents | Future independent Linux filesystem reader |
 | ApfsHandler.cpp, HfsHandler.cpp, DmgHandler.cpp | macOS disks/images | Separate milestones |
 
@@ -48,10 +48,10 @@ Read handlers at https://github.com/ip7z/7zip/tree/main/CPP/7zip/Archive.
 
 - ISO/UDF and optical disc images: existing WCX plugin, read-only.
 - Raw HDD IMG GPT/MBR and extended EBR, fixed VHD GPT/MBR:
-  read-only CLI/library only, not registered as WCX archives.
+  read-only WCX/CLI native parser for supported FAT partitions.
 - Dynamic VHD: unsupported. Fixed/dynamic base VHDX: native experimental reader in CLI with bounded BAT, CRC32C and metadata validation.
-- FAT12/16/32 file listing and extraction: available in separate CLI for
-  partitioned raw IMG/fixed VHD, **not** registered in WCX.
+- FAT12/16/32 file listing and extraction: linked into WCX for partitioned
+  IMG/RAW, fixed VHD and clean base VHDX; also testable via developer CLI.
 - VMDK/QCOW2/VDI and exFAT/NTFS/ext filesystems within virtual disks:
   not yet supported.
 - Differencing parents and snapshot chains: explicitly disabled.
@@ -77,6 +77,6 @@ needs file-level provenance and compliance with the relevant license terms.
 - No writes, no physical-drive access, no disk mounts, no automatic
   cross-file parent resolution.
 
-Next objective: validate FAT with independent real-world images and integrate
-verified extraction into a separate WCX adapter; then add exFAT and NTFS with
-strict corruption handling. The stable optical ISO/UDF handler stays isolated.
+Next objective: validate FAT using more independent real-world image samples,
+then add exFAT and NTFS using bounded native read-only parsers with strict
+corruption handling. The stable optical ISO/UDF handler stays isolated.

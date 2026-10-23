@@ -26,8 +26,9 @@ Example after a CMake build:
     virtual_partition_inspect path/to/raw-hard-disk.img
     virtual_partition_inspect path/to/raw-4k-disk.img 4096
 
-**Virtual hard disks are not yet registered as WCX archives.** The module
-and CLI are built/tested independently, without changing optical `.img` logic.
+**As of v0.13 Preview, the tested read-only FAT virtual-disk layer is
+linked into WCX itself.** Standalone CLI tools remain for developer tests,
+not installation. The existing optical IMG/ISO reader is retained.
 
 ## Stage 2 implemented: safe native fixed-size VHD (read-only)
 
@@ -43,8 +44,8 @@ data region; the footer can never be interpreted as a partition or file.
 
 Synthetic regression tests cover fixed VHD partition enumeration, byte reads,
 invalid footer checksum, corrupt capacity, incomplete footer, saved-state
-images; dynamic VHD and VHDX are rejected. This is an isolated
-**CLI and library reader**, not a registered WCX format. It does not mount
+images; dynamic VHD is rejected, while clean base VHDX is supported by the
+native reader. This module is part of WCX and developer CLIs. It does not mount
 disks, enumerate physical drives, perform writes or follow differencing
 parents. The existing optical ISO/BIN/IMG parsers are not changed.
 
@@ -73,22 +74,22 @@ format handler code.
    (footer, BAT, bitmap, sparse blocks) with independent tests.
 2. GPT GUID names and labels, metadata consistency reporting; CRC-verified
    backup fallback and linked EBR are implemented with mutation tests.
-3. FAT12/16/32 is available in a standalone, bounded filesystem reader
-   (`virtual_fat_inspect` list/cat) over existing raw IMG/fixed VHD partitions.
-   Expose it to WCX only after real-image and GUI extraction tests. exFAT and
+3. FAT12/16/32 is available both in WCX and a developer-only bounded reader
+   (`virtual_fat_inspect` list/cat) over IMG, fixed VHD and clean base VHDX.
+   Broader real-image and GUI validation remains required. exFAT and
    NTFS remain unimplemented; NTFS sparse runs, compression, reparse points
    and alternate streams require separate design and integrity tests.
-4. Add a real VHD/VHDX/VMDK/NTFS corpus and Windows Win32/x64 WCX smoke tests
-   before registering virtual hard-disk extensions.
+4. Expand the real VHD/VHDX/VMDK/NTFS corpus. Native Windows Win32/x64 WCX
+   smoke tests now exercise in-process FAT extraction for supported images.
 
-## Stage 3 implemented: read-only FAT12/16/32 CLI
+## Stage 3 implemented: FAT12/16/32 inside WCX and developer CLI
 
 A separate `FatVolume` class validates the FAT BPB, directory and cluster
 chains, VFAT long-name sequences, bounds and unsafe names. It can list and
 extract files via `virtual_fat_inspect` without disk mounting, writes or
 implicit output-path creation. Synthetic tests cover FAT12/16/32, nested
-folders, noncontiguous files, fixed VHD and corrupted chains. This is not
-registered as a WCX image format. See [FAT design](fat-filesystems.md).
+folders, noncontiguous files, fixed VHD/VHDX and corrupted chains. This
+is registered as a read-only WCX image format for supported FAT volumes. See [FAT design](fat-filesystems.md).
 
 ## Experimental C++26 compatibility
 
