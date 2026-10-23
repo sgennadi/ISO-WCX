@@ -9,7 +9,26 @@ ISO-WCX v0.12.1 Preview - исправление старой ассоциаци
   C:\Program Files\TotalCmd\plugins\wcx\ISO-WCX\ISO-WCX.wcx
   C:\Program Files\TotalCmd\plugins\wcx\ISO-WCX\ISO-WCX.wcx64
 
-Исправление:
+Автоматическая проверка и безопасное исправление (НОВОЕ):
+1. Извлеките ZIP целиком (не запускайте BAT внутри открытого ZIP).
+2. Запустите ISO-WCX-Repair.cmd. Это проверка БЕЗ изменений.
+3. Закройте все окна Total Commander.
+4. Запустите ISO-WCX-Repair-Apply.cmd и введите YES.
+   Скрипт изменяет ТОЛЬКО старую строку iso=...\\ISO\\iso.wcx
+   в активном wincmd.ini. Другие расширения и плагины не затрагиваются.
+   Перед изменением создаётся копия .isowcx-backup-YYYYMMDD_HHMMSS.
+5. Откройте Total Commander и проверьте ISO через Ctrl+PgDn.
+
+Если скрипт не находит файл настроек, выберите в Total Commander
+Configuration > Change Settings Files Directly, узнайте полный путь
+wincmd.ini, закройте Total Commander и запустите:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "ISO-WCX-Repair.ps1" -IniPath "C:\\путь\\wincmd.ini" -Apply
+
+Скрипт откажется изменять настройки, если старый iso.wcx ещё
+существует, нужный ISO-WCX.wcx64 отсутствует или запущен Total Commander.
+Если предпочитаете ручную настройку, используйте инструкцию ниже.
+
+Исправление вручную:
 1. Configuration > Options > Packer > Configure packer extension WCXs.
 2. Введите расширение iso. В списке Associate with выделите старую
    запись с путем ...\plugins\wcx\ISO\iso.wcx и нажмите Delete.

@@ -14,6 +14,8 @@ For details, compatibility notes and source build commands, see [PREVIEW.md](PRE
 
 If Total Commander shows **File iso.wcx not found!** or **Error, could not load plugin!** pointing to `...\\plugins\\wcx\\ISO\\iso.wcx`, the old ISO.WCX handler remains selected; installing the new DLL does not remove stale associations. Open **Configuration → Options → Packer → Configure packer extension WCXs**, select extension `iso`, delete **only** the old entry referencing the missing `ISO\\iso.wcx`, and use **New type...** to select `...\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx`. The 64-bit `ISO-WCX.wcx64` must be installed beside it. The leading `192,` is Total Commander's capability bitfield, not part of a filename. Restart Total Commander after changing the configuration.
 
+**Repair assistant:** the ZIP now includes `ISO-WCX-Repair.cmd` for read-only diagnosis, and `ISO-WCX-Repair-Apply.cmd` to repair the missing legacy ISO path *after explicitly typing YES and closing Total Commander*. It edits only the obsolete `iso=` mapping and creates a backup of `wincmd.ini`; it does not delete any unrelated plugin configuration. You can override the INI location with `ISO-WCX-Repair.ps1 -IniPath "..." -Apply`. Windows CI tests the dry run, rollback backup, BOM/CRLF preservation, correct targeting and refusal cases.
+
 See [Russian repair instructions](INSTALL_RU.txt) or [English repair instructions](INSTALL_EN.txt).
 
 ## Formats (preview)
