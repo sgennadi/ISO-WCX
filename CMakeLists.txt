@@ -71,7 +71,7 @@ endif()
 # Virtual hard-disk partition discovery is an *isolated, read-only*
 # proof-of-format module. It is not yet registered as a WCX opener; optical
 # .img files remain handled by the existing CD sector logic.
-add_library(iso_virtual_partitions STATIC src/partition_map.cpp)
+add_library(iso_virtual_partitions STATIC src/partition_map.cpp src/virtual_disk.cpp)
 target_include_directories(iso_virtual_partitions PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_virtual_partitions PUBLIC cxx_std_20)
 if(MSVC)
@@ -84,6 +84,9 @@ if(BUILD_TESTING)
   add_executable(virtual_partition_tests tests/partition_map.cpp)
   target_link_libraries(virtual_partition_tests PRIVATE iso_virtual_partitions)
   add_test(NAME raw_virtual_disk_mbr_gpt COMMAND virtual_partition_tests)
+  add_executable(virtual_disk_tests tests/virtual_disk.cpp)
+  target_link_libraries(virtual_disk_tests PRIVATE iso_virtual_partitions)
+  add_test(NAME raw_fixed_vhd_read_only COMMAND virtual_disk_tests)
 endif()
 
 add_executable(virtual_partition_inspect tools/virtual_partition_inspect.cpp)
