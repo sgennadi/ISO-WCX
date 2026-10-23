@@ -20,6 +20,8 @@ std::vector<Item> el_torito_images(std::span<const std::uint8_t> boot_record,
 std::vector<Item> xbox_xdvdfs(std::uint64_t image_bytes, const SectorReader& reader);
 // DOS file time is expressed without timezone information by the WCX ABI.
 std::uint32_t iso_dos_timestamp(std::span<const std::uint8_t> seven_bytes);
+// ISO 9660 17-byte ASCII date format; also used by RRIP TF long timestamps.
+std::uint32_t iso_long_dos_timestamp(std::span<const std::uint8_t> seventeen_bytes);
 std::uint32_t udf_dos_timestamp(std::span<const std::uint8_t> twelve_bytes);
 std::uint32_t xbox_filetime_dos(std::uint64_t filetime);
 } // namespace iso_wcx

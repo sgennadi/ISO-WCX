@@ -1,8 +1,45 @@
 cmake_minimum_required(VERSION 3.21)
 project(ISO_WCX VERSION 0.12.1 LANGUAGES C CXX)
-set(CMAKE_CXX_STANDARD 20)
+
+# Keep the released WCX ABI on its tested C++20 toolchain. The C++26 lane
+# exercises *exactly the same sources and tests*, without changing artifacts.
+set(ISO_WCX_CXX_STANDARD "20" CACHE STRING "ISO-WCX C++ standard: 20 or experimental 26")
+set_property(CACHE ISO_WCX_CXX_STANDARD PROPERTY STRINGS 20 26)
+if(NOT ISO_WCX_CXX_STANDARD MATCHES "^(20|26)$")
+  message(FATAL_ERROR "ISO_WCX_CXX_STANDARD must be 20 or 26")
+endif()
+if(ISO_WCX_CXX_STANDARD STREQUAL "26" AND CMAKE_VERSION VERSION_LESS 3.25)
+  message(FATAL_ERROR "The experimental C++26 lane requires CMake 3.25 or newer")
+endif()
+set(CMAKE_CXX_STANDARD ${ISO_WCX_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(ISO_WCX_CXX_STANDARD STREQUAL "26")
+  # CMake/Clang/MSVC support for C++26 is still evolving. Explicit flags avoid
+  # quietly compiling in C++23 via CMake's standard-level fallback.
+  if(MSVC)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++latest>")
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-std=c++26>")
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-std=c++2c>")
+  else()
+    message(FATAL_ERROR "C++26 has not been validated for this compiler")
+  endif()
+  if(NOT MSVC)
+    include(CheckCXXSourceCompiles)
+    check_cxx_source_compiles("
+      #if __cplusplus < 202400L
+      #error Compiler is not in experimental C++26 mode
+      #endif
+      int main() { return 0; }" ISO_WCX_HAS_REAL_CXX26_MODE)
+    if(NOT ISO_WCX_HAS_REAL_CXX26_MODE)
+      message(FATAL_ERROR "C++26 dialect check failed; refusing to silently fall back")
+    endif()
+  endif()
+  message(STATUS "ISO-WCX experimental C++26 dialect enabled (not a release ABI change)")
+endif()
 
 # The Windows builder uses a pinned static zlib, so WCX does not depend on an
 # external DLL. Linux uses the system package when it is available.
@@ -21,7 +58,7 @@ endif()
 
 include(CTest)
 
-add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp)
+add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET})
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_disc PUBLIC cxx_std_20)
@@ -34,9 +71,24 @@ endif()
 # Virtual hard-disk partition discovery is an *isolated, read-only*
 # proof-of-format module. It is not yet registered as a WCX opener; optical
 # .img files remain handled by the existing CD sector logic.
-add_library(iso_virtual_partitions STATIC src/partition_map.cpp)
+add_library(iso_virtual_partitions STATIC src/partition_map.cpp src/virtual_disk.cpp)
 target_include_directories(iso_virtual_partitions PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_virtual_partitions PUBLIC cxx_std_20)
+
+# The libyal/libvhdi adapter is opt-in research for dynamic VHD/VHDX.
+# Do NOT add it to Windows WCX packages or silently fetch/redistribute LGPL
+# dependencies. Linux builds using system libvhdi only.
+option(ISO_WCX_WITH_LIBVHDI "Experimental system libvhdi dynamic VHD/VHDX reader (Linux only)" OFF)
+if(ISO_WCX_WITH_LIBVHDI)
+  if(WIN32)
+    message(FATAL_ERROR "libvhdi backend is not packaged or validated on Windows")
+  endif()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(LIBVHDI REQUIRED IMPORTED_TARGET libvhdi)
+  target_link_libraries(iso_virtual_partitions PUBLIC PkgConfig::LIBVHDI)
+  target_compile_definitions(iso_virtual_partitions PRIVATE ISO_WCX_WITH_LIBVHDI=1)
+endif()
+
 if(MSVC)
   target_compile_options(iso_virtual_partitions PRIVATE /W4 /EHsc)
 else()
@@ -47,10 +99,47 @@ if(BUILD_TESTING)
   add_executable(virtual_partition_tests tests/partition_map.cpp)
   target_link_libraries(virtual_partition_tests PRIVATE iso_virtual_partitions)
   add_test(NAME raw_virtual_disk_mbr_gpt COMMAND virtual_partition_tests)
+  add_executable(virtual_disk_tests tests/virtual_disk.cpp)
+  target_link_libraries(virtual_disk_tests PRIVATE iso_virtual_partitions)
+  add_test(NAME raw_fixed_vhd_read_only COMMAND virtual_disk_tests)
+  if(ISO_WCX_WITH_LIBVHDI)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    find_program(ISO_WCX_QEMU_IMG qemu-img)
+    if(ISO_WCX_QEMU_IMG)
+      add_test(NAME dynamic_vhd_vhdx_libvhdi
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_libvhdi_backend.py"
+                "$<TARGET_FILE:virtual_partition_inspect>" "${ISO_WCX_QEMU_IMG}")
+    else()
+      message(STATUS "qemu-img missing; optional real dynamic VHD/VHDX tests unavailable")
+    endif()
+  endif()
 endif()
 
 add_executable(virtual_partition_inspect tools/virtual_partition_inspect.cpp)
 target_link_libraries(virtual_partition_inspect PRIVATE iso_virtual_partitions)
+
+# Independent FAT12/16/32 filesystem reader above the virtual block layer.
+# Deliberately not linked into ISO-WCX until WCX extraction and security tests pass.
+add_library(iso_virtual_fat STATIC src/fat_volume.cpp)
+target_include_directories(iso_virtual_fat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(iso_virtual_fat PUBLIC iso_virtual_partitions)
+target_compile_features(iso_virtual_fat PUBLIC cxx_std_20)
+if(MSVC)
+  target_compile_options(iso_virtual_fat PRIVATE /W4 /EHsc)
+else()
+  target_compile_options(iso_virtual_fat PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_executable(virtual_fat_inspect tools/virtual_fat_inspect.cpp)
+target_link_libraries(virtual_fat_inspect PRIVATE iso_virtual_fat)
+if(BUILD_TESTING)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME fat12_fat16_fat32_virtual_disk_filesystems
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_virtual_fat.py"
+            "$<TARGET_FILE:virtual_fat_inspect>")
+endif()
+
+add_executable(mds_descriptor_inspect tools/mds_descriptor_inspect.cpp)
+target_link_libraries(mds_descriptor_inspect PRIVATE iso_disc)
 
 add_executable(disc_inspect tools/disc_inspect.cpp)
 target_link_libraries(disc_inspect PRIVATE iso_disc)
@@ -101,6 +190,12 @@ if(BUILD_TESTING)
   add_executable(legacy_timestamp_tests tests/legacy_timestamps.cpp)
   target_link_libraries(legacy_timestamp_tests PRIVATE iso_disc)
   add_test(NAME legacy_timestamp_encoding COMMAND legacy_timestamp_tests)
+  add_executable(rock_ridge_metadata_tests tests/rock_ridge_metadata.cpp)
+  target_link_libraries(rock_ridge_metadata_tests PRIVATE iso_disc)
+  add_test(NAME rock_ridge_px_tf_ce_metadata COMMAND rock_ridge_metadata_tests)
+  add_executable(mds_descriptor_probe_tests tests/mds_descriptor_probe.cpp)
+  target_link_libraries(mds_descriptor_probe_tests PRIVATE iso_disc)
+  add_test(NAME mds_v1_v2_mdx_metadata_bounds COMMAND mds_descriptor_probe_tests)
   add_executable(copy_transaction_tests tests/copy_transaction.cpp)
   target_link_libraries(copy_transaction_tests PRIVATE iso_disc)
   add_test(NAME copy_transaction_rollback COMMAND copy_transaction_tests)

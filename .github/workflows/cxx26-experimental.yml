@@ -1,0 +1,65 @@
+name: Experimental C++26 compatibility
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'tests/**'
+      - 'tools/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/cxx26-experimental.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'tests/**'
+      - 'tools/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/cxx26-experimental.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-cxx26:
+    name: C++26 Linux ${{ matrix.compiler }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc-14
+            cc: gcc-14
+            cxx: g++-14
+          - compiler: clang-19
+            cc: clang-19
+            cxx: clang++-19
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install modern toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14 clang-19 ninja-build python3-venv
+          "${{ matrix.cxx }}" --version
+      - name: Install CMake 3.31 in isolated virtual environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/cmake-env"
+          "$RUNNER_TEMP/cmake-env/bin/python" -m pip install --disable-pip-version-check cmake==3.31.10
+          echo "$RUNNER_TEMP/cmake-env/bin" >> "$GITHUB_PATH"
+      - name: Configure experimental C++26
+        run: |
+          cmake -S . -B build-cxx26 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DISO_WCX_CXX_STANDARD=26
+      - name: Compile all Linux tools and tests
+        run: cmake --build build-cxx26 --parallel 2
+      - name: Run full test suite under C++26
+        run: ctest --test-dir build-cxx26 --output-on-failure

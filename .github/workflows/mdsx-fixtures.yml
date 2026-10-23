@@ -1,0 +1,29 @@
+name: MDSv2 and MDX real fixture probe (research)
+
+on:
+  pull_request:
+    paths:
+      - 'include/iso_wcx/mds_probe.hpp'
+      - 'src/mds_probe.cpp'
+      - 'tools/mds_descriptor_inspect.cpp'
+      - 'tests/mds_descriptor_probe.cpp'
+      - 'tests/test_mdsx_external_fixtures.py'
+      - '.github/workflows/mdsx-fixtures.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-mdsx-envelope-smoke:
+    name: Real MDSv2 / MDX metadata only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure native metadata inspector
+        run: cmake -S . -B build-mds -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+      - name: Build native descriptor probe
+        run: cmake --build build-mds --target mds_descriptor_inspect --parallel 2
+      - name: Recognize external fixed-revision MDSv2 and MDX fixtures
+        run: python3 tests/test_mdsx_external_fixtures.py ./build-mds/mds_descriptor_inspect

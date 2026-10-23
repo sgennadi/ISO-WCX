@@ -10,7 +10,7 @@ This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.
 
 - CUE/BIN track selection: opens `.cue` directly, parses multiple FILE/TRACK and INDEX 00/01 records, skips audio and unsupported track types, and chooses the last ISO/UDF-bearing data track. Supports 2048, 2336, Mode 1/2352 and Mode 2 Form 1/2352 layouts; extracts files through the same read-only WCX API.
 - ISO9660 and Joliet, including Unicode names, ISO multi-extent/interleaved files, and primary-volume fallback for damaged Joliet.
-- Rock Ridge RRIP NM/CE names, CL relocated directory references; symbolic links are ignored rather than followed.
+- Rock Ridge RRIP NM/CE names, CL relocated directory references, PX non-writable/read-only mapping, TF modification timestamps and mirrored CE/PX number validation; symbolic links and POSIX special files are ignored rather than followed.
 - 2048-byte logical images, raw 2352-byte CD Mode 1 and Mode 2 Form 1, and 2336-byte XA Form 1 frames (no Form 2).
 - Some images with 150-sector lead-in (relative and absolute session LBA conventions), but **not full multisession TOC/CUE parsing**.
 - UDF Type-1 physical partition mapping, File Entry/Extended File Entry, embedded/short/long allocation descriptors, AED continuations, OSTA CS0 UTF-16 names (surrogate pairs), and reserve VDS recovery.
@@ -22,7 +22,7 @@ This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.
 - This is a **preview** tested primarily with deterministic synthetic image fixtures. Real DVD/BD/UDF compatibility is not yet guaranteed, especially rewritable/packet-written and damaged media.
 - RAW Mode 2 Form 2, CD-Audio extraction, CD-Text and full CloneCD multisession are not supported. CloneCD raw `.sub` is preserved and position-type Q frames are CRC-checked; damaged Q data is not treated as an ISO failure. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
 - UDF VAT historical chains, every version of Metadata/Sparable, UDF pseudo-overwrite behavior and fragmented descriptor edge cases are not yet exhaustively covered.
-- Rock Ridge POSIX permissions, TF timestamps and symlink extraction are not implemented.
+- Rock Ridge PX read-only permissions and TF modification timestamps are implemented in the development branch, with CE mirrored-endian validation. Full POSIX permissions, symlink extraction and creation/access times are not exposed by the WCX API.
 - Unsupported image containers remain ISZ, DAA, DMG and encrypted/compressed NRG/MDF variations. Indexed CSO/ZSO are supported. Only uncompressed NRG and MDS/MDF track subsets are implemented.
 - Avoid extracting untrusted images into important directories; path checks cannot fully mitigate concurrent symlink races.
 - Unsigned binary; this is not an official release of the legacy ISO.WCX plugin.
@@ -50,6 +50,16 @@ CLI tool: `disc_inspect image.iso` or `disc_inspect image.iso --extract OUTPUT`.
 Download the **ISO-WCX-Installable-Preview** artifact from successful GitHub Actions runs. Unzip the outer GitHub artifact archive, then open `ISO-WCX-preview.zip` directly in Total Commander; `pluginst.inf` prompts installation. Alternatively configure `.iso`, `.img` or `.bin` manually under **Configuration > Options > Packer > Configure packer extension WCXs**. Only use `.bin` images in the supported single-track layouts above.
 
 CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list/extract smoke checks, and packages an installable ZIP when both architectures pass.
+
+## MDS v2 / MDX inspection research (not an archive handler)
+
+The standalone `mds_descriptor_inspect` tool detects MDS version 1,
+packed/encrypted MDS major version 2, and MDX monolithic metadata envelopes,
+with strict file-offset and overflow checks. It does **not** decrypt,
+decompress or extract data from MDS v2 or MDX. A recognized MDX will
+produce a specific error rather than being silently misread as ISO. The
+installer does not associate .mdx. Read
+[the Aaru issue #256 compatibility notes](docs/mds-v2-mdx-research.md).
 
 ## NRG and MDS/MDF preview support
 

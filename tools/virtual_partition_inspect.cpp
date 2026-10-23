@@ -1,6 +1,7 @@
 // Read-only raw virtual hard-disk partition inspector.
 // Standalone CLI; neither mounts disks nor changes the WCX image formats.
 #include "iso_wcx/partition_map.hpp"
+#include "iso_wcx/virtual_disk.hpp"
 #include <exception>
 #include <iomanip>
 #include <iostream>
@@ -9,7 +10,7 @@
 
 int main(int argc,char** argv) {
     if(argc!=2 && argc!=3) {
-        std::cerr<<"Usage: virtual_partition_inspect IMAGE.img [512|4096]\n";
+        std::cerr<<"Usage: virtual_partition_inspect IMAGE.img|IMAGE.vhd|IMAGE.vhdx [512|4096]\n";
         return 2;
     }
     unsigned sector=512;
@@ -22,7 +23,24 @@ int main(int argc,char** argv) {
         sector=size=="512"?512u:4096u;
     }
     try {
-        const auto result=iso_wcx::inspect_partition_table(argv[1],sector);
+        iso_wcx::VirtualDiskReader device{std::filesystem::path(argv[1])};
+        const auto result=iso_wcx::inspect_partition_table(device,sector);
+        const char* container="raw hard-disk image";
+        switch(device.format()) {
+            case iso_wcx::VirtualDiskFormat::raw_image:
+                break;
+            case iso_wcx::VirtualDiskFormat::fixed_vhd:
+                container="fixed VHD";
+                break;
+            case iso_wcx::VirtualDiskFormat::dynamic_vhd:
+                container="dynamic VHD (experimental libvhdi)";
+                break;
+            case iso_wcx::VirtualDiskFormat::vhdx:
+                container="VHDX (experimental libvhdi)";
+                break;
+        }
+        std::cout<<"Container: "<<container
+                 <<" ("<<device.size()<<" logical bytes)\n";
         std::cout<<"Scheme\tFirstLBA\tSectors\tType\n";
         for(const auto& partition:result) {
             std::cout<<(partition.scheme==iso_wcx::PartitionTableKind::gpt?"GPT":"MBR")

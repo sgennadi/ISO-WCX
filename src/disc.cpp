@@ -4,6 +4,7 @@
 #include "iso_wcx/compressed_image.hpp"
 #include "iso_wcx/cue.hpp"
 #include "iso_wcx/image_tracks.hpp"
+#include "iso_wcx/mds_probe.hpp"
 #include "iso_wcx/rock_ridge.hpp"
 #include "iso_wcx/legacy_formats.hpp"
 #include <algorithm>
@@ -438,6 +439,7 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
             auto r=read_record(data,p,joliet);
             const auto iso_identifier=r.name;
             if(r.name==".") {p+=length;continue;}
+            std::optional<std::uint32_t> rr_mode,rr_modification;
             if(rr_skip) {
                 const auto rr=rock_ridge_entry(
                     std::span<const std::uint8_t>(data.data()+p,length),*rr_skip,
@@ -446,6 +448,19 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
                 // needs directory-structure rewriting; fail instead of silently
                 // listing the wrong files. RE entries are duplicate placeholders.
                 if(rr.relocated || rr.symlink) {p+=length;continue;}
+                if(rr.posix_mode) {
+                    const auto kind=*rr.posix_mode & 0170000u;
+                    // A POSIX link or device masquerading as an ISO data file
+                    // must not be materialized as ordinary extracted bytes.
+                    if(kind!=0 && kind!=0100000u && kind!=0040000u) {
+                        p+=length;
+                        continue;
+                    }
+                    require(kind==0 || (kind==0040000u)==bool(r.flags&2),
+                            "RRIP PX file type contradicts ISO directory flag");
+                    rr_mode=rr.posix_mode;
+                }
+                rr_modification=rr.modification_dos_time;
                 if(rr.child_link) {
                     require((r.flags&2) && rr.child_lba.has_value(),
                             "Rock Ridge CL must reference a directory");
@@ -467,9 +482,12 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
             }
             p+=length;
             Item item;item.path=base+r.name;item.directory=bool(r.flags&2);item.size=item.directory?0:r.size;
-            item.dos_time=r.dos_time;
+            item.dos_time=rr_modification.value_or(r.dos_time);
             item.attributes=item.directory?0x10u:0x20u;
             if(r.flags&1)item.attributes|=0x02u;
+            // DOS/WCX only exposes a subset of POSIX permissions. Keep the
+            // original mode in RRIP parsing, map non-writable to read-only.
+            if(rr_mode && ((*rr_mode & 0222u)==0))item.attributes|=0x01u;
             if(!item.directory) {
                 if(!r.gap) {
                     item.extents.push_back({std::uint64_t(r.lba)*iso_sector,r.size,false});
@@ -1060,6 +1078,12 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
     const bool nrg=is_nrg_path(image_);
     const bool mds=is_mds_path(image_);
     const bool ccd=is_ccd_path(image_);
+    if(is_mdx_path(image_)) {
+        (void)probe_mds_descriptor(image_);
+        throw std::runtime_error(
+            "MDX recognized; encrypted/packed MDSv2 metadata and "
+            "data-track extraction are not implemented in ISO-WCX");
+    }
     if(cue || nrg || mds || ccd) {
         const std::size_t count=cue?cue_data_tracks(image_).size():
             (nrg?nrg_data_tracks(image_).size():

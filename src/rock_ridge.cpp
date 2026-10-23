@@ -1,6 +1,5 @@
 #include "iso_wcx/rock_ridge.hpp"
-#include <algorithm>
-#include <limits>
+#include "iso_wcx/legacy_formats.hpp"
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -52,6 +51,16 @@ void utf8_valid(const std::string& name) {
         p += n;
     }
 }
+// RRIP PX fields use both-endian 32-bit integers (ECMA-119 7.3.3).
+std::uint32_t mirrored32(std::span<const std::uint8_t> source,std::size_t at) {
+    check(at<=source.size() && source.size()-at>=8,"truncated RRIP PX integer");
+    const auto le=little32(source,at);
+    const auto be=(std::uint32_t(source[at+4])<<24)|
+                  (std::uint32_t(source[at+5])<<16)|
+                  (std::uint32_t(source[at+6])<<8)|source[at+7];
+    check(le==be,"RRIP PX integer endian mismatch");
+    return le;
+}
 struct Continuation {std::uint32_t block{},offset{},length{};};
 }
 
@@ -78,6 +87,7 @@ RockRidgeEntry rock_ridge_entry(std::span<const std::uint8_t> record,
     RockRidgeEntry result;
     std::string name;
     bool saw_nm = false, continuing_nm = false, name_finished = false;
+    bool saw_px = false, saw_tf = false;
     std::set<std::tuple<std::uint32_t,std::uint32_t,std::uint32_t>> visited;
     std::vector<std::uint8_t> continuation_data;
     std::span<const std::uint8_t> current = record.subspan(beginning+susp_skip);
@@ -110,6 +120,37 @@ RockRidgeEntry rock_ridge_entry(std::span<const std::uint8_t> record,
                 name.append(reinterpret_cast<const char*>(current.data()+p+5),length-5);
                 continuing_nm = (flags & 1) != 0;
                 if (!continuing_nm) name_finished = true;
+            } else if (a=='P' && b=='X') {
+                check(!saw_px && (length==36 || length==44),
+                      "duplicate or truncated Rock Ridge PX record");
+                saw_px=true;
+                // Reject contradictory LE/BE copies even in unused PX fields.
+                for(std::size_t at=4;at+8<=length;at+=8)
+                    (void)mirrored32(current.subspan(p,length),at);
+                result.posix_mode=mirrored32(current,p+4);
+            } else if (a=='T' && b=='F') {
+                check(!saw_tf && length>=5,"duplicate or truncated Rock Ridge TF record");
+                saw_tf=true;
+                const auto flags=current[p+4];
+                const auto width=(flags&0x80u)?17u:7u;
+                unsigned count=0;
+                for(unsigned bit=0;bit<7;++bit)if(flags&(1u<<bit))++count;
+                // libarchive emits a valid empty TF record (length 5,
+                // flags 0) when no timestamps are available. An empty
+                // optional timestamp set must not hide the ISO directory.
+                check(length==5u+count*width,
+                      "Rock Ridge TF timestamp list has invalid length");
+                std::size_t at=p+5;
+                for(unsigned bit=0;bit<7;++bit) {
+                    if(!(flags&(1u<<bit)))continue;
+                    if(bit==1) { // modification timestamp only
+                        const auto stamp=(width==7)?
+                            iso_dos_timestamp(current.subspan(at,width)):
+                            iso_long_dos_timestamp(current.subspan(at,width));
+                        if(stamp)result.modification_dos_time=stamp;
+                    }
+                    at+=width;
+                }
             } else if (a=='S' && b=='L') {
                 check(length>=5,"truncated Rock Ridge SL record");
                 result.symlink = true;
@@ -127,7 +168,11 @@ RockRidgeEntry rock_ridge_entry(std::span<const std::uint8_t> record,
                 result.child_lba = lba;
             } else if (a=='C' && b=='E') {
                 check(length>=28 && !next,"invalid Rock Ridge CE entry");
-                Continuation ce{little32(current,p+4),little32(current,p+12),little32(current,p+20)};
+                // All three CE numbers have mirrored LE/BE values. A
+                // mismatch is corruption, not a reason to follow the LE half.
+                Continuation ce{mirrored32(current,p+4),
+                                mirrored32(current,p+12),
+                                mirrored32(current,p+20)};
                 check(ce.offset < sector_size && ce.length > 0 && ce.length <= max_ce_area,
                       "invalid Rock Ridge CE extent");
                 next = ce;
