@@ -1,6 +1,5 @@
 [plugininstall]
 description=ISO-WCX v0.12.1 Preview - ISO/UDF, optical containers + Setup repair
-descriptionRUS=ISO-WCX v0.12.1 Preview - ISO/UDF и восстановление ассоциаций
 version=0.12.1-preview
 type=wcx
 file=ISO-WCX.wcx
