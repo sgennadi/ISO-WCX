@@ -24,7 +24,7 @@ int main(int argc,char** argv) {
     }
     try {
         iso_wcx::VirtualDiskReader device{std::filesystem::path(argv[1])};
-        const auto result=iso_wcx::inspect_partition_table(argv[1],sector);
+        const auto result=iso_wcx::inspect_partition_table(device,sector);
         const char* container="raw hard-disk image";
         switch(device.format()) {
             case iso_wcx::VirtualDiskFormat::raw_image:
