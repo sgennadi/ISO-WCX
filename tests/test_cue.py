@@ -6,6 +6,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import wave
 import test_images as fixtures
 
 SECTOR=2048
@@ -111,7 +112,6 @@ def case_rejections(binary):
       'FILE "image.bin" BINARY\n TRACK 01 MODE1/2352\n INDEX 01 00:00:00\n TRACK 02 MODE1/2352\n INDEX 01 00:00:00\n',
       'FILE "image.bin" WAVE\n TRACK 01 MODE1/2352\n INDEX 01 00:00:00\n',
       'FILE "image.bin" BINARY\n TRACK 01 MODE2/2324\n INDEX 01 00:00:00\n',
-      'FILE "image.bin" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n',
     ]
     with tempfile.TemporaryDirectory() as dirname:
         root=pathlib.Path(dirname)
@@ -152,14 +152,100 @@ def case_link_escape(binary):
         invoke(binary,cue_dir,'FILE "linked.bin" BINARY\n TRACK 01 MODE1/2352\n INDEX 01 00:00:00\n',should_work=False)
 
 
+def check_pcm_wave(wav_file, expected_audio):
+    with wave.open(str(wav_file),'rb') as decoder:
+        assert decoder.getnchannels()==2
+        assert decoder.getsampwidth()==2
+        assert decoder.getframerate()==44100
+        assert decoder.getcomptype()=='NONE'
+        assert decoder.getnframes()==len(expected_audio)//4
+        assert decoder.readframes(decoder.getnframes())==expected_audio
+    data=wav_file.read_bytes()
+    assert data[:4]==b'RIFF' and data[8:12]==b'WAVE'
+    assert int.from_bytes(data[4:8],'little')==len(data)-8
+    assert data[44:]==expected_audio
+
+
+def case_audio_only(binary):
+    # A BINARY CUE without a filesystem must still open as CD-Audio.
+    with tempfile.TemporaryDirectory() as dirname:
+        root=pathlib.Path(dirname)
+        source=bytes([0,1,2,3])*588*4
+        (root/'music.bin').write_bytes(source)
+        out=root/'output'
+        sheet=root/'music.cue'
+        sheet.write_text('FILE "music.bin" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n',encoding='utf-8')
+        proc=subprocess.run([binary,str(sheet),'--extract',str(out)],capture_output=True,
+                            text=True,encoding='utf-8')
+        assert proc.returncode==0,(proc.stdout,proc.stderr)
+        assert 'CUE CD-Audio' in proc.stdout
+        check_pcm_wave(out/'audio.tracks'/'track01.wav',source)
+
+
+def case_audio_multitrack(binary):
+    with tempfile.TemporaryDirectory() as dirname:
+        root=pathlib.Path(dirname)
+        # 12 frames of 2352 bytes, where INDEX 00 frames 04-05 are pregap.
+        frames=[bytes([i])*2352 for i in range(12)]
+        (root/'full.bin').write_bytes(b''.join(frames))
+        sheet=root/'disc.cue'
+        sheet.write_text('FILE "full.bin" BINARY\n'
+                         ' TRACK 01 AUDIO\n INDEX 01 00:00:00\n'
+                         ' TRACK 02 AUDIO\n INDEX 00 00:00:04\n INDEX 01 00:00:06\n',
+                         encoding='utf-8')
+        out=root/'output'
+        proc=subprocess.run([binary,str(sheet),'--extract',str(out)],capture_output=True,
+                            text=True,encoding='utf-8')
+        assert proc.returncode==0,(proc.stdout,proc.stderr)
+        check_pcm_wave(out/'audio.tracks'/'track01.wav',b''.join(frames[:4]))
+        check_pcm_wave(out/'audio.tracks'/'track02.wav',b''.join(frames[6:]))
+
+
+def case_audio_and_data(binary):
+    # 30 audio frames followed by a valid filesystem in the same binary.
+    audio=b''.join(bytes([i])*2352 for i in range(30))
+    iso=fixtures.raw_cd_image(fixtures.iso_image(),mode=1)
+    with tempfile.TemporaryDirectory() as dirname:
+        root=pathlib.Path(dirname)
+        (root/'audio_and_iso.bin').write_bytes(audio+iso)
+        sheet=root/'disc.cue'
+        sheet.write_text('FILE "audio_and_iso.bin" BINARY\n'
+                         ' TRACK 01 AUDIO\n INDEX 01 00:00:00\n'
+                         ' TRACK 02 MODE1/2352\n INDEX 01 00:00:30\n',
+                         encoding='utf-8')
+        out=root/'output'
+        proc=subprocess.run([binary,str(sheet),'--extract',str(out)],capture_output=True,
+                            text=True,encoding='utf-8')
+        assert proc.returncode==0,(proc.stdout,proc.stderr)
+        assert (out/'HELLO.TXT').read_bytes()==b'world'
+        check_pcm_wave(out/'audio.tracks'/'track01.wav',audio)
+
+
+def case_audio_invalid(binary):
+    with tempfile.TemporaryDirectory() as dirname:
+        root=pathlib.Path(dirname)
+        # Truncated CD audio source (partial sector).
+        (root/'music.bin').write_bytes(bytes(2352*3+1))
+        invoke(binary,root,'FILE "music.bin" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n',should_work=False)
+        # Unsafe path traversal must be rejected, even for an audio-only disc.
+        invoke(binary,root,'FILE "../music.bin" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n',should_work=False)
+        # End-of-file INDEX at frame 3 is invalid.
+        (root/'music.bin').write_bytes(bytes(2352*3))
+        invoke(binary,root,'FILE "music.bin" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:03\n',should_work=False)
+
+
 if __name__=='__main__':
     exe=sys.argv[1]
     case_single(exe)
     case_audio_prefix(exe)
     case_multi_file(exe)
+    case_audio_only(exe)
+    case_audio_multitrack(exe)
+    case_audio_and_data(exe)
+    case_audio_invalid(exe)
     case_choose_latest(exe)
     case_track_bounds(exe)
     case_rejections(exe)
     case_link_escape(exe)
     case_mutations(exe)
-    print('PASS: CUE BINARY data-track formats, mixed audio/data, bounds, Unicode and hostile paths')
+    print('PASS: CUE data tracks, CD-Audio WAV, pregap, mixed-mode, bounds and hostile paths')
