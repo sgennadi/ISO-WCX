@@ -1,10 +1,7 @@
 #include "iso_wcx/fat_volume.hpp"
 
 #include <algorithm>
-#include <array>
-#include <cctype>
 #include <cstdint>
-#include <limits>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -348,8 +345,8 @@ void FatVolume::scan_directory_bytes(std::string_view prefix,
                 "invalid FAT file/directory entry cluster or size");
         // No duplicate output paths even if a damaged FAT directory points
         // to the same entity multiple times.
-        for (const auto& previous : entries_)
-            require(previous.path != path, "duplicate FAT directory path");
+        require(seen_paths_.insert(path).second,
+                "duplicate FAT directory path");
         entries_.push_back({path, size, first_cluster, is_directory});
         if (is_directory)
             walk_directory(path, first_cluster, false, depth + 1);
@@ -366,10 +363,8 @@ void FatVolume::walk_directory(std::string_view prefix, std::uint32_t first,
                 "FAT12/16 root directory exceeds safety limit");
         data = volume_read(root_offset_, root_length_);
     } else {
-        require(std::find(visited_directories_.begin(), visited_directories_.end(), first)
-                    == visited_directories_.end(),
+        require(visited_directories_.insert(first).second,
                 "FAT directory cluster referenced multiple times");
-        visited_directories_.push_back(first);
         require(visited_directories_.size() <= kMaxListedEntries,
                 "too many FAT directories");
         data = directory_chain(first);
@@ -380,6 +375,7 @@ void FatVolume::walk_directory(std::string_view prefix, std::uint32_t first,
 void FatVolume::scan_once() {
     if (scanned_) return;
     entries_.clear();
+    seen_paths_.clear();
     visited_directories_.clear();
     try {
         walk_directory("", root_cluster_, kind_ != FatKind::fat32, 0);
