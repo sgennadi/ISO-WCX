@@ -1,10 +1,26 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.9.0 LANGUAGES CXX)
+project(ISO_WCX VERSION 0.10.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/legacy_formats.cpp)
+# The Windows builder uses a pinned static zlib, so WCX does not depend on an
+# external DLL. Linux uses the system package when it is available.
+if(WIN32)
+  include(FetchContent)
+  set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(iso_wcx_zlib
+      URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz)
+  FetchContent_MakeAvailable(iso_wcx_zlib)
+  set(ISO_WCX_ZLIB_TARGET zlibstatic)
+else()
+  find_package(ZLIB REQUIRED)
+  set(ISO_WCX_ZLIB_TARGET ZLIB::ZLIB)
+endif()
+
+add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/legacy_formats.cpp src/compressed_image.cpp)
+target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET})
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_disc PUBLIC cxx_std_20)
 if(MSVC)
@@ -61,6 +77,8 @@ if(BUILD_TESTING)
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compat_v070.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME legacy_boot_xbox_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_legacy_formats.py" "$<TARGET_FILE:disc_inspect>")
+    add_test(NAME compressed_iso_smoke
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compressed_iso.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME iso_udf_image_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_images.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME disc_descriptor_mutations
