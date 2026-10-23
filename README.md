@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.6.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
+**ISO-WCX v0.7.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
 
 ## Preview installation
 
@@ -36,3 +36,14 @@ Build with CMake 3.21+, a C++20 compiler and Python 3 for tests:
 Windows uses Visual Studio 2022 via CMake (`-G "Visual Studio 17 2022" -A x64` or `-A Win32`). CI produces both binary architectures and tests the WCX DLL APIs.
 
 This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg` and `.mds` are registered by the ZIP installer, while `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
+
+
+## v0.7.0 compatibility fixes
+
+- **ISO interleaved extents:** respect File Unit Size and Interleave Gap Size; combine interleaved segments correctly in multi-extent files. Reject unsupported interleaved directories.
+- **Joliet fallback:** if the supplementary Joliet directory is invalid, retry the complete directory scan from a valid ISO9660 primary volume.
+- **UDF CS0 Unicode:** validate and decode UTF-16 surrogate pairs (for example emoji in filenames), rejecting unpaired or truncated pairs.
+- **UDF reserve VDS:** when a main Volume Descriptor Sequence cannot be parsed, try its reserve sequence from the same anchor before trying a different anchor.
+- **Test coverage:** 12 synthetic success/failure cases, plus an independently mastered Rock Ridge/ISO9660 image generated with libarchive on Linux that includes nested directories, a 1 MiB file, Unicode, and an omitted symlink.
+
+**Preview limits remain:** real optical media, broad Nero/Alcohol and mixed sessions, actual Total Commander GUI integration, and complex UDF versions still require sample-based validation. Do not regard this as full UDF 1.02-2.60 coverage.

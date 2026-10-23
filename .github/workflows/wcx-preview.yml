@@ -44,6 +44,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Confirm independent ISO mastering dependency
+        run: python3 -c "import ctypes.util; assert ctypes.util.find_library('archive'), 'libarchive required'"
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
