@@ -5,6 +5,17 @@ If Total Commander shows "File iso.wcx not found!" or "Error, could
 not load plugin!" for ...\plugins\wcx\ISO\iso.wcx, it is attempting to load
 the LEGACY ISO.WCX plugin, not this ISO-WCX project.
 
+Optional safe automatic repair:
+- Extract the entire ZIP first.
+- Run ISO-WCX-Repair.cmd for read-only detection.
+- Close ALL Total Commander windows.
+- Run ISO-WCX-Repair-Apply.cmd; type YES to approve.
+- Only a stale iso=...\\ISO\\iso.wcx entry is changed and a timestamped
+  wincmd.ini backup is saved. Other extensions and working plugins remain intact.
+- When INI autodetection fails, pass -IniPath "C:\\path\\wincmd.ini" to
+  ISO-WCX-Repair.ps1. The script checks that both WCX binaries exist.
+
+Manual alternative:
 1. Open Configuration > Options > Packer > Configure packer extension WCXs.
 2. Enter extension "iso". Select the OLD entry pointing to
    ...\plugins\wcx\ISO\iso.wcx and press Delete.
