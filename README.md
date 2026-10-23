@@ -124,3 +124,23 @@ files. The optical ISO/BIN `.img` path is unchanged. See
 [virtual disk architecture](docs/virtual-disks.md), informed by
 [TalAloni/DiskAccessLibrary](https://github.com/TalAloni/DiskAccessLibrary)
 (LGPL-3.0-or-later; no source copied or linked).
+
+
+## Experimental C++26 and virtual HDD support
+
+ISO-WCX ships its Windows x86/x64 WCX files using the proven **C++20** toolchain.
+For developers, `-DISO_WCX_CXX_STANDARD=26` enables a separate, checked
+experimental **C++26** compilation lane (GCC 14 and Clang 19 in GitHub Actions)
+without changing the Total Commander ABI or release package.
+
+The isolated `virtual_partition_inspect` tool can now parse MBR/GPT in
+both raw HDD IMG and **fixed-size VHD v1** files. Fixed VHD validation includes
+the EOF footer signature, one's-complement checksum, format version, disk type,
+and exact logical size. No VHD data is written or mounted. The tool does not
+open dynamic/differencing VHD, VHDX or VMDK yet, and this feature is not
+exposed by the WCX plugin until filesystem readers and real-image tests exist.
+
+We evaluated [libyal/libvhdi](https://github.com/libyal/libvhdi) as a native
+C candidate for future read-only dynamic VHD/VHDX support. It is alpha and
+LGPL-3.0-or-later; ISO-WCX does not currently bundle or link it. See
+[virtual disk design and limitations](docs/virtual-disks.md).
