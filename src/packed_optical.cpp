@@ -48,8 +48,8 @@ std::string lowercase_extension(const std::filesystem::path& path) {
 void inflate_exact(const std::vector<std::uint8_t>& encoded,
                    std::vector<std::uint8_t>& decoded,
                    std::size_t expected, int format) {
-    check(encoded.size() <= std::numeric_limits<uInt>::max() &&
-          decoded.size() <= std::numeric_limits<uInt>::max(),
+    check(encoded.size() <= (std::numeric_limits<uInt>::max)() &&
+          decoded.size() <= (std::numeric_limits<uInt>::max)(),
           "packed ISO zlib buffer exceeds bounds");
     z_stream state{};
     check(inflateInit2(&state, format) == Z_OK,
@@ -119,7 +119,7 @@ std::vector<std::uint8_t> PackedOptical::physical_read(
     check(length <= 16u * 1024u * 1024u &&
           pos <= physical_size_ && length <= physical_size_ - pos &&
           pos <= static_cast<std::uint64_t>(
-              std::numeric_limits<std::streamoff>::max()),
+              (std::numeric_limits<std::streamoff>::max)()),
           "packed optical read outside file");
     std::vector<std::uint8_t> result(length);
     file_.clear();
