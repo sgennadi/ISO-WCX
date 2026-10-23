@@ -12,6 +12,7 @@ on:
       - 'CMakeLists.txt'
       - '.github/workflows/wcx-preview.yml'
       - 'INSTALL_*.txt'
+      - 'ISO-WCX-Repair*'
       - 'pluginst.inf'
       - 'README.md'
       - 'PREVIEW.md'
@@ -34,6 +35,9 @@ jobs:
         run: cmake --build build --config Release --parallel 2
       - name: Run tests including WCX DLL loading
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Verify safe WCX association repair
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
       - name: Upload preview binaries
         uses: actions/upload-artifact@v4
         with:
@@ -90,8 +94,8 @@ jobs:
         run: |
           test -s package/ISO-WCX.wcx
           test -s package/ISO-WCX.wcx64
-          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX.wcx ISO-WCX.wcx64)
+          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX-Repair.ps1 ISO-WCX-Repair.cmd ISO-WCX-Repair-Apply.cmd package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX-Repair.ps1 ISO-WCX-Repair.cmd ISO-WCX-Repair-Apply.cmd ISO-WCX.wcx ISO-WCX.wcx64)
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v4
         with:
