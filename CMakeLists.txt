@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.14.0 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.15.0 LANGUAGES C CXX)
 
 # Keep the released WCX ABI on its tested C++20 toolchain. The C++26 lane
 # exercises *exactly the same sources and tests*, without changing artifacts.
@@ -235,6 +235,10 @@ if(WIN32)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
+    add_executable(wcx_wim_smoke tests/wcx_wim_smoke.cpp)
+    add_test(NAME wcx_wim_multi_image_lzx_esd
+      COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>")
+    set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 240)
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()
 endif()

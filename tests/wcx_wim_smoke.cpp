@@ -57,56 +57,6 @@ std::string load(const fs::path& filename) {
     std::ifstream file(filename,std::ios::binary);
     return {std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
 }
-int run() {
-    const auto root=fs::temp_directory_path()/
-        (L"iso-wcx-wim-smoke-"+std::to_wstring(GetCurrentProcessId())+L"-"+
-         std::to_wstring(GetTickCount64()));
-    fs::create_directories(root);
-    const auto first=root/L"first";
-    const auto second=root/L"second";
-    write(first/L"HELLO.TXT","hello-one");
-    write(first/L"Nested"/L"folder.bin","nested-data");
-    fs::create_directories(first/L"Empty");
-    write(second/L"HELLO.TXT","hello-two");
-    write(second/L"SECOND.TXT","second-image");
-
-    HMODULE system=LoadLibraryExW(L"wimgapi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if(!system){std::cerr<<"Cannot load system WIMGAPI\n";return 2;}
-    const auto create=bind<WimCreateFn>(system,"WIMCreateFile");
-    const auto temp=bind<WimTempFn>(system,"WIMSetTemporaryPath");
-    const auto capture=bind<WimCaptureFn>(system,"WIMCaptureImage");
-    const auto close_wim=bind<WimCloseFn>(system,"WIMCloseHandle");
-    if(!create||!temp||!capture||!close_wim){std::cerr<<"WIMGAPI exports missing\n";return 3;}
-
-    const fs::path source=root/L"test.wim";
-    DWORD status=0;
-    HANDLE archive=create(source.c_str(),GENERIC_READ|GENERIC_WRITE,
-                          CREATE_ALWAYS,0,WIM_COMPRESS_LZX,&status);
-    if(!archive||archive==INVALID_HANDLE_VALUE) {
-        std::cerr<<"WIM creation failed "<<GetLastError()<<"\n";return 4;
-    }
-    const auto tmp=root.wstring();
-    if(!temp(archive,tmp.c_str())) {
-        std::cerr<<"WIMSetTemporaryPath failed "<<GetLastError()<<"\n";
-        close_wim(archive);return 5;
-    }
-    for(const auto& folder:{first,second}) {
-        HANDLE image=capture(archive,folder.c_str(),0);
-        if(!image||image==INVALID_HANDLE_VALUE) {
-            std::cerr<<"WIMCaptureImage failed "<<GetLastError()<<"\n";
-            close_wim(archive);return 6;
-        }
-        close_wim(image);
-    }
-    close_wim(archive);
-
-    if(!fs::is_regular_file(source) || fs::file_size(source) <= 208)
-        return 7;
-    // Test the architecture-matched public WCX plugin, not a standalone WIM EXE.
-    const fs::path wcx=fs::absolute(fs::path{L"ISO-WCX"});
-    (void)wcx;
-    return 0;
-}
 int wmain(int argc,wchar_t** argv) {
     if(argc!=2) return 1;
     try {
