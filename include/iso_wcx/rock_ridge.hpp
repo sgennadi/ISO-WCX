@@ -18,6 +18,11 @@ struct RockRidgeEntry {
     bool relocated = false;
     bool child_link = false;
     std::optional<std::uint32_t> child_lba; // RRIP CL relocated directory block
+    // PX records are stored in mirrored LE/BE integers. No host chmod is used.
+    std::optional<std::uint32_t> posix_mode;
+    // TF modification timestamp mapped to the same timezone-free DOS date
+    // representation as ISO directory records; invalid dates are ignored.
+    std::optional<std::uint32_t> modification_dos_time;
 };
 
 // Returns SUSP skip length when a valid SP entry is present on the root "."
