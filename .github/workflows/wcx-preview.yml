@@ -48,7 +48,6 @@ jobs:
           path: |
             build/Release/ISO-WCX.wcx
             build/Release/ISO-WCX.wcx64
-            build/Release/ISO-WCX-Setup.exe
           if-no-files-found: error
           retention-days: 14
   linux:
@@ -98,15 +97,14 @@ jobs:
         run: |
           test -s package/ISO-WCX.wcx
           test -s package/ISO-WCX.wcx64
-          test -s package/ISO-WCX-Setup.exe
-          # .wcx/.wcx64 are the plugin DLLs; exclude *additional*
+          # Exactly two self-contained WCX DLLs; exclude *additional*
           # third-party shared libraries from this self-contained package.
           if find package -maxdepth 1 -type f \( -iname '*.dll' -o -iname '*.so*' -o -iname '*.dylib' \) | grep -q .; then
             echo "Unexpected third-party shared library in ISO-WCX installer" >&2
             exit 1
           fi
-          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX-Repair.ps1 ISO-WCX-Repair.cmd ISO-WCX-Repair-Apply.cmd package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX-Repair.ps1 ISO-WCX-Repair.cmd ISO-WCX-Repair-Apply.cmd ISO-WCX.wcx ISO-WCX.wcx64 ISO-WCX-Setup.exe)
+          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX.wcx ISO-WCX.wcx64)
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v4
         with:

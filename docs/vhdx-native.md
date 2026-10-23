@@ -2,9 +2,10 @@
 
 Independently authored C++20, with **no libvhdi, Rust runtime, .NET,
 ReFS block cloning, VirtDisk mount, or third-party disk DLL**.
-This module is built into the standalone virtual-disk library and
-inspection tools. It is **not yet registered as a Total Commander WCX
-archive format**. The optical ISO/UDF plugin remains unchanged.
+The native VHDX reader is now also linked into ISO-WCX and is registered
+as a **read-only Total Commander WCX format** for clean base images that
+contain supported FAT12/16/32 partitions. Standalone inspector tools are
+optional development tests; the optical ISO/UDF reader remains available.
 
 ## Implemented
 
@@ -44,7 +45,8 @@ entries. It uses partitioned FAT12 data to validate listing and binary
 extraction, sparse blocks, offset bounds and 512/4096-byte sectors.
 tests/vhdx_read_fixture.cpp verifies actual logical byte values and
 out-of-range reads. Real QEMU/Microsoft fixture interoperability and
-Win32/x64 Total Commander GUI extraction are separate release gates.
+Win32/x64 Total Commander GUI extraction on real media remains a separate
+release-validation gate; synthetic WCX public-ABI smoke tests run in CI.
 
 ## Format documentation and code provenance
 

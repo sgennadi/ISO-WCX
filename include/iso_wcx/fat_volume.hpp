@@ -22,6 +22,8 @@ struct FatFile {
     std::uint64_t size = 0;
     std::uint32_t first_cluster = 0;
     bool directory = false;
+    std::uint32_t dos_time = 0; // FAT last-write date/time in WCX layout.
+    std::uint32_t attributes = 0; // DOS file attribute flags.
 };
 
 class FatVolume {

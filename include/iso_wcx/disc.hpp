@@ -3,10 +3,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace iso_wcx {
+class VirtualArchive;
 struct Extent {
     std::uint64_t offset = 0;
     std::uint64_t length = 0;
@@ -35,5 +37,6 @@ private:
     std::filesystem::path image_;
     std::vector<Item> entries_;
     std::string format_;
+    std::shared_ptr<VirtualArchive> virtual_archive_;
 };
 }

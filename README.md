@@ -1,25 +1,27 @@
 # ISO-WCX
 
-**ISO-WCX v0.12.1 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
+**ISO-WCX v0.13.0 Preview** — a self-contained modern C++20, read-only
+Total Commander WCX plugin for optical disc images and virtual HDD filesystems.
 
-## Preview installation
+## Install into Total Commander
 
-1. Open [WCX preview CI builds](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml) and select a successful workflow run.
-2. Download its **ISO-WCX-Installable-Preview** artifact, unzip that outer artifact, then open `ISO-WCX-preview.zip` in Total Commander.
-3. Total Commander installs `ISO-WCX.wcx64` (64-bit) or `ISO-WCX.wcx` (32-bit) using `pluginst.inf`.
-4. **Exit all Total Commander windows**, then run `ISO-WCX-Setup.exe` from the installed plugin directory using Windows Explorer. It installs/verifies both DLL architectures, backs up active settings and repairs WCX associations. Restart TC and open a test ISO with Ctrl+PgDn. The `pluginst.inf` installer cannot auto-run Setup.
+1. Open [WCX preview builds](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml).
+2. Download the **ISO-WCX-Installable-Preview** ZIP artifact, unzip the artifact envelope if needed, and open **ISO-WCX-preview.zip** in Total Commander.
+3. Total Commander uses `pluginst.inf` to install `ISO-WCX.wcx` for 32-bit and `ISO-WCX.wcx64` for 64-bit. Keep both files together in the plugin folder.
+4. Restart Total Commander and open a supported image with Ctrl+PgDn.
 
-For details, compatibility notes and source build commands, see [PREVIEW.md](PREVIEW.md).
+**No separate setup EXE, parser DLL, unpacker, PowerShell script or mounting
+service is needed.** Existing native helper CLIs are development/test programs,
+not dependencies of the WCX installation.
 
-### Fix for an obsolete ISO.WCX association
+If Total Commander still points to a removed old `...\ISO\iso.wcx`,
+fix **Configuration → Options → Packer → Configure packer extension WCXs**:
+remove only the obsolete `iso` association and add a new type pointing to
+the installed `ISO-WCX.wcx`. Restart TC. The plugin itself cannot repair an
+association that prevents its DLL from loading in the first place.
 
-If Total Commander shows **File iso.wcx not found!** or **Error, could not load plugin!** pointing to `...\\plugins\\wcx\\ISO\\iso.wcx`, the old ISO.WCX handler remains selected; installing the new DLL does not remove stale associations. Open **Configuration → Options → Packer → Configure packer extension WCXs**, select extension `iso`, delete **only** the old entry referencing the missing `ISO\\iso.wcx`, and use **New type...** to select `...\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx`. The 64-bit `ISO-WCX.wcx64` must be installed beside it. The leading `192,` is Total Commander's capability bitfield, not part of a filename. Restart Total Commander after changing the configuration.
-
-**Native repair (recommended):** `ISO-WCX-Setup.exe` detects active `wincmd.ini` and any redirected plugin sections. It repairs missing/stale ISO-WCX paths and unassigned supported extensions while leaving existing working third-party plugins alone. For custom locations use `--ini`, `--tc-dir` or `--plugin-dir`; `--dry-run` inspects without changes, while `--force-iso` explicitly overrides even a valid ISO association. The helper is an x86 executable that also works on x64 Windows, and does not change Windows Explorer file associations.
-
-**Optional legacy-only PowerShell/CMD repair:** the ZIP now includes `ISO-WCX-Repair.cmd` for read-only diagnosis, and `ISO-WCX-Repair-Apply.cmd` to repair the missing legacy ISO path *after explicitly typing YES and closing Total Commander*. It edits only the obsolete `iso=` mapping and creates a backup of `wincmd.ini`; it does not delete any unrelated plugin configuration. You can override the INI location with `ISO-WCX-Repair.ps1 -IniPath "..." -Apply`. Windows CI tests the dry run, rollback backup, BOM/CRLF preservation, correct targeting and refusal cases.
-
-See [Russian repair instructions](INSTALL_RU.txt) or [English repair instructions](INSTALL_EN.txt).
+For detailed instructions see [PREVIEW.md](PREVIEW.md),
+[INSTALL_EN.txt](INSTALL_EN.txt), and [INSTALL_RU.txt](INSTALL_RU.txt).
 
 ## Formats (preview)
 
@@ -36,6 +38,7 @@ See [Russian repair instructions](INSTALL_RU.txt) or [English repair instruction
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
 | Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352/2448 data sectors); synthetic-test coverage |
 | El Torito | Exposes validated BIOS and EFI boot-load images and the boot catalog under `boot.images/`; EFI FAT BPB sizing when valid |
+| Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Built-in native MBR/GPT + FAT12/16/32 browsing and extraction under `partitionN/`; VHDX fixed/dynamic sparse payloads with 512/4096 logical sectors; no mount or external DLL |
 | Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
@@ -50,6 +53,12 @@ Build with CMake 3.21+, a C++20 compiler and Python 3 for tests:
     ctest --test-dir build --output-on-failure
 
 Windows uses Visual Studio 2022 via CMake (`-G "Visual Studio 17 2022" -A x64` or `-A Win32`). CI produces both binary architectures and tests the WCX DLL APIs.
+
+For a minimal Windows release build containing **only the WCX DLL**, use
+`-DBUILD_TESTING=OFF -DISO_WCX_BUILD_DEV_TOOLS=OFF` and
+`cmake --build build --config Release --target ISO-WCX`.
+The standalone diagnostic/test EXEs are internal development targets, not
+WCX runtime dependencies or parts of the installable ZIP.
 
 This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg`, `.mds`, `.cso` and `.zso` are registered by the ZIP installer, while `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
 
@@ -121,7 +130,7 @@ primary GPT using an independently valid backup header and table. For example:
     virtual_partition_inspect C:\Images\disk.img
     virtual_partition_inspect C:\Images\disk-4k.img 4096
 
-The virtual-disk code is **not yet registered in WCX**. A separate,
+The native virtual-disk partition and FAT readers are now linked directly into WCX for supported images. A separate,
 read-only `virtual_fat_inspect` CLI now lists and extracts FAT12/16/32
 files from discovered raw IMG or fixed VHD partitions. NTFS/exFAT/ext
 are not implemented. The optical ISO/BIN `.img` path is unchanged. See
@@ -144,8 +153,8 @@ and exact logical size. No VHD data is written or mounted. The
 **experimental native VHDX v1 reader** now handles clean fixed/dynamic base
 images, including sparse BAT blocks and 512/4096-byte sectors, through
 standalone partition and FAT tools. Differencing VHD/VHDX and VMDK remain
-unsupported. These virtual disk readers are **not yet included in WCX**
-until real-image interoperability and Windows GUI extraction are validated.
+unsupported. The FAT-capable virtual disk readers are now linked into WCX;
+real-image interoperability and Windows GUI extraction still need broader validation.
 See [native VHDX design and test boundaries](docs/vhdx-native.md).
 
 **No external disk DLLs:** The experimental libvhdi adapter and its CI
@@ -157,14 +166,14 @@ zlib.dll or libvhdi.dll is shipped. See
 [7-Zip handler study](docs/7zip-disk-formats.md) and
 [FAT12/16/32 read-only implementation](docs/fat-filesystems.md).
 
-### FAT12/16/32 files inside raw IMG and fixed VHD (standalone CLI)
+### FAT12/16/32 files inside WCX and standalone developer tests
 
 `virtual_fat_inspect list disk.img 1` lists files in the first partition;
 `virtual_fat_inspect cat disk.img 1 README.TXT` streams its bytes to stdout.
 This supports verified nested directories, VFAT long filenames and
 non-contiguous file cluster chains. No disk is mounted and no host path is
-created from the image. The FAT reader is still **not included in the WCX
-DLL**, so Total Commander continues to use its validated optical engine.
+created from the image. FAT and virtual HDD support is now compiled directly into
+the WCX DLL, alongside the existing optical ISO/UDF engine.
 
 ### Experimental MDS v2 / MDX metadata inspection
 
@@ -179,3 +188,23 @@ for current limitations, TrueCrypt licensing notes, and the decoding roadmap.
 ### Consolidated optical metadata regression checks
 
 RRIP PX (mode), TF (7/17-byte modification time), and mirrored CE pointers now have a dedicated integration + malformed-image regression in `tests/rock_ridge_metadata.cpp`. `tests/test_nrg_mds.py` no longer pretends that twice-running an MDS v1 fixture tests MDS v2; major version 2 is explicitly rejected. The supported MDS parser remains **v1 only** until independently validated v2 descriptors are implemented.
+
+## What changed in v0.13.0 Preview
+
+- Linked the independent native partition-table reader (MBR/EBR/GPT),
+  VHD/VHDX block layer and FAT12/16/32 reader into the same WCX DLL as
+  ISO9660/Joliet/Rock Ridge/UDF; no new runtime DLL or EXE.
+- Added `partition1/`, `partition2/`, etc. for supported FAT volumes.
+  Data is streamed through the existing extraction staging, rollback and
+  progress handling, with full FAT chain validation.
+- Raw HDD `.img` is distinguished by a validated partition map plus FAT
+  directory tree. Optical images remain supported through the existing
+  CD parser, and `.vhd`, `.vhdx`, `.raw` enter the HDD reader directly.
+- Added end-to-end synthetic FAT12/16/32 IMG, fixed VHD, fixed/dynamic VHDX
+  extraction and corrupt-chain rollback tests.
+- The install ZIP now contains only WCX binaries, TC installation metadata
+  and text documentation. No setup EXE or repair scripts are required.
+
+**Unsupported:** NTFS, exFAT, ext2/3/4, VMDK, dynamic/differencing VHD,
+differencing/dirty VHDX, MDS v2 and MDX extraction, DAA, ISZ and CHD.
+Real-world media/Total Commander GUI validation is pending.

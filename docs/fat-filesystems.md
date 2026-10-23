@@ -7,8 +7,8 @@ has been copied or linked.
 
 ## How it works
 
-The existing VirtualDiskReader supplies logical bytes from raw HDD IMG or
-fixed VHD. The MBR/EBR/GPT parser returns a partition extent. FatVolume
+The existing VirtualDiskReader supplies logical bytes from partitioned HDD
+IMG/RAW, fixed VHD and clean base fixed/dynamic VHDX. The MBR/EBR/GPT parser returns a partition extent. FatVolume
 then validates the FAT BIOS Parameter Block, FAT type by cluster count,
 FAT allocation-table capacity, cluster mapping and file/directory chains.
 
@@ -45,9 +45,10 @@ cluster chain can leave partial data in redirected stdout.
 
 ## Current limits
 
-This is a standalone library and CLI, NOT a Total Commander WCX format
-registration. Filesystem-aware WCX extraction and security regression
-coverage need to be completed before new extensions are enabled.
+Since v0.13 Preview, this same native reader is also built directly into
+the WCX DLL. IMG/RAW, fixed VHD and supported VHDX images expose FAT
+files under partition1/, etc. Extraction participates in the WCX progress,
+cancellation and rollback transaction. The standalone CLI is developer-only.
 
 It does not yet read exFAT, NTFS, ext, APFS, compressed/encrypted
 filesystems, host physical disks, snapshot parent chains, FAT timestamps
