@@ -88,6 +88,13 @@ if(ISO_WCX_WITH_LIBVHDI)
   target_compile_definitions(iso_virtual_partitions PRIVATE ISO_WCX_WITH_LIBVHDI=1)
   target_link_libraries(iso_virtual_partitions PRIVATE PkgConfig::ISO_WCX_LIBVHDI)
   message(STATUS "EXPERIMENTAL read-only libvhdi backend enabled for virtual_partition_inspect")
+  if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME optional_libvhdi_real_images
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_libvhdi_images.py"
+              "$<TARGET_FILE:virtual_partition_inspect>")
+    set_tests_properties(optional_libvhdi_real_images PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 endif()
 
 # The libyal/libvhdi adapter is opt-in research for dynamic VHD/VHDX.
