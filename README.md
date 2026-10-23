@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.13.0 Preview** — a self-contained modern C++20, read-only
+**ISO-WCX v0.14.0 Preview** — a self-contained modern C++20, read-only
 Total Commander WCX plugin for optical disc images and virtual HDD filesystems.
 
 ## Install into Total Commander
@@ -41,8 +41,11 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 | Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Built-in native MBR/GPT + FAT12/16/32 browsing and extraction under `partitionN/`; VHDX fixed/dynamic sparse payloads with 512/4096 logical sectors; no mount or external DLL |
 | Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
+| ISZ v1 (single-file) | Built-in indexed 2048-byte optical sectors with stored/zero/zlib/bzip2 chunks; encrypted, segmented, multi-volume and other ISZ variants rejected |
+| DAA v1.00 | Built-in single-file raw DEFLATE chunks with header CRC32 and bounds checking; v1.10, encryption and multipart images rejected |
+| CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and experimental single-track Mode 1/Mode 2 Form 1 CD frames (2448 bytes); no CDDA, multiple tracks, parents or mixed modes; `.chd` association is manual in Preview |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
-| Other compressed/encrypted containers | Not implemented: ISZ, DAA, CHD, NRG encrypted/compressed, MDS v2, MDX; only CloneCD Q position decoding is implemented; other raw CD subchannels are not interpreted |
+| Other compressed/encrypted containers | Not implemented: encrypted ISZ/DAA, multipart ISZ, DAA v1.10, compressed CHD, NRG encrypted/compressed, MDS v2, MDX; only CloneCD Q position decoding is implemented; other raw CD subchannels are not interpreted |
 
 ## Development
 
@@ -60,7 +63,7 @@ For a minimal Windows release build containing **only the WCX DLL**, use
 The standalone diagnostic/test EXEs are internal development targets, not
 WCX runtime dependencies or parts of the installable ZIP.
 
-This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg`, `.mds`, `.cso` and `.zso` are registered by the ZIP installer, while `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
+This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg`, `.mds`, `.cso`, `.zso`, `.isz` and `.daa` are registered by the ZIP installer, while `.chd`, `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
 
 ## What changed in v0.7.0
 
@@ -80,6 +83,10 @@ This is an independent modern reimplementation; original ISO.WCX 1.7.6 source co
 - **CI hardening:** Linux Clang AddressSanitizer/UndefinedBehaviorSanitizer testing is now a regular GitHub Actions job, alongside Windows x86/x64 build and DLL smoke tests.
 
 As before, the WCX adapter is read-only and **Preview** quality. We have not demonstrated compatibility with every optical-media image format, commercial disc or live Total Commander installation. Destination path symlinks are checked, but extracting into a directory modified concurrently by an adversary remains outside the current threat model.
+
+## Historical changelog
+
+The following release notes describe the feature coverage **at each older version**. For current capabilities, consult the format table above and the v0.14 notes below.
 
 ## What changed in v0.9.0
 
@@ -111,7 +118,7 @@ As before, the WCX adapter is read-only and **Preview** quality. We have not dem
 - **CloneCD `.sub`:** Preserve and extract an optional same-base raw P-W subchannel stream under `subchannels/disc.sub` after checking every 96-byte frame corresponds to one 2352-byte `.img` frame. A CRC-gated `subchannels/q-index.csv` report identifies valid Q track/index positions; CD-Text and copy-protection semantics are **not decoded**, and invalid Q frames never invalidate raw `.sub`.
 - **Regression tests:** Synthetic ISO extended-attribute and endian corruption tests, scrambled CCD round trips and byte-perfect `.sub` extraction.
 
-The roadmap still includes *MDS v2, MDX, ISZ, DAA, CHD, DMG, ECM, GZ/XZ and CD-Audio*. They are not implied by libMirage/CDEmu supporting them.
+The remaining roadmap includes *MDS v2, MDX, broader ISZ/DAA/CHD variants, DMG, ECM, GZ/XZ and CD-Audio*. Partial ISZ/DAA/CHD support arrived in v0.14; formats supported by other projects are not automatically supported here.
 
 ## What changed in v0.12.1
 
@@ -206,5 +213,28 @@ RRIP PX (mode), TF (7/17-byte modification time), and mirrored CE pointers now h
   and text documentation. No setup EXE or repair scripts are required.
 
 **Unsupported:** NTFS, exFAT, ext2/3/4, VMDK, dynamic/differencing VHD,
-differencing/dirty VHDX, MDS v2 and MDX extraction, DAA, ISZ and CHD.
+differencing/dirty VHDX, MDS v2 and MDX extraction, encrypted/segmented ISZ,
+DAA v1.10 or encrypted DAA, audio/multitrack CHD and CHD parent chains.
 Real-world media/Total Commander GUI validation is pending.
+
+## What changed in v0.14.0 Preview
+
+- A native `PackedOptical` block reader is compiled directly into
+  `ISO-WCX.wcx` and `ISO-WCX.wcx64`; no external extractor, driver,
+  intermediate ISO or optional DLL is required.
+- ISZ v1 single-file data: zero, stored, zlib and **statically built bzip2**
+  chunks with bounded index, decompression and read cache.
+- Unencrypted DAA v1.00 single-file images: validated header CRC32, three-byte
+  block length index, raw RFC1951 DEFLATE streams.
+- CHD v5 compressed optical streams using statically built libchdr and its
+  in-tree zlib, LZMA, Zstandard, FLAC and CD codecs. Read-only cooked DVD/ISO
+  and experimental single-track Mode 1 / Mode 2 Form 1 CD data; unsupported
+  audio, multi-track and parent layouts are rejected. No runtime library.
+- Linux and Windows x86/x64 tests exercise synthetic ISO/UDF data, byte
+  extraction and corrupt-container rejection. Windows tests use the actual
+  WCX export functions, not an external extractor.
+- No automatic `.chd` association yet: audio/multi-track and mixed-mode CHDs
+  are not decoded, so registering every CHD globally would be misleading.
+  MDS v2/MDX and protected ISZ/DAA remain **unsupported**.
+
+See [bounded optical container design](docs/packed-optical.md).

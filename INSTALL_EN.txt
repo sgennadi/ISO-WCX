@@ -1,4 +1,4 @@
-ISO-WCX v0.13.0 Preview - standalone Total Commander WCX plugin
+ISO-WCX v0.14.0 Preview - standalone Total Commander WCX plugin
 ================================================================
 
 Installation (no additional tools)
@@ -13,7 +13,8 @@ Installation (no additional tools)
 
 No setup EXE, repair CMD, PowerShell script, external parser DLL, virtual
 disk mount, driver, or standalone disk extraction program is necessary.
-The WCX binaries include the ISO/UDF and supported virtual-disk readers.
+The WCX binaries include ISO/UDF, supported virtual-disk readers and
+native ISZ/DAA optical compressed-stream decoding.
 
 The included virtual HDD reader supports MBR/GPT FAT12/16/32 partitions
 in raw HDD IMG/RAW, fixed VHD, and clean base fixed/dynamic VHDX.
@@ -40,10 +41,14 @@ file path. Do not type it in the file selection dialog.
 
 Check other extensions only if they point to that same obsolete plugin.
 The installed plugin also handles cue, ccd, nrg, mds v1, cso, zso,
-partitioned img, raw, vhd and vhdx.
+limited single-file isz/daa, partitioned img, raw, vhd and vhdx.
 
-This is read-only preview software; encrypted/packed MDS v2/MDX,
-dynamic/differencing VHD, differencing/dirty VHDX, NTFS, exFAT, ext,
-ISZ, CHD and DAA are not yet supported.
+This is read-only preview software. Supported compressed optical subsets:
+single-file ISZ v1 (zero/raw/zlib/bzip2) and DAA 1.00 (raw DEFLATE).
+Experimental CHD v5 uncompressed 2048-byte data is readable when manually
+opened, but CHD is NOT registered by default.
+Not supported: MDS v2/MDX, encrypted/multipart ISZ or DAA, DAA 1.10,
+compressed CD/arcade CHD, dynamic/differencing VHD, differencing/dirty
+VHDX, NTFS, exFAT and ext-family file systems.
 
 Source: https://github.com/sgennadi/ISO-WCX

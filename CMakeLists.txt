@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.13.0 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.14.0 LANGUAGES C CXX)
 
 # Keep the released WCX ABI on its tested C++20 toolchain. The C++26 lane
 # exercises *exactly the same sources and tests*, without changing artifacts.
@@ -56,6 +56,46 @@ else()
   set(ISO_WCX_ZLIB_TARGET ZLIB::ZLIB)
 endif()
 
+# bzip2 ISZ support: compiled statically for all platforms.
+# Pin official 1.0.8 source by digest; do not ship DLLs or EXEs.
+include(FetchContent)
+FetchContent_Declare(iso_wcx_bzip2
+    URL https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz
+    URL_HASH SHA256=ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269)
+  FetchContent_GetProperties(iso_wcx_bzip2)
+  if(NOT iso_wcx_bzip2_POPULATED)
+    FetchContent_Populate(iso_wcx_bzip2)
+  endif()
+  add_library(iso_wcx_bzip2 STATIC
+    "${iso_wcx_bzip2_SOURCE_DIR}/blocksort.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/huffman.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/crctable.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/randtable.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/compress.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/decompress.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/bzlib.c")
+  target_include_directories(iso_wcx_bzip2 PUBLIC "${iso_wcx_bzip2_SOURCE_DIR}")
+set(ISO_WCX_BZIP2_TARGET iso_wcx_bzip2)
+
+# Native CHD v5 decoder: all codec and container libraries are statically
+# linked into ISO-WCX. No chdman, helper executable or shared DLL at runtime.
+# libchdr is pinned to a reviewed BSD-3-Clause source commit.
+set(CHDR_WANT_TESTS OFF CACHE BOOL "No libchdr test EXEs" FORCE)
+set(CHDR_FLAC_BACKEND drflac CACHE STRING "" FORCE)
+set(CHDR_WANT_RAW_DATA_SECTOR ON CACHE BOOL "" FORCE)
+set(CHDR_WANT_SUBCODE ON CACHE BOOL "" FORCE)
+set(CHDR_VERIFY_BLOCK_CRC ON CACHE BOOL "" FORCE)
+set(CHDR_LOWRAM_TARGET OFF CACHE BOOL "" FORCE)
+set(WITH_LZMA_ASM OFF CACHE BOOL "Portable LZMA decoder" FORCE)
+set(WITH_SYSTEM_ZLIB OFF CACHE BOOL "Bundled static miniz" FORCE)
+set(WITH_SYSTEM_ZSTD OFF CACHE BOOL "Bundled static Zstd" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "No auxiliary runtime DLLs" FORCE)
+FetchContent_Declare(iso_wcx_chdr
+  GIT_REPOSITORY https://github.com/rtissera/libchdr.git
+  GIT_TAG 47d794151b2b64f6aba60304e6480f4f5a2bc24b
+  GIT_SHALLOW FALSE)
+FetchContent_MakeAvailable(iso_wcx_chdr)
+
 include(CTest)
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
 # runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
@@ -64,8 +104,8 @@ if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
   message(FATAL_ERROR "CTest requires ISO_WCX_BUILD_DEV_TOOLS=ON")
 endif()
 
-add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp)
-target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET})
+add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
+target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET} chdr-static)
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_disc PUBLIC cxx_std_20)
 if(MSVC)
@@ -191,6 +231,7 @@ if(WIN32)
   if(BUILD_TESTING)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
+    add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()
 endif()
@@ -232,6 +273,25 @@ if(BUILD_TESTING)
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compressed_iso.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME iso_extended_attributes
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iso_attrs_v012.py" "$<TARGET_FILE:disc_inspect>")
+    if(WIN32)
+      add_test(NAME packed_optical_isz_daa_chd_wcx
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_packed_optical.py"
+          "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:ISO-WCX>" "$<TARGET_FILE:wcx_packed_smoke>")
+    else()
+      add_test(NAME packed_optical_isz_daa_chd_core
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_packed_optical.py"
+          "$<TARGET_FILE:disc_inspect>")
+    endif()
+    # Genuine MAME-produced compressed CD/DVD CHD fixtures, available in
+    # the Linux preview CI job. chdman is test-only, never a WCX dependency.
+    find_program(ISO_WCX_CHDMAN_EXECUTABLE NAMES chdman)
+    if(ISO_WCX_CHDMAN_EXECUTABLE)
+      add_test(NAME external_chdman_compressed_chd
+        COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chdman_interop.py"
+          "$<TARGET_FILE:disc_inspect>")
+      set_tests_properties(external_chdman_compressed_chd PROPERTIES TIMEOUT 240)
+    endif()
     add_test(NAME integrated_virtual_disk_fat_wcx
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_fat.py" "$<TARGET_FILE:disc_inspect>")
     set_tests_properties(integrated_virtual_disk_fat_wcx PROPERTIES TIMEOUT 180)

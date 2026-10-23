@@ -55,6 +55,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Install MAME CHD fixture generator for CI only
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mame-tools
+          command -v chdman
+          # chdman help prints usage and may return nonzero on valid builds.
       - name: Confirm independent ISO writer test dependency
         run: python3 -c "import ctypes.util; assert ctypes.util.find_library('archive'), 'libarchive is required for independent ISO validation'"
       - name: Configure
@@ -72,7 +78,7 @@ jobs:
         run: python3 -c "import ctypes.util; assert ctypes.util.find_library('archive'), 'libarchive is required for independent ISO validation'"
       - name: Configure sanitizers
         run: |
-          cmake -S . -B build-sanitized -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++ \
+          cmake -S . -B build-sanitized -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
             '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -O1' \
             '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined'
       - name: Build sanitizers
@@ -103,8 +109,10 @@ jobs:
             echo "Unexpected third-party shared library in ISO-WCX installer" >&2
             exit 1
           fi
-          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX.wcx ISO-WCX.wcx64)
+          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX.wcx ISO-WCX.wcx64)
+          unzip -t ISO-WCX-preview.zip
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'THIRD_PARTY_NOTICES.txt'
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v4
         with:

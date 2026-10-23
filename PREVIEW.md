@@ -1,4 +1,4 @@
-# ISO-WCX v0.13.0 C++20 preview
+# ISO-WCX v0.14.0 C++20 preview
 
 Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
@@ -23,7 +23,7 @@ This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.
 - RAW Mode 2 Form 2, CD-Audio extraction, CD-Text and full CloneCD multisession are not supported. CloneCD raw `.sub` is preserved and position-type Q frames are CRC-checked; damaged Q data is not treated as an ISO failure. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
 - UDF VAT historical chains, every version of Metadata/Sparable, UDF pseudo-overwrite behavior and fragmented descriptor edge cases are not yet exhaustively covered.
 - Rock Ridge PX read-only permissions and TF modification timestamps are implemented in the development branch, with CE mirrored-endian validation. Full POSIX permissions, symlink extraction and creation/access times are not exposed by the WCX API.
-- Unsupported image containers remain ISZ, DAA, DMG and encrypted/compressed NRG/MDF variations. Indexed CSO/ZSO are supported. Only uncompressed NRG and MDS/MDF track subsets are implemented.
+- ISZ v1 (single-file zero/stored/zlib/bzip2) and DAA v1.00 (unencrypted single-file raw DEFLATE) are now supported; CHD v5 supports only uncompressed 2048-byte optical payloads. Broader/encrypted variants, DMG and encrypted/compressed NRG/MDF remain unsupported. Indexed CSO/ZSO and uncompressed NRG/MDS v1 remain supported.
 - Avoid extracting untrusted images into important directories; path checks cannot fully mitigate concurrent symlink races.
 - Unsigned binary; this is not an official release of the legacy ISO.WCX plugin.
 
@@ -91,6 +91,10 @@ installer does not associate .mdx. Read
 
 **Concurrent file-system modifications:** This protection preserves existing destinations on ordinary failures, but it is not a substitute for an adversarially secure extraction sandbox. The destination-directory symlink check cannot prevent all external races.
 
+## Historical release notes (older versions)
+
+Support statements below describe their respective releases; see **v0.14** at the end for current additions.
+
 ## New in v0.9.0: boot, Xbox and sessions
 
 - El Torito BIOS/EFI `boot.images` support from validated boot catalogs. EFI FAT-BPB-backed larger extraction is attempted only when its byte size is within the image. Boot-catalog entries do not guarantee the size of an entire no-emulation image; avoid treating incomplete boot images as full partition dumps.
@@ -127,3 +131,28 @@ installer does not associate .mdx. Read
 - Handles normal CloneCD deinterleaved P12/Q12, with CRC-gated fallback for packed/interleaved P-W variants.
 - No R-W CD-Text, Q ADR=2/3 EAN/ISRC, proprietary protection semantics or CD-Audio in this update.
 - The report scans in constant memory with a one-million-sector limit; new WCX artifacts require successful Windows CI before release.
+
+## v0.14: integrated ISZ, DAA and limited CHD support
+
+All new format decoders operate inside `ISO-WCX.wcx/.wcx64`, with no
+separate ISO conversion, external parser DLL, executable, mounting driver or
+runtime archive utility. Supported variants: unencrypted, single-file ISZ v1
+with zero/stored/zlib/bzip2 blocks; unencrypted single-file DAA 1.00 with raw
+DEFLATE and checked header CRC32; CHD v5 now decodes compressed maps and
+hunks using the statically linked BSD-licensed libchdr. ISO/UDF are mapped
+from 2048-byte DVD data or validated single-track Mode 1/2 Form 1 CD frames.
+All filesystem parsing is in the existing WCX engine.
+
+The bzip2 1.0.8 source is fetched with a pinned SHA-256 **at build time** and
+compiled statically into the WCX. This does not add a runtime DLL.
+bzip2/libbzip2 (C) 1996-2010 Julian R Seward. Redistribution and use are
+permitted under its permissive license; see
+https://sourceware.org/bzip2/downloads.html for official source and license.
+The format logic itself is independently authored; no GPL image decoder
+code was copied.
+
+**Not supported yet:** multi-volume ISZ, ISZ passwords/encryption, DAA 1.10,
+password-protected/multipart DAA, CHD audio, multi-track/mixed-mode,
+parent chains and unusual sector layouts, plus MDS v2/MDX metadata decryption.
+These deliberately fail closed.
+Authentic vendor samples and GUI testing are still required for stable.
