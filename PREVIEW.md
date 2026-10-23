@@ -1,4 +1,4 @@
-# ISO-WCX v0.12.1 C++20 preview
+# ISO-WCX v0.13.0 C++20 preview
 
 Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
@@ -49,11 +49,15 @@ CLI tool: `disc_inspect image.iso` or `disc_inspect image.iso --extract OUTPUT`.
 
 Download the **ISO-WCX-Installable-Preview** artifact from successful GitHub Actions runs. Unzip the outer GitHub artifact archive, then open `ISO-WCX-preview.zip` directly in Total Commander; `pluginst.inf` prompts installation. Alternatively configure `.iso`, `.img` or `.bin` manually under **Configuration > Options > Packer > Configure packer extension WCXs**. Only use `.bin` images in the supported single-track layouts above.
 
-CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list/extract smoke checks, and packages an installable ZIP when both architectures pass.
+CI builds both Windows WCX architectures, runs parser and extraction tests, and packages only ISO-WCX.wcx, ISO-WCX.wcx64, pluginst.inf and human-readable instructions. No Setup.exe, third-party disk DLLs, PowerShell or CMD scripts are installed.
+
+## Native HDD images inside WCX (v0.13 preview)
+
+The plugin itself now opens partitioned raw HDD IMG/RAW, fixed VHD and clean fixed/dynamic base VHDX images through its own C++20 partition and FAT code. Read-only FAT12/16/32 files appear under partition1/, partition2/, etc. Extraction uses the same staging, rollback and progress controls as ISO/UDF. The installer registers IMG/RAW/VHD/VHDX; non-FAT partitions are skipped. VHD differencing/dynamic and VHDX parent/dirty-log images remain unsupported. No external programs, drivers or disk-parser DLLs are needed.
 
 ## MDS v2 / MDX inspection research (not an archive handler)
 
-The standalone `mds_descriptor_inspect` tool detects MDS version 1,
+The developer-only `mds_descriptor_inspect` test utility detects MDS version 1,
 packed/encrypted MDS major version 2, and MDX monolithic metadata envelopes,
 with strict file-offset and overflow checks. It does **not** decrypt,
 decompress or extract data from MDS v2 or MDX. A recognized MDX will

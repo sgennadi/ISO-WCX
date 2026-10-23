@@ -1,7 +1,7 @@
 [plugininstall]
-description=ISO-WCX v0.12.1 Preview - ISO/UDF, optical containers + Setup repair
-version=0.12.1-preview
+description=ISO-WCX v0.13.0 Preview - embedded ISO/UDF and virtual disk readers
+version=0.13.0-preview
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX
-defaultextension=iso,cue,ccd,nrg,mds,cso,zso
+defaultextension=iso,cue,ccd,nrg,mds,cso,zso,img,raw,vhd,vhdx

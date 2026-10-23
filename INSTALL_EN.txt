@@ -1,64 +1,49 @@
-ISO-WCX v0.12.1 Preview - repairing an old Total Commander association
-========================================================================
+ISO-WCX v0.13.0 Preview - standalone Total Commander WCX plugin
+================================================================
 
-If Total Commander shows "File iso.wcx not found!" or "Error, could
-not load plugin!" for ...\plugins\wcx\ISO\iso.wcx, it is attempting to load
-the LEGACY ISO.WCX plugin, not this ISO-WCX project.
+Installation (no additional tools)
+----------------------------------
+1. In the GitHub WCX preview workflow, download the combined
+   ISO-WCX-Installable-Preview artifact and unzip the outer envelope.
+2. Open ISO-WCX-preview.zip in Total Commander. Confirm the plugin
+   installation requested by pluginst.inf.
+3. Verify the plugin directory contains ISO-WCX.wcx and ISO-WCX.wcx64.
+   These are the 32-bit and 64-bit versions of the SAME read-only plugin.
+4. Restart Total Commander and open an ISO, VHD or VHDX with Ctrl+PgDn.
 
-Recommended: ISO-WCX-Setup.exe (native C++20, x86/x64)
-------------------------------------------------------
-1. Install the ISO-WCX-preview.zip using Total Commander pluginst.inf,
-   or extract the COMPLETE ZIP first.
-2. EXIT ALL Total Commander windows.
-3. Start ISO-WCX-Setup.exe from the installed plugin folder with
-   Windows Explorer (or the fully extracted ZIP folder).
-4. Setup validates the x86 WCX and x64 WCX64 pair, copies it if needed,
-   finds the active wincmd.ini and redirected sections, repairs missing
-   ISO\iso.wcx and stale ISO-WCX paths, and registers unassigned supported
-   extensions while preserving working third-party plugins. It backs up
-   affected INI files and invalidates the [PackerPlugins64] checksum.
-5. Restart Total Commander; open an ISO with Ctrl+PgDn.
+No setup EXE, repair CMD, PowerShell script, external parser DLL, virtual
+disk mount, driver, or standalone disk extraction program is necessary.
+The WCX binaries include the ISO/UDF and supported virtual-disk readers.
 
-Options: --dry-run, --ini "C:\path\wincmd.ini", --tc-dir "C:\TotalCmd",
---plugin-dir "D:\TCPlugins\wcx\ISO-WCX", --force-iso, --quiet.
---force-iso explicitly replaces even a working ISO handler.
-Setup does not run automatically from pluginst.inf. Run it only after
-closing TC, under the same account. Windows Explorer file associations
-are not modified.
+The included virtual HDD reader supports MBR/GPT FAT12/16/32 partitions
+in raw HDD IMG/RAW, fixed VHD, and clean base fixed/dynamic VHDX.
+FAT files appear inside partition1/, partition2/, etc. Unsupported
+filesystems such as NTFS, exFAT and ext4 are NOT decoded yet.
 
-Alternative opt-in CMD/PowerShell repair (legacy ISO mapping only):
-- Extract the entire ZIP first.
-- Run ISO-WCX-Repair.cmd for read-only detection.
-- Close ALL Total Commander windows.
-- Run ISO-WCX-Repair-Apply.cmd; type YES to approve.
-- Only a stale iso=...\\ISO\\iso.wcx entry is changed and a timestamped
-  wincmd.ini backup is saved. Other extensions and working plugins remain intact.
-- When INI autodetection fails, pass -IniPath "C:\\path\\wincmd.ini" to
-  ISO-WCX-Repair.ps1. The script checks that both WCX binaries exist.
+Fixing an old broken ISO.WCX association
+----------------------------------------
+If Total Commander says "File iso.wcx not found!" pointing to an old
+...\plugins\wcx\ISO\iso.wcx, it is using the OLD plugin entry.
 
-Manual alternative:
 1. Open Configuration > Options > Packer > Configure packer extension WCXs.
-2. Enter extension "iso". Select the OLD entry pointing to
-   ...\plugins\wcx\ISO\iso.wcx and press Delete.
-3. Click New type... and select the installed
-   ...\plugins\wcx\ISO-WCX\ISO-WCX.wcx.
-   The corresponding ISO-WCX.wcx64 must be in the same folder for
-   64-bit Total Commander, which picks up the sibling DLL automatically.
-4. Confirm, restart Total Commander, and open a test ISO with Ctrl+PgDn.
+2. Select extension iso and delete ONLY the obsolete mapping to the missing
+   ...\ISO\iso.wcx. Do not delete a working unrelated association.
+3. Use New type... and choose the installed ISO-WCX\ISO-WCX.wcx.
+4. Keep ISO-WCX.wcx64 beside ISO-WCX.wcx for 64-bit Total Commander.
+5. Restart Total Commander and retry Ctrl+PgDn.
 
-The number 192 in "192,path" is the WCX capability bitfield; it is not
-part of the filename and must not be typed into a file picker.
+A DLL cannot change a missing DLL's association before Total Commander
+has loaded it. This is a one-time settings correction, not an
+additional required program. The leading "192," sometimes shown in
+wincmd.ini is a Total Commander WCX capability mask, NOT part of the
+file path. Do not type it in the file selection dialog.
 
-Check extensions cue, ccd, nrg, mds, cso and zso only if they also point
-to the missing old DLL. Preserve unrelated working plugin associations.
+Check other extensions only if they point to that same obsolete plugin.
+The installed plugin also handles cue, ccd, nrg, mds v1, cso, zso,
+partitioned img, raw, vhd and vhdx.
 
-The pluginst.inf auto-installer installs the new WCX but does not remove
-obsolete associations from wincmd.ini. Do not delete all wincmd.ini entries.
-The correct INI location is shown in Help > About Total Commander.
+This is read-only preview software; encrypted/packed MDS v2/MDX,
+dynamic/differencing VHD, differencing/dirty VHDX, NTFS, exFAT, ext,
+ISZ, CHD and DAA are not yet supported.
 
-If a correctly registered file still will not load, examine Windows
-architecture (WCX vs WCX64), DLL dependencies and runtime errors separately.
-
-Sources:
-https://github.com/sgennadi/ISO-WCX
-https://www.ghisler.ch/wiki/index.php/Plugins_Automated_Installation
+Source: https://github.com/sgennadi/ISO-WCX
