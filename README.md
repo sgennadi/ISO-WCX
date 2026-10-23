@@ -146,8 +146,8 @@ and exact logical size. No VHD data is written or mounted. The
 **experimental native VHDX v1 reader** now handles clean fixed/dynamic base
 images, including sparse BAT blocks and 512/4096-byte sectors, through
 standalone partition and FAT tools. Differencing VHD/VHDX and VMDK remain
-unsupported. These virtual disk readers are **not yet included in WCX**
-until real-image interoperability and Windows GUI extraction are validated.
+unsupported. The FAT-capable virtual disk readers are now linked into WCX;
+real-image interoperability and Windows GUI extraction still need broader validation.
 See [native VHDX design and test boundaries](docs/vhdx-native.md).
 
 **No external disk DLLs:** The experimental libvhdi adapter and its CI
@@ -159,14 +159,14 @@ zlib.dll or libvhdi.dll is shipped. See
 [7-Zip handler study](docs/7zip-disk-formats.md) and
 [FAT12/16/32 read-only implementation](docs/fat-filesystems.md).
 
-### FAT12/16/32 files inside raw IMG and fixed VHD (standalone CLI)
+### FAT12/16/32 files inside WCX and standalone developer tests
 
 `virtual_fat_inspect list disk.img 1` lists files in the first partition;
 `virtual_fat_inspect cat disk.img 1 README.TXT` streams its bytes to stdout.
 This supports verified nested directories, VFAT long filenames and
 non-contiguous file cluster chains. No disk is mounted and no host path is
-created from the image. The FAT reader is still **not included in the WCX
-DLL**, so Total Commander continues to use its validated optical engine.
+created from the image. FAT and virtual HDD support is now compiled directly into
+the WCX DLL, alongside the existing optical ISO/UDF engine.
 
 ### Experimental MDS v2 / MDX metadata inspection
 
