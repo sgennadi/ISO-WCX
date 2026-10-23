@@ -235,7 +235,9 @@ int main(int argc,char** argv){
         {std::ofstream f(archive,std::ios::binary);
          f.write(reinterpret_cast<const char*>(packed.data()),
                  static_cast<std::streamsize>(packed.size()));}
-        if(!verify_container(archive,fmt.first)){
+        // Never extract onto the input archive: Windows cannot replace an open source file.
+        const auto output_name=(std::wstring(fmt.first)==L"smoke.cso")?L"from-cso.txt":L"from-zso.txt";
+        if(!verify_container(archive,output_name)){
             std::cerr<<"Indexed CSO/ZSO WCX extraction failed\n";return 40;
         }
     }
