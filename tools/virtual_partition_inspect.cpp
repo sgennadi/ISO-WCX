@@ -10,7 +10,7 @@
 
 int main(int argc,char** argv) {
     if(argc!=2 && argc!=3) {
-        std::cerr<<"Usage: virtual_partition_inspect IMAGE.img|IMAGE.vhd|IMAGE.vhdx [512|4096]\n";
+        std::cerr<<"Usage: virtual_partition_inspect IMAGE.img|IMAGE.vhd [512|4096]\n";
         return 2;
     }
     unsigned sector=512;
@@ -31,12 +31,6 @@ int main(int argc,char** argv) {
                 break;
             case iso_wcx::VirtualDiskFormat::fixed_vhd:
                 container="fixed VHD";
-                break;
-            case iso_wcx::VirtualDiskFormat::dynamic_vhd:
-                container="dynamic VHD (experimental libvhdi)";
-                break;
-            case iso_wcx::VirtualDiskFormat::vhdx:
-                container="VHDX (experimental libvhdi)";
                 break;
         }
         std::cout<<"Container: "<<container
