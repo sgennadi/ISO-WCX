@@ -1,0 +1,51 @@
+name: WCX preview builds
+on:
+  push:
+    branches:
+      - feature/wcx-native-iso-udf
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/wcx-preview.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    name: Windows ${{ matrix.arch }} WCX
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [Win32, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DCMAKE_CXX_STANDARD=20
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Run tests including WCX DLL loading
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Upload preview binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ISO-WCX-${{ matrix.arch }}-preview
+          path: |
+            build/Release/ISO-WCX.wcx
+            build/Release/ISO-WCX.wcx64
+          if-no-files-found: error
+          retention-days: 14
+  linux:
+    name: Linux core tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
