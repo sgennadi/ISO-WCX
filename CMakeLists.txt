@@ -56,6 +56,32 @@ else()
   set(ISO_WCX_ZLIB_TARGET ZLIB::ZLIB)
 endif()
 
+# bzip2 ISZ support: compiled statically into WCX on Windows.
+# Pin official 1.0.8 source by digest; do not ship DLLs or EXEs.
+if(WIN32)
+  include(FetchContent)
+  FetchContent_Declare(iso_wcx_bzip2
+    URL https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz
+    URL_HASH SHA256=ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269)
+  FetchContent_GetProperties(iso_wcx_bzip2)
+  if(NOT iso_wcx_bzip2_POPULATED)
+    FetchContent_Populate(iso_wcx_bzip2)
+  endif()
+  add_library(iso_wcx_bzip2 STATIC
+    "${iso_wcx_bzip2_SOURCE_DIR}/blocksort.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/huffman.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/crctable.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/randtable.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/compress.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/decompress.c"
+    "${iso_wcx_bzip2_SOURCE_DIR}/bzlib.c")
+  target_include_directories(iso_wcx_bzip2 PUBLIC "${iso_wcx_bzip2_SOURCE_DIR}")
+  set(ISO_WCX_BZIP2_TARGET iso_wcx_bzip2)
+else()
+  find_package(BZip2 REQUIRED)
+  set(ISO_WCX_BZIP2_TARGET BZip2::BZip2)
+endif()
+
 include(CTest)
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
 # runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
@@ -65,7 +91,7 @@ if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
 endif()
 
 add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp src/packed_optical.cpp)
-target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET})
+target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET})
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_disc PUBLIC cxx_std_20)
 if(MSVC)
