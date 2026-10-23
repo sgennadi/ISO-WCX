@@ -11,6 +11,10 @@ on:
       - 'tests/**'
       - 'CMakeLists.txt'
       - '.github/workflows/wcx-preview.yml'
+      - 'INSTALL_*.txt'
+      - 'pluginst.inf'
+      - 'README.md'
+      - 'PREVIEW.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -86,8 +90,8 @@ jobs:
         run: |
           test -s package/ISO-WCX.wcx
           test -s package/ISO-WCX.wcx64
-          cp pluginst.inf PREVIEW.md package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md ISO-WCX.wcx ISO-WCX.wcx64)
+          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX.wcx ISO-WCX.wcx64)
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v4
         with:
