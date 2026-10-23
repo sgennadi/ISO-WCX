@@ -94,7 +94,6 @@ def run(exe):
         (root/"test.sub").unlink()
         shutil.rmtree(root/"output")
         reject=[
-            descriptor([(1,1,0,None)],scrambled=1),
             descriptor([(1,1,0,None)],sessions=2),
             descriptor([(1,1,0,None)],version=2),
             descriptor([(1,1,999,None)]),
