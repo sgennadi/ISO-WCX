@@ -1,35 +1,35 @@
 # ISO-WCX
 
-A modern **read-only Total Commander WCX** disc-image plugin based on C++20 and CMake.
+**ISO-WCX v0.4.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
 
-> **Status: v0.3.0 preview, not a production release.** Windows x86 and x64 binaries compile and pass the automated WCX load/list/extract smoke tests. Compatibility with real-world discs and the Total Commander user interface still needs further validation.
+## Preview installation
 
-## Download the preview
+1. Open [WCX preview CI builds](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml) and select a successful workflow run.
+2. Download its **ISO-WCX-Installable-Preview** artifact, unzip that outer artifact, then open `ISO-WCX-preview.zip` in Total Commander.
+3. Total Commander installs `ISO-WCX.wcx64` (64-bit) or `ISO-WCX.wcx` (32-bit) using `pluginst.inf`.
 
-Open [GitHub Actions](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml), choose a successful run, and download the **ISO-WCX-Installable-Preview** artifact. The artifact contains `ISO-WCX-preview.zip`, with both binaries and `pluginst.inf`. Open the inner ZIP in Total Commander to start its plugin installer.
+For details, compatibility notes and source build commands, see [PREVIEW.md](PREVIEW.md).
 
-## Current support
+## Formats (preview)
 
-- ISO 9660 with 2048-byte sectors, including multi-extent file data.
-- Joliet (Unicode filenames).
-- Rock Ridge RRIP alternative names via `NM`, SUSP `SP`/`ER` detection and bounded `CE` continuation areas. Symbolic links are deliberately omitted.
-- Basic UDF Type-1 partition mapping, File Entry / Extended File Entry, short and long extents, `AED` allocation extent continuations, and OSTA CS0 filenames.
-- Read-only archive navigation, testing, and extraction through WCX Unicode and ANSI API.
-- Streamed file reads with 64-bit sizes, bounded parsing and initial malformed-image checks.
-- Windows x86 `ISO-WCX.wcx` and x64 `ISO-WCX.wcx64` with GitHub Actions builds and tests.
+| Format/layout | Coverage |
+| --- | --- |
+| ISO 9660 / Joliet | File listing, extraction, Unicode names, multi-extent files |
+| Rock Ridge | RRIP NM/CE and relocated CL directories, no symlink extraction |
+| Raw BIN/IMG | CD Mode 1 / Mode 2 Form 1 (2352-byte), XA Form 1 (2336-byte), single-track only |
+| 150-sector prefix | Relative and some absolute-LBA cases (not full multisession parsing) |
+| UDF Type 1 | File Entry/Extended File Entry, OSTA CS0 and AED extents |
+| UDF Metadata / VAT / Sparable | Experimental, synthetic-fixture coverage; not comprehensive UDF 1.02–2.60 |
+| Compressed and proprietary image formats | Not implemented yet |
 
-**Not yet implemented:** Rock Ridge CL relocated directory trees, symlink extraction and POSIX attributes/timestamps; El Torito virtual folders; multisession/session offsets; 2352-byte sector BIN; UDF VAT/Metadata/Sparable partitions; compressed ISO container formats. Do not assume every UDF 1.02–2.60 image works. Do not assume every UDF 1.02–2.60 image works.
+## Development
 
-## Build
+Build with CMake 3.21+, a C++20 compiler and Python 3 for tests:
 
-Windows with Visual Studio 2022:
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+    cmake --build build --parallel
+    ctest --test-dir build --output-on-failure
 
-```sh
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-```
+Windows uses Visual Studio 2022 via CMake (`-G "Visual Studio 17 2022" -A x64` or `-A Win32`). CI produces both binary architectures and tests the WCX DLL APIs.
 
-Use `-A Win32` for the 32-bit plugin. For Linux, the standalone `disc_inspect` utility and parser tests build with regular CMake commands; the WCX DLL is Windows-only.
-
-See [PREVIEW.md](PREVIEW.md) for detailed build and install instructions and [PROVENANCE.md](PROVENANCE.md) for code provenance and licensing considerations. Original ISO.WCX 1.7.6 sources have **not** been republished. [Track additional format support in issue #1](https://github.com/sgennadi/ISO-WCX/issues/1).
+This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
