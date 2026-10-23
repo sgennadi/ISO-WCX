@@ -43,30 +43,30 @@ data region; the footer can never be interpreted as a partition or file.
 
 Synthetic regression tests cover fixed VHD partition enumeration, byte reads,
 invalid footer checksum, corrupt capacity, incomplete footer, saved-state
-images; without the optional library, dynamic VHD and VHDX are rejected. This is an isolated
+images; dynamic VHD and VHDX are rejected. This is an isolated
 **CLI and library reader**, not a registered WCX format. It does not mount
 disks, enumerate physical drives, perform writes or follow differencing
 parents. The existing optical ISO/BIN/IMG parsers are not changed.
 
-## libyal/libvhdi evaluation
+## Native-only disk readers (no libvhdi)
 
-[libvhdi](https://github.com/libyal/libvhdi) is a native C library whose
-upstream README lists VHD v1, VHDX v2, fixed/dynamic and differencing formats.
-It currently labels itself **alpha** and uses **LGPL-3.0-or-later**.
-No code was copied and no extra DLL is distributed in the Windows WCX package.
-An **optional Linux-only, read-only** libvhdi adapter can be enabled with
-`-DISO_WCX_WITH_LIBVHDI=ON` for dynamic VHD/VHDX research. It is off by default,
-and parent/differencing images remain disabled. Windows WCX does not link it.
+ISO-WCX no longer contains the experimental Linux-only libvhdi adapter.
+The CMake option, linkage, source conditionals and dedicated CI job were
+removed. No `libvhdi.dll`, `libvhdi.so` or .NET dependency is needed.
+Raw HDD IMG and fixed VHD are implemented independently in C++.
 
-For format references, see
-[libvhdi's VHD specification](https://github.com/libyal/libvhdi/blob/main/documentation/Virtual%20Hard%20Disk%20%28VHD%29%20image%20format.asciidoc)
-and
-[libvhdi's VHDX specification](https://github.com/libyal/libvhdi/blob/main/documentation/Virtual%20Hard%20Disk%20version%202%20%28VHDX%29%20image%20format.asciidoc).
+Dynamic VHD and VHDX require native BAT/bitmap/metadata readers, which
+are **not yet implemented**. Differencing parents are never followed.
+Unknown VHD types are rejected rather than treated as raw disk bytes.
+
+7-Zip and libvhdi remain external technical references, not source-code
+dependencies. The ISO-WCX implementation neither imports nor links their
+format handler code.
 
 ## Stage 3–5 (not yet implemented)
 
-1. Validate optional libvhdi against a real-world dynamic VHD/VHDX corpus,
-   including corruption and parent/snapshot rejection, before any shipment.
+1. Implement native dynamic VHD (footer, BAT, bitmap, sparse blocks) and
+   VHDX (header CRC32C, metadata, BAT) with independent real-image tests.
 2. GPT GUID names and labels, metadata consistency reporting; CRC-verified
    backup fallback and linked EBR are implemented with mutation tests.
 3. FAT12/16/32 is available in a standalone, bounded filesystem reader
