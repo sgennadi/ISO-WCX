@@ -22,7 +22,7 @@ struct PartitionEntry {
 // Validate GPT primary CRC32 and partition-array CRC, extent bounds, overlaps,
 // EBR metadata and cycle prevention. Hybrid GPT/MBR is rejected.
 // No physical-drive access, mounting, writes or external parent-file traversal.
-// GPT backup-header recovery remains unsupported.
+// If primary GPT is damaged, a fully checked backup GPT may be used.
 // Throws std::runtime_error for truncated, invalid, or unsupported layouts.
 [[nodiscard]] std::vector<PartitionEntry> inspect_partition_table(
     const std::filesystem::path& raw_image,
