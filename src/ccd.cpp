@@ -157,4 +157,27 @@ std::vector<ImageTrack> ccd_data_tracks(const std::filesystem::path& descriptor)
     check(!tracks.empty(),"CloneCD has no supported data tracks");
     return tracks;
 }
+std::optional<CloneCdSub> ccd_subchannels(const std::filesystem::path& descriptor) {
+    const auto img=sidecar(descriptor);
+    const auto img_size=std::filesystem::file_size(img);
+    check(img_size%2352==0,"CloneCD IMG must contain whole sectors");
+    const auto sectors=img_size/2352;
+    check(sectors<=std::numeric_limits<std::uint64_t>::max()/96,
+          "CloneCD SUB size overflow");
+    auto sub=std::filesystem::canonical(descriptor);
+    sub.replace_extension(".sub");
+    if(!std::filesystem::exists(sub))sub.replace_extension(".SUB");
+    // Reject symlinks even if they are broken; an attacker must not point a
+    // supposed sidecar to data outside the image directory.
+    check(!std::filesystem::is_symlink(sub),"CloneCD SUB symlink is forbidden");
+    if(!std::filesystem::exists(sub))return std::nullopt;
+    const auto full=std::filesystem::canonical(sub);
+    check(full.parent_path()==std::filesystem::canonical(descriptor).parent_path() &&
+          std::filesystem::is_regular_file(full),
+          "CloneCD SUB must be a regular sibling sidecar");
+    const auto size=std::filesystem::file_size(full);
+    check(size==sectors*96,"CloneCD SUB size does not match IMG sector count");
+    return CloneCdSub{full,size};
+}
+
 } // namespace iso_wcx
