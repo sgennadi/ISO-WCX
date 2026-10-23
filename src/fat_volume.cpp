@@ -354,7 +354,10 @@ void FatVolume::scan_directory_bytes(std::string_view prefix,
         // to the same entity multiple times.
         require(seen_paths_.insert(path).second,
                 "duplicate FAT directory path");
-        entries_.push_back({path, size, first_cluster, is_directory});
+        const auto dos_time = (std::uint32_t(le16(entry + 24)) << 16) |
+                              le16(entry + 22);
+        entries_.push_back({path, size, first_cluster, is_directory,
+                            dos_time, attrs});
         if (is_directory)
             walk_directory(path, first_cluster, false, depth + 1);
     }

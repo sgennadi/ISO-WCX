@@ -118,7 +118,9 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
             item.path = prefix + "/" + entry.path;
             item.directory = entry.directory;
             item.size = entry.directory ? 0 : entry.size;
-            item.attributes = entry.directory ? 0x10u : 0x20u;
+            item.dos_time = entry.dos_time;
+            item.attributes = entry.attributes != 0 ? entry.attributes :
+                              (entry.directory ? 0x10u : 0x20u);
             items_.push_back(std::move(item));
             files_.push_back({volume_index, entry.path});
         }

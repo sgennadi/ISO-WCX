@@ -26,6 +26,9 @@ def short_entry(name: bytes, attr: int, cluster: int, size: int = 0) -> bytes:
     b = bytearray(32)
     b[:11] = name
     b[11] = attr
+    # Fixed valid last-write timestamp: 2024-02-03 14:05:08.
+    b[22:24] = ((14 << 11) | (5 << 5) | 4).to_bytes(2, "little")
+    b[24:26] = ((44 << 9) | (2 << 5) | 3).to_bytes(2, "little")
     b[20:22] = ((cluster >> 16) & 0xFFFF).to_bytes(2, "little")
     b[26:28] = (cluster & 0xFFFF).to_bytes(2, "little")
     b[28:32] = size.to_bytes(4, "little")
@@ -132,7 +135,7 @@ def build_disk(path: pathlib.Path, kind: str, *,
     short_lfn = b"LONGNA~1TXT"
     root_directory = b"".join((
         short_entry(b"TESTDIR    ", 0x10, 2),
-        short_entry(b"README  TXT", 0x20, 3,
+        short_entry(b"README  TXT", 0x21, 3,
                     len(messages["README.TXT"])),
         vfat_entries("Long Filename.txt", short_lfn, bad_checksum=bad_name),
         short_entry(short_lfn, 0x20, 4, len(messages["Long Filename.txt"])),

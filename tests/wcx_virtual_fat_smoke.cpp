@@ -60,6 +60,13 @@ int wmain(int argc, wchar_t** argv) {
         if (status != 0) { code = 8; break; }
         if (std::wstring(entry.FileName) == L"partition1\\README.TXT") {
             found = true;
+            constexpr int expected_time =
+                (((44 << 9) | (2 << 5) | 3) << 16) |
+                ((14 << 11) | (5 << 5) | 4);
+            if (entry.FileTime != expected_time ||
+                (entry.FileAttr & 0x21) != 0x21) {
+                code = 11; break;
+            }
             const fs::path output = fs::path(argv[3]) / L"README.TXT";
             fs::create_directories(output.parent_path());
             auto target = output.wstring();
