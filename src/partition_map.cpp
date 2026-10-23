@@ -1,4 +1,5 @@
 #include "iso_wcx/partition_map.hpp"
+#include "iso_wcx/virtual_disk.hpp"
 
 #include <algorithm>
 #include <array>
@@ -42,33 +43,7 @@ std::uint32_t crc32_ieee(const std::uint8_t* data,std::size_t length) noexcept {
         crc=table[(crc^data[i])&0xffu]^(crc>>8);
     return crc^0xffffffffu;
 }
-class Input {
-public:
-    explicit Input(const std::filesystem::path& path) {
-        require(std::filesystem::is_regular_file(path),"partition source is not a regular file");
-        bytes_=std::filesystem::file_size(path);
-        require(bytes_>=512 && bytes_<=static_cast<std::uint64_t>(
-                std::numeric_limits<std::streamoff>::max()),"invalid virtual-disk size");
-        input_.open(path,std::ios::binary);
-        require(input_.is_open(),"cannot open raw virtual-disk image");
-    }
-    [[nodiscard]] std::uint64_t size() const noexcept {return bytes_;}
-    [[nodiscard]] std::vector<std::uint8_t> read(std::uint64_t at,std::size_t length) {
-        require(at<=bytes_ && length<=bytes_-at,"partition data outside image");
-        require(length<=4u*1024u*1024u,"partition metadata size limit exceeded");
-        std::vector<std::uint8_t> data(length);
-        input_.clear();
-        input_.seekg(static_cast<std::streamoff>(at),std::ios::beg);
-        require(bool(input_),"cannot seek in raw virtual disk");
-        if(length)input_.read(reinterpret_cast<char*>(data.data()),
-                              static_cast<std::streamsize>(length));
-        require(bool(input_),"truncated raw virtual disk");
-        return data;
-    }
-private:
-    std::ifstream input_;
-    std::uint64_t bytes_{};
-};
+using Input = VirtualDiskReader;
 void check_ranges(std::vector<PartitionEntry>& result) {
     std::sort(result.begin(),result.end(),[](const auto& a,const auto& b){
         return a.first_lba<b.first_lba;
