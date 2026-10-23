@@ -1,5 +1,6 @@
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/cue.hpp"
+#include "iso_wcx/image_tracks.hpp"
 #include "iso_wcx/rock_ridge.hpp"
 #include <algorithm>
 #include <array>
@@ -58,6 +59,10 @@ class Source {
     std::ifstream file_;
     std::uint64_t raw_length_{};
     std::uint64_t logical_length_{};
+    std::uint64_t raw_base_{};
+    std::uint64_t raw_end_{};
+    std::optional<std::uint32_t> session_lba_;
+    std::string track_label_;
     std::uint32_t physical_sector_ = 2048;
     std::uint32_t data_offset_ = 0;
     std::uint32_t leading_sectors_ = 0;
@@ -65,7 +70,7 @@ class Source {
     std::optional<unsigned> cue_track_number_;
 
     Bytes raw_read(std::uint64_t p, std::size_t n) {
-        require(p<=raw_length_ && n<=raw_length_-p &&
+        require(p<=raw_end_ && n<=raw_end_-p &&
                 p<=static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()),
                 "raw extent outside image");
         Bytes b(n);
@@ -78,8 +83,8 @@ class Source {
     bool candidate(std::uint32_t physical,std::uint32_t data_offset,
                    std::uint32_t leading,std::uint8_t mode) {
         constexpr std::uint64_t vd_sector = 16;
-        const auto record = (std::uint64_t(leading)+vd_sector)*physical;
-        if(record>raw_length_ || raw_length_-record<physical)return false;
+        const auto record = raw_base_+(std::uint64_t(leading)+vd_sector)*physical;
+        if(record>raw_end_ || raw_end_-record<physical)return false;
         auto frame=raw_read(record,physical);
         if (physical==2352) {
             if (frame[0]!=0 || frame[11]!=0 || frame[15]!=mode) return false;
@@ -98,8 +103,8 @@ class Source {
     }
     bool candidate_udf(std::uint32_t physical,std::uint32_t offset,
                        std::uint32_t leading,std::uint8_t mode) {
-        const auto physical_at=(std::uint64_t(leading)+256)*physical;
-        if(physical_at>raw_length_ || physical>raw_length_-physical_at)return false;
+        const auto physical_at=raw_base_+(std::uint64_t(leading)+256)*physical;
+        if(physical_at>raw_end_ || physical>raw_end_-physical_at)return false;
         const auto frame=raw_read(physical_at,physical);
         if(physical==2352) {
             if(frame[0]!=0 || frame[11]!=0 || frame[15]!=mode)return false;
@@ -119,8 +124,9 @@ class Source {
     void choose(std::uint32_t physical,std::uint32_t offset,std::uint32_t leading,
                 std::uint8_t mode) {
         physical_sector_=physical;data_offset_=offset;leading_sectors_=leading;mode_=mode;
-        require(raw_length_ >= std::uint64_t(leading)*physical,"invalid sector prefix");
-        const auto sectors = raw_length_/physical - leading;
+        require(raw_base_<=raw_end_ && raw_end_-raw_base_>=std::uint64_t(leading)*physical,
+                "invalid track prefix or end bound");
+        const auto sectors = (raw_end_-raw_base_)/physical - leading;
         require(sectors<=std::numeric_limits<std::uint64_t>::max()/2048,
                 "image too large");
         logical_length_ = sectors*2048;
@@ -132,10 +138,30 @@ class Source {
         require(file_.is_open(),"cannot open disc image");
         auto n=file_.tellg();require(n>=0,"cannot stat disc image");
         raw_length_=static_cast<std::uint64_t>(n);
+        raw_base_=0;raw_end_=raw_length_;session_lba_.reset();track_label_.clear();
         logical_length_=raw_length_;
     }
 public:
     explicit Source(const std::filesystem::path& p) {
+        if(is_nrg_path(p) || is_mds_path(p)) {
+            const auto tracks=is_nrg_path(p)?nrg_data_tracks(p):mds_data_tracks(p);
+            // Prefer a later playable data track, never probe across track
+            // boundaries or metadata appended after the disc content.
+            for(auto it=tracks.rbegin();it!=tracks.rend();++it) {
+                open_image(it->image);
+                require(it->begin<=it->end && it->end<=raw_length_,
+                        "descriptor track range exceeds image");
+                raw_base_=it->begin;raw_end_=it->end;
+                choose(it->physical_sector,it->data_offset,0,it->mode);
+                if(candidate(it->physical_sector,it->data_offset,0,it->mode) ||
+                   candidate_udf(it->physical_sector,it->data_offset,0,it->mode)) {
+                    track_label_=it->container;
+                    session_lba_=it->session_lba;
+                    return;
+                }
+            }
+            throw std::runtime_error("no recognized ISO9660/UDF data track in image descriptor");
+        }
         if(is_cue_path(p)) {
             // The CUE file specifies the physical layout and track boundaries.
             // Prefer the latest track containing a recognizable file system.
@@ -177,8 +203,9 @@ public:
     }
     [[nodiscard]] std::uint64_t size() const {return logical_length_;}
     [[nodiscard]] bool raw_mode() const {return physical_sector_!=2048;}
-    [[nodiscard]] std::uint32_t session_leadin() const {return leading_sectors_;}
+    [[nodiscard]] std::uint32_t session_leadin() const {return session_lba_.value_or(leading_sectors_);}
     [[nodiscard]] std::string layout() const {
+        if(!track_label_.empty())return track_label_+" / "+std::to_string(physical_sector_)+"-byte sectors";
         if(cue_track_number_)
             return "CUE track " + std::to_string(*cue_track_number_) + " / " +
                 std::to_string(physical_sector_) + "-byte sectors";
@@ -190,7 +217,7 @@ public:
         require(n<=max_directory && p<=logical_length_ && n<=logical_length_-p,
                 "extent outside image");
         if(physical_sector_==2048)
-            return raw_read(std::uint64_t(leading_sectors_)*2048+p,n);
+            return raw_read(raw_base_+std::uint64_t(leading_sectors_)*2048+p,n);
         Bytes b(n);
         std::size_t copied=0;
         while(copied<n) {
@@ -198,7 +225,7 @@ public:
             const auto sector=logical/2048;
             const auto inside=static_cast<std::size_t>(logical%2048);
             const auto count=std::min<std::size_t>(n-copied,2048-inside);
-            const auto physical=(std::uint64_t(leading_sectors_)+sector)*physical_sector_;
+            const auto physical=raw_base_+(std::uint64_t(leading_sectors_)+sector)*physical_sector_;
             if(physical_sector_==2352) {
                 auto h=raw_read(physical,mode_==1?16:24);
                 require(h[0]==0 && h[11]==0 && h[15]==mode_,"raw sector mode mismatch");
