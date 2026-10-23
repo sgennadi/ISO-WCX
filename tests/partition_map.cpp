@@ -42,6 +42,32 @@ std::vector<std::uint8_t> basic_mbr(bool overlap=false) {
     put32(d,462+12,1200);
     return d;
 }
+// Two independent linked EBRs plus a primary MBR partition, safe for 512/4K.
+std::vector<std::uint8_t> linked_ebr(std::uint32_t sector) {
+    std::vector<std::uint8_t> bytes(16u*1024u*1024u);
+    bytes[510]=0x55;bytes[511]=0xaa;
+    bytes[446+4]=0x07;
+    put32(bytes,446+8,1500);
+    put32(bytes,446+12,200);
+    bytes[462+4]=0x0f;
+    put32(bytes,462+8,64);
+    put32(bytes,462+12,1200);
+    for(std::uint32_t i=0;i<3;++i) {
+        const std::uint32_t ebr=64+400*i;
+        const auto pos=std::size_t(ebr)*sector;
+        bytes[pos+510]=0x55;bytes[pos+511]=0xaa;
+        bytes[pos+446+4]=i==1?0x83:0x07;
+        put32(bytes,pos+446+8,1);
+        put32(bytes,pos+446+12,100);
+        if(i<2) {
+            bytes[pos+462+4]=0x0f;
+            put32(bytes,pos+462+8,(i+1)*400);
+            put32(bytes,pos+462+12,1200-(i+1)*400);
+        }
+    }
+    return bytes;
+}
+
 std::vector<std::uint8_t> gpt(std::uint32_t sector,bool overlapping=false) {
     // 16 MiB @512, 8 MiB @4096; both >128 usable sectors.
     const auto disk_bytes=sector==512?16u*1024u*1024u:8u*1024u*1024u;
@@ -108,7 +134,44 @@ int main() {
         rejects(path,data);
         data=basic_mbr();
         data[446+4]=0x0f;
-        rejects(path,data); // EBR chain is not implemented.
+        rejects(path,data); // Garbage at declared extended partition start.
+
+        for(auto logical_sector:{512u,4096u}) {
+            auto d=linked_ebr(logical_sector);
+            write(path,d);
+            auto partitions=inspect_partition_table(path,logical_sector);
+            check(partitions.size()==4 &&
+                  partitions[0].first_lba==65 && partitions[0].sector_count==100 &&
+                  partitions[1].first_lba==465 && partitions[1].mbr_type==0x83 &&
+                  partitions[2].first_lba==865 &&
+                  partitions[3].first_lba==1500 && partitions[3].mbr_type==0x07,
+                  "valid linked EBR logical/primary partitions not discovered");
+
+            d=linked_ebr(logical_sector);
+            d[std::size_t(464)*logical_sector+510]=0; // 2nd EBR signature invalid.
+            rejects(path,d,logical_sector);
+            d=linked_ebr(logical_sector);
+            put32(d,std::size_t(64)*logical_sector+462+8,0); // EBR self-link.
+            rejects(path,d,logical_sector);
+            d=linked_ebr(logical_sector);
+            put32(d,std::size_t(464)*logical_sector+462+8,1); // Backward link.
+            rejects(path,d,logical_sector);
+            d=linked_ebr(logical_sector);
+            put32(d,std::size_t(64)*logical_sector+446+12,500); // Covers next EBR.
+            rejects(path,d,logical_sector);
+            d=linked_ebr(logical_sector);
+            put32(d,std::size_t(864)*logical_sector+446+12,600); // Outside extended range.
+            rejects(path,d,logical_sector);
+            d=linked_ebr(logical_sector);
+            d[std::size_t(64)*logical_sector+478+4]=0x07; // Third EBR entry.
+            rejects(path,d,logical_sector);
+            d=linked_ebr(logical_sector);
+            d[462+4]=0xee; // Hybrid protective GPT with legacy primary.
+            rejects(path,d,logical_sector);
+            d=linked_ebr(logical_sector);
+            put32(d,446+8,100); // Primary partition overlaps extended container.
+            rejects(path,d,logical_sector);
+        }
 
         for(auto sector:{512u,4096u}) {
             auto d=gpt(sector);
@@ -130,7 +193,7 @@ int main() {
             rejects(path,d,sector);
         }
         fs::remove(path);
-        std::cout<<"PASS: read-only MBR/GPT, 512/4096-byte logical sectors, CRC and bounds\n";
+        std::cout<<"PASS: read-only MBR/EBR/GPT, 512/4096-byte logical sectors, CRC, cycles and bounds\n";
     } catch(const std::exception& e) {
         std::error_code ignore;
         fs::remove(path,ignore);
