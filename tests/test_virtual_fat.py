@@ -92,7 +92,7 @@ def build_disk(path: pathlib.Path, kind: str, *,
     disk_size = (PARTITION_LBA + total + 2048) * SECTOR
     root = 6 if kind == "fat32" else 0
     messages = {
-        "README.TXT": ("Hello from " + kind + "!\n").encode(),
+        "README.TXT": (("Hello from " + kind + "!\n") * 48).encode(),
         "Long Filename.txt": ("VFAT-" + kind).encode(),
         "TESTDIR/NESTED.TXT": ("nested-" + kind).encode(),
     }
@@ -121,8 +121,9 @@ def build_disk(path: pathlib.Path, kind: str, *,
     end = {"fat12": 0xFFF, "fat16": 0xFFFF, "fat32": 0x0FFFFFFF}[kind]
     fat_set(fat, kind, 0, end)
     fat_set(fat, kind, 1, end)
-    for i in (2, 3, 4, 5, 6):
+    for i in (2, 3, 4, 5, 6, 7):
         fat_set(fat, kind, i, end)
+    fat_set(fat, kind, 3, 7)  # README.TXT spans two non-contiguous clusters.
     if chain_error:
         fat_set(fat, kind, 3, 3)
     if directory_cycle:
@@ -132,7 +133,7 @@ def build_disk(path: pathlib.Path, kind: str, *,
     root_directory = b"".join((
         short_entry(b"TESTDIR    ", 0x10, 2),
         short_entry(b"README  TXT", 0x20, 3,
-                    600 if chain_error else len(messages["README.TXT"])),
+                    len(messages["README.TXT"])),
         vfat_entries("Long Filename.txt", short_lfn, bad_checksum=bad_name),
         short_entry(short_lfn, 0x20, 4, len(messages["Long Filename.txt"])),
     ))
@@ -162,7 +163,8 @@ def build_disk(path: pathlib.Path, kind: str, *,
             place(image, part_offset + (reserved + fat_sectors) * SECTOR,
                   root_directory)
         place(image, cluster_offset(2), nested)
-        place(image, cluster_offset(3), messages["README.TXT"])
+        place(image, cluster_offset(3), messages["README.TXT"][:SECTOR])
+        place(image, cluster_offset(7), messages["README.TXT"][SECTOR:])
         place(image, cluster_offset(4), messages["Long Filename.txt"])
         place(image, cluster_offset(5), messages["TESTDIR/NESTED.TXT"])
     return messages
@@ -216,6 +218,27 @@ def main(executable: pathlib.Path) -> None:
             run(executable, "list", bad, "1", success=False)
             build_disk(bad, kind, chain_error=True)
             run(executable, "cat", bad, "1", "README.TXT", success=False)
+            # A truncated chain may not silently return a shortened file.
+            build_disk(bad, kind)
+            with bad.open("r+b") as broken:
+                fat_position = PARTITION_LBA * SECTOR + FAT_CONFIG[kind][1] * SECTOR
+                table_bytes = FAT_CONFIG[kind][2] * SECTOR
+                broken.seek(fat_position)
+                table = bytearray(broken.read(table_bytes))
+                fat_set(table, kind, 3,
+                        {"fat12": 0xFFF, "fat16": 0xFFFF, "fat32": 0x0FFFFFFF}[kind])
+                broken.seek(fat_position)
+                broken.write(table)
+            run(executable, "cat", bad, "1", "README.TXT", success=False)
+            # FAT reserved markers must never be followed as data clusters.
+            with bad.open("r+b") as broken:
+                broken.seek(fat_position)
+                table = bytearray(broken.read(table_bytes))
+                fat_set(table, kind, 3,
+                        {"fat12": 0xFF0, "fat16": 0xFFF0, "fat32": 0x0FFFFFF0}[kind])
+                broken.seek(fat_position)
+                broken.write(table)
+            run(executable, "cat", bad, "1", "README.TXT", success=False)
             build_disk(bad, kind, bad_name=True)
             out = run(executable, "list", bad, "1").stdout.decode("utf-8")
             assert "Long Filename.txt" not in out and "LONGNA~1.TXT" in out, out
@@ -228,7 +251,7 @@ def main(executable: pathlib.Path) -> None:
                 assert "TESTDIR/NESTED.TXT" in run(
                     executable, "list", vhd, "1").stdout.decode("utf-8")
 
-        print("PASS FAT12/16/32 list, nested/LFN, binary extract, fixed VHD, malformed FAT chains")
+        print("PASS FAT12/16/32: nested VFAT, noncontiguous multicluster files, fixed VHD and chain corruption")
 
 
 if __name__ == "__main__":
