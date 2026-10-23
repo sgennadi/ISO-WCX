@@ -1,6 +1,7 @@
 #include "iso_wcx/packed_optical.hpp"
 
 #include <zlib.h>
+#include <bzlib.h>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -106,7 +107,7 @@ PackedOptical::PackedOptical(const std::filesystem::path& path)
 
 std::string PackedOptical::label() const {
     switch (type_) {
-    case Type::isz: return "ISZ v1 / native stored-zlib";
+    case Type::isz: return "ISZ v1 / native stored-zlib-bzip2";
     case Type::daa_v1: return "DAA v1 / native raw DEFLATE";
     case Type::chd_v5: return "CHD v5 / uncompressed hunks";
     }
@@ -209,8 +210,13 @@ void PackedOptical::parse_isz() {
                   "invalid ISZ zlib size");
             codec = Codec::zlib;
             break;
+        case 3:
+            check(length >= 4 && length <= block_bytes_ + 65536u,
+                  "invalid ISZ bzip2 compressed size");
+            codec = Codec::bzip2;
+            break;
         default:
-            throw std::runtime_error("ISZ bzip2 variant requires an in-process codec not yet implemented");
+            throw std::runtime_error("invalid ISZ chunk codec");
         }
         const auto consumed = codec == Codec::zeros ? 0 : length;
         check(physical <= physical_size_ &&
@@ -332,6 +338,23 @@ void PackedOptical::decode(std::size_t index) {
         check(entry.encoded_size >= expected, "truncated packed ISO stored block");
         const auto data = physical_read(entry.offset,expected);
         std::copy(data.begin(),data.end(),cached_bytes_.begin());
+        break;
+    }
+    case Codec::bzip2: {
+        const auto stored = physical_read(entry.offset,entry.encoded_size);
+        check(stored.size() >= 4, "truncated ISZ bzip2 block");
+        // ISZ substitutes the BZh signature with its private 3-byte prefix;
+        // the remaining bzip2 stream and its CRCs are standard.
+        auto data = stored;
+        data[0] = 'B'; data[1] = 'Z'; data[2] = 'h';
+        unsigned out_size = static_cast<unsigned>(cached_bytes_.size());
+        const auto result = BZ2_bzBuffToBuffDecompress(
+            reinterpret_cast<char*>(cached_bytes_.data()), &out_size,
+            reinterpret_cast<char*>(data.data()),
+            static_cast<unsigned>(data.size()), 0, 0);
+        check(result == BZ_OK &&
+              (out_size == expected || out_size == cached_bytes_.size()),
+              "invalid ISZ bzip2 block or CRC");
         break;
     }
     case Codec::zlib:
