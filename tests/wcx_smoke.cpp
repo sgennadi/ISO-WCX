@@ -258,6 +258,53 @@ int main(int argc,char** argv){
     if(!verify_container(ccd_path,L"from-clonecd.txt")) {
         std::cerr<<"CloneCD CCD/IMG WCX extraction failed\n";return 41;
     }
+    // CloneCD Q-channel: verify the *loaded WCX DLL* exposes the raw SUB and
+    // its CRC-gated Q index summary, not just the standalone parser.
+    const auto sub_path=folder/L"clonecd.sub";
+    std::vector<std::uint8_t> sub_bytes((raw.size()/2352)*96,0);
+    const std::array<std::uint8_t,12> qframe{
+        0x41,0x01,0x01,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x28,0x32};
+    std::copy(qframe.begin(),qframe.end(),sub_bytes.begin()+12);
+    {std::ofstream f(sub_path,std::ios::binary);
+     f.write(reinterpret_cast<const char*>(sub_bytes.data()),
+             static_cast<std::streamsize>(sub_bytes.size()));}
+    source=ccd_path.wstring();options=OpenW{};options.ArcName=source.data();
+    state=open(&options);
+    if(!state||options.OpenResult!=0){std::cerr<<"CloneCD SUB OpenArchiveW failed\n";return 42;}
+    bool saw_q=false,saw_sub=false;
+    for(unsigned i=0;i<32;++i) {
+        item=HeaderExW{};
+        const auto rc=header(state,&item);
+        if(rc==10)break;
+        if(rc!=0){close(state);std::cerr<<"CloneCD SUB ReadHeaderExW failed\n";return 43;}
+        const std::wstring name(item.FileName);
+        if(name==L"subchannels\\q-index.csv") {
+            saw_q=true;
+            dest=(folder/L"q-index.csv").wstring();
+            if(process(state,2,nullptr,dest.data())!=0){close(state);return 44;}
+        } else if(name==L"subchannels\\disc.sub") {
+            saw_sub=true;
+            dest=(folder/L"copied.sub").wstring();
+            if(process(state,2,nullptr,dest.data())!=0){close(state);return 45;}
+        } else if(process(state,0,nullptr,nullptr)!=0) {
+            close(state);return 46;
+        }
+    }
+    close(state);
+    if(!saw_q||!saw_sub) {
+        std::cerr<<"CloneCD SUB virtual entries missing\n";return 47;
+    }
+    {std::ifstream f(folder/L"q-index.csv",std::ios::binary);
+     const std::string csv((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
+     if(csv.find("# crc_valid,1\n")==std::string::npos ||
+        csv.find("deinterleaved,1,1,0,0,1")==std::string::npos) {
+         std::cerr<<"CloneCD SUB Q index report incorrect\n";return 48;
+     }}
+    {std::ifstream f(folder/L"copied.sub",std::ios::binary);
+     const std::vector<std::uint8_t> got((std::istreambuf_iterator<char>(f)),
+                                          std::istreambuf_iterator<char>());
+     if(got!=sub_bytes){std::cerr<<"CloneCD raw SUB data changed\n";return 49;}}
+    fs::remove(sub_path);
     if(!verify_container(nrg_path,L"from-nrg.txt"))return 14;
     if(!verify_container(mds_path,L"from-mds.txt"))return 15;
 
