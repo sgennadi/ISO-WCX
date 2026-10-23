@@ -29,6 +29,24 @@ else()
   target_compile_options(iso_disc PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
+# Virtual hard-disk partition discovery is an *isolated, read-only*
+# proof-of-format module. It is not yet registered as a WCX opener; optical
+# .img files remain handled by the existing CD sector logic.
+add_library(iso_virtual_partitions STATIC src/partition_map.cpp)
+target_include_directories(iso_virtual_partitions PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_compile_features(iso_virtual_partitions PUBLIC cxx_std_20)
+if(MSVC)
+  target_compile_options(iso_virtual_partitions PRIVATE /W4 /EHsc)
+else()
+  target_compile_options(iso_virtual_partitions PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+
+if(BUILD_TESTING)
+  add_executable(virtual_partition_tests tests/partition_map.cpp)
+  target_link_libraries(virtual_partition_tests PRIVATE iso_virtual_partitions)
+  add_test(NAME raw_virtual_disk_mbr_gpt COMMAND virtual_partition_tests)
+endif()
+
 add_executable(disc_inspect tools/disc_inspect.cpp)
 target_link_libraries(disc_inspect PRIVATE iso_disc)
 
