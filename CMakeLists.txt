@@ -47,6 +47,9 @@ if(BUILD_TESTING)
   add_test(NAME raw_virtual_disk_mbr_gpt COMMAND virtual_partition_tests)
 endif()
 
+add_executable(virtual_partition_inspect tools/virtual_partition_inspect.cpp)
+target_link_libraries(virtual_partition_inspect PRIVATE iso_virtual_partitions)
+
 add_executable(disc_inspect tools/disc_inspect.cpp)
 target_link_libraries(disc_inspect PRIVATE iso_disc)
 
