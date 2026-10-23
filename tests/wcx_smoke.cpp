@@ -59,17 +59,47 @@ int main(int argc,char** argv){
     std::wstring dest=output.wstring();
     std::cerr << "wcx smoke: invoking ProcessFileW\n" << std::flush;
     if(process(state,2,nullptr,dest.data())!=0){std::cerr<<"ProcessFileW failed\n";close(state);return 6;}
-    std::cerr << "wcx smoke: checking archive end\n" << std::flush;
+    std::cerr << "wcx smoke: checking end of archive\n" << std::flush;
     if(header(state,&item)!=10){std::cerr<<"Expected end of archive\n";close(state);return 7;}
     std::cerr << "wcx smoke: closing state\n" << std::flush;
     close(state);
     std::ifstream result(output,std::ios::binary);
     std::string content((std::istreambuf_iterator<char>(result)),std::istreambuf_iterator<char>());
-    result.close(); // Windows cannot delete a file while std::ifstream is open.
+    result.close(); // Windows cannot unlink a still-open output file.
+    if(content!="world") {std::cerr<<"ISO contents mismatch\n";return 8;}
+    // Repeat the WCX ABI smoke with a CUE referencing a MODE1/2352 track
+    // preceded by 150 audio sectors in the same BIN file.
+    std::vector<std::uint8_t> raw((150+32)*2352,0);
+    for(std::size_t k=0;k<32;k++) {
+        auto base=(150+k)*2352;
+        raw[base]=0;raw[base+11]=0;raw[base+15]=1;
+        for(int i=1;i<=10;i++)raw[base+static_cast<std::size_t>(i)]=0xff;
+        std::copy_n(image.data()+k*block,block,raw.data()+base+16);
+    }
+    auto bin=folder/L"mixed.bin";
+    auto cue=folder/L"mixed.cue";
+    auto extracted=folder/L"from-cue.txt";
+    {std::ofstream f(bin,std::ios::binary);f.write(reinterpret_cast<const char*>(raw.data()),static_cast<std::streamsize>(raw.size()));}
+    {std::ofstream f(cue,std::ios::binary);
+      f<<"FILE \"mixed.bin\" BINARY\n TRACK 01 AUDIO\n  INDEX 01 00:00:00\n TRACK 02 MODE1/2352\n  INDEX 01 00:02:00\n";}
+    source=cue.wstring();options=OpenW{};options.ArcName=source.data();
+    state=open(&options);
+    if(!state||options.OpenResult!=0){std::cerr<<"CUE OpenArchiveW failed\n";return 9;}
+    item=HeaderExW{};
+    if(header(state,&item)!=0||std::wstring(item.FileName)!=L"HELLO.TXT"){
+        std::cerr<<"CUE ReadHeaderExW failed\n";close(state);return 10;
+    }
+    dest=extracted.wstring();
+    if(process(state,2,nullptr,dest.data())!=0){std::cerr<<"CUE ProcessFileW failed\n";close(state);return 11;}
+    if(header(state,&item)!=10){std::cerr<<"CUE end-of-archive missing\n";close(state);return 12;}
+    close(state);
+    std::ifstream cue_output(extracted,std::ios::binary);
+    std::string cue_content((std::istreambuf_iterator<char>(cue_output)),std::istreambuf_iterator<char>());
+    cue_output.close();
+    if(cue_content!="world") {std::cerr<<"CUE extraction mismatch\n";return 13;}
     fs::remove_all(folder);
     std::cerr << "wcx smoke: unloading DLL\n" << std::flush;
     FreeLibrary(dll);
-    if(content!="world"){std::cerr<<"File contents mismatch\n";return 8;}
     std::cout<<"WCX load/export/list/extract test passed\n";return 0;
 }
 #endif

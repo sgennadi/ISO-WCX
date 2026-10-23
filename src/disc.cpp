@@ -1,4 +1,5 @@
 #include "iso_wcx/disc.hpp"
+#include "iso_wcx/cue.hpp"
 #include "iso_wcx/rock_ridge.hpp"
 #include <algorithm>
 #include <array>
@@ -61,6 +62,7 @@ class Source {
     std::uint32_t data_offset_ = 0;
     std::uint32_t leading_sectors_ = 0;
     std::uint8_t mode_ = 0;
+    std::optional<unsigned> cue_track_number_;
 
     Bytes raw_read(std::uint64_t p, std::size_t n) {
         require(p<=raw_length_ && n<=raw_length_-p &&
@@ -123,12 +125,38 @@ class Source {
                 "image too large");
         logical_length_ = sectors*2048;
     }
-public:
-    explicit Source(const std::filesystem::path& p) : file_(p,std::ios::binary|std::ios::ate) {
+    void open_image(const std::filesystem::path& p) {
+        file_.close();
+        file_.clear();
+        file_.open(p,std::ios::binary|std::ios::ate);
         require(file_.is_open(),"cannot open disc image");
         auto n=file_.tellg();require(n>=0,"cannot stat disc image");
         raw_length_=static_cast<std::uint64_t>(n);
         logical_length_=raw_length_;
+    }
+public:
+    explicit Source(const std::filesystem::path& p) {
+        if(is_cue_path(p)) {
+            // The CUE file specifies the physical layout and track boundaries.
+            // Prefer the latest track containing a recognizable file system.
+            auto tracks=cue_data_tracks(p);
+            for(auto it=tracks.rbegin();it!=tracks.rend();++it) {
+                open_image(it->image);
+                if(it->start_frame >= raw_length_/it->physical_sector)continue;
+                choose(it->physical_sector,it->data_offset,it->start_frame,it->mode);
+                if(it->end_frame) {
+                    auto count=std::uint64_t(*it->end_frame-it->start_frame);
+                    logical_length_=std::min(logical_length_,count*iso_sector);
+                }
+                if(candidate(it->physical_sector,it->data_offset,it->start_frame,it->mode) ||
+                   candidate_udf(it->physical_sector,it->data_offset,it->start_frame,it->mode)) {
+                    cue_track_number_=it->number;
+                    return;
+                }
+            }
+            throw std::runtime_error("no ISO9660/UDF data track found in CUE");
+        }
+        open_image(p);
         // Only select a raw layout after seeing a valid ISO PVD and raw sync/mode.
         // A no-header 2048 image is left unchanged so that UDF anchors still work.
         if(candidate(2048,0,0,0))return;
@@ -151,6 +179,9 @@ public:
     [[nodiscard]] bool raw_mode() const {return physical_sector_!=2048;}
     [[nodiscard]] std::uint32_t session_leadin() const {return leading_sectors_;}
     [[nodiscard]] std::string layout() const {
+        if(cue_track_number_)
+            return "CUE track " + std::to_string(*cue_track_number_) + " / " +
+                std::to_string(physical_sector_) + "-byte sectors";
         if(physical_sector_==2048)return leading_sectors_?"2048-sector, 150-sector prefix":"";
         return std::to_string(physical_sector_)+"-sector Mode "+std::to_string(mode_)+
                (leading_sectors_?", 150-sector prefix":"");

@@ -1,50 +1,48 @@
-# ISO-WCX C++20 native preview
+# ISO-WCX v0.5.0 C++20 preview
 
-This clean-room preview implements a read-only Total Commander packer plugin without importing original ISO.WCX 1.7.6 source code. It is intentionally separate pending a review of the original author's redistribution terms.
+Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
-## Working preview functionality
+## Supported in the preview
 
-- ISO9660 (logical 2048-byte sectors), Joliet Unicode, Rock Ridge RRIP NM/CE filenames, and contiguous or multi-extent file data.
-- UDF Type-1 partition mapping with supported File Entry/Extended File Entry, inline or short/long extents, allocation-continuation AED (tag 258) and OSTA CS0 filenames.
-- Extraction, test, skip, folder enumeration, WCX Unicode and ANSI entrypoints.
-- Large file (64-bit) sizes in `ReadHeaderExW` and streamed extraction.
-- Basic malformed-image validation, UTF-8 paths, filtering unsafe Windows filenames, CRC16 for non-empty UDF descriptor CRC fields.
-- Read-only on purpose.
+- CUE/BIN track selection: opens `.cue` directly, parses multiple FILE/TRACK and INDEX 00/01 records, skips audio and unsupported track types, and chooses the last ISO/UDF-bearing data track. Supports 2048, 2336, Mode 1/2352 and Mode 2 Form 1/2352 layouts; extracts files through the same read-only WCX API.
+- ISO9660 and Joliet, including Unicode names and ISO multi-extent files.
+- Rock Ridge RRIP NM/CE names, CL relocated directory references; symbolic links are ignored rather than followed.
+- 2048-byte logical images, raw 2352-byte CD Mode 1 and Mode 2 Form 1, and 2336-byte XA Form 1 frames (no Form 2).
+- Some images with 150-sector lead-in (relative and absolute session LBA conventions), but **not full multisession TOC/CUE parsing**.
+- UDF Type-1 physical partition mapping, File Entry/Extended File Entry, embedded/short/long allocation descriptors, AED continuations, OSTA CS0 names.
+- **Experimental** UDF Metadata, Virtual (VAT) and Sparable partition-map reading, including mirror metadata fallback and packet redirects.
+- Read-only WCX operations (list/test/extract), streamed file data, 64-bit file sizes, bounded parsing and safety checks.
 
-## Explicit limitations
+## Limits and cautions
 
-- UDF VAT / metadata / sparable partitions are not yet supported. Basic continuation allocation extents are supported, but not all allocation descriptor variants or real-world edge cases.
-- Rock Ridge names are supported using RRIP NM and CE; POSIX symlinks are deliberately omitted, while CL/RE relocated directory trees are not supported. Rock Ridge PX modes, SL targets and TF timestamps are not exposed. El Torito virtual folders, multisession offsets, 2352-byte sector BIN, and compressed container formats are not implemented yet.
-- The WCX adapter must be built and tested on Windows. Core smoke tests on Linux do not establish Windows compatibility.
-- For untrusted ISO images, test on disposable filesystems: the extraction path validates symbolic links but cannot eliminate races with another process changing directories.
-- This is a preview, not an official ISO.WCX release.
+- This is a **preview** tested primarily with deterministic synthetic image fixtures. Real DVD/BD/UDF compatibility is not yet guaranteed, especially rewritable/packet-written and damaged media.
+- RAW Mode 2 Form 2, audio tracks, mixed-mode tracks, complete CUE/CCD/MDS metadata and full multisession TOC are not supported.
+- UDF VAT historical chains, every version of Metadata/Sparable, UDF pseudo-overwrite behavior and fragmented descriptor edge cases are not yet exhaustively covered.
+- Rock Ridge POSIX permissions, TF timestamps and symlink extraction are not implemented.
+- Compression/container formats (ISZ, CSO, ZSO, DAA, DMG, NRG, MDF, etc.) are not supported yet.
+- Avoid extracting untrusted images into important directories; path checks cannot fully mitigate concurrent symlink races.
+- Unsigned binary; this is not an official release of the legacy ISO.WCX plugin.
 
-## Build and test
+## Build and verify
 
-Windows x64 (Visual Studio 2022 build tools):
+Visual Studio 2022 x64:
 
     cmake -S . -B build -G "Visual Studio 17 2022" -A x64
     cmake --build build --config Release
     ctest --test-dir build -C Release --output-on-failure
 
-For 32-bit, replace `x64` with `Win32`. Output is `ISO-WCX.wcx64` or `ISO-WCX.wcx` under `build/Release`.
+For 32-bit replace `-A x64` with `-A Win32`. Builds produce `ISO-WCX.wcx64` / `ISO-WCX.wcx`.
 
-Linux CLI-only validation:
+Linux CLI tests:
 
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
     cmake --build build --parallel
     ctest --test-dir build --output-on-failure
 
-Inspect a disc image:
+CLI tool: `disc_inspect image.iso` or `disc_inspect image.iso --extract OUTPUT`.
 
-    ./build/disc_inspect image.iso
+## Installing in Total Commander
 
-Extract:
+Download the **ISO-WCX-Installable-Preview** artifact from successful GitHub Actions runs. Unzip the outer GitHub artifact archive, then open `ISO-WCX-preview.zip` directly in Total Commander; `pluginst.inf` prompts installation. Alternatively configure `.iso`, `.img` or `.bin` manually under **Configuration > Options > Packer > Configure packer extension WCXs**. Only use `.bin` images in the supported single-track layouts above.
 
-    ./build/disc_inspect image.iso --extract output-directory
-
-## Install in Total Commander
-
-In **Configuration > Options > Packer > Configure packer extension WCXs**, register the `.iso` extension against `ISO-WCX.wcx64` (Total Commander x64), or `.wcx` (32-bit). For an ISO/UDF image the same plugin performs format probing. More extensions can be registered only after corresponding image layouts are supported.
-
-CI builds the two Windows architectures, runs a dynamic DLL export/list/extraction smoke test and creates a combined ZIP containing `pluginst.inf`, both binaries, and PREVIEW.md. Open the ZIP in Total Commander to trigger its plugin installer. Preview artifacts are unsigned and not official releases.
+CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list/extract smoke checks, and packages an installable ZIP when both architectures pass.

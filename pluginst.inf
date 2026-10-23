@@ -1,7 +1,7 @@
 [plugininstall]
-description=ISO-WCX v0.4.0 Preview - ISO9660 Joliet Rock Ridge RAW BIN IMG and UDF
-version=0.4.0-preview
+description=ISO-WCX v0.5.0 Preview - ISO/UDF, BIN/IMG and CUE data tracks
+version=0.5.0-preview
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX
-defaultextension=iso
+defaultextension=iso,cue
