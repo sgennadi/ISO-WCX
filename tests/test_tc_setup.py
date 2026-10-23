@@ -151,9 +151,9 @@ def test_utf8_bom_is_preserved_on_refusal(binary: pathlib.Path):
     with tempfile.TemporaryDirectory() as tmp:
         helper, tc, ini, target = setup_fixture(binary, pathlib.Path(tmp))
         ini.write_bytes(
-            b"\\xef\\xbb\\xbf[PackerPlugins]\\r\\n"
-            b"iso=192,C:\\\\Missing\\\\iso.wcx\\r\\n"
-            + "comment=Пример\\r\\n".encode("utf-8")
+            b"\xef\xbb\xbf[PackerPlugins]\r\n"
+            b"iso=192,C:\\Missing\\iso.wcx\r\n"
+            + "comment=Пример\r\n".encode("utf-8")
         )
         original = ini.read_bytes()
         invoke(helper, tc, ini, target, expect=2)
@@ -165,8 +165,8 @@ def test_duplicate_iso_refused(binary: pathlib.Path):
     with tempfile.TemporaryDirectory() as tmp:
         helper, tc, ini, target = setup_fixture(binary, pathlib.Path(tmp))
         ini.write_text(
-            "[PackerPlugins]\\niso=192,C:\\\\Missing\\\\iso.wcx\\n"
-            "ISO=192,C:\\\\Missing2\\\\iso.wcx\\n", encoding="utf-8"
+            "[PackerPlugins]\niso=192,C:\\Missing\\iso.wcx\n"
+            "ISO=192,C:\\Missing2\\iso.wcx\n", encoding="utf-8"
         )
         original = ini.read_bytes()
         invoke(helper, tc, ini, target, expect=2)
