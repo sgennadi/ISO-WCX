@@ -114,7 +114,7 @@ int do_process(State* state,int operation,const wchar_t* dest_path,const wchar_t
         std::wstring wide=item_path(item);
         // Total Commander can register both callbacks. Report to Unicode only
         // when available; otherwise every byte is counted twice in its UI.
-        const auto ansi=(!state->progress_w && state->progress_a) ? to_ansi(wide) : std::string{};
+        auto ansi=(!state->progress_w && state->progress_a) ? to_ansi(wide) : std::string{};
         std::uint64_t prior=0;
         auto callback=[&](std::uint64_t done) {
             auto delta=static_cast<int>(done-prior);
