@@ -31,7 +31,7 @@ file signature and validated metadata.
 | Official 7-Zip source (CPP/7zip/Archive) | Key structure | ISO-WCX |
 | --- | --- | --- |
 | VhdHandler.cpp | VHD footer, BAT, bitmaps | Native fixed VHD, dynamic VHD needs a future native BAT reader |
-| VhdxHandler.cpp | CRC32C regions, metadata/BAT | Native VHDX metadata and BAT reader not yet implemented |
+| VhdxHandler.cpp | CRC32C regions, metadata/BAT | Native clean fixed/dynamic VHDX reader in experimental CLI; no WCX association |
 | VmdkHandler.cpp | Sparse grain mapping | Separate read-only implementation later |
 | QcowHandler.cpp | L1/L2 clusters and decompression | Separate read-only QCOW2 later |
 | VdiHandler.cpp | Block allocation maps | Separate read-only VDI later |
@@ -49,7 +49,7 @@ Read handlers at https://github.com/ip7z/7zip/tree/main/CPP/7zip/Archive.
 - ISO/UDF and optical disc images: existing WCX plugin, read-only.
 - Raw HDD IMG GPT/MBR and extended EBR, fixed VHD GPT/MBR:
   read-only CLI/library only, not registered as WCX archives.
-- Dynamic VHD/VHDX: unsupported until a separately verified native reader is available.
+- Dynamic VHD: unsupported. Fixed/dynamic base VHDX: native experimental reader in CLI with bounded BAT, CRC32C and metadata validation.
 - FAT12/16/32 file listing and extraction: available in separate CLI for
   partitioned raw IMG/fixed VHD, **not** registered in WCX.
 - VMDK/QCOW2/VDI and exFAT/NTFS/ext filesystems within virtual disks:

@@ -49,12 +49,16 @@ int main(int argc, char** argv) {
         if ((listing && (argc != 4 && argc != 5)) ||
             (!listing && (argc != 5 && argc != 6)))
             throw std::runtime_error("wrong argument count");
-        const auto logical_sector = sector_arg(
-            listing ? (argc == 5 ? argv[4] : "512") :
-                      (argc == 6 ? argv[5] : "512"));
         const auto index = index_arg(argv[3]);
         const std::filesystem::path image(argv[2]);
         iso_wcx::VirtualDiskReader reader(image);
+        auto logical_sector = reader.logical_sector_size();
+        if ((listing && argc == 5) || (!listing && argc == 6)) {
+            logical_sector = sector_arg(listing ? argv[4] : argv[5]);
+            if (reader.format() == iso_wcx::VirtualDiskFormat::vhdx &&
+                logical_sector != reader.logical_sector_size())
+                throw std::runtime_error("VHDX sector size disagrees with metadata");
+        }
         const auto partitions = iso_wcx::inspect_partition_table(reader, logical_sector);
         if (index >= partitions.size())
             throw std::runtime_error("partition number is outside the discovered table");

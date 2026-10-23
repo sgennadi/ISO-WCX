@@ -71,7 +71,8 @@ endif()
 # Virtual hard-disk partition discovery is an *isolated, read-only*
 # proof-of-format module. It is not yet registered as a WCX opener; optical
 # .img files remain handled by the existing CD sector logic.
-add_library(iso_virtual_partitions STATIC src/partition_map.cpp src/virtual_disk.cpp)
+add_library(iso_virtual_partitions STATIC
+  src/partition_map.cpp src/virtual_disk.cpp src/vhdx_reader.cpp)
 target_include_directories(iso_virtual_partitions PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_virtual_partitions PUBLIC cxx_std_20)
 
@@ -88,6 +89,14 @@ if(BUILD_TESTING)
   add_executable(virtual_disk_tests tests/virtual_disk.cpp)
   target_link_libraries(virtual_disk_tests PRIVATE iso_virtual_partitions)
   add_test(NAME raw_fixed_vhd_read_only COMMAND virtual_disk_tests)
+  add_executable(vhdx_read_fixture tests/vhdx_read_fixture.cpp)
+  target_link_libraries(vhdx_read_fixture PRIVATE iso_virtual_partitions)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME native_vhdx_container_bat_crc32c
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_vhdx.py"
+            "$<TARGET_FILE:virtual_partition_inspect>" "$<TARGET_FILE:virtual_fat_inspect>"
+            "$<TARGET_FILE:vhdx_read_fixture>")
+  set_tests_properties(native_vhdx_container_bat_crc32c PROPERTIES TIMEOUT 120)
   if(WIN32)
     # Independently compare our native VHD parser with Microsoft's built-in
     # Virtual Disk metadata API. Test-only: no mount/attach, no WCX linkage.

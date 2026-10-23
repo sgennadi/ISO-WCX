@@ -55,9 +55,12 @@ The CMake option, linkage, source conditionals and dedicated CI job were
 removed. No `libvhdi.dll`, `libvhdi.so` or .NET dependency is needed.
 Raw HDD IMG and fixed VHD are implemented independently in C++.
 
-Dynamic VHD and VHDX require native BAT/bitmap/metadata readers, which
-are **not yet implemented**. Differencing parents are never followed.
-Unknown VHD types are rejected rather than treated as raw disk bytes.
+Native dynamic VHD is not yet implemented. A new experimental C++20
+VHDX v1 reader handles clean, non-differencing fixed/dynamic base images
+with CRC32C-validated headers, required metadata and BAT-mapped payload
+reads, including sparse blocks. See [VHDX details](vhdx-native.md).
+Differencing parents and log replay are deliberately unsupported.
+VHDX renamed to raw IMG is rejected rather than silently misinterpreted.
 
 7-Zip and libvhdi remain external technical references, not source-code
 dependencies. The ISO-WCX implementation neither imports nor links their
@@ -65,8 +68,9 @@ format handler code.
 
 ## Stage 3–5 (not yet implemented)
 
-1. Implement native dynamic VHD (footer, BAT, bitmap, sparse blocks) and
-   VHDX (header CRC32C, metadata, BAT) with independent real-image tests.
+1. Complete independent QEMU/Microsoft interop and hostile-image tests
+   for the experimental native VHDX reader, then implement dynamic VHD v1
+   (footer, BAT, bitmap, sparse blocks) with independent tests.
 2. GPT GUID names and labels, metadata consistency reporting; CRC-verified
    backup fallback and linked EBR are implemented with mutation tests.
 3. FAT12/16/32 is available in a standalone, bounded filesystem reader

@@ -10,20 +10,21 @@
 
 int main(int argc,char** argv) {
     if(argc!=2 && argc!=3) {
-        std::cerr<<"Usage: virtual_partition_inspect IMAGE.img|IMAGE.vhd [512|4096]\n";
+        std::cerr<<"Usage: virtual_partition_inspect IMAGE.img|IMAGE.vhd|IMAGE.vhdx [512|4096]\n";
         return 2;
-    }
-    unsigned sector=512;
-    if(argc==3) {
-        const std::string size=argv[2];
-        if(size!="512" && size!="4096") {
-            std::cerr<<"Logical sector size must be 512 or 4096\n";
-            return 2;
-        }
-        sector=size=="512"?512u:4096u;
     }
     try {
         iso_wcx::VirtualDiskReader device{std::filesystem::path(argv[1])};
+        unsigned sector=device.logical_sector_size();
+        if(argc==3) {
+            const std::string size=argv[2];
+            if(size!="512" && size!="4096")
+                throw std::runtime_error("logical sector size must be 512 or 4096");
+            sector=size=="512"?512u:4096u;
+            if(device.format()==iso_wcx::VirtualDiskFormat::vhdx &&
+               sector!=device.logical_sector_size())
+                throw std::runtime_error("VHDX sector size disagrees with metadata");
+        }
         const auto result=iso_wcx::inspect_partition_table(device,sector);
         const char* container="raw hard-disk image";
         switch(device.format()) {
@@ -31,6 +32,9 @@ int main(int argc,char** argv) {
                 break;
             case iso_wcx::VirtualDiskFormat::fixed_vhd:
                 container="fixed VHD";
+                break;
+            case iso_wcx::VirtualDiskFormat::vhdx:
+                container="VHDX (native read-only)";
                 break;
         }
         std::cout<<"Container: "<<container
@@ -51,7 +55,7 @@ int main(int argc,char** argv) {
             std::cout<<'\n';
         }
     } catch(const std::exception& e) {
-        std::cerr<<"Invalid or unsupported raw virtual disk: "<<e.what()<<"\n";
+        std::cerr<<"Invalid or unsupported virtual disk: "<<e.what()<<"\n";
         return 1;
     }
     return 0;
