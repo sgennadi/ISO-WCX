@@ -168,7 +168,9 @@ if ($running.Count -gt 0) {
     throw 'Close all Total Commander instances first, so their settings do not overwrite the repair.'
 }
 $backup = "$ini.isowcx-backup-$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')"
-[IO.File]::Copy($ini, $backup, $false)
+# File.Replace performs the swap and creates the original-file backup
+# atomically on NTFS. Passing null for the third argument is rejected by
+# Windows PowerShell/.NET Framework on some systems.
 $tmp = "$ini.isowcx-pending-$([guid]::NewGuid().ToString('N'))"
 try {
     $payload = $encoding.GetBytes([string]::Concat($lines))
@@ -177,7 +179,7 @@ try {
     [Array]::Copy($bom, 0, $updated, 0, $bom.Length)
     [Array]::Copy($payload, 0, $updated, $bom.Length, $payload.Length)
     [IO.File]::WriteAllBytes($tmp, $updated)
-    [IO.File]::Replace($tmp, $ini, $null)
+    [IO.File]::Replace($tmp, $ini, $backup)
 } finally {
     if (Test-Path -LiteralPath $tmp) {
         Remove-Item -LiteralPath $tmp -Force
