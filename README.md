@@ -83,3 +83,12 @@ As before, the WCX adapter is read-only and **Preview** quality. We have not dem
 - Added clean-room CloneCD `.ccd`/`.img` read-only loader based on the published descriptor layout. Track INDEX boundaries and .img sector alignment are validated. Audio, scrambled sectors, subchannels and multidisc CCD sessions are deliberately not decoded.
 - A multi-data-track CCD is presented as `session1/`, `session2/` virtual folders, each retaining its own physical source when files are extracted.
 - Added synthetic Mode 1/2, audio-prefix, multi-data-track, path and malformed-metadata regression tests on Linux and Windows. See [format comparison](docs/libmirage-format-comparison.md) for the libMirage references and licensing.
+
+## What changed in v0.12.0
+
+- **ECMA-119 extended attributes:** Honor directory-record extended-attribute block counts when reading regular files and directories. Reject conflicting big- and little-endian extent values.
+- **CloneCD scrambled tracks:** Restore physical CD-ROM data on demand with the ECMA-130 Annex B sector-synchronized XOR sequence. This is **not** decryption of proprietary formats.
+- **CloneCD `.sub`:** Preserve and extract an optional same-base raw P-W subchannel stream under `subchannels/disc.sub` after checking every 96-byte frame corresponds to one 2352-byte `.img` frame. Q/CRC, CD-Text and copy-protection semantics are **not yet decoded**.
+- **Regression tests:** Synthetic ISO extended-attribute and endian corruption tests, scrambled CCD round trips and byte-perfect `.sub` extraction.
+
+The roadmap still includes *MDS v2, MDX, ISZ, DAA, CHD, DMG, ECM, GZ/XZ and CD-Audio*. They are not implied by libMirage/CDEmu supporting them.
