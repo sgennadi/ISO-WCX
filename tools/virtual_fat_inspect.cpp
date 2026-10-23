@@ -54,10 +54,10 @@ int main(int argc, char** argv) {
                       (argc == 6 ? argv[5] : "512"));
         const auto index = index_arg(argv[3]);
         const std::filesystem::path image(argv[2]);
-        const auto partitions = iso_wcx::inspect_partition_table(image, logical_sector);
+        iso_wcx::VirtualDiskReader reader(image);
+        const auto partitions = iso_wcx::inspect_partition_table(reader, logical_sector);
         if (index >= partitions.size())
             throw std::runtime_error("partition number is outside the discovered table");
-        iso_wcx::VirtualDiskReader reader(image);
         const auto& partition = partitions[index];
         const std::uint64_t start = partition.first_lba * logical_sector;
         const std::uint64_t bytes = partition.sector_count * logical_sector;
