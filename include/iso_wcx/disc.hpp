@@ -9,6 +9,7 @@
 
 namespace iso_wcx {
 class VirtualArchive;
+class WimArchive;
 struct Extent {
     std::uint64_t offset = 0;
     std::uint64_t length = 0;
@@ -38,5 +39,6 @@ private:
     std::vector<Item> entries_;
     std::string format_;
     std::shared_ptr<VirtualArchive> virtual_archive_;
+    std::shared_ptr<WimArchive> wim_archive_;
 };
 }

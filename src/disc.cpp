@@ -9,6 +9,9 @@
 #include "iso_wcx/rock_ridge.hpp"
 #include "iso_wcx/legacy_formats.hpp"
 #include "iso_wcx/virtual_archive.hpp"
+#ifdef _WIN32
+#include "iso_wcx/wim_archive.hpp"
+#endif
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -1107,6 +1110,18 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
         format_ = archive->format();
         virtual_archive_ = std::move(archive);
     };
+    if(extension == L".wim" || extension == L".esd") {
+#ifdef _WIN32
+        // WIMGAPI is a Windows system component, not an external helper.
+        auto archive = std::make_shared<WimArchive>(image_);
+        entries_ = archive->items();
+        format_ = archive->format();
+        wim_archive_ = std::move(archive);
+        return;
+#else
+        throw std::runtime_error("WIM/ESD browsing requires Windows WIMGAPI");
+#endif
+    }
     if(extension == L".vhd" || extension == L".vhdx" || extension == L".raw") {
         open_virtual();
         return;
@@ -1228,8 +1243,8 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
     if(entry.source_index!=0xffffffffu) track.emplace(entry.source_index);
     std::unique_ptr<Source> source;
     std::ifstream direct;
-    if(!virtual_archive_ && entry.direct_source.empty())source=std::make_unique<Source>(image_,track);
-    else if(!virtual_archive_) {
+    if(!virtual_archive_ && !wim_archive_ && entry.direct_source.empty())source=std::make_unique<Source>(image_,track);
+    else if(!virtual_archive_ && !wim_archive_) {
         require(std::filesystem::is_regular_file(entry.direct_source) &&
                 !std::filesystem::is_symlink(entry.direct_source),
                 "unsafe raw CloneCD sidecar source");
@@ -1290,6 +1305,12 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
     };
     if(virtual_archive_) {
         if(!virtual_archive_->read(index,deliver))return false;
+    } else if(wim_archive_) {
+#ifdef _WIN32
+        if(!wim_archive_->read(index,deliver))return false;
+#else
+        throw std::runtime_error("WIM/ESD is unsupported on this platform");
+#endif
     } else if(!entry.inline_data.empty()) {
         require(entry.inline_data.size()==entry.size,"invalid inline data length");
         if(!deliver(entry.inline_data.data(),entry.inline_data.size()))return false;

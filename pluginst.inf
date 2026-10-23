@@ -1,7 +1,7 @@
 [plugininstall]
-description=ISO-WCX v0.14.0 Preview - self-contained ISO/UDF, ISZ/DAA and virtual disks
-version=0.14.0-preview
+description=ISO-WCX v0.15.0 Preview - ISO/UDF, native WIM/ESD, ISZ/DAA, virtual disks
+version=0.15.0-preview
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX
-defaultextension=iso,cue,ccd,nrg,mds,cso,zso,isz,daa,img,raw,vhd,vhdx
+defaultextension=iso,cue,ccd,nrg,mds,cso,zso,isz,daa,img,raw,vhd,vhdx,wim,esd
