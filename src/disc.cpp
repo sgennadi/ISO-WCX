@@ -1061,6 +1061,7 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
     const bool mds=is_mds_path(image_);
     const bool ccd=is_ccd_path(image_);
     if(cue || nrg || mds || ccd) {
+        const auto audio=cue?cue_audio_tracks(image_):std::vector<CueAudioTrack>{};
         const std::size_t count=cue?cue_data_tracks(image_).size():
             (nrg?nrg_data_tracks(image_).size():
              (mds?mds_data_tracks(image_).size():ccd_data_tracks(image_).size()));
@@ -1080,7 +1081,10 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
                 views.push_back({static_cast<std::uint32_t>(i),std::move(detected),std::move(list)});
             } catch(const std::exception&) { /* Track has no supported filesystem. */ }
         }
-        require(!views.empty(),"no supported filesystem track in image descriptor");
+        require(count==0 || !views.empty(),
+                "descriptor data tracks have no recognized ISO/UDF filesystem");
+        require(!views.empty() || !audio.empty(),
+                "no supported filesystem or CUE audio track in descriptor");
         if(views.size()>1) {
             format_="Multisession / ";
             format_+=cue?"CUE tracks":(nrg?"NRG tracks":(mds?"MDS sessions":"CloneCD tracks"));
@@ -1095,10 +1099,35 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
                     append(entries_,std::move(item));
                 }
             }
-        } else {
+        } else if(!views.empty()) {
             format_=views[0].format;
             entries_=std::move(views[0].entries);
             for(auto& item:entries_)item.source_index=views[0].index;
+        }
+        if(!audio.empty()) {
+            // Avoid shadowing an actual on-disc directory named audio.tracks.
+            std::string folder="audio.tracks";
+            for(unsigned suffix=1;suffix<=99;++suffix) {
+                const bool conflict=std::any_of(entries_.begin(),entries_.end(),
+                    [&](const Item& item) {
+                        return item.path==folder || item.path.starts_with(folder+"/");
+                    });
+                if(!conflict)break;
+                folder="audio.tracks-"+std::to_string(suffix);
+            }
+            Item directory;directory.path=folder;directory.directory=true;
+            directory.attributes=0x10u;append(entries_,std::move(directory));
+            for(const auto& track:audio) {
+                Item item;
+                item.path=folder+"/track"+(track.number<10?"0":"")+
+                          std::to_string(track.number)+".wav";
+                item.size=track.pcm_bytes+44u;
+                item.audio_track_number=track.number;
+                item.attributes=0x20u;
+                append(entries_,std::move(item));
+            }
+            if(views.empty())format_="CUE CD-Audio (PCM WAV)";
+            else format_+=" + CUE CD-Audio";
         }
         if(ccd) {
             const auto sub=ccd_subchannels(image_);
@@ -1154,11 +1183,22 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
         }
         return true;
     }
+    std::optional<CueAudioTrack> audio;
+    if(entry.audio_track_number) {
+        require(is_cue_path(image_),"audio track must originate from a CUE descriptor");
+        const auto tracks=cue_audio_tracks(image_);
+        const auto found=std::find_if(tracks.begin(),tracks.end(),[&](const CueAudioTrack& t) {
+            return t.number==entry.audio_track_number;
+        });
+        require(found!=tracks.end() && found->pcm_bytes+44u==entry.size,
+                "CUE audio track changed since enumeration");
+        audio=*found;
+    }
     std::optional<std::size_t> track;
     if(entry.source_index!=0xffffffffu) track.emplace(entry.source_index);
     std::unique_ptr<Source> source;
     std::ifstream direct;
-    if(entry.direct_source.empty())source=std::make_unique<Source>(image_,track);
+    if(!audio && entry.direct_source.empty())source=std::make_unique<Source>(image_,track);
     else {
         require(std::filesystem::is_regular_file(entry.direct_source) &&
                 !std::filesystem::is_symlink(entry.direct_source),
@@ -1218,7 +1258,46 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
         written+=n;
         return !progress || progress(written);
     };
-    if(!entry.inline_data.empty()) {
+    if(audio) {
+        // Audio CD PCM: 2 channels, 44,100 samples/s, 16-bit little endian.
+        // PCM data is copied from CUE BINARY frames. No FFmpeg/codec required.
+        std::array<std::uint8_t,44> header{};
+        const auto put32=[&](std::size_t p,std::uint32_t v) {
+            for(unsigned i=0;i<4;i++)header[p+i]=static_cast<std::uint8_t>(v>>(8*i));
+        };
+        const auto put16=[&](std::size_t p,std::uint16_t v) {
+            header[p]=static_cast<std::uint8_t>(v);
+            header[p+1]=static_cast<std::uint8_t>(v>>8);
+        };
+        std::copy_n("RIFF",4,header.begin());
+        put32(4,static_cast<std::uint32_t>(audio->pcm_bytes+36u));
+        std::copy_n("WAVE",4,header.begin()+8);
+        std::copy_n("fmt ",4,header.begin()+12);
+        put32(16,16);put16(20,1);put16(22,2);put32(24,44100);
+        put32(28,176400);put16(32,4);put16(34,16);
+        std::copy_n("data",4,header.begin()+36);
+        put32(40,static_cast<std::uint32_t>(audio->pcm_bytes));
+        if(!deliver(header.data(),header.size()))return false;
+        std::ifstream file(audio->image,std::ios::binary|std::ios::ate);
+        require(file.is_open(),"cannot open CUE audio source");
+        const auto size=file.tellg();
+        require(size>=0 && static_cast<std::uint64_t>(size)>=audio->start_byte &&
+                audio->pcm_bytes<=static_cast<std::uint64_t>(size)-audio->start_byte,
+                "CUE audio source size changed");
+        require(audio->start_byte<=static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()),
+                "CUE audio byte offset too large");
+        file.seekg(static_cast<std::streamoff>(audio->start_byte));
+        require(bool(file),"CUE audio seek failed");
+        std::vector<std::uint8_t> pcm(1024*1024);
+        auto remain=audio->pcm_bytes;
+        while(remain) {
+            const auto n=static_cast<std::size_t>(std::min<std::uint64_t>(remain,pcm.size()));
+            require(bool(file.read(reinterpret_cast<char*>(pcm.data()),
+                                   static_cast<std::streamsize>(n))),"CUE audio read failed");
+            if(!deliver(pcm.data(),n))return false;
+            remain-=n;
+        }
+    } else if(!entry.inline_data.empty()) {
         require(entry.inline_data.size()==entry.size,"invalid inline data length");
         if(!deliver(entry.inline_data.data(),entry.inline_data.size()))return false;
     } else {
