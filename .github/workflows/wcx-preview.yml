@@ -49,3 +49,28 @@ jobs:
         run: cmake --build build --parallel 2
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
+  package:
+    name: Total Commander ZIP installer
+    needs: windows
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect x86 and x64 plugins
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ISO-WCX-*-preview
+          path: package
+          merge-multiple: true
+      - name: Build auto-installable Total Commander package
+        run: |
+          test -s package/ISO-WCX.wcx
+          test -s package/ISO-WCX.wcx64
+          cp pluginst.inf PREVIEW.md package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md ISO-WCX.wcx ISO-WCX.wcx64)
+      - name: Upload combined preview installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ISO-WCX-Installable-Preview
+          path: ISO-WCX-preview.zip
+          if-no-files-found: error
+          retention-days: 14
