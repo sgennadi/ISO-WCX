@@ -10,6 +10,22 @@
 
 For details, compatibility notes and source build commands, see [PREVIEW.md](PREVIEW.md).
 
+### Experimental virtual hard-disk partition inspector
+
+An **independent CLI**, `virtual_partition_inspect`, now reads MBR and GPT
+partition tables from raw HDD `.img` files (512/4096-byte logical sectors).
+It checks GPT CRC32, partition bounds and overlaps. For example:
+
+    virtual_partition_inspect C:\Images\disk.img
+    virtual_partition_inspect C:\Images\disk-4k.img 4096
+
+This is **not yet a WCX archive reader** and does not open VHD/VMDK or NTFS
+files. The optical ISO/BIN `.img` path is unchanged. See
+[virtual disk architecture](docs/virtual-disks.md), informed by
+[TalAloni/DiskAccessLibrary](https://github.com/TalAloni/DiskAccessLibrary)
+(LGPL-3.0-or-later; no source copied or linked).
+
+
 ## Formats (preview)
 
 | Format/layout | Coverage |
