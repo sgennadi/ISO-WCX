@@ -130,6 +130,20 @@ def rr_image(ce=False, symlink=False, malformed_ce=False, joliet=False):
     image[20*B:20*B+len(body)]=body
     return image
 
+
+def rr_multiextent_image():
+    image=rr_image()
+    sp=rr_susp(b'SP',b'\xbe\xef\0')
+    er=rr_susp(b'ER',bytes([10,0,0,1])+b'RRIP_1991A')
+    d=(rr_iso_record(20,B,2,b'\0',sp+er) + rr_iso_record(20,B,2,b'\1') +
+       rr_iso_record(21,3,0x80,b'SPLIT.TXT;1',rr_susp(b'NM',b'\0split.bin')) +
+       rr_iso_record(24,2,0,b'SPLIT.TXT;1'))
+    image[20*B:21*B]=bytes(B)
+    image[20*B:20*B+len(d)]=d
+    image[21*B:21*B+3]=b'wor'
+    image[24*B:24*B+2]=b'ld'
+    return image
+
 def udf_allocation_continuation(cyclic=False, damaged_crc=False):
     image=udf_image()
     # Inline five-byte file is replaced with a short AD which references an AED.
@@ -191,6 +205,7 @@ if __name__=='__main__':
     run_rock_ridge(binary,rr_image(ce=True))
     run_rock_ridge(binary,rr_image(symlink=True,joliet=True))
     run_rock_ridge(binary,rr_image(ce=True,malformed_ce=True),fail=True)
+    run(binary,rr_multiextent_image(),'split.bin',b'world')
     run(binary,iso_image(filename='../FOO;1'),'ignored',b'',fail=True)
     run(binary,bytearray(12*B),'ignored',b'',fail=True)
     print('PASS: ISO9660, Joliet, Rock Ridge NM/CE, UDF Type-1/AED and invalid-image cases')
