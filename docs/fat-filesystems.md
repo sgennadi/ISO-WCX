@@ -1,0 +1,58 @@
+# FAT12 / FAT16 / FAT32 virtual disk filesystems
+
+This is an independently developed, read-only native C++ module. Its
+layered design was informed by the official 7-Zip FatHandler.cpp and
+HandlerCont interfaces (https://github.com/ip7z/7zip). No 7-Zip source
+has been copied or linked.
+
+## How it works
+
+The existing VirtualDiskReader supplies logical bytes from raw HDD IMG or
+fixed VHD. The MBR/EBR/GPT parser returns a partition extent. FatVolume
+then validates the FAT BIOS Parameter Block, FAT type by cluster count,
+FAT allocation-table capacity, cluster mapping and file/directory chains.
+
+Two safe interfaces are available:
+
+- list: reads validated directory entries, including nested folders and
+  VFAT long names, and returns relative UTF-8 paths.
+- cat: extracts bytes of a listed file to the caller's binary stream.
+
+CLI examples:
+
+    virtual_partition_inspect disk.img
+    virtual_fat_inspect list disk.img 1
+    virtual_fat_inspect cat disk.img 1 README.TXT > README.TXT
+    virtual_fat_inspect list windows-fixed.vhd 1
+    virtual_fat_inspect list disk-4kn.img 1 4096
+
+Partition numbers start at 1. The command never constructs output
+filenames from untrusted metadata. Check the exit status: a corrupt
+cluster chain can leave partial data in redirected stdout.
+
+## Integrity limits
+
+- No disk writes, mounting, physical-drive access or parent paths.
+- BPB and file extents must lie inside the discovered partition.
+- Up to 100,000 listing items, depth 32 and 8 MiB per directory.
+- Each cluster is at most 1 MiB, and chains reject cycles, out-of-range
+  sectors, reserved/free/bad clusters and incomplete file allocation.
+- Every VFAT name must have a consistent ordinal sequence and matching
+  short-name checksum, otherwise a validated 8.3 fallback is used.
+- Unsafe filename components and duplicate paths are rejected.
+- 8.3 OEM non-ASCII bytes use ~XX hex tokens instead of guessing the
+  disk's encoding from the host locale.
+
+## Current limits
+
+This is a standalone library and CLI, NOT a Total Commander WCX format
+registration. Filesystem-aware WCX extraction and security regression
+coverage need to be completed before new extensions are enabled.
+
+It does not yet read exFAT, NTFS, ext, APFS, compressed/encrypted
+filesystems, host physical disks, snapshot parent chains, FAT timestamps
+or extended attributes.
+
+The regression suite uses independently constructed synthetic FAT12,
+FAT16 and FAT32 partitioned images and fixed-size VHD plus malformed
+directory and cluster-chain fixtures. See tests/test_virtual_fat.py.
