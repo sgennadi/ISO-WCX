@@ -20,13 +20,13 @@ upstream GPL implementation, and must work through the shared bounded reader.
 
 ## Format coverage and verification
 
-| Image / filter | ISO-WCX v0.11.0 preview | Missing / test next |
+| Image / filter | ISO-WCX v0.12.0 preview | Missing / test next |
 | --- | --- | --- |
 | ISO/Joliet/Rock Ridge/UDF | Supported tested subsets | Vendor discs, metadata variants, UDF corner cases |
 | CUE/BIN | BINARY Mode 1 / Mode 2 Form 1 | CD-DA and alternate codecs |
 | NRG | Selected uncompressed DAO/TAO data tracks | Full TOC / subchannels |
 | MDS/MDF | MDS v1 selected uncompressed data | MDS v2, MDX |
-| CloneCD CCD/IMG | New single-session unswizzled Mode 1/2 Form 1 | Multi-session, scrambled tracks, .SUB |
+| CloneCD CCD/IMG | Single-session Mode 1/2 Form 1, including standard ECMA-130 descrambling and raw .sub extraction | Multi-session, subchannel Q/CD-TEXT interpretation |
 | CSO / ZSO | Indexed random reads | More authentic compressed images |
 | CHD | Not implemented | Independent parser or suitably licensed dependency |
 | ISZ / DAA | Not implemented | Bounds-checked block-index reader and codec support |
