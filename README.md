@@ -10,6 +10,12 @@
 
 For details, compatibility notes and source build commands, see [PREVIEW.md](PREVIEW.md).
 
+### Fix for an obsolete ISO.WCX association
+
+If Total Commander shows **File iso.wcx not found!** or **Error, could not load plugin!** pointing to `...\\plugins\\wcx\\ISO\\iso.wcx`, the old ISO.WCX handler remains selected; installing the new DLL does not remove stale associations. Open **Configuration → Options → Packer → Configure packer extension WCXs**, select extension `iso`, delete **only** the old entry referencing the missing `ISO\\iso.wcx`, and use **New type...** to select `...\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx`. The 64-bit `ISO-WCX.wcx64` must be installed beside it. The leading `192,` is Total Commander's capability bitfield, not part of a filename. Restart Total Commander after changing the configuration.
+
+See [Russian repair instructions](INSTALL_RU.txt) or [English repair instructions](INSTALL_EN.txt).
+
 ## Formats (preview)
 
 | Format/layout | Coverage |
