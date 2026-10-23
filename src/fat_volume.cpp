@@ -275,7 +275,10 @@ std::uint32_t FatVolume::next_cluster(std::uint32_t cluster) {
     const auto eoc = kind_ == FatKind::fat12 ? 0xff8u :
                      kind_ == FatKind::fat16 ? 0xfff8u : 0x0ffffff8u;
     if (raw >= eoc) return UINT32_MAX;
-    require(raw >= 2 && std::uint64_t(raw) < std::uint64_t(total_clusters_) + 2,
+    const auto reserved_from = kind_ == FatKind::fat12 ? 0xff0u :
+                               kind_ == FatKind::fat16 ? 0xfff0u : 0x0ffffff0u;
+    require(raw < reserved_from && raw >= 2 &&
+            std::uint64_t(raw) < std::uint64_t(total_clusters_) + 2,
             "FAT chain references bad/free/reserved/out-of-range cluster");
     return raw;
 }
@@ -341,8 +344,12 @@ void FatVolume::scan_directory_bytes(std::string_view prefix,
         const auto first_cluster = kind_ == FatKind::fat32 ?
             first & 0x0fffffffu : first & 0xffffu;
         require(is_directory ? (size == 0 && first_cluster >= 2) :
-                (size == 0 || first_cluster >= 2),
+                (size == 0 ? first_cluster == 0 : first_cluster >= 2),
                 "invalid FAT file/directory entry cluster or size");
+        if (first_cluster != 0)
+            (void)cluster_offset(first_cluster);
+        require(is_directory || size <= volume_size_,
+                "FAT file claims more bytes than the volume can contain");
         // No duplicate output paths even if a damaged FAT directory points
         // to the same entity multiple times.
         require(seen_paths_.insert(path).second,
@@ -402,6 +409,9 @@ void FatVolume::extract(std::string_view path, std::ostream& output) {
     if (!remaining) return;
 
     std::unordered_set<std::uint32_t> visited;
+    const auto needed_clusters = (remaining + cluster_bytes_ - 1) / cluster_bytes_;
+    require(needed_clusters <= total_clusters_ && needed_clusters <= 1000000,
+            "FAT file chain exceeds available clusters or safety limit");
     auto cluster = iter->first_cluster;
     while (remaining) {
         require(visited.insert(cluster).second, "cyclic FAT file chain");
