@@ -84,6 +84,26 @@ std::uint32_t iso_dos_timestamp(std::span<const std::uint8_t> b) {
     // WCX's DOS date has no timezone field; preserve the written local date.
     return pack_dos(1900u+b[0],b[1],b[2],b[3],b[4],b[5]);
 }
+std::uint32_t iso_long_dos_timestamp(std::span<const std::uint8_t> b) {
+    if(b.size()!=17)return 0;
+    const auto digits=[&](std::size_t pos,unsigned count)->unsigned {
+        unsigned result=0;
+        for(unsigned i=0;i<count;++i) {
+            const auto c=b[pos+i];
+            if(c<'0' || c>'9')return 100000; // Invalid ASCII digit
+            result=result*10+(c-'0');
+        }
+        return result;
+    };
+    const auto year=digits(0,4),month=digits(4,2),day=digits(6,2);
+    const auto hour=digits(8,2),minute=digits(10,2),second=digits(12,2);
+    const auto centiseconds=digits(14,2);
+    const auto zone=static_cast<std::int8_t>(b[16]);
+    if(centiseconds>99 || zone<-48 || zone>52)return 0;
+    // The WCX DOS timestamp represents the recorded *local* calendar time,
+    // so no timezone conversion is applied (same as the short ISO date).
+    return pack_dos(year,month,day,hour,minute,second);
+}
 std::uint32_t udf_dos_timestamp(std::span<const std::uint8_t> b) {
     if(b.size()<12)return 0;
     // ECMA-167 timestamp: TypeAndTimezone, year, month, day, hour, minute,

@@ -26,7 +26,7 @@ See [Russian repair instructions](INSTALL_RU.txt) or [English repair instruction
 | Format/layout | Coverage |
 | --- | --- |
 | ISO 9660 / Joliet | File listing and extraction, Unicode names, multi-extent and interleaved files; recover from broken Joliet directory using valid ISO9660 primary volume |
-| Rock Ridge | RRIP NM/CE and relocated CL directories, no symlink extraction |
+| Rock Ridge | RRIP NM/CE and relocated CL directories; PX read-only and TF modification timestamps; no symlink/device extraction |
 | Raw BIN/IMG | CD Mode 1 / Mode 2 Form 1 (2352-byte), XA Form 1 (2336-byte); automatic probing limited to single-track images |
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
 | CloneCD CCD/IMG | `.ccd` version 3 + matching `.img` (2352-byte sectors), single-session Mode 1 / Mode 2 Form 1 data tracks, including ECMA-130 scrambled sectors. Optional `.sub` sidecar exposed byte-for-byte under `subchannels/disc.sub`; CD-Audio and CD-Text decoding not implemented; CRC-valid Q track/index frames summarized in `subchannels/q-index.csv`. |
@@ -79,7 +79,7 @@ As before, the WCX adapter is read-only and **Preview** quality. We have not dem
 - **Descriptor-driven multisession views:** enumerate more than one filesystem-bearing CUE, NRG or MDS track under `session1/`, `session2/` etc. Track indices are preserved for extraction, including earlier tracks. Does not replace a full TOC-based multisession implementation for raw `.iso`/`.bin` files.
 - **Metadata:** ISO 9660 and UDF timestamps and file attributes are passed through the WCX API. Xbox XDVDFS entries inherit the volume creation date when per-file timestamps are unavailable.
 - **Security and rollback:** preserves the v0.8 staging-file extraction and single Unicode progress callback behavior.
-- **Validation:** independent synthetic tests for El Torito BIOS/EFI, XDVDFS nested trees, multisession extraction and malformed descriptors; Linux tests and sanitizers. MDS v2, MDX and compressed ISZ/CSO/ZSO/DAA are still **not supported**.
+- **Validation:** independent synthetic tests for El Torito BIOS/EFI, XDVDFS nested trees, multisession extraction and malformed descriptors; Linux tests and sanitizers. MDS v2, MDX, ISZ, CHD and DAA are **not supported**; indexed CSO v1/v2 and ZSO are already implemented and tested synthetically.
 
 
 ## What changed in v0.10.0
@@ -160,3 +160,7 @@ This supports verified nested directories, VFAT long filenames and
 non-contiguous file cluster chains. No disk is mounted and no host path is
 created from the image. The FAT reader is still **not included in the WCX
 DLL**, so Total Commander continues to use its validated optical engine.
+
+### Consolidated optical metadata regression checks
+
+RRIP PX (mode), TF (7/17-byte modification time), and mirrored CE pointers now have a dedicated integration + malformed-image regression in `tests/rock_ridge_metadata.cpp`. `tests/test_nrg_mds.py` no longer pretends that twice-running an MDS v1 fixture tests MDS v2; major version 2 is explicitly rejected. The supported MDS parser remains **v1 only** until independently validated v2 descriptors are implemented.
