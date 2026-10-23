@@ -47,4 +47,4 @@ Extract:
 
 In **Configuration > Options > Packer > Configure packer extension WCXs**, register the `.iso` extension against `ISO-WCX.wcx64` (Total Commander x64), or `.wcx` (32-bit). For an ISO/UDF image the same plugin performs format probing. More extensions can be registered only after corresponding image layouts are supported.
 
-CI builds the two Windows architectures and runs a dynamic DLL export/list/extraction smoke test. Preview binaries are CI artifacts, not signed releases.
+CI builds both Windows architectures, runs a dynamic DLL export/list/extraction smoke test, and creates a combined ZIP containing `pluginst.inf`, both binaries and PREVIEW.md. Open the ZIP in Total Commander to trigger its plugin installer. Preview artifacts are unsigned and not official releases.
