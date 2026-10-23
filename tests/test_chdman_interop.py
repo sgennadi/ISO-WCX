@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pathlib
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
