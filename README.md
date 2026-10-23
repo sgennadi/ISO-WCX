@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.13.0 Preview** — a self-contained modern C++20, read-only
+**ISO-WCX v0.14.0 Preview** — a self-contained modern C++20, read-only
 Total Commander WCX plugin for optical disc images and virtual HDD filesystems.
 
 ## Install into Total Commander
@@ -41,8 +41,11 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 | Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Built-in native MBR/GPT + FAT12/16/32 browsing and extraction under `partitionN/`; VHDX fixed/dynamic sparse payloads with 512/4096 logical sectors; no mount or external DLL |
 | Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
+| ISZ v1 (single-file) | Built-in indexed 2048-sector stored/zero/zlib/bzip2 chunks; encrypted, segmented, multi-volume and other ISZ variants rejected |
+| DAA v1.00 | Built-in single-file raw DEFLATE chunks with header CRC32 and bounds checking; v1.10, encryption and multipart images rejected |
+| CHD v5 (uncompressed) | Experimental 2048-byte logical optical payloads only, sparse 4-byte hunk map; compressed maps, CDDA, 2448-byte frames, parent chains not yet supported; not installed as default association |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
-| Other compressed/encrypted containers | Not implemented: ISZ, DAA, CHD, NRG encrypted/compressed, MDS v2, MDX; only CloneCD Q position decoding is implemented; other raw CD subchannels are not interpreted |
+| Other compressed/encrypted containers | Not implemented: encrypted ISZ/DAA, multipart ISZ, DAA v1.10, compressed CHD, NRG encrypted/compressed, MDS v2, MDX; only CloneCD Q position decoding is implemented; other raw CD subchannels are not interpreted |
 
 ## Development
 
@@ -206,5 +209,25 @@ RRIP PX (mode), TF (7/17-byte modification time), and mirrored CE pointers now h
   and text documentation. No setup EXE or repair scripts are required.
 
 **Unsupported:** NTFS, exFAT, ext2/3/4, VMDK, dynamic/differencing VHD,
-differencing/dirty VHDX, MDS v2 and MDX extraction, DAA, ISZ and CHD.
+differencing/dirty VHDX, MDS v2 and MDX extraction, encrypted/segmented ISZ, DAA v1.10 or encrypted DAA, and compressed/audio CHD.
 Real-world media/Total Commander GUI validation is pending.
+
+## What changed in v0.14.0 Preview
+
+- A native `PackedOptical` block reader is compiled directly into
+  `ISO-WCX.wcx` and `ISO-WCX.wcx64`; no external extractor, driver,
+  intermediate ISO or optional DLL is required.
+- ISZ v1 single-file data: zero, stored, zlib and **statically built bzip2**
+  chunks with bounded index, decompression and read cache.
+- Unencrypted DAA v1.00 single-file images: validated header CRC32, three-byte
+  block length index, raw RFC1951 DEFLATE streams.
+- Uncompressed CHD v5: 2048-byte logical optical payloads, sparse map entries,
+  strict parent/codec/map bounds rejection.
+- Linux and Windows x86/x64 tests exercise synthetic ISO/UDF data, byte
+  extraction and corrupt-container rejection. Windows tests use the actual
+  WCX export functions, not an external extractor.
+- No automatic `.chd` association yet: the common compressed CD/arcade CHD
+  layouts need entropy-coded maps, CDDA frame mapping and licensed codecs.
+  MDS v2/MDX, protected ISZ/DAA and compressed CHD remain **unsupported**.
+
+See [bounded optical container design](docs/packed-optical.md).

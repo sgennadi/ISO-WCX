@@ -1,4 +1,4 @@
-# ISO-WCX v0.13.0 C++20 preview
+# ISO-WCX v0.14.0 C++20 preview
 
 Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
@@ -127,3 +127,27 @@ installer does not associate .mdx. Read
 - Handles normal CloneCD deinterleaved P12/Q12, with CRC-gated fallback for packed/interleaved P-W variants.
 - No R-W CD-Text, Q ADR=2/3 EAN/ISRC, proprietary protection semantics or CD-Audio in this update.
 - The report scans in constant memory with a one-million-sector limit; new WCX artifacts require successful Windows CI before release.
+
+## v0.14: integrated ISZ, DAA and limited CHD support
+
+All new format decoders operate inside `ISO-WCX.wcx/.wcx64`, with no
+separate ISO conversion, external parser DLL, executable, mounting driver or
+runtime archive utility. Supported variants: unencrypted, single-file ISZ v1
+with zero/stored/zlib/bzip2 blocks; unencrypted single-file DAA 1.00 with raw
+DEFLATE and checked header CRC32; CHD v5 **uncompressed** with 2048-byte
+logical sector mapping. Both ISO9660 and UDF are parsed by the existing
+filesystem engine.
+
+The bzip2 1.0.8 source is fetched with a pinned SHA-256 **at build time** and
+compiled statically into the WCX. This does not add a runtime DLL.
+bzip2/libbzip2 (C) 1996-2010 Julian R Seward. Redistribution and use are
+permitted under its permissive license; see
+https://sourceware.org/bzip2/downloads.html for official source and license.
+The format logic itself is independently authored; no GPL image decoder
+code was copied.
+
+**Not supported yet:** multi-volume ISZ, ISZ passwords/encryption, DAA 1.10,
+password-protected/multipart DAA, most real-world compressed CHD images,
+CHD CDDA/Mode 2 physical track mapping, CHD parent images, MDS v2/MDX
+encrypted metadata/track extraction. These deliberately fail closed.
+Authentic vendor samples and GUI testing are still required for stable.
