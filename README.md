@@ -38,7 +38,8 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
 | Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352/2448 data sectors); synthetic-test coverage |
 | El Torito | Exposes validated BIOS and EFI boot-load images and the boot catalog under `boot.images/`; EFI FAT BPB sizing when valid |
-| Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Built-in native MBR/GPT + FAT12/16/32 browsing and extraction under `partitionN/`; VHDX fixed/dynamic sparse payloads with 512/4096 logical sectors; no mount or external DLL |\n| Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
+| Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Built-in native MBR/GPT + FAT12/16/32 browsing and extraction under `partitionN/`; VHDX fixed/dynamic sparse payloads with 512/4096 logical sectors; no mount or external DLL |
+| Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
 | Other compressed/encrypted containers | Not implemented: ISZ, DAA, CHD, NRG encrypted/compressed, MDS v2, MDX; only CloneCD Q position decoding is implemented; other raw CD subchannels are not interpreted |
@@ -52,6 +53,12 @@ Build with CMake 3.21+, a C++20 compiler and Python 3 for tests:
     ctest --test-dir build --output-on-failure
 
 Windows uses Visual Studio 2022 via CMake (`-G "Visual Studio 17 2022" -A x64` or `-A Win32`). CI produces both binary architectures and tests the WCX DLL APIs.
+
+For a minimal Windows release build containing **only the WCX DLL**, use
+`-DBUILD_TESTING=OFF -DISO_WCX_BUILD_DEV_TOOLS=OFF` and
+`cmake --build build --config Release --target ISO-WCX`.
+The standalone diagnostic/test EXEs are internal development targets, not
+WCX runtime dependencies or parts of the installable ZIP.
 
 This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg`, `.mds`, `.cso` and `.zso` are registered by the ZIP installer, while `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
 

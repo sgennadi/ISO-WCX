@@ -57,6 +57,12 @@ else()
 endif()
 
 include(CTest)
+# Standalone inspectors and Setup are developer/test fixtures, never WCX
+# runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
+option(ISO_WCX_BUILD_DEV_TOOLS "Build internal inspection and test EXEs" ${BUILD_TESTING})
+if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
+  message(FATAL_ERROR "CTest requires ISO_WCX_BUILD_DEV_TOOLS=ON")
+endif()
 
 add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET})
@@ -68,9 +74,8 @@ else()
   target_compile_options(iso_disc PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
-# Virtual hard-disk partition discovery is an *isolated, read-only*
-# proof-of-format module. It is not yet registered as a WCX opener; optical
-# .img files remain handled by the existing CD sector logic.
+# Native partition mapping is part of the WCX in-process virtual HDD reader.
+# It remains read-only and has no external disk DLL dependencies.
 add_library(iso_virtual_partitions STATIC
   src/partition_map.cpp src/virtual_disk.cpp src/vhdx_reader.cpp)
 target_include_directories(iso_virtual_partitions PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -114,11 +119,12 @@ if(BUILD_TESTING)
 
 endif()
 
-add_executable(virtual_partition_inspect tools/virtual_partition_inspect.cpp)
-target_link_libraries(virtual_partition_inspect PRIVATE iso_virtual_partitions)
+if(ISO_WCX_BUILD_DEV_TOOLS)
+  add_executable(virtual_partition_inspect tools/virtual_partition_inspect.cpp)
+  target_link_libraries(virtual_partition_inspect PRIVATE iso_virtual_partitions)
+endif()
 
-# Independent FAT12/16/32 filesystem reader above the virtual block layer.
-# Deliberately not linked into ISO-WCX until WCX extraction and security tests pass.
+# Built-in native FAT12/16/32 filesystem reader, linked into ISO-WCX.
 add_library(iso_virtual_fat STATIC src/fat_volume.cpp)
 target_include_directories(iso_virtual_fat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(iso_virtual_fat PUBLIC iso_virtual_partitions)
@@ -129,8 +135,10 @@ else()
   target_compile_options(iso_virtual_fat PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 target_link_libraries(iso_disc PRIVATE iso_virtual_fat)
-add_executable(virtual_fat_inspect tools/virtual_fat_inspect.cpp)
-target_link_libraries(virtual_fat_inspect PRIVATE iso_virtual_fat)
+if(ISO_WCX_BUILD_DEV_TOOLS)
+  add_executable(virtual_fat_inspect tools/virtual_fat_inspect.cpp)
+  target_link_libraries(virtual_fat_inspect PRIVATE iso_virtual_fat)
+endif()
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME fat12_fat16_fat32_virtual_disk_filesystems
@@ -138,11 +146,12 @@ if(BUILD_TESTING)
             "$<TARGET_FILE:virtual_fat_inspect>")
 endif()
 
-add_executable(mds_descriptor_inspect tools/mds_descriptor_inspect.cpp)
-target_link_libraries(mds_descriptor_inspect PRIVATE iso_disc)
-
-add_executable(disc_inspect tools/disc_inspect.cpp)
-target_link_libraries(disc_inspect PRIVATE iso_disc)
+if(ISO_WCX_BUILD_DEV_TOOLS)
+  add_executable(mds_descriptor_inspect tools/mds_descriptor_inspect.cpp)
+  target_link_libraries(mds_descriptor_inspect PRIVATE iso_disc)
+  add_executable(disc_inspect tools/disc_inspect.cpp)
+  target_link_libraries(disc_inspect PRIVATE iso_disc)
+endif()
 
 if(WIN32)
   add_library(ISO-WCX MODULE src/wcx.cpp)
@@ -156,9 +165,10 @@ if(WIN32)
   if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     target_sources(ISO-WCX PRIVATE src/wcx_x86.def)
     set(WCX_SUFFIX ".wcx")
-    # One 32-bit installer runs on both x86 and x64 Windows. It installs
-    # and validates the paired x86/x64 WCX binaries.
-    add_executable(ISO-WCX-Setup WIN32 tools/tc_setup.cpp)
+    # Historical association helper is a test-only executable.
+    # It is never required or packaged with the WCX plugin.
+    if(ISO_WCX_BUILD_DEV_TOOLS)
+      add_executable(ISO-WCX-Setup WIN32 tools/tc_setup.cpp)
     target_compile_features(ISO-WCX-Setup PRIVATE cxx_std_20)
     target_compile_definitions(ISO-WCX-Setup PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(ISO-WCX-Setup PRIVATE shell32 advapi32)
@@ -173,6 +183,7 @@ if(WIN32)
                   "$<TARGET_FILE:ISO-WCX-Setup>")
       endif()
     endif()
+    endif() # ISO_WCX_BUILD_DEV_TOOLS
   else()
     set(WCX_SUFFIX ".wcx64")
   endif()
