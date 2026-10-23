@@ -69,12 +69,22 @@ and
    including corruption and parent/snapshot rejection, before any shipment.
 2. GPT GUID names and labels, metadata consistency reporting; CRC-verified
    backup fallback and linked EBR are implemented with mutation tests.
-3. Read-only FAT12/16/32, exFAT and NTFS volume readers; expose partition
-   folders and file metadata with correct WCX extraction. NTFS sparse runs,
-   compressed attributes, reparse points and alternate streams need careful
-   explicit behavior.
+3. FAT12/16/32 is available in a standalone, bounded filesystem reader
+   (`virtual_fat_inspect` list/cat) over existing raw IMG/fixed VHD partitions.
+   Expose it to WCX only after real-image and GUI extraction tests. exFAT and
+   NTFS remain unimplemented; NTFS sparse runs, compression, reparse points
+   and alternate streams require separate design and integrity tests.
 4. Add a real VHD/VHDX/VMDK/NTFS corpus and Windows Win32/x64 WCX smoke tests
    before registering virtual hard-disk extensions.
+
+## Stage 3 implemented: read-only FAT12/16/32 CLI
+
+A separate `FatVolume` class validates the FAT BPB, directory and cluster
+chains, VFAT long-name sequences, bounds and unsafe names. It can list and
+extract files via `virtual_fat_inspect` without disk mounting, writes or
+implicit output-path creation. Synthetic tests cover FAT12/16/32, nested
+folders, noncontiguous files, fixed VHD and corrupted chains. This is not
+registered as a WCX image format. See [FAT design](fat-filesystems.md).
 
 ## Experimental C++26 compatibility
 
