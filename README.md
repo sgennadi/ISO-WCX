@@ -140,16 +140,17 @@ without changing the Total Commander ABI or release package.
 The isolated `virtual_partition_inspect` tool can now parse MBR/EBR/GPT in
 both raw HDD IMG and **fixed-size VHD v1** files. Fixed VHD validation includes
 the EOF footer signature, one's-complement checksum, format version, disk type,
-and exact logical size. No VHD data is written or mounted. Dynamic VHD/VHDX
-can be investigated via **optional Linux-only libvhdi**; Windows WCX does not
-link it. Differencing VHD and VMDK are not implemented. Filesystem extraction
-is not exposed in WCX until filesystem and Windows GUI integration tests pass.
+and exact logical size. No VHD data is written or mounted. Dynamic and
+differencing VHD, VHDX and VMDK are **not implemented**. Filesystem extraction
+is not exposed by WCX until Windows extraction and GUI tests pass.
 
-We evaluated [libyal/libvhdi](https://github.com/libyal/libvhdi), an alpha
-LGPL-3.0-or-later C library. The Linux research build may link a separately
-installed libvhdi with `-DISO_WCX_WITH_LIBVHDI=ON`; it is never included in
-Windows WCX packages. See [virtual disk design](docs/virtual-disks.md) and
-[our 7-Zip source architecture study](docs/7zip-disk-formats.md), and
+**No external disk DLLs:** The experimental libvhdi adapter and its CI
+have been removed. ISO-WCX has its own native C++ raw IMG/fixed VHD reader.
+We studied 7-Zip disk handler architecture but **did not copy its sources**.
+Windows statically links zlib for compressed ISO support; no separate
+zlib.dll or libvhdi.dll is shipped. See
+[virtual disk architecture](docs/virtual-disks.md),
+[7-Zip handler study](docs/7zip-disk-formats.md) and
 [FAT12/16/32 read-only implementation](docs/fat-filesystems.md).
 
 ### FAT12/16/32 files inside raw IMG and fixed VHD (standalone CLI)
