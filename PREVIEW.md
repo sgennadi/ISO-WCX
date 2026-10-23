@@ -81,3 +81,10 @@ CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list
 - ISO/UDF timestamps and file attributes are made available to the Windows WCX adapter.
 - Unsupported: MDS v2, MDX, compressed ISZ, CSO/CISO, ZSO, DAX, CHD, DAA, UIF and compressed/encrypted NRG/MDF variants.
 
+
+## v0.10.0 compressed ISO and raw MDF support
+
+- Read-only `.cso` v1 (including legacy version 0 headers), `.cso` v2 (mixed raw DEFLATE/LZ4) and `.zso` LZ4. A fixed-size block index is validated before any on-demand decompression; individual blocks are decoded only when the filesystem parser or extractor needs them.
+- Zlib is linked statically on Windows using a pinned upstream source version, while Linux uses the system package. No runtime Python process, full-image unpack or additional DLL is needed by Total Commander.
+- 2448-byte physical sectors are accepted for unswizzled raw MODE1/MODE2 Form 1 data, including supported MDS v1 subchannel layouts. Extra subchannel bytes are not exposed as ISO data.
+- Does not support `.isz`, `.daa`, `.mdx`, `.chd`, proprietary encryption, mixed audio extraction, scrambling or all vendor MDF sector patterns. The bchunk and mdf2iso projects are useful test references; their GPL source is not included.

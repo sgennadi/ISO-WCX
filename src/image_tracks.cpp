@@ -264,13 +264,17 @@ std::vector<ImageTrack> mds_data_tracks(const std::filesystem::path& descriptor)
             if(point<1 || point>99)continue; // lead-in TOC entries
             // Interleaved subchannels, redbook audio and unsupported sector modes
             // are ignored (never parsed as 2048-byte payloads).
-            if(sub!=0 || (kind!=0xaa && kind!=0xab && kind!=0xac))continue;
+            if((kind!=0xaa && kind!=0xab && kind!=0xac))continue;
+            // 2448 = 2352-byte raw sector plus 96 bytes of interleaved
+            // subchannel data.  The subchannel bytes are not filesystem data.
+            // Reject all other unsupported subchannel arrangements.
+            if(sub!=0 && !(sub==8 && le16(b,p+0x10)==2448))continue;
             const auto physical=le16(b,p+0x10);
             std::uint32_t data_offset=0;
             std::uint8_t mode=0;
             if(physical==2048) {data_offset=0;mode=0;}
             else if(physical==2336 && kind==0xab) {data_offset=8;mode=2;}
-            else if(physical==2352) {
+            else if(physical==2352 || physical==2448) {
                 mode=kind==0xaa?1:2;
                 data_offset=mode==1?16:24;
             } else continue;

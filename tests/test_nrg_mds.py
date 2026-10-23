@@ -78,7 +78,10 @@ def nrg_tao(raw=False, version=2, mode2=False):
 def mds_layout(physical=2352,mode2=False,unicode_name=True,
                name='image.mdf', start_lba=0):
     cooked=iso.iso_image(filename='FROMMDF.TXT;1')
-    if physical==2352: data=iso.raw_cd_image(cooked,mode=2 if mode2 else 1)
+    if physical in (2352,2448):
+        raw=iso.raw_cd_image(cooked,mode=2 if mode2 else 1)
+        data=(b''.join(raw[i:i+2352]+bytes(96) for i in range(0,len(raw),2352))
+              if physical==2448 else raw)
     elif physical==2336: data=iso.cooked_xa_2336(cooked)
     else:
         assert physical==2048
@@ -95,6 +98,7 @@ def mds_layout(physical=2352,mode2=False,unicode_name=True,
     p=112
     info[p]=0xab if physical==2336 else (0xac if mode2 else 0xaa)
     info[p+4]=1
+    info[p+1]=8 if physical==2448 else 0
     info[p+0x0c:p+0x10]=le32(192)
     info[p+0x10:p+0x12]=le16(physical)
     info[p+0x24:p+0x28]=le32(start_lba)
@@ -182,7 +186,7 @@ def main(executable):
         (root/'mixed.nrg').write_bytes(nrg_dao(raw=True,audio_first=True))
         run(executable,root,'mixed.nrg','NERODATA.TXT')
         for version in (1,2):
-            for sector in (2048,2352,2336):
+            for sector in (2048,2352,2336,2448):
                 descriptor,data=mds_layout(sector,mode2=(sector==2336))
                 (root/'image.mdf').write_bytes(data)
                 name=f'mds{version}_{sector}.mds'

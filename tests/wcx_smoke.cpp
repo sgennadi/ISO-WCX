@@ -210,6 +210,37 @@ int main(int argc,char** argv){
         output_file.close();
         return actual=="world";
     };
+    // CSO and ZSO stored-block fixtures: exercise native WCX API against
+    // the indexed compressed-container path (Python tests cover DEFLATE/LZ4).
+    auto make_indexed_iso=[&](const char* magic) {
+        std::vector<std::uint8_t> compressed(24+(32+1)*4,0);
+        std::memcpy(compressed.data(),magic,4);
+        put32(compressed,4,24);
+        put32(compressed,8,32*block);
+        put32(compressed,16,static_cast<std::uint32_t>(block));
+        compressed[20]=1;
+        for(std::size_t k=0;k<=32;k++) {
+            const auto start=static_cast<std::uint32_t>(compressed.size());
+            put32(compressed,24+k*4,start|(k<32?0x80000000u:0));
+            if(k<32)
+                compressed.insert(compressed.end(),image.begin()+static_cast<std::ptrdiff_t>(k*block),
+                                  image.begin()+static_cast<std::ptrdiff_t>((k+1)*block));
+        }
+        return compressed;
+    };
+    for(const auto& fmt:std::array<std::pair<const wchar_t*,const char*>,2>{
+            std::pair{L"smoke.cso","CISO"},std::pair{L"smoke.zso","ZISO"}}) {
+        const auto packed=make_indexed_iso(fmt.second);
+        const auto archive=folder/fmt.first;
+        {std::ofstream f(archive,std::ios::binary);
+         f.write(reinterpret_cast<const char*>(packed.data()),
+                 static_cast<std::streamsize>(packed.size()));}
+        // Never extract onto the input archive: Windows cannot replace an open source file.
+        const auto output_name=(std::wstring(fmt.first)==L"smoke.cso")?L"from-cso.txt":L"from-zso.txt";
+        if(!verify_container(archive,output_name)){
+            std::cerr<<"Indexed CSO/ZSO WCX extraction failed\n";return 40;
+        }
+    }
     if(!verify_container(nrg_path,L"from-nrg.txt"))return 14;
     if(!verify_container(mds_path,L"from-mds.txt"))return 15;
 

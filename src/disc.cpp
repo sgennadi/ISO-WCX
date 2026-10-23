@@ -1,4 +1,5 @@
 #include "iso_wcx/disc.hpp"
+#include "iso_wcx/compressed_image.hpp"
 #include "iso_wcx/cue.hpp"
 #include "iso_wcx/image_tracks.hpp"
 #include "iso_wcx/rock_ridge.hpp"
@@ -8,6 +9,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <cctype>
@@ -60,6 +62,7 @@ void safe_name(const std::string& s) {
 
 class Source {
     std::ifstream file_;
+    std::unique_ptr<CompressedImage> compressed_;
     std::uint64_t raw_length_{};
     std::uint64_t logical_length_{};
     std::uint64_t raw_base_{};
@@ -76,6 +79,7 @@ class Source {
         require(p<=raw_end_ && n<=raw_end_-p &&
                 p<=static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()),
                 "raw extent outside image");
+        if(compressed_)return compressed_->read(p,n);
         Bytes b(n);
         file_.clear();
         file_.seekg(static_cast<std::streamoff>(p));
@@ -89,7 +93,7 @@ class Source {
         const auto record = raw_base_+(std::uint64_t(leading)+vd_sector)*physical;
         if(record>raw_end_ || raw_end_-record<physical)return false;
         auto frame=raw_read(record,physical);
-        if (physical==2352) {
+        if (physical==2352 || physical==2448) {
             if (frame[0]!=0 || frame[11]!=0 || frame[15]!=mode) return false;
             for(int i=1;i<=10;i++)if(frame[i]!=0xff)return false;
             if(mode==2) {
@@ -109,7 +113,7 @@ class Source {
         const auto physical_at=raw_base_+(std::uint64_t(leading)+256)*physical;
         if(physical_at>raw_end_ || physical>raw_end_-physical_at)return false;
         const auto frame=raw_read(physical_at,physical);
-        if(physical==2352) {
+        if(physical==2352 || physical==2448) {
             if(frame[0]!=0 || frame[11]!=0 || frame[15]!=mode)return false;
             for(int i=1;i<=10;i++)if(frame[i]!=0xff)return false;
             if(mode==2 && ((frame[18]&0x20) ||
@@ -135,6 +139,7 @@ class Source {
         logical_length_ = sectors*2048;
     }
     void open_image(const std::filesystem::path& p) {
+        compressed_.reset();
         file_.close();
         file_.clear();
         file_.open(p,std::ios::binary|std::ios::ate);
@@ -143,6 +148,12 @@ class Source {
         raw_length_=static_cast<std::uint64_t>(n);
         raw_base_=0;raw_end_=raw_length_;session_lba_.reset();track_label_.clear();
         logical_length_=raw_length_;
+        if(is_compressed_image_path(p)) {
+            compressed_=std::make_unique<CompressedImage>(p);
+            raw_length_=compressed_->size();
+            raw_end_=logical_length_=raw_length_;
+            track_label_=compressed_->label();
+        }
     }
 public:
     explicit Source(const std::filesystem::path& p, std::optional<std::size_t> requested = std::nullopt) {
@@ -191,13 +202,20 @@ public:
         }
         require(!requested || *requested==0,"track index is unsupported for bare image");
         open_image(p);
+        if(compressed_) {
+            require(candidate(2048,0,0,0) || candidate_udf(2048,0,0,0),
+                    "CSO/ZSO does not contain a recognized ISO or UDF filesystem");
+            return;
+        }
         // Only select a raw layout after seeing a valid ISO PVD and raw sync/mode.
         // A no-header 2048 image is left unchanged so that UDF anchors still work.
         if(candidate(2048,0,0,0))return;
         for(const auto leading: {0u,150u}) {
             for(const auto layout: {
                     std::array<std::uint32_t,3>{2352,16,1},
+                    std::array<std::uint32_t,3>{2448,16,1},
                     std::array<std::uint32_t,3>{2352,24,2},
+                    std::array<std::uint32_t,3>{2448,24,2},
                     std::array<std::uint32_t,3>{2336,8,2},
                     std::array<std::uint32_t,3>{2048,0,0}}) {
                 if(leading==0 && layout[0]==2048)continue;
@@ -234,7 +252,7 @@ public:
             const auto inside=static_cast<std::size_t>(logical%2048);
             const auto count=std::min<std::size_t>(n-copied,2048-inside);
             const auto physical=raw_base_+(std::uint64_t(leading_sectors_)+sector)*physical_sector_;
-            if(physical_sector_==2352) {
+            if(physical_sector_==2352 || physical_sector_==2448) {
                 auto h=raw_read(physical,mode_==1?16:24);
                 require(h[0]==0 && h[11]==0 && h[15]==mode_,"raw sector mode mismatch");
                 for(int i=1;i<=10;i++)require(h[i]==0xff,"raw CD sector sync invalid");
