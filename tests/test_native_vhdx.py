@@ -62,7 +62,8 @@ def run(executable: pathlib.Path, *args: object, ok: bool = True) -> bytes:
     return proc.stdout
 
 
-def make_header(seq: int = 2, dirty: bool = False) -> bytearray:
+def make_header(seq: int = 2, dirty: bool = False,
+                log_offset: int = MIB) -> bytearray:
     header = bytearray(4096)
     header[0:4] = b"head"
     struct.pack_into("<Q", header, 8, seq)
@@ -73,7 +74,7 @@ def make_header(seq: int = 2, dirty: bool = False) -> bytearray:
     struct.pack_into("<H", header, 64, 0)  # LogVersion
     struct.pack_into("<H", header, 66, 1)  # Version
     struct.pack_into("<I", header, 68, MIB)
-    struct.pack_into("<Q", header, 72, MIB)
+    struct.pack_into("<Q", header, 72, log_offset)
     seal(header)
     return header
 
@@ -214,13 +215,18 @@ def main(partition_inspector: pathlib.Path,
         changed[HEADER_A:HEADER_A + len(header)] = header
         invalid_samples["dirty-log"] = changed
         changed = bytearray(fixed)
+        changed[HEADER_A:HEADER_A + 4096] = make_header(2, log_offset=PAYLOAD)
+        changed[HEADER_B:HEADER_B + 4096] = make_header(1, log_offset=PAYLOAD)
+        invalid_samples["payload-overlaps-log"] = changed
+        changed = bytearray(fixed)
         changed[METADATA + 32:METADATA + 48] = b"X" * 16
         invalid_samples["unknown-required-metadata"] = changed
 
         for name, sample in invalid_samples.items():
             write(corrupted_path, sample)
             # BAT damage may be discovered only when a mapped block is read.
-            if name in ("partial-block", "reserved-bat", "out-of-bounds-payload"):
+            if name in ("partial-block", "reserved-bat", "out-of-bounds-payload",
+                        "payload-overlaps-log"):
                 run(reader_test, corrupted_path, 0, 512, 0, ok=False)
             else:
                 run(partition_inspector, corrupted_path, ok=False)
