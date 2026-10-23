@@ -59,8 +59,7 @@ endif()
 # bzip2 ISZ support: compiled statically for all platforms.
 # Pin official 1.0.8 source by digest; do not ship DLLs or EXEs.
 include(FetchContent)
-if(TRUE)
-  FetchContent_Declare(iso_wcx_bzip2
+FetchContent_Declare(iso_wcx_bzip2
     URL https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz
     URL_HASH SHA256=ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269)
   FetchContent_GetProperties(iso_wcx_bzip2)
@@ -76,8 +75,7 @@ if(TRUE)
     "${iso_wcx_bzip2_SOURCE_DIR}/decompress.c"
     "${iso_wcx_bzip2_SOURCE_DIR}/bzlib.c")
   target_include_directories(iso_wcx_bzip2 PUBLIC "${iso_wcx_bzip2_SOURCE_DIR}")
-  set(ISO_WCX_BZIP2_TARGET iso_wcx_bzip2)
-endif()
+set(ISO_WCX_BZIP2_TARGET iso_wcx_bzip2)
 
 include(CTest)
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
