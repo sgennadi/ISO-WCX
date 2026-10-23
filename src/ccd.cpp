@@ -125,7 +125,7 @@ std::vector<ImageTrack> ccd_data_tracks(const std::filesystem::path& descriptor)
     check(has_header&&has_disc&&version&&*version==3,
           "unsupported CloneCD format version");
     check(sessions&&*sessions==1,"multisession CloneCD not yet supported");
-    check(scrambled&&*scrambled==0,"scrambled CloneCD data not supported");
+    check(scrambled&&*scrambled<=1,"invalid CloneCD scrambled flag");
     check(!parsed.empty(),"CloneCD descriptor has no tracks");
     const auto img=sidecar(descriptor);
     const auto bytes=std::filesystem::file_size(img);
@@ -152,7 +152,7 @@ std::vector<ImageTrack> ccd_data_tracks(const std::filesystem::path& descriptor)
         if(*t.mode==0)continue; // CD-DA is handled separately from filesystem tracks.
         tracks.push_back({img,start*physical,end*physical,2352,
                           *t.mode==1?16u:24u,static_cast<std::uint8_t>(*t.mode),
-                          0,t.number,"CloneCD track "+std::to_string(t.number)});
+                          0,t.number,"CloneCD track "+std::to_string(t.number),*scrambled!=0});
     }
     check(!tracks.empty(),"CloneCD has no supported data tracks");
     return tracks;
