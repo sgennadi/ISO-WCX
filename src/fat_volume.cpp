@@ -408,28 +408,38 @@ void FatVolume::extract(std::string_view path, std::ostream& output) {
     auto remaining = iter->size;
     if (!remaining) return;
 
-    std::unordered_set<std::uint32_t> visited;
+    // Validate the *entire* chain before emitting data. This avoids writing
+    // partial files when a FAT table contains a cycle, bad marker, or short
+    // chain; no untrusted path is ever created by this library.
     const auto needed_clusters = (remaining + cluster_bytes_ - 1) / cluster_bytes_;
     require(needed_clusters <= total_clusters_ && needed_clusters <= 1000000,
             "FAT file chain exceeds available clusters or safety limit");
+    std::vector<std::uint32_t> chain;
+    chain.reserve(static_cast<std::size_t>(needed_clusters));
+    std::unordered_set<std::uint32_t> visited;
     auto cluster = iter->first_cluster;
-    while (remaining) {
+    for (std::uint64_t i = 0; i < needed_clusters; ++i) {
         require(visited.insert(cluster).second, "cyclic FAT file chain");
+        chain.push_back(cluster);
+        const auto next = next_cluster(cluster);
+        if (i + 1 == needed_clusters) {
+            require(next == UINT32_MAX,
+                    "FAT file chain contains extra allocated clusters");
+        } else {
+            require(next != UINT32_MAX, "truncated FAT file chain");
+            cluster = next;
+        }
+    }
+    for (const auto allocated_cluster : chain) {
         const auto n = static_cast<std::size_t>(
             std::min<std::uint64_t>(remaining, cluster_bytes_));
-        const auto data = volume_read(cluster_offset(cluster), n);
+        const auto data = volume_read(cluster_offset(allocated_cluster), n);
         output.write(reinterpret_cast<const char*>(data.data()),
                      static_cast<std::streamsize>(data.size()));
         require(static_cast<bool>(output), "cannot write extracted FAT file");
         remaining -= n;
-        if (remaining) {
-            cluster = next_cluster(cluster);
-            require(cluster != UINT32_MAX, "truncated FAT file chain");
-        } else {
-            require(next_cluster(cluster) == UINT32_MAX,
-                    "FAT file chain has unexpected extra allocated clusters");
-        }
     }
+    require(remaining == 0, "FAT extraction length mismatch");
 }
 
 } // namespace iso_wcx
