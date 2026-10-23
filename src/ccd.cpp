@@ -142,7 +142,7 @@ std::vector<ImageTrack> ccd_data_tracks(const std::filesystem::path& descriptor)
         std::uint64_t end=total;
         if(i+1<parsed.size()) {
             const auto& following=parsed[i+1];
-            check(following.index1,"missing next CloneCD INDEX 1");
+            check(following.index1.has_value(),"missing next CloneCD INDEX 1");
             if(following.index0)check(*following.index0<=*following.index1,
                                       "invalid CloneCD INDEX 0");
             end=following.index0?*following.index0:*following.index1;
