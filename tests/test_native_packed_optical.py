@@ -193,7 +193,8 @@ def wcx_check(plugin: pathlib.Path, source: pathlib.Path,
     assert extracted and output.read_bytes() == b"world", source
 
 
-def main(reader: pathlib.Path, plugin: pathlib.Path | None = None) -> None:
+def main(reader: pathlib.Path, plugin: pathlib.Path | None = None,
+         probe: pathlib.Path | None = None) -> None:
     raw = test_images.iso_image()
     assert len(raw) % SECTOR == 0
     with tempfile.TemporaryDirectory(prefix="iso-wcx-packed-") as td:
@@ -206,9 +207,18 @@ def main(reader: pathlib.Path, plugin: pathlib.Path | None = None) -> None:
             source = root / ("working" + extension)
             invoke(reader, source, good)
             if plugin is not None:
-                wcx_check(plugin, source,
-                          root / ("native-" + extension[1:] + ".txt"), "HELLO.TXT")
-            mutations = [good[:32], good[:-100],
+                native_output = root / ("native-" + extension[1:] + ".txt")
+                if probe is None:
+                    wcx_check(plugin, source, native_output, "HELLO.TXT")
+                else:
+                    command = subprocess.run(
+                        [str(probe), str(plugin), str(source), str(native_output)],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        timeout=45, check=False)
+                    assert command.returncode == 0, (
+                        extension, command.returncode, command.stderr)
+                    assert native_output.read_bytes() == b"world"
+            mutations = [good[:32], good[:len(good)//2],
                          b"\0\0\0\0" + good[4:]]
             if extension == ".isz":
                 damage = bytearray(good)
@@ -245,5 +255,5 @@ def main(reader: pathlib.Path, plugin: pathlib.Path | None = None) -> None:
 
 if __name__ == "__main__":
     args = [pathlib.Path(arg).resolve() for arg in sys.argv[1:]]
-    assert len(args) in (1, 2)
+    assert len(args) in (1, 2, 3)
     main(*args)
