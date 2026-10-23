@@ -37,3 +37,20 @@ Total Commander (x64 должен видеть WCX64) и DLL зависимос�
 
 Исходный код: https://github.com/sgennadi/ISO-WCX
 Справка: https://www.ghisler.ch/wiki/index.php/Plugins_Automated_Installation
+
+АВТОМАТИЧЕСКОЕ ИСПРАВЛЕНИЕ (НЕОБЯЗАТЕЛЬНО):
+1. Закройте все окна Total Commander.
+2. В каталоге установленного ISO-WCX запустите Repair-ISO-WCX.cmd.
+3. Сначала утилита показывает предварительный список изменений, не записывая INI.
+4. Подтвердите Y только если показан старый путь ISO\\iso.wcx.
+5. Скрипт создаст резервную копию wincmd.ini.iso-wcx-backup-ДАТА.
+6. Снова запустите Total Commander и откройте ISO через Ctrl+PgDn.
+
+По умолчанию изменяется только регистрация .iso, и только если она
+указывает на ISO\\iso.wcx / ISO-WCX или вообще отсутствует. Другие
+плагины не затрагиваются. Скрипт проверяет архитектуру обеих DLL.
+Если wincmd.ini не найден автоматически, используйте PowerShell:
+  .\\Repair-ISO-WCX.ps1 -IniPath "ПОЛНЫЙ_ПУТЬ_К_wincmd.ini"
+Для записи используйте ту же команду с -Apply.
+Сначала закройте Total Commander. Для остальных расширений опционально
+добавьте -IncludeOtherExtensions; чужие ассоциации сохраняются.
