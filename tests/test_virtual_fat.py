@@ -217,7 +217,8 @@ def main(executable: pathlib.Path) -> None:
             build_disk(bad, kind, directory_cycle=True)
             run(executable, "list", bad, "1", success=False)
             build_disk(bad, kind, chain_error=True)
-            run(executable, "cat", bad, "1", "README.TXT", success=False)
+            assert run(executable, "cat", bad, "1", "README.TXT",
+                       success=False).stdout == b"", "corrupt chain leaked partial file data"
             # A truncated chain may not silently return a shortened file.
             build_disk(bad, kind)
             with bad.open("r+b") as broken:
@@ -229,7 +230,8 @@ def main(executable: pathlib.Path) -> None:
                         {"fat12": 0xFFF, "fat16": 0xFFFF, "fat32": 0x0FFFFFFF}[kind])
                 broken.seek(fat_position)
                 broken.write(table)
-            run(executable, "cat", bad, "1", "README.TXT", success=False)
+            assert run(executable, "cat", bad, "1", "README.TXT",
+                       success=False).stdout == b"", "corrupt chain leaked partial file data"
             # FAT reserved markers must never be followed as data clusters.
             with bad.open("r+b") as broken:
                 broken.seek(fat_position)
@@ -238,7 +240,8 @@ def main(executable: pathlib.Path) -> None:
                         {"fat12": 0xFF0, "fat16": 0xFFF0, "fat32": 0x0FFFFFF0}[kind])
                 broken.seek(fat_position)
                 broken.write(table)
-            run(executable, "cat", bad, "1", "README.TXT", success=False)
+            assert run(executable, "cat", bad, "1", "README.TXT",
+                       success=False).stdout == b"", "corrupt chain leaked partial file data"
             build_disk(bad, kind, bad_name=True)
             out = run(executable, "list", bad, "1").stdout.decode("utf-8")
             assert "Long Filename.txt" not in out and "LONGNA~1.TXT" in out, out
