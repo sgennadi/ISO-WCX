@@ -2,6 +2,22 @@
 
 **ISO-WCX v0.12.1 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
 
+## Recover a missing old `iso.wcx` registration
+
+If Total Commander 64-bit says it cannot load
+`...\\plugins\\wcx\\ISO\\iso.wcx`, that **legacy** association is
+unrelated to the new `ISO-WCX.wcx64` DLL. Reinstalling the new plugin
+alone does not delete entries previously registered in `wincmd.ini`.
+The supported fix is to remove the old association under
+Configuration → Options → Packer → Configure packer extension WCXs
+and register `plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx` (the adjacent
+`.wcx64` is selected automatically by 64-bit TC).
+
+The installer also includes **Repair-ISO-WCX.cmd** and
+**Repair-ISO-WCX.ps1** for an *opt-in*, read-only-preview-first repair.
+Close TC before applying; the script preserves an INI backup and does
+not replace unrelated plugin registrations. See [INSTALL_RU.txt](INSTALL_RU.txt).
+
 ## Preview installation
 
 1. Open [WCX preview CI builds](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml) and select a successful workflow run.
