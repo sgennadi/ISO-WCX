@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.7.0 LANGUAGES CXX)
+project(ISO_WCX VERSION 0.9.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp)
+add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/legacy_formats.cpp)
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_disc PUBLIC cxx_std_20)
 if(MSVC)
@@ -40,6 +40,12 @@ if(WIN32)
 endif()
 
 if(BUILD_TESTING)
+  add_executable(legacy_timestamp_tests tests/legacy_timestamps.cpp)
+  target_link_libraries(legacy_timestamp_tests PRIVATE iso_disc)
+  add_test(NAME legacy_timestamp_encoding COMMAND legacy_timestamp_tests)
+  add_executable(copy_transaction_tests tests/copy_transaction.cpp)
+  target_link_libraries(copy_transaction_tests PRIVATE iso_disc)
+  add_test(NAME copy_transaction_rollback COMMAND copy_transaction_tests)
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
     add_test(NAME cue_track_smoke
@@ -53,6 +59,8 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME disc_compatibility_v070
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compat_v070.py" "$<TARGET_FILE:disc_inspect>")
+    add_test(NAME legacy_boot_xbox_smoke
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_legacy_formats.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME iso_udf_image_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_images.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME disc_descriptor_mutations
