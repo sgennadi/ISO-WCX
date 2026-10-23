@@ -1,8 +1,45 @@
 cmake_minimum_required(VERSION 3.21)
 project(ISO_WCX VERSION 0.12.1 LANGUAGES C CXX)
-set(CMAKE_CXX_STANDARD 20)
+
+# Keep the released WCX ABI on its tested C++20 toolchain. The C++26 lane
+# exercises *exactly the same sources and tests*, without changing artifacts.
+set(ISO_WCX_CXX_STANDARD "20" CACHE STRING "ISO-WCX C++ standard: 20 or experimental 26")
+set_property(CACHE ISO_WCX_CXX_STANDARD PROPERTY STRINGS 20 26)
+if(NOT ISO_WCX_CXX_STANDARD MATCHES "^(20|26)$")
+  message(FATAL_ERROR "ISO_WCX_CXX_STANDARD must be 20 or 26")
+endif()
+if(ISO_WCX_CXX_STANDARD STREQUAL "26" AND CMAKE_VERSION VERSION_LESS 3.25)
+  message(FATAL_ERROR "The experimental C++26 lane requires CMake 3.25 or newer")
+endif()
+set(CMAKE_CXX_STANDARD ${ISO_WCX_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(ISO_WCX_CXX_STANDARD STREQUAL "26")
+  # CMake/Clang/MSVC support for C++26 is still evolving. Explicit flags avoid
+  # quietly compiling in C++23 via CMake's standard-level fallback.
+  if(MSVC)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++latest>")
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-std=c++26>")
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-std=c++2c>")
+  else()
+    message(FATAL_ERROR "C++26 has not been validated for this compiler")
+  endif()
+  if(NOT MSVC)
+    include(CheckCXXSourceCompiles)
+    check_cxx_source_compiles("
+      #if __cplusplus < 202400L
+      #error Compiler is not in experimental C++26 mode
+      #endif
+      int main() { return 0; }" ISO_WCX_HAS_REAL_CXX26_MODE)
+    if(NOT ISO_WCX_HAS_REAL_CXX26_MODE)
+      message(FATAL_ERROR "C++26 dialect check failed; refusing to silently fall back")
+    endif()
+  endif()
+  message(STATUS "ISO-WCX experimental C++26 dialect enabled (not a release ABI change)")
+endif()
 
 # The Windows builder uses a pinned static zlib, so WCX does not depend on an
 # external DLL. Linux uses the system package when it is available.
