@@ -104,3 +104,18 @@ The roadmap still includes *MDS v2, MDX, ISZ, DAA, CHD, DMG, ECM, GZ/XZ and CD-A
 - Read CloneCD P-W Q position frames with both deinterleaved and interleaved decoders; validate the CD CRC16 checksum before interpreting track/index or MSF timestamps.
 - Export a bounded, read-only `subchannels/q-index.csv` listing CRC-valid Q observations, while preserving `subchannels/disc.sub` byte-for-byte.
 - Correct contradictory older CloneCD negative test fixtures and add C++20 Q-channel unit tests. CD-Text, encrypted formats and full protection handling remain unsupported.
+
+### Experimental virtual hard-disk partition inspector
+
+An **independent CLI**, `virtual_partition_inspect`, now reads MBR and GPT
+partition tables from raw HDD `.img` files (512/4096-byte logical sectors).
+It checks GPT CRC32, partition bounds and overlaps. For example:
+
+    virtual_partition_inspect C:\Images\disk.img
+    virtual_partition_inspect C:\Images\disk-4k.img 4096
+
+This is **not yet a WCX archive reader** and does not open VHD/VMDK or NTFS
+files. The optical ISO/BIN `.img` path is unchanged. See
+[virtual disk architecture](docs/virtual-disks.md), informed by
+[TalAloni/DiskAccessLibrary](https://github.com/TalAloni/DiskAccessLibrary)
+(LGPL-3.0-or-later; no source copied or linked).
