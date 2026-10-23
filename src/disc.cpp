@@ -1,4 +1,5 @@
 #include "iso_wcx/disc.hpp"
+#include "iso_wcx/rock_ridge.hpp"
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -118,11 +119,28 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
         if(b[0]==2 && b[88]=='%' && b[89]=='/' && (b[90]=='@'||b[90]=='C'||b[90]=='E'))alternative=b;
         if(b[0]==255)break;
     }
-    bool joliet=!alternative.empty();
+    // The root '.' entry advertises Rock Ridge through SUSP SP. When both
+    // Rock Ridge and Joliet are present, prefer RRIP's original POSIX names.
+    std::optional<std::uint8_t> rr_skip;
+    if(!primary.empty()) {
+        auto pvd_root=record(primary,156,false);
+        if((pvd_root.flags&2) && pvd_root.size>=34) {
+            auto first=src.read(std::uint64_t(pvd_root.lba)*iso_sector,
+                                std::min<std::uint32_t>(pvd_root.size,2048));
+            if(first[0]>=34 && first[0]<=first.size()) {
+                auto dot=std::span<const std::uint8_t>(first.data(),first[0]);
+                auto sp=rock_ridge_skip(dot);
+                if(sp && rock_ridge_entry(dot,*sp,[&](std::uint64_t offset,std::size_t n) {
+                    return src.read(offset,n);
+                }).extension)rr_skip=sp;
+            }
+        }
+    }
+    bool joliet=!alternative.empty() && !rr_skip.has_value();
     require(joliet||!primary.empty(),"no ISO volume descriptor");
     const auto& volume=joliet?alternative:primary;
     auto root=record(volume,156,joliet);require(root.flags&2,"ISO root is not a directory");
-    format=joliet?"Joliet":"ISO 9660";
+    format=rr_skip?"Rock Ridge":(joliet?"Joliet":"ISO 9660");
     std::vector<Item> out;
     std::set<std::pair<std::uint32_t,std::uint32_t>> active;
     auto walk=[&](auto&& self,const IsoRecord& dir,const std::string& base,unsigned depth)->void {
@@ -136,8 +154,20 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
             if(data[p]==0) {p+=iso_sector-(p%iso_sector);continue;}
             auto length=data[p];
             require(length>=34 && length<=data.size()-p && length<=iso_sector-(p%iso_sector),"invalid ISO record length");
-            auto r=record(data,p,joliet);p+=length;
-            if(r.name==".")continue;
+            auto r=record(data,p,joliet);
+            if(r.name==".") {p+=length;continue;}
+            if(rr_skip) {
+                const auto rr=rock_ridge_entry(
+                    std::span<const std::uint8_t>(data.data()+p,length),*rr_skip,
+                    [&](std::uint64_t offset,std::size_t size){return src.read(offset,size);});
+                // Never traverse a link on the host. A relocated child (CL)
+                // needs directory-structure rewriting; fail instead of silently
+                // listing the wrong files. RE entries are duplicate placeholders.
+                if(rr.relocated || rr.symlink) {p+=length;continue;}
+                require(!rr.child_link,"Rock Ridge relocated directories not yet supported");
+                if(rr.alternate_name) {r.name=*rr.alternate_name;safe_name(r.name);}
+            }
+            p+=length;
             Item item;item.path=base+r.name;item.directory=bool(r.flags&2);item.size=item.directory?0:r.size;
             if(!item.directory)item.extents.push_back({std::uint64_t(r.lba)*iso_sector,r.size,false});
             if(!pending_multiextent.empty()) {
@@ -225,19 +255,46 @@ class Udf {
             return result;
         }
         require(mode==0||mode==1,"unsupported UDF allocation descriptor type");
-        std::size_t step=mode==0?8:16;
+        const std::size_t step=mode==0?8:16;
         require(ads%step==0,"truncated UDF allocation descriptors");
         std::uint64_t remain=result.size;
-        for(std::size_t p=begin;p<begin+ads && remain;p+=step) {
-            auto raw=u32(b,p);
-            auto length=std::uint64_t(raw&0x3fffffffu);
-            auto kind=raw>>30;
-            require(kind!=3,"UDF allocation extent continuation unsupported");
-            auto chunk=std::min(length,remain);
+        std::set<std::pair<std::uint16_t,std::uint32_t>> followed;
+        Bytes continuation;
+        const Bytes* current=&b;
+        std::size_t pos=begin, end=begin+ads;
+        unsigned redirects=0;
+        while(remain && pos<end) {
+            const auto raw=u32(*current,pos);
+            const auto length=std::uint64_t(raw&0x3fffffffu);
+            const auto kind=raw>>30;
+            auto current_map=mode==0?map:u16(*current,pos+8);
+            auto current_lba=u32(*current,pos+4);
+            pos+=step;
+            if(kind==3) {
+                // ECMA-167 Allocation Extent Descriptor (tag 258). Continuation
+                // descriptors do not themselves account for file contents.
+                require(pos==end,"UDF allocation continuation must be last descriptor");
+                require(++redirects<=64 && length>=24 && length<=max_directory,
+                        "invalid UDF allocation continuation size");
+                require(followed.insert({current_map,current_lba}).second,
+                        "cyclic UDF allocation continuation");
+                continuation=src_.read(address(current_lba,current_map,length),
+                                        static_cast<std::size_t>(length));
+                check_tag(continuation,0,258);
+                const auto continuation_ads=u32(continuation,20);
+                require(continuation_ads>0 && continuation_ads%step==0 &&
+                        continuation_ads<=continuation.size()-24,
+                        "invalid UDF allocation extent descriptor length");
+                current=&continuation;
+                pos=24;
+                end=24+continuation_ads;
+                continue;
+            }
+            const auto chunk=std::min(length,remain);
             if(!chunk)continue;
-            bool sparse=kind!=0;
+            const bool sparse=kind!=0;
             std::uint64_t offset=0;
-            if(!sparse)offset=address(u32(b,p+4),mode==0?map:u16(b,p+8),chunk);
+            if(!sparse)offset=address(current_lba,current_map,chunk);
             result.extents.push_back({offset,chunk,sparse});
             remain-=chunk;
         }
