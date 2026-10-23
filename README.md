@@ -112,15 +112,16 @@ The roadmap still includes *MDS v2, MDX, ISZ, DAA, CHD, DMG, ECM, GZ/XZ and CD-A
 
 ### Experimental virtual hard-disk partition inspector
 
-An **independent CLI**, `virtual_partition_inspect`, now reads MBR and GPT
-partition tables from raw HDD `.img` files (512/4096-byte logical sectors).
+An **independent CLI**, `virtual_partition_inspect`, reads primary MBR,
+linked extended MBR (EBR), and GPT partition tables from raw HDD `.img` and
+fixed VHD images (512/4096-byte logical sectors).
 It checks GPT CRC32, partition bounds and overlaps. For example:
 
     virtual_partition_inspect C:\Images\disk.img
     virtual_partition_inspect C:\Images\disk-4k.img 4096
 
-This is **not yet a WCX archive reader** and does not open VHD/VMDK or NTFS
-files. The optical ISO/BIN `.img` path is unchanged. See
+This is **not yet a WCX archive reader** and cannot extract files from
+NTFS/FAT/ext partitions. The optical ISO/BIN `.img` path is unchanged. See
 [virtual disk architecture](docs/virtual-disks.md), informed by
 [TalAloni/DiskAccessLibrary](https://github.com/TalAloni/DiskAccessLibrary)
 (LGPL-3.0-or-later; no source copied or linked).
@@ -133,14 +134,16 @@ For developers, `-DISO_WCX_CXX_STANDARD=26` enables a separate, checked
 experimental **C++26** compilation lane (GCC 14 and Clang 19 in GitHub Actions)
 without changing the Total Commander ABI or release package.
 
-The isolated `virtual_partition_inspect` tool can now parse MBR/GPT in
+The isolated `virtual_partition_inspect` tool can now parse MBR/EBR/GPT in
 both raw HDD IMG and **fixed-size VHD v1** files. Fixed VHD validation includes
 the EOF footer signature, one's-complement checksum, format version, disk type,
-and exact logical size. No VHD data is written or mounted. The tool does not
-open dynamic/differencing VHD, VHDX or VMDK yet, and this feature is not
-exposed by the WCX plugin until filesystem readers and real-image tests exist.
+and exact logical size. No VHD data is written or mounted. Dynamic VHD/VHDX
+can be investigated via **optional Linux-only libvhdi**; Windows WCX does not
+link it. Differencing VHD and VMDK are not implemented. Filesystem extraction
+is not exposed until verified image and filesystem readers are available.
 
-We evaluated [libyal/libvhdi](https://github.com/libyal/libvhdi) as a native
-C candidate for future read-only dynamic VHD/VHDX support. It is alpha and
-LGPL-3.0-or-later; ISO-WCX does not currently bundle or link it. See
-[virtual disk design and limitations](docs/virtual-disks.md).
+We evaluated [libyal/libvhdi](https://github.com/libyal/libvhdi), an alpha
+LGPL-3.0-or-later C library. The Linux research build may link a separately
+installed libvhdi with `-DISO_WCX_WITH_LIBVHDI=ON`; it is never included in
+Windows WCX packages. See [virtual disk design](docs/virtual-disks.md) and
+[our 7-Zip source architecture study](docs/7zip-disk-formats.md).
