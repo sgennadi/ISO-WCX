@@ -89,6 +89,82 @@ def udf_bad_crc_image():
     image[256*B+4] = sum(image[256*B+i] for i in range(16) if i!=4)&255
     return image
 
+
+def rr_susp(sig, payload=b''):
+    assert len(payload) <= 251
+    return sig + bytes([4+len(payload),1]) + payload
+
+def rr_iso_record(lba,size,flags,name,susp=b''):
+    result=iso_record(lba,size,flags,name)
+    assert len(result)+len(susp)<=255
+    result.extend(susp)
+    result[0]=len(result)
+    return result
+
+def rr_image(ce=False, symlink=False, malformed_ce=False, joliet=False):
+    image=iso_image(joliet=joliet)
+    # SP enables SUSP; ER explicitly advertises the RRIP_1991A extension.
+    sp=rr_susp(b'SP',b'\xbe\xef\0')
+    er=rr_susp(b'ER',bytes([10,0,0,1])+b'RRIP_1991A')
+    dot=rr_iso_record(20,B,2,b'\0',sp+er)
+    parent=rr_iso_record(20,B,2,b'\1')
+    file_nm=rr_susp(b'NM',b'\0readme-linux.txt')
+    if ce:
+        # Resolve the complete NM name from a separate continuation area.
+        continued=rr_susp(b'NM',b'\1readme-')+rr_susp(b'NM',b'\0linux.txt')
+        image[23*B:23*B+len(continued)]=continued
+        block=23 if not malformed_ce else 50000
+        ce_data=(block.to_bytes(4,'little')+block.to_bytes(4,'big')+
+                 (0).to_bytes(8,'little')+len(continued).to_bytes(4,'little')+
+                 len(continued).to_bytes(4,'big'))
+        # CE fields: each 4-byte integer stored as 8-byte both-endian.
+        file_nm=rr_susp(b'CE',ce_data)
+    file_record=rr_iso_record(21,5,0,b'README.TXT;1',file_nm)
+    body=dot+parent+file_record
+    if symlink:
+        link_record=rr_iso_record(21,5,0,b'LINK.TXT;1',
+                                  rr_susp(b'NM',b'\0symlink')+
+                                  rr_susp(b'SL',b'\0'))
+        body+=link_record
+    image[20*B:21*B]=bytes(B)
+    image[20*B:20*B+len(body)]=body
+    return image
+
+def udf_allocation_continuation(cyclic=False, damaged_crc=False):
+    image=udf_image()
+    # Inline five-byte file is replaced with a short AD which references an AED.
+    fe=302*B
+    p16(image,fe+34,0) # short allocation descriptors
+    p32(image,fe+172,8)
+    p32(image,fe+176,(3<<30)|B)
+    p32(image,fe+180,10) # Partition starts at block 300.
+    image[fe+4] = sum(image[fe+i] for i in range(16) if i!=4)&255
+    aed=310*B
+    p16(image,aed+0,258);p16(image,aed+2,2)
+    p32(image,aed+12,310)
+    p32(image,aed+20,8)
+    p32(image,aed+24,(3<<30)|B if cyclic else 5)
+    p32(image,aed+28,10 if cyclic else 12)
+    if damaged_crc:
+        p16(image,aed+10,8)
+        p16(image,aed+8,0x1234)
+    image[aed+4]=sum(image[aed+i] for i in range(16) if i!=4)&255
+    image[312*B:312*B+5]=b'world'
+    return image
+
+def run_rock_ridge(exe,image,fail=False):
+    with tempfile.TemporaryDirectory() as tmp:
+        src=pathlib.Path(tmp)/'rr.iso';src.write_bytes(image)
+        dst=pathlib.Path(tmp)/'output'
+        proc=subprocess.run([exe,str(src),'--extract',str(dst)],capture_output=True,text=True,encoding='utf-8')
+        if fail:
+            assert proc.returncode!=0,(proc.returncode,proc.stdout,proc.stderr)
+        else:
+            assert proc.returncode==0,(proc.returncode,proc.stdout,proc.stderr)
+            assert (dst/'readme-linux.txt').read_bytes()==b'world',(proc.stdout,proc.stderr)
+            assert 'Rock Ridge' in proc.stdout,proc.stdout
+            assert not (dst/'symlink').exists(),'Rock Ridge symlinks must not be materialized'
+
 def run(exe,image,name,expected,fail=False):
     with tempfile.TemporaryDirectory() as tmp:
         src=pathlib.Path(tmp)/'test.iso';src.write_bytes(image)
@@ -108,6 +184,13 @@ if __name__=='__main__':
     run(binary,udf_image(),'hello',b'world')
     run(binary,iso_multiextent_image(),'SPLIT.BIN',b'world')
     run(binary,udf_bad_crc_image(),'ignored',b'',fail=True)
+    run(binary,udf_allocation_continuation(),'hello',b'world')
+    run(binary,udf_allocation_continuation(cyclic=True),'ignored',b'',fail=True)
+    run(binary,udf_allocation_continuation(damaged_crc=True),'ignored',b'',fail=True)
+    run_rock_ridge(binary,rr_image())
+    run_rock_ridge(binary,rr_image(ce=True))
+    run_rock_ridge(binary,rr_image(symlink=True,joliet=True))
+    run_rock_ridge(binary,rr_image(ce=True,malformed_ce=True),fail=True)
     run(binary,iso_image(filename='../FOO;1'),'ignored',b'',fail=True)
     run(binary,bytearray(12*B),'ignored',b'',fail=True)
-    print('PASS: ISO9660, Joliet Unicode, UDF Type-1, multi-extent and corrupt-image cases')
+    print('PASS: ISO9660, Joliet, Rock Ridge NM/CE, UDF Type-1/AED and invalid-image cases')
