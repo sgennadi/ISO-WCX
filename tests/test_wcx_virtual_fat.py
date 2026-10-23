@@ -38,25 +38,39 @@ def verify(executable: pathlib.Path, image: pathlib.Path, contents: dict[str, by
         assert target.read_bytes() == expected, (image, target)
 
 
-def main(executable: pathlib.Path) -> None:
+def main(executable: pathlib.Path, wcx_dll: pathlib.Path | None = None,
+         wcx_probe: pathlib.Path | None = None) -> None:
     with tempfile.TemporaryDirectory(prefix="iso-wcx-integrated-fat-") as directory:
         root = pathlib.Path(directory)
+
+        def check(image: pathlib.Path, expected: dict[str, bytes],
+                  output: pathlib.Path) -> None:
+            verify(executable, image, expected, output)
+            if wcx_dll is None or wcx_probe is None:
+                return
+            wcx_output = output.parent / (output.name + "-wcx")
+            wcx_output.mkdir(parents=True)
+            test = subprocess.run([str(wcx_probe), str(wcx_dll), str(image),
+                                   str(wcx_output)], capture_output=True,
+                                  timeout=90, check=False)
+            assert test.returncode == 0, (image, test.stderr)
+            assert (wcx_output / "README.TXT").read_bytes() == expected["README.TXT"]
         for kind in ("fat12", "fat16", "fat32"):
             raw = root / (kind + ".img")
             expected = build_disk(raw, kind)
-            verify(executable, raw, expected, root / ("extracted-" + kind))
+            check(raw, expected, root / ("extracted-" + kind))
             if kind == "fat16":
                 vhd = root / "fixed.vhd"
                 make_fixed_vhd(raw, vhd)
-                verify(executable, vhd, expected, root / "extracted-vhd")
+                check(vhd, expected, root / "extracted-vhd")
             if kind == "fat12":
                 raw_bytes = raw.read_bytes()
                 fixed = root / "fixed.vhdx"
                 dynamic = root / "dynamic.vhdx"
                 fixed.write_bytes(make_image(raw_bytes, fixed=True))
                 dynamic.write_bytes(make_image(raw_bytes, fixed=False))
-                verify(executable, fixed, expected, root / "extracted-vhdx")
-                verify(executable, dynamic, expected, root / "extracted-dynamic-vhdx")
+                check(fixed, expected, root / "extracted-vhdx")
+                check(dynamic, expected, root / "extracted-dynamic-vhdx")
 
         # A broken FAT file chain must not replace an existing destination,
         # and must leave no .iso-wcx staging file after the failed extraction.
@@ -74,4 +88,4 @@ def main(executable: pathlib.Path) -> None:
 
 
 if __name__ == "__main__":
-    main(pathlib.Path(sys.argv[1]).resolve())
+    main(*(pathlib.Path(p).resolve() for p in sys.argv[1:]))

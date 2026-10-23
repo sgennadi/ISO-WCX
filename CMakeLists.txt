@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.12.1 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.13.0 LANGUAGES C CXX)
 
 # Keep the released WCX ABI on its tested C++20 toolchain. The C++26 lane
 # exercises *exactly the same sources and tests*, without changing artifacts.
@@ -179,6 +179,7 @@ if(WIN32)
   set_target_properties(ISO-WCX PROPERTIES PREFIX "" SUFFIX "${WCX_SUFFIX}")
   if(BUILD_TESTING)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
+    add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()
 endif()
@@ -223,6 +224,13 @@ if(BUILD_TESTING)
     add_test(NAME integrated_virtual_disk_fat_wcx
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_fat.py" "$<TARGET_FILE:disc_inspect>")
     set_tests_properties(integrated_virtual_disk_fat_wcx PROPERTIES TIMEOUT 180)
+    if(WIN32)
+      add_test(NAME integrated_virtual_disk_fat_wcx_exports
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_fat.py"
+          "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:ISO-WCX>"
+          "$<TARGET_FILE:wcx_virtual_fat_smoke>")
+      set_tests_properties(integrated_virtual_disk_fat_wcx_exports PROPERTIES TIMEOUT 180)
+    endif()
     add_test(NAME iso_udf_image_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_images.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME disc_descriptor_mutations
