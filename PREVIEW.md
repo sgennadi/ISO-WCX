@@ -113,3 +113,14 @@ CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list
 - Handles normal CloneCD deinterleaved P12/Q12, with CRC-gated fallback for packed/interleaved P-W variants.
 - No R-W CD-Text, Q ADR=2/3 EAN/ISRC, proprietary protection semantics or CD-Audio in this update.
 - The report scans in constant memory with a one-million-sector limit; new WCX artifacts require successful Windows CI before release.
+
+## Safe Total Commander association repair utility
+
+The installable ZIP includes opt-in `Repair-ISO-WCX.cmd` and
+`Repair-ISO-WCX.ps1`, which only fix stale legacy `ISO\\iso.wcx`
+registrations (or update existing ISO-WCX registrations) in the exact
+`wincmd.ini` selected. Default run is read-only; `-Apply` requires
+Total Commander to be closed and backs up the original INI atomically.
+Both DLL PE architectures are validated first. Other packer plugins,
+legacy code-page bytes and extra INI sections are not changed.
+A Windows PowerShell integration test runs in GitHub Actions.
