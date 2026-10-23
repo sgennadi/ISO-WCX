@@ -5,7 +5,28 @@ If Total Commander shows "File iso.wcx not found!" or "Error, could
 not load plugin!" for ...\plugins\wcx\ISO\iso.wcx, it is attempting to load
 the LEGACY ISO.WCX plugin, not this ISO-WCX project.
 
-Optional safe automatic repair:
+Recommended: ISO-WCX-Setup.exe (native C++20, x86/x64)
+------------------------------------------------------
+1. Install the ISO-WCX-preview.zip using Total Commander pluginst.inf,
+   or extract the COMPLETE ZIP first.
+2. EXIT ALL Total Commander windows.
+3. Start ISO-WCX-Setup.exe from the installed plugin folder with
+   Windows Explorer (or the fully extracted ZIP folder).
+4. Setup validates the x86 WCX and x64 WCX64 pair, copies it if needed,
+   finds the active wincmd.ini and redirected sections, repairs missing
+   ISO\iso.wcx and stale ISO-WCX paths, and registers unassigned supported
+   extensions while preserving working third-party plugins. It backs up
+   affected INI files and invalidates the [PackerPlugins64] checksum.
+5. Restart Total Commander; open an ISO with Ctrl+PgDn.
+
+Options: --dry-run, --ini "C:\path\wincmd.ini", --tc-dir "C:\TotalCmd",
+--plugin-dir "D:\TCPlugins\wcx\ISO-WCX", --force-iso, --quiet.
+--force-iso explicitly replaces even a working ISO handler.
+Setup does not run automatically from pluginst.inf. Run it only after
+closing TC, under the same account. Windows Explorer file associations
+are not modified.
+
+Alternative opt-in CMD/PowerShell repair (legacy ISO mapping only):
 - Extract the entire ZIP first.
 - Run ISO-WCX-Repair.cmd for read-only detection.
 - Close ALL Total Commander windows.

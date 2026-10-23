@@ -9,7 +9,27 @@ ISO-WCX v0.12.1 Preview - исправление старой ассоциаци
   C:\Program Files\TotalCmd\plugins\wcx\ISO-WCX\ISO-WCX.wcx
   C:\Program Files\TotalCmd\plugins\wcx\ISO-WCX\ISO-WCX.wcx64
 
-Автоматическая проверка и безопасное исправление (НОВОЕ):
+Рекомендуемый способ: ISO-WCX-Setup.exe (C++20, x86/x64)
+---------------------------------------------------------
+1. Откройте ISO-WCX-preview.zip через Total Commander (pluginst.inf),
+   либо извлеките весь ZIP целиком.
+2. ПОЛНОСТЬЮ закройте все окна Total Commander.
+3. Из Windows Explorer запустите ISO-WCX-Setup.exe из каталога плагина
+   или из полностью распакованного ZIP.
+4. Setup проверяет x86 ISO-WCX.wcx и x64 ISO-WCX.wcx64, при необходимости
+   копирует их, находит активный wincmd.ini и RedirectSection, исправляет
+   отсутствующий ISO\iso.wcx, устаревшие записи ISO-WCX и неназначенные
+   поддерживаемые расширения. Рабочие сторонние плагины не заменяются.
+   До изменений создаётся backup INI, обновляется кеш [PackerPlugins64].
+5. Снова запустите TC и откройте ISO через Ctrl+PgDn.
+
+Параметры: --dry-run, --ini "C:\path\wincmd.ini", --tc-dir "C:\TotalCmd",
+--plugin-dir "D:\TCPlugins\wcx\ISO-WCX", --force-iso, --quiet.
+--force-iso принудительно переключает работающий обработчик ISO.
+Setup.exe не запускается автоматически из pluginst.inf. Используйте
+ту же Windows-учётную запись; ассоциации Windows Explorer не меняются.
+
+Альтернатива: PowerShell/CMD для ремонта только старой iso-записи:
 1. Извлеките ZIP целиком (не запускайте BAT внутри открытого ZIP).
 2. Запустите ISO-WCX-Repair.cmd. Это проверка БЕЗ изменений.
 3. Закройте все окна Total Commander.

@@ -7,6 +7,7 @@
 1. Open [WCX preview CI builds](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml) and select a successful workflow run.
 2. Download its **ISO-WCX-Installable-Preview** artifact, unzip that outer artifact, then open `ISO-WCX-preview.zip` in Total Commander.
 3. Total Commander installs `ISO-WCX.wcx64` (64-bit) or `ISO-WCX.wcx` (32-bit) using `pluginst.inf`.
+4. **Exit all Total Commander windows**, then run `ISO-WCX-Setup.exe` from the installed plugin directory using Windows Explorer. It installs/verifies both DLL architectures, backs up active settings and repairs WCX associations. Restart TC and open a test ISO with Ctrl+PgDn. The `pluginst.inf` installer cannot auto-run Setup.
 
 For details, compatibility notes and source build commands, see [PREVIEW.md](PREVIEW.md).
 
@@ -14,7 +15,9 @@ For details, compatibility notes and source build commands, see [PREVIEW.md](PRE
 
 If Total Commander shows **File iso.wcx not found!** or **Error, could not load plugin!** pointing to `...\\plugins\\wcx\\ISO\\iso.wcx`, the old ISO.WCX handler remains selected; installing the new DLL does not remove stale associations. Open **Configuration → Options → Packer → Configure packer extension WCXs**, select extension `iso`, delete **only** the old entry referencing the missing `ISO\\iso.wcx`, and use **New type...** to select `...\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx`. The 64-bit `ISO-WCX.wcx64` must be installed beside it. The leading `192,` is Total Commander's capability bitfield, not part of a filename. Restart Total Commander after changing the configuration.
 
-**Repair assistant:** the ZIP now includes `ISO-WCX-Repair.cmd` for read-only diagnosis, and `ISO-WCX-Repair-Apply.cmd` to repair the missing legacy ISO path *after explicitly typing YES and closing Total Commander*. It edits only the obsolete `iso=` mapping and creates a backup of `wincmd.ini`; it does not delete any unrelated plugin configuration. You can override the INI location with `ISO-WCX-Repair.ps1 -IniPath "..." -Apply`. Windows CI tests the dry run, rollback backup, BOM/CRLF preservation, correct targeting and refusal cases.
+**Native repair (recommended):** `ISO-WCX-Setup.exe` detects active `wincmd.ini` and any redirected plugin sections. It repairs missing/stale ISO-WCX paths and unassigned supported extensions while leaving existing working third-party plugins alone. For custom locations use `--ini`, `--tc-dir` or `--plugin-dir`; `--dry-run` inspects without changes, while `--force-iso` explicitly overrides even a valid ISO association. The helper is an x86 executable that also works on x64 Windows, and does not change Windows Explorer file associations.
+
+**Optional legacy-only PowerShell/CMD repair:** the ZIP now includes `ISO-WCX-Repair.cmd` for read-only diagnosis, and `ISO-WCX-Repair-Apply.cmd` to repair the missing legacy ISO path *after explicitly typing YES and closing Total Commander*. It edits only the obsolete `iso=` mapping and creates a backup of `wincmd.ini`; it does not delete any unrelated plugin configuration. You can override the INI location with `ISO-WCX-Repair.ps1 -IniPath "..." -Apply`. Windows CI tests the dry run, rollback backup, BOM/CRLF preservation, correct targeting and refusal cases.
 
 See [Russian repair instructions](INSTALL_RU.txt) or [English repair instructions](INSTALL_EN.txt).
 

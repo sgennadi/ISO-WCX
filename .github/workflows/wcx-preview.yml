@@ -3,12 +3,14 @@ on:
   push:
     branches:
       - main
-      - 'feature/**' 
+      - 'feature/**'
+      - 'fix/**'
   pull_request:
     paths:
       - 'src/**'
       - 'include/**'
       - 'tests/**'
+      - 'tools/**'
       - 'CMakeLists.txt'
       - '.github/workflows/wcx-preview.yml'
       - 'INSTALL_*.txt'
@@ -45,6 +47,7 @@ jobs:
           path: |
             build/Release/ISO-WCX.wcx
             build/Release/ISO-WCX.wcx64
+            build/Release/ISO-WCX-Setup.exe
           if-no-files-found: error
           retention-days: 14
   linux:
@@ -94,8 +97,9 @@ jobs:
         run: |
           test -s package/ISO-WCX.wcx
           test -s package/ISO-WCX.wcx64
+          test -s package/ISO-WCX-Setup.exe
           cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX-Repair.ps1 ISO-WCX-Repair.cmd ISO-WCX-Repair-Apply.cmd package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX-Repair.ps1 ISO-WCX-Repair.cmd ISO-WCX-Repair-Apply.cmd ISO-WCX.wcx ISO-WCX.wcx64)
+          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX-Repair.ps1 ISO-WCX-Repair.cmd ISO-WCX-Repair-Apply.cmd ISO-WCX.wcx ISO-WCX.wcx64 ISO-WCX-Setup.exe)
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v4
         with:
