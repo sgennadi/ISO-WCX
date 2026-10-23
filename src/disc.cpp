@@ -7,6 +7,7 @@
 #include "iso_wcx/mds_probe.hpp"
 #include "iso_wcx/rock_ridge.hpp"
 #include "iso_wcx/legacy_formats.hpp"
+#include "iso_wcx/virtual_archive.hpp"
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -16,6 +17,8 @@
 #include <set>
 #include <stdexcept>
 #include <cctype>
+#include <cwctype>
+#include <exception>
 #include <string_view>
 #include <random>
 #include <system_error>
@@ -1084,6 +1087,21 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
             "MDX recognized; encrypted/packed MDSv2 metadata and "
             "data-track extraction are not implemented in ISO-WCX");
     }
+    // Virtual HDD formats are served directly by the in-process FAT backend.
+    // Ambiguous .img files are handled by the optical reader first.
+    auto extension = image_.extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+    auto open_virtual = [&] {
+        auto archive = std::make_shared<VirtualArchive>(image_);
+        entries_ = archive->items();
+        format_ = archive->format();
+        virtual_archive_ = std::move(archive);
+    };
+    if(extension == L".vhd" || extension == L".vhdx" || extension == L".raw") {
+        open_virtual();
+        return;
+    }
     if(cue || nrg || mds || ccd) {
         const std::size_t count=cue?cue_data_tracks(image_).size():
             (nrg?nrg_data_tracks(image_).size():
@@ -1197,8 +1215,8 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
     if(entry.source_index!=0xffffffffu) track.emplace(entry.source_index);
     std::unique_ptr<Source> source;
     std::ifstream direct;
-    if(entry.direct_source.empty())source=std::make_unique<Source>(image_,track);
-    else {
+    if(!virtual_archive_ && entry.direct_source.empty())source=std::make_unique<Source>(image_,track);
+    else if(!virtual_archive_) {
         require(std::filesystem::is_regular_file(entry.direct_source) &&
                 !std::filesystem::is_symlink(entry.direct_source),
                 "unsafe raw CloneCD sidecar source");
@@ -1257,7 +1275,9 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
         written+=n;
         return !progress || progress(written);
     };
-    if(!entry.inline_data.empty()) {
+    if(virtual_archive_) {
+        if(!virtual_archive_->read(index,deliver))return false;
+    } else if(!entry.inline_data.empty()) {
         require(entry.inline_data.size()==entry.size,"invalid inline data length");
         if(!deliver(entry.inline_data.data(),entry.inline_data.size()))return false;
     } else {
