@@ -155,6 +155,8 @@ int main() {
         std::copy_n("vhdxfile",8,vhdx_bytes.begin());
         save(vhdx,vhdx_bytes);
         expect_failure(vhdx,vhdx_bytes);
+        // A renamed VHDX must not silently be parsed as a raw HDD image.
+        expect_failure(raw,vhdx_bytes);
 
         std::error_code ec;
         fs::remove_all(dir,ec);

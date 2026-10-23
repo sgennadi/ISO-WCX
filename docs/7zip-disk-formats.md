@@ -14,7 +14,7 @@ This is the architecture we are following in ISO-WCX:
 
 1. Container: VirtualDiskReader supplies bounded logical bytes. Raw HDD IMG
    and native fixed-size VHD are supported in the standalone inspector.
-   System libvhdi is a Linux-only experimental opt-in for dynamic VHD/VHDX.
+   No external virtual disk library is linked or loaded.
 2. Partitions: inspect_partition_table interprets GPT and MBR and now
    validates and follows bounded extended MBR (EBR) links.
 3. Filesystems: FAT12/16/32 standalone browser/extractor now implemented;
@@ -30,8 +30,8 @@ file signature and validated metadata.
 
 | Official 7-Zip source (CPP/7zip/Archive) | Key structure | ISO-WCX |
 | --- | --- | --- |
-| VhdHandler.cpp | VHD footer, BAT, bitmaps | Native fixed VHD, opt-in libvhdi dynamic |
-| VhdxHandler.cpp | CRC32C regions, metadata/BAT | Optional libvhdi research, not shipped |
+| VhdHandler.cpp | VHD footer, BAT, bitmaps | Native fixed VHD, dynamic VHD needs a future native BAT reader |
+| VhdxHandler.cpp | CRC32C regions, metadata/BAT | Native VHDX metadata and BAT reader not yet implemented |
 | VmdkHandler.cpp | Sparse grain mapping | Separate read-only implementation later |
 | QcowHandler.cpp | L1/L2 clusters and decompression | Separate read-only QCOW2 later |
 | VdiHandler.cpp | Block allocation maps | Separate read-only VDI later |
@@ -49,7 +49,7 @@ Read handlers at https://github.com/ip7z/7zip/tree/main/CPP/7zip/Archive.
 - ISO/UDF and optical disc images: existing WCX plugin, read-only.
 - Raw HDD IMG GPT/MBR and extended EBR, fixed VHD GPT/MBR:
   read-only CLI/library only, not registered as WCX archives.
-- Dynamic VHD/VHDX: research-only Linux system libvhdi optional backend.
+- Dynamic VHD/VHDX: unsupported until a separately verified native reader is available.
 - FAT12/16/32 file listing and extraction: available in separate CLI for
   partitioned raw IMG/fixed VHD, **not** registered in WCX.
 - VMDK/QCOW2/VDI and exFAT/NTFS/ext filesystems within virtual disks:
@@ -60,8 +60,8 @@ Read handlers at https://github.com/ip7z/7zip/tree/main/CPP/7zip/Archive.
 
 7-Zip DOC/License.txt (https://github.com/ip7z/7zip/blob/main/DOC/License.txt)
 states LGPL-2.1-or-later for most code, plus unRAR restrictions and BSD
-exceptions. libvhdi is LGPL-3.0-or-later. No 7-Zip source is copied, linked,
-vendored or distributed in ISO-WCX by this research. Any actual source reuse
+exceptions. No 7-Zip or libvhdi source is copied, linked, vendored or
+shipped by ISO-WCX. Any actual source reuse
 needs file-level provenance and compliance with the relevant license terms.
 
 ## CI and threat model
