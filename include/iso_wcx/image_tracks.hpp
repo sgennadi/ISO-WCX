@@ -20,8 +20,11 @@ struct ImageTrack {
 };
 [[nodiscard]] bool is_nrg_path(const std::filesystem::path& image);
 [[nodiscard]] bool is_mds_path(const std::filesystem::path& descriptor);
+[[nodiscard]] bool is_ccd_path(const std::filesystem::path& descriptor);
 // Each loader validates the descriptor/footer and throws for invalid containers;
 // unsupported audio or packed/subchannel tracks are ignored.
 [[nodiscard]] std::vector<ImageTrack> nrg_data_tracks(const std::filesystem::path& image);
 [[nodiscard]] std::vector<ImageTrack> mds_data_tracks(const std::filesystem::path& descriptor);
+// CloneCD v3, single-session, unscrambled 2352-byte .img tracks only.
+[[nodiscard]] std::vector<ImageTrack> ccd_data_tracks(const std::filesystem::path& descriptor);
 }

@@ -241,6 +241,20 @@ int main(int argc,char** argv){
             std::cerr<<"Indexed CSO/ZSO WCX extraction failed\n";return 40;
         }
     }
+    // CloneCD: verify the real WCX API can read a Mode 1 data track after
+    // an audio prefix using the descriptor's INDEX 1, not a guessed offset.
+    const auto ccd_path=folder/L"clonecd.ccd";
+    const auto ccd_img=folder/L"clonecd.img";
+    {std::ofstream f(ccd_img,std::ios::binary);
+     f.write(reinterpret_cast<const char*>(raw.data()),static_cast<std::streamsize>(raw.size()));}
+    {std::ofstream f(ccd_path,std::ios::binary);
+     f<<"[CloneCD]\nVersion=3\n"
+       "[Disc]\nSessions=1\nDataTracksScrambled=0\n"
+       "[TRACK 1]\nMODE=0\nINDEX 1=0\n"
+       "[TRACK 2]\nMODE=1\nINDEX 0=145\nINDEX 1=150\n";}
+    if(!verify_container(ccd_path,L"from-clonecd.txt")) {
+        std::cerr<<"CloneCD CCD/IMG WCX extraction failed\n";return 41;
+    }
     if(!verify_container(nrg_path,L"from-nrg.txt"))return 14;
     if(!verify_container(mds_path,L"from-mds.txt"))return 15;
 

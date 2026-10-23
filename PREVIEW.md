@@ -1,4 +1,4 @@
-# ISO-WCX v0.7.0 C++20 preview
+# ISO-WCX v0.11.0 C++20 preview
 
 Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
@@ -16,10 +16,10 @@ Modern, read-only Total Commander WCX plugin. The codebase is clean-room and doe
 ## Limits and cautions
 
 - This is a **preview** tested primarily with deterministic synthetic image fixtures. Real DVD/BD/UDF compatibility is not yet guaranteed, especially rewritable/packet-written and damaged media.
-- RAW Mode 2 Form 2, audio extraction, subchannel processing, full TOC/CCD and nonstandard CUE/MDS layouts are not supported. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
+- RAW Mode 2 Form 2, audio extraction, subchannel processing, full subchannel/scrambled/multisession CCD and nonstandard CUE/MDS layouts are not supported. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
 - UDF VAT historical chains, every version of Metadata/Sparable, UDF pseudo-overwrite behavior and fragmented descriptor edge cases are not yet exhaustively covered.
 - Rock Ridge POSIX permissions, TF timestamps and symlink extraction are not implemented.
-- Unsupported image containers remain ISZ, CSO, ZSO, DAA, DMG and encrypted/compressed NRG/MDF variations. Only uncompressed NRG and MDS/MDF track subsets are implemented.
+- Unsupported image containers remain ISZ, DAA, DMG and encrypted/compressed NRG/MDF variations. Indexed CSO/ZSO are supported. Only uncompressed NRG and MDS/MDF track subsets are implemented.
 - Avoid extracting untrusted images into important directories; path checks cannot fully mitigate concurrent symlink races.
 - Unsigned binary; this is not an official release of the legacy ISO.WCX plugin.
 
@@ -79,7 +79,7 @@ CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list
 - Original Xbox XDVDFS directory-tree listing, nested read-only extraction, and volume creation timestamps. Xbox 360/One proprietary formats are not implemented.
 - Descriptor-proven CUE/NRG/MDS filesystems across multiple tracks appear as `sessionN` virtual directories. The plugin does not infer unknown sessions or merge their directories.
 - ISO/UDF timestamps and file attributes are made available to the Windows WCX adapter.
-- Unsupported: MDS v2, MDX, compressed ISZ, CSO/CISO, ZSO, DAX, CHD, DAA, UIF and compressed/encrypted NRG/MDF variants.
+- Unsupported: MDS v2, MDX, ISZ, DAX, CHD, DAA, UIF and compressed/encrypted NRG/MDF variants; CSO/ZSO are implemented.
 
 
 ## v0.10.0 compressed ISO and raw MDF support
@@ -88,3 +88,10 @@ CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list
 - Zlib is linked statically on Windows using a pinned upstream source version, while Linux uses the system package. No runtime Python process, full-image unpack or additional DLL is needed by Total Commander.
 - 2448-byte physical sectors are accepted for unswizzled raw MODE1/MODE2 Form 1 data, including supported MDS v1 subchannel layouts. Extra subchannel bytes are not exposed as ISO data.
 - Does not support `.isz`, `.daa`, `.mdx`, `.chd`, proprietary encryption, mixed audio extraction, scrambling or all vendor MDF sector patterns. The bchunk and mdf2iso projects are useful test references; their GPL source is not included.
+
+## v0.11.0 CloneCD CCD/IMG preview
+
+- Open a `.ccd` descriptor paired with a same-base `.img` file. Parses CloneCD version 3 `[Disc]` / `[TRACK N]` fields, including MODE and INDEX 0/1. Validated Mode 1 and Mode 2 Form 1 data tracks use the existing sector reader.
+- If multiple data tracks contain readable ISO/UDF filesystems, they appear under virtual `sessionN/` folders. The `.sub` sidecar, audio frames, copy-protection subchannels, scrambled data, multiple CCD sessions and other CloneCD versions are not supported.
+- Rejects descriptors with out-of-order/overlapping tracks, invalid physical lengths, missing sidecars, unsafe symbolic links and unsupported encoding/scrambling.
+- New synthetic tests cover physical-sector boundaries and per-track extraction, but manual validation using real CloneCD dumps remains necessary.

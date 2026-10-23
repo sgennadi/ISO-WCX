@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.10.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
+**ISO-WCX v0.11.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
 
 ## Preview installation
 
@@ -18,6 +18,7 @@ For details, compatibility notes and source build commands, see [PREVIEW.md](PRE
 | Rock Ridge | RRIP NM/CE and relocated CL directories, no symlink extraction |
 | Raw BIN/IMG | CD Mode 1 / Mode 2 Form 1 (2352-byte), XA Form 1 (2336-byte); automatic probing limited to single-track images |
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
+| CloneCD CCD/IMG | `.ccd` version 3 + matching `.img` (2352-byte sectors), single-session unscrambled Mode 1 / Mode 2 Form 1 data tracks. `.sub` ignored; audio not decoded. |
 | 150-sector prefix | Relative and some absolute-LBA cases (not full multisession parsing) |
 | UDF Type 1 | File Entry/Extended File Entry, OSTA CS0 (including UTF-16 surrogate-pair names), AED extents and reserve VDS failover |
 | UDF Metadata / VAT / Sparable | Experimental, synthetic-fixture coverage; not comprehensive UDF 1.02–2.60 |
@@ -76,3 +77,9 @@ As before, the WCX adapter is read-only and **Preview** quality. We have not dem
 - Extend raw ISO and MDS to 2448-byte sectors (2352-byte CD frame + 96 subchannel bytes); subchannel metadata is deliberately ignored.
 - Synthetic random-access and extraction tests for stored, DEFLATE, LZ4, shifted indexes, UDF and corrupted compressed blocks. Windows CI also loads compressed ISO images through the WCX API.
 - Compared bchunk, mdf2iso and daa2iso for interoperability. Their GPL source code is **not** copied. DAA and MDS v2 are not yet supported.
+
+## What changed in v0.11.0
+
+- Added clean-room CloneCD `.ccd`/`.img` read-only loader based on the published descriptor layout. Track INDEX boundaries and .img sector alignment are validated. Audio, scrambled sectors, subchannels and multidisc CCD sessions are deliberately not decoded.
+- A multi-data-track CCD is presented as `session1/`, `session2/` virtual folders, each retaining its own physical source when files are extracted.
+- Added synthetic Mode 1/2, audio-prefix, multi-data-track, path and malformed-metadata regression tests on Linux and Windows. See [format comparison](docs/libmirage-format-comparison.md) for the libMirage references and licensing.

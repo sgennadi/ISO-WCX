@@ -157,8 +157,9 @@ class Source {
     }
 public:
     explicit Source(const std::filesystem::path& p, std::optional<std::size_t> requested = std::nullopt) {
-        if(is_nrg_path(p) || is_mds_path(p)) {
-            const auto tracks=is_nrg_path(p)?nrg_data_tracks(p):mds_data_tracks(p);
+        if(is_nrg_path(p) || is_mds_path(p) || is_ccd_path(p)) {
+            const auto tracks=is_nrg_path(p)?nrg_data_tracks(p):
+                (is_mds_path(p)?mds_data_tracks(p):ccd_data_tracks(p));
             // Prefer a later playable data track, never probe across track
             // boundaries or metadata appended after the disc content.
             for(auto it=tracks.rbegin();it!=tracks.rend();++it) {
@@ -1022,9 +1023,11 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
     const bool cue=is_cue_path(image_);
     const bool nrg=is_nrg_path(image_);
     const bool mds=is_mds_path(image_);
-    if(cue || nrg || mds) {
+    const bool ccd=is_ccd_path(image_);
+    if(cue || nrg || mds || ccd) {
         const std::size_t count=cue?cue_data_tracks(image_).size():
-            (nrg?nrg_data_tracks(image_).size():mds_data_tracks(image_).size());
+            (nrg?nrg_data_tracks(image_).size():
+             (mds?mds_data_tracks(image_).size():ccd_data_tracks(image_).size()));
         require(count<=512,"too many descriptor tracks");
         struct View {std::uint32_t index;std::string format;std::vector<Item> entries;};
         std::vector<View> views;
@@ -1044,7 +1047,7 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
         require(!views.empty(),"no supported filesystem track in image descriptor");
         if(views.size()>1) {
             format_="Multisession / ";
-            format_+=cue?"CUE tracks":(nrg?"NRG tracks":"MDS sessions");
+            format_+=cue?"CUE tracks":(nrg?"NRG tracks":(mds?"MDS sessions":"CloneCD tracks"));
             for(std::size_t v=0;v<views.size();v++) {
                 const auto prefix="session"+std::to_string(v+1);
                 Item directory;directory.directory=true;directory.path=prefix;
