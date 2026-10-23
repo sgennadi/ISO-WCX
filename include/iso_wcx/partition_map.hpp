@@ -18,11 +18,11 @@ struct PartitionEntry {
     std::array<std::uint8_t,16> gpt_type{}; // GUID raw bytes, GPT only
 };
 
-// Parse primary MBR entries, or a GPT whose protective MBR is present.
-// Validate both GPT CRC32 fields, declared lengths, bounds and overlaps.
-// For safety it does NOT access physical drives, follow any partition chain,
-// mount filesystems, modify images, or open VHD/VMDK sparse containers.
-// EBR logical partitions and hybrid-MBR overrides remain unsupported.
+// Read primary MBR partitions, bounded linked EBR logical partitions, or GPT.
+// Validate GPT primary CRC32 and partition-array CRC, extent bounds, overlaps,
+// EBR metadata and cycle prevention. Hybrid GPT/MBR is rejected.
+// No physical-drive access, mounting, writes or external parent-file traversal.
+// GPT backup-header recovery remains unsupported.
 // Throws std::runtime_error for truncated, invalid, or unsupported layouts.
 [[nodiscard]] std::vector<PartitionEntry> inspect_partition_table(
     const std::filesystem::path& raw_image,
