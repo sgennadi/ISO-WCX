@@ -51,6 +51,16 @@ Download the **ISO-WCX-Installable-Preview** artifact from successful GitHub Act
 
 CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list/extract smoke checks, and packages an installable ZIP when both architectures pass.
 
+## MDS v2 / MDX inspection research (not an archive handler)
+
+The standalone `mds_descriptor_inspect` tool detects MDS version 1,
+packed/encrypted MDS major version 2, and MDX monolithic metadata envelopes,
+with strict file-offset and overflow checks. It does **not** decrypt,
+decompress or extract data from MDS v2 or MDX. A recognized MDX will
+produce a specific error rather than being silently misread as ISO. The
+installer does not associate .mdx. Read
+[the Aaru issue #256 compatibility notes](docs/mds-v2-mdx-research.md).
+
 ## NRG and MDS/MDF preview support
 
 - Nero `.nrg`: NERO (32-bit) and NER5 (64-bit) trailer, bounded chunk list, DAOI/DAOX (disc-at-once) and ETNF/ETN2 (track-at-once), selected latest ISO9660/UDF data track.
