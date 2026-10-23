@@ -65,6 +65,7 @@ int main(int argc,char** argv){
     close(state);
     std::ifstream result(output,std::ios::binary);
     std::string content((std::istreambuf_iterator<char>(result)),std::istreambuf_iterator<char>());
+    result.close(); // Windows cannot delete a file while std::ifstream is open.
     fs::remove_all(folder);
     std::cerr << "wcx smoke: unloading DLL\n" << std::flush;
     FreeLibrary(dll);
