@@ -147,10 +147,39 @@ def test_invalid_source_no_modify(binary: pathlib.Path):
         assert not target.exists()
 
 
+def test_utf8_bom_is_preserved_on_refusal(binary: pathlib.Path):
+    with tempfile.TemporaryDirectory() as tmp:
+        helper, tc, ini, target = setup_fixture(binary, pathlib.Path(tmp))
+        ini.write_bytes(
+            b"\\xef\\xbb\\xbf[PackerPlugins]\\r\\n"
+            b"iso=192,C:\\\\Missing\\\\iso.wcx\\r\\n"
+            + "comment=Пример\\r\\n".encode("utf-8")
+        )
+        original = ini.read_bytes()
+        invoke(helper, tc, ini, target, expect=2)
+        assert ini.read_bytes() == original, "Unexpected UTF-8 INI rewrite"
+        assert not backups(ini)
+
+
+def test_duplicate_iso_refused(binary: pathlib.Path):
+    with tempfile.TemporaryDirectory() as tmp:
+        helper, tc, ini, target = setup_fixture(binary, pathlib.Path(tmp))
+        ini.write_text(
+            "[PackerPlugins]\\niso=192,C:\\\\Missing\\\\iso.wcx\\n"
+            "ISO=192,C:\\\\Missing2\\\\iso.wcx\\n", encoding="utf-8"
+        )
+        original = ini.read_bytes()
+        invoke(helper, tc, ini, target, expect=2)
+        assert ini.read_bytes() == original
+        assert not backups(ini)
+
+
 if __name__ == "__main__":
     binary = pathlib.Path(sys.argv[1]).resolve()
     test_missing_legacy_and_repeat(binary)
     test_keep_existing_user_plugin_and_force(binary)
     test_redirected_sections(binary)
     test_invalid_source_no_modify(binary)
+    test_utf8_bom_is_preserved_on_refusal(binary)
+    test_duplicate_iso_refused(binary)
     print("PASS: ISO-WCX setup safely repairs legacy, preserves plugins, redirects and rolls back")
