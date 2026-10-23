@@ -30,7 +30,7 @@ std::vector<std::uint8_t> rec(std::uint32_t lba,std::uint32_t size,
     out[0]=static_cast<std::uint8_t>(len);
     le32(out,2,lba);be32(out,6,lba);
     le32(out,10,size);be32(out,14,size);
-    out[25]=flags;out[28]=1;out[30]=1;
+    out[25]=flags;out[28]=1;out[31]=1;
     out[32]=static_cast<std::uint8_t>(name.size());
     std::copy(name.begin(),name.end(),out.begin()+33);
     return out;
