@@ -88,6 +88,20 @@ if(BUILD_TESTING)
   add_executable(virtual_disk_tests tests/virtual_disk.cpp)
   target_link_libraries(virtual_disk_tests PRIVATE iso_virtual_partitions)
   add_test(NAME raw_fixed_vhd_read_only COMMAND virtual_disk_tests)
+  if(WIN32)
+    # Independently compare our native VHD parser with Microsoft's built-in
+    # Virtual Disk metadata API. Test-only: no mount/attach, no WCX linkage.
+    add_executable(windows_virtual_disk_metadata_tests
+      tests/windows_virtual_disk_metadata.cpp)
+    target_link_libraries(windows_virtual_disk_metadata_tests PRIVATE
+      iso_virtual_partitions virtdisk rpcrt4)
+    target_compile_definitions(windows_virtual_disk_metadata_tests PRIVATE
+      WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME windows_native_vhd_vs_virtdisk_reference
+      COMMAND windows_virtual_disk_metadata_tests)
+    set_tests_properties(windows_native_vhd_vs_virtdisk_reference PROPERTIES
+      SKIP_RETURN_CODE 77 TIMEOUT 90)
+  endif()
 
 endif()
 
