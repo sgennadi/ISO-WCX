@@ -19,6 +19,7 @@
 
 #include "iso_wcx/virtual_disk.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -153,7 +154,7 @@ void must_reject_native(const fs::path& path) {
     } catch(const std::exception&) {
         return;
     }
-    throw std::runtime_error("unsupported VHD/VHDX was accepted as a native raw disk");
+    throw std::runtime_error("unsupported dynamic VHD was accepted as a native fixed disk");
 }
 } // namespace
 
@@ -191,10 +192,21 @@ int main() {
         require(vhdxMetadata.capacity==capacity &&
                 vhdxMetadata.format==VIRTUAL_STORAGE_TYPE_DEVICE_VHDX,
                 "Windows reported unexpected dynamic-VHDX reference metadata");
-        must_reject_native(vhdx);
+        // A new Microsoft-generated VHDX is clean and requires no log replay.
+        // Read it through our own C++ implementation; VirtDisk is test-only.
+        iso_wcx::VirtualDiskReader nativeVhdx(vhdx);
+        require(nativeVhdx.format()==iso_wcx::VirtualDiskFormat::vhdx &&
+                nativeVhdx.size()==vhdxMetadata.capacity &&
+                nativeVhdx.logical_sector_size()==512,
+                "native VHDX size/geometry disagrees with Microsoft VirtDisk");
+        const auto sparse=nativeVhdx.read(0,512);
+        require(sparse.size()==512 &&
+                std::all_of(sparse.begin(),sparse.end(),
+                            [](std::uint8_t byte){return byte==0;}),
+                "unallocated Microsoft VHDX block did not return zeroes");
 
-        std::cout<<"PASS: Windows VirtDisk metadata-only reference for fixed VHD, "
-                    "dynamic VHD and VHDX; independent native fixed reader; "
+        std::cout<<"PASS: Windows VirtDisk metadata-only cross-check for fixed "
+                    "VHD and dynamic VHDX; unsupported dynamic VHD refused; "
                     "no attach/mount or external disk DLLs\n";
         return 0;
     } catch(const WindowsFailure& error) {
