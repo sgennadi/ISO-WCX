@@ -1,4 +1,5 @@
 #include "iso_wcx/image_tracks.hpp"
+#include "iso_wcx/mds_probe.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -158,6 +159,9 @@ bool is_nrg_path(const std::filesystem::path& image) {
 bool is_mds_path(const std::filesystem::path& descriptor) {
     return uppercase(descriptor.extension().string())==".MDS";
 }
+bool is_mdx_path(const std::filesystem::path& image) {
+    return uppercase(image.extension().string())==".MDX";
+}
 
 std::vector<ImageTrack> nrg_data_tracks(const std::filesystem::path& image) {
     CheckedFile file(image);
@@ -245,6 +249,14 @@ std::vector<ImageTrack> mds_data_tracks(const std::filesystem::path& descriptor)
     const std::span<const std::uint8_t> b(bytes);
     check(std::string_view(reinterpret_cast<const char*>(b.data()),16)=="MEDIA DESCRIPTOR",
           "invalid MDS signature");
+    if(b[16]==2) {
+        // Confirm the distinct encrypted/packed descriptor layout instead of
+        // letting an MDSv2 pointer masquerade as an MDSv1 track table.
+        (void)probe_mds_descriptor(descriptor);
+        throw std::runtime_error(
+            "MDS v2 recognized; encrypted/packed metadata and track decoding "
+            "are not implemented in ISO-WCX");
+    }
     check(b[16]==1,"unsupported MDS major version");
     const auto sessions=le16(b,0x14);
     const auto offset=le32(b,0x50);
