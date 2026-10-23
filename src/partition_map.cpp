@@ -56,6 +56,73 @@ void check_ranges(std::vector<PartitionEntry>& result) {
                 "overlapping virtual-disk partitions");
     }
 }
+// MBR Extended Boot Records: each EBR has one relative data extent and an
+// optional link relative to the original extended-container start.
+// Reject cycles and malformed chains rather than returning partial results.
+struct MbrRecord {
+    std::uint8_t type{};
+    std::uint64_t first{};
+    std::uint64_t length{};
+};
+bool is_extended(std::uint8_t type) noexcept {
+    return type==0x05 || type==0x0f || type==0x85;
+}
+MbrRecord mbr_record(const std::uint8_t* entry) noexcept {
+    return {entry[4],le32(entry+8),le32(entry+12)};
+}
+bool is_empty(const MbrRecord& entry) noexcept {
+    return entry.type==0 && entry.first==0 && entry.length==0;
+}
+void read_extended(Input& disk,std::uint32_t logical_sector_size,
+                   std::uint64_t base,std::uint64_t count,
+                   std::vector<PartitionEntry>& out) {
+    const auto total=disk.size()/logical_sector_size;
+    require(base>0 && count>=2 && base<total && count<=total-base,
+            "invalid extended MBR container bounds");
+    const auto limit=base+count;
+    std::vector<std::uint64_t> visited;
+    std::uint64_t cursor=base;
+    for(unsigned depth=0;depth<128;++depth) {
+        require(cursor>=base && cursor<limit,
+                "EBR location escapes extended partition");
+        require(std::find(visited.begin(),visited.end(),cursor)==visited.end(),
+                "cyclic extended partition chain");
+        visited.push_back(cursor);
+        auto ebr=disk.read(cursor*logical_sector_size,512);
+        require(ebr[510]==0x55 && ebr[511]==0xaa,"invalid EBR signature");
+        const auto data=mbr_record(ebr.data()+446);
+        const auto link=mbr_record(ebr.data()+462);
+        require(is_empty(mbr_record(ebr.data()+478)) &&
+                is_empty(mbr_record(ebr.data()+494)),
+                "EBR uses unsupported third/fourth entry");
+        require(data.type!=0 && !is_extended(data.type) &&
+                data.type!=0xee && data.first>=1 && data.length>0 &&
+                data.first<limit-cursor,
+                "invalid logical partition mapping in EBR");
+        const auto start=cursor+data.first;
+        require(data.length<=limit-start && data.length<=total-start,
+                "logical partition exceeds extended container");
+        out.push_back({PartitionTableKind::mbr,start,data.length,data.type,{}});
+        if(is_empty(link)) {
+            for(const auto sector:visited)
+                for(const auto& entry:out)
+                    require(!(sector>=entry.first_lba &&
+                              sector-entry.first_lba<entry.sector_count),
+                            "EBR metadata overlaps a logical partition");
+            return;
+        }
+        require(is_extended(link.type) && link.first>0 && link.length>0 &&
+                link.first<count,
+                "invalid EBR next-link type or offset");
+        const auto next=base+link.first;
+        require(next<limit && next>cursor &&
+                link.length<=limit-next,
+                "EBR next-link outside extended container or out of order");
+        cursor=next;
+    }
+    throw std::runtime_error("EBR chain exceeds 128 entries");
+}
+
 std::vector<PartitionEntry> read_gpt(Input& disk,std::uint32_t sector) {
     const auto sectors=disk.size()/sector;
     require(sectors>=8,"virtual disk too small for GPT");
@@ -117,22 +184,43 @@ std::vector<PartitionEntry> inspect_partition_table(
     require(mbr[510]==0x55 && mbr[511]==0xaa,"invalid MBR signature");
     std::vector<PartitionEntry> result;
     bool protective=false;
+    bool found_extended=false;
+    std::uint64_t extended_start=0,extended_length=0;
     for(std::size_t i=0;i<4;++i) {
-        const auto* e=mbr.data()+446+i*16;
-        const auto type=e[4];
-        const auto start=std::uint64_t(le32(e+8)),count=std::uint64_t(le32(e+12));
-        if(!type) {
-            require(start==0 && count==0,"invalid empty MBR partition");
+        const auto item=mbr_record(mbr.data()+446+i*16);
+        if(item.type==0) {
+            require(is_empty(item),"invalid empty MBR partition");
             continue;
         }
-        if(type==0xee){protective=true;continue;}
-        require(type!=0x05 && type!=0x0f && type!=0x85,
-                "extended MBR partitions not supported");
-        require(start>=1 && count>0 && start<total && count<=total-start,
+        require(item.first>=1 && item.length>0 && item.first<total &&
+                item.length<=total-item.first,
                 "MBR partition beyond image boundaries");
-        result.push_back({PartitionTableKind::mbr,start,count,type,{}});
+        if(item.type==0xee){
+            require(!protective && item.first==1,"invalid protective GPT MBR");
+            protective=true;
+        }else if(is_extended(item.type)){
+            require(!found_extended,"multiple extended MBR containers unsupported");
+            found_extended=true;
+            extended_start=item.first;
+            extended_length=item.length;
+        }else
+            result.push_back({PartitionTableKind::mbr,item.first,item.length,item.type,{}});
     }
-    if(protective)return read_gpt(disk,sector);
+    if(protective){
+        // Reject hybrid MBR by default rather than silently ignoring active
+        // legacy partitions that may disagree with the GPT map.
+        require(result.empty() && !found_extended,
+                "hybrid protective GPT/MBR requires explicit handling");
+        return read_gpt(disk,sector);
+    }
+    if(found_extended){
+        for(const auto& p:result){
+            require(p.first_lba+p.sector_count<=extended_start ||
+                    extended_start+extended_length<=p.first_lba,
+                    "primary partition overlaps the extended MBR container");
+        }
+        read_extended(disk,sector,extended_start,extended_length,result);
+    }
     check_ranges(result);
     return result;
 }
