@@ -7,6 +7,7 @@
 #include <iosfwd>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace iso_wcx {
@@ -73,7 +74,8 @@ private:
     FatKind kind_ = FatKind::fat12;
     bool scanned_ = false;
     std::vector<FatFile> entries_;
-    std::vector<std::uint32_t> visited_directories_;
+    std::unordered_set<std::string> seen_paths_;
+    std::unordered_set<std::uint32_t> visited_directories_;
 };
 
 } // namespace iso_wcx
