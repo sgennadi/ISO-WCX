@@ -58,7 +58,7 @@ endif()
 
 include(CTest)
 
-add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp)
+add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET})
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_disc PUBLIC cxx_std_20)
@@ -138,6 +138,9 @@ if(BUILD_TESTING)
             "$<TARGET_FILE:virtual_fat_inspect>")
 endif()
 
+add_executable(mds_descriptor_inspect tools/mds_descriptor_inspect.cpp)
+target_link_libraries(mds_descriptor_inspect PRIVATE iso_disc)
+
 add_executable(disc_inspect tools/disc_inspect.cpp)
 target_link_libraries(disc_inspect PRIVATE iso_disc)
 
@@ -190,6 +193,9 @@ if(BUILD_TESTING)
   add_executable(rock_ridge_metadata_tests tests/rock_ridge_metadata.cpp)
   target_link_libraries(rock_ridge_metadata_tests PRIVATE iso_disc)
   add_test(NAME rock_ridge_px_tf_ce_metadata COMMAND rock_ridge_metadata_tests)
+  add_executable(mds_descriptor_probe_tests tests/mds_descriptor_probe.cpp)
+  target_link_libraries(mds_descriptor_probe_tests PRIVATE iso_disc)
+  add_test(NAME mds_v1_v2_mdx_metadata_bounds COMMAND mds_descriptor_probe_tests)
   add_executable(copy_transaction_tests tests/copy_transaction.cpp)
   target_link_libraries(copy_transaction_tests PRIVATE iso_disc)
   add_test(NAME copy_transaction_rollback COMMAND copy_transaction_tests)
