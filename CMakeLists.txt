@@ -77,6 +77,25 @@ FetchContent_Declare(iso_wcx_bzip2
   target_include_directories(iso_wcx_bzip2 PUBLIC "${iso_wcx_bzip2_SOURCE_DIR}")
 set(ISO_WCX_BZIP2_TARGET iso_wcx_bzip2)
 
+# Native CHD v5 decoder: all codec and container libraries are statically
+# linked into ISO-WCX. No chdman, helper executable or shared DLL at runtime.
+# libchdr is pinned to a reviewed BSD-3-Clause source commit.
+set(CHDR_WANT_TESTS OFF CACHE BOOL "No libchdr test EXEs" FORCE)
+set(CHDR_FLAC_BACKEND drflac CACHE STRING "" FORCE)
+set(CHDR_WANT_RAW_DATA_SECTOR ON CACHE BOOL "" FORCE)
+set(CHDR_WANT_SUBCODE ON CACHE BOOL "" FORCE)
+set(CHDR_VERIFY_BLOCK_CRC ON CACHE BOOL "" FORCE)
+set(CHDR_LOWRAM_TARGET OFF CACHE BOOL "" FORCE)
+set(WITH_LZMA_ASM OFF CACHE BOOL "Portable LZMA decoder" FORCE)
+set(WITH_SYSTEM_ZLIB OFF CACHE BOOL "Bundled static miniz" FORCE)
+set(WITH_SYSTEM_ZSTD OFF CACHE BOOL "Bundled static Zstd" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "No auxiliary runtime DLLs" FORCE)
+FetchContent_Declare(iso_wcx_chdr
+  GIT_REPOSITORY https://github.com/rtissera/libchdr.git
+  GIT_TAG 47d794151b2b64f6aba60304e6480f4f5a2bc24b
+  GIT_SHALLOW FALSE)
+FetchContent_MakeAvailable(iso_wcx_chdr)
+
 include(CTest)
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
 # runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
@@ -85,8 +104,8 @@ if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
   message(FATAL_ERROR "CTest requires ISO_WCX_BUILD_DEV_TOOLS=ON")
 endif()
 
-add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp src/packed_optical.cpp)
-target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET})
+add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
+target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET} chdr-static)
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_disc PUBLIC cxx_std_20)
 if(MSVC)

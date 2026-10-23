@@ -59,8 +59,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y mame-tools
-          chdman help createdvd
-          chdman help createcd
+          command -v chdman
+          # chdman help prints usage and may return nonzero on valid builds.
       - name: Confirm independent ISO writer test dependency
         run: python3 -c "import ctypes.util; assert ctypes.util.find_library('archive'), 'libarchive is required for independent ISO validation'"
       - name: Configure
