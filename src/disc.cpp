@@ -1,5 +1,6 @@
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/cd_sector.hpp"
+#include "iso_wcx/subq.hpp"
 #include "iso_wcx/compressed_image.hpp"
 #include "iso_wcx/cue.hpp"
 #include "iso_wcx/image_tracks.hpp"
@@ -1117,6 +1118,21 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
                     raw.attributes=0x20;raw.direct_source=sub->source;
                     raw.extents.push_back({0,sub->size,false});
                     append(entries_,std::move(raw));
+                    // The physical Q-channel is advisory: corrupted or
+                    // intentionally protected subcodes must never hide disc
+                    // files or make the raw .sub inaccessible.
+                    try {
+                        const std::string csv=subq_index_report(sub->source);
+                        require(csv.size()<=1024u*1024u,"CloneCD Q report too large");
+                        Item info;
+                        info.path="subchannels/q-index.csv";
+                        info.size=csv.size();
+                        info.attributes=0x20u;
+                        info.inline_data.assign(csv.begin(),csv.end());
+                        append(entries_,std::move(info));
+                    } catch(const std::exception&) {
+                        // An unreadable Q report is non-fatal; disc.sub remains.
+                    }
                 }
             }
         }
