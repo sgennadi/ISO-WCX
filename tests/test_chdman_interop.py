@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 
-from test_images import iso_image, udf_image
+from test_images import iso_image, udf_image, raw_cd_image
 
 
 def run(args: list[str], timeout: int = 120) -> str:
@@ -26,7 +26,37 @@ def run(args: list[str], timeout: int = 120) -> str:
 
 def verify(reader: pathlib.Path, chd: pathlib.Path,
            output: pathlib.Path, name: str, data: bytes) -> None:
-    listing = run([str(reader), str(chd)])
+    try:
+        listing = run([str(reader), str(chd)])
+    except AssertionError as failure:
+        # In CI only, use chdman's independent decoder to show whether a
+        # corrupted test fixture, CD frame offset or plugin mapping failed.
+        # This is diagnostic and is never run in the shipped WCX.
+        if "cd" in chd.name and shutil.which("chdman"):
+            cue = output.parent / "diagnostic.cue"
+            binary = output.parent / "diagnostic.bin"
+            extracted = subprocess.run(
+                ["chdman", "extractcd", "-i", str(chd),
+                 "-o", str(cue), "-ob", str(binary)],
+                capture_output=True, text=True, timeout=90, check=False)
+            if extracted.returncode == 0 and binary.is_file():
+                data = binary.read_bytes()[:2 * 1024 * 1024]
+                marker = b"\x01CD001\x01"
+                positions = []
+                pos = 0
+                while len(positions) < 8:
+                    pos = data.find(marker,pos)
+                    if pos == -1:
+                        break
+                    positions.append((pos,pos // 2352,pos % 2352))
+                    pos += len(marker)
+                raise AssertionError(
+                    f"CD image failed native reader; independent chdman "
+                    f"ISO PVD positions (byte,2352-frame,offset): {positions}; "
+                    f"CUE: {cue.read_text(errors='replace')[:500]!r}"
+                ) from failure
+        raise
+
     assert name in listing, (chd, listing)
     run([str(reader), str(chd), "--extract", str(output)])
     assert (output / name).read_bytes() == data, chd
@@ -64,12 +94,13 @@ def main(reader: pathlib.Path) -> None:
              "-c", "lzma", "-hs", "4096", "-np", "1"])
         verify(reader, output, root / "out-udf", "hello", b"world")
 
-        # A Mode 1/2048 CUE is normalized by chdman to full 2448-byte
-        # CD frames with the track metadata libchdr supplies for our reader.
-        (root / "cd.bin").write_bytes(image.read_bytes())
+        # Raw Mode 1/2352 CD input, converted by chdman into 2448-byte
+        # frames including subcode. Unlike Mode 1/2048 it directly models
+        # physical sector data and avoids ambiguity in cooked CUE conversion.
+        (root / "cd.bin").write_bytes(raw_cd_image(image.read_bytes(),mode=1))
         cue = root / "cd.cue"
         cue.write_text('FILE "cd.bin" BINARY\n'
-                       '  TRACK 01 MODE1/2048\n'
+                       '  TRACK 01 MODE1/2352\n'
                        '    INDEX 01 00:00:00\n', encoding="ascii")
         cd = root / "cd-lzma.chd"
         run([chdman, "createcd", "-i", str(cue), "-o", str(cd),

@@ -43,7 +43,7 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
 | ISZ v1 (single-file) | Built-in indexed 2048-byte optical sectors with stored/zero/zlib/bzip2 chunks; encrypted, segmented, multi-volume and other ISZ variants rejected |
 | DAA v1.00 | Built-in single-file raw DEFLATE chunks with header CRC32 and bounds checking; v1.10, encryption and multipart images rejected |
-| CHD v5 (uncompressed) | Experimental 2048-byte logical optical payloads only, sparse 4-byte hunk map; compressed maps, CDDA, 2448-byte frames, parent chains not yet supported; not installed as default association |
+| CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and experimental single-track Mode 1/Mode 2 Form 1 CD frames (2448 bytes); no CDDA, multiple tracks, parents or mixed modes; `.chd` association is manual in Preview |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
 | Other compressed/encrypted containers | Not implemented: encrypted ISZ/DAA, multipart ISZ, DAA v1.10, compressed CHD, NRG encrypted/compressed, MDS v2, MDX; only CloneCD Q position decoding is implemented; other raw CD subchannels are not interpreted |
 
@@ -213,7 +213,8 @@ RRIP PX (mode), TF (7/17-byte modification time), and mirrored CE pointers now h
   and text documentation. No setup EXE or repair scripts are required.
 
 **Unsupported:** NTFS, exFAT, ext2/3/4, VMDK, dynamic/differencing VHD,
-differencing/dirty VHDX, MDS v2 and MDX extraction, encrypted/segmented ISZ, DAA v1.10 or encrypted DAA, and compressed/audio CHD.
+differencing/dirty VHDX, MDS v2 and MDX extraction, encrypted/segmented ISZ,
+DAA v1.10 or encrypted DAA, audio/multitrack CHD and CHD parent chains.
 Real-world media/Total Commander GUI validation is pending.
 
 ## What changed in v0.14.0 Preview
@@ -225,13 +226,15 @@ Real-world media/Total Commander GUI validation is pending.
   chunks with bounded index, decompression and read cache.
 - Unencrypted DAA v1.00 single-file images: validated header CRC32, three-byte
   block length index, raw RFC1951 DEFLATE streams.
-- Uncompressed CHD v5: 2048-byte logical optical payloads, sparse map entries,
-  strict parent/codec/map bounds rejection.
+- CHD v5 compressed optical streams using statically built libchdr and its
+  in-tree zlib, LZMA, Zstandard, FLAC and CD codecs. Read-only cooked DVD/ISO
+  and experimental single-track Mode 1 / Mode 2 Form 1 CD data; unsupported
+  audio, multi-track and parent layouts are rejected. No runtime library.
 - Linux and Windows x86/x64 tests exercise synthetic ISO/UDF data, byte
   extraction and corrupt-container rejection. Windows tests use the actual
   WCX export functions, not an external extractor.
-- No automatic `.chd` association yet: the common compressed CD/arcade CHD
-  layouts need entropy-coded maps, CDDA frame mapping and licensed codecs.
-  MDS v2/MDX, protected ISZ/DAA and compressed CHD remain **unsupported**.
+- No automatic `.chd` association yet: audio/multi-track and mixed-mode CHDs
+  are not decoded, so registering every CHD globally would be misleading.
+  MDS v2/MDX and protected ISZ/DAA remain **unsupported**.
 
 See [bounded optical container design](docs/packed-optical.md).

@@ -58,7 +58,7 @@ jobs:
       - name: Install MAME CHD fixture generator for CI only
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y mame-tools
+          sudo apt-get install -y --no-install-recommends mame-tools
           command -v chdman
           # chdman help prints usage and may return nonzero on valid builds.
       - name: Confirm independent ISO writer test dependency

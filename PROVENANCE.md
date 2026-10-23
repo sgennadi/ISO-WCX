@@ -15,7 +15,13 @@ cross-checked against upstream references:
 
 - ISZ layout: oserres/isz-tool (GPLv3): no code copied or linked.
 - DAA v1 layout: rsenn/daa2iso (GPLv2): no code copied or linked.
-- CHD v5 map structure: rtissera/libchdr (BSD-3): no code copied or linked.
+- CHD v5 map structure was initially researched from rtissera/libchdr (BSD-3)
+  without copying codec source. The v0.14 compressed CHD reader now **links
+  libchdr statically** at pinned commit
+  `47d794151b2b64f6aba60304e6480f4f5a2bc24b`.
+  Our C++ CD/DVD optical adapter is separately authored. libchdr's bundled
+  miniz, LZMA SDK, Zstandard and dr_flac are all statically compiled; their
+  notices are included in THIRD_PARTY_NOTICES.txt.
 
 Compression libraries: zlib is statically linked on Windows (as previously).
 bzip2/libbzip2 1.0.8 is built from pinned upstream source with a verified

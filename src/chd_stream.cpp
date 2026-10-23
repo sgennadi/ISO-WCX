@@ -169,20 +169,44 @@ ChdStream::ChdStream(const std::filesystem::path& path) {
             return (sum & 255u) == p[4];
         };
         bool found = false;
-        for (const auto lead : {0u,150u}) {
-            if (used_frames <= std::uint64_t(lead) + 16) continue;
+        const auto try_leading = [&](std::uint32_t lead, bool udf) -> bool {
+            if (used_frames <= std::uint64_t(lead) + (udf ? 256u : 16u))
+                return false;
             for (const auto offset : {data_offset_,0u,16u,24u}) {
-                if (probe(std::uint64_t(lead) + 16,offset,false) ||
-                    probe(std::uint64_t(lead) + 256,offset,true)) {
+                if (probe(std::uint64_t(lead) + (udf ? 256u : 16u),
+                          offset,udf)) {
                     data_offset_ = offset;
                     leading_frames_ = lead;
                     logical_size_ = (used_frames - lead) * iso_sector;
+                    return true;
+                }
+            }
+            return false;
+        };
+        // Standard layouts are the fast path. Some chdman-produced and
+        // vendor CD images place a data-track lead-in at other frame offsets.
+        // Allow up to 512 frames, but only after observing a valid ISO PVD
+        // or UDF anchor. Never guess and expose unknown audio as file bytes.
+        for (const auto lead : {0u,150u}) {
+            if (try_leading(lead,false) || try_leading(lead,true)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            const auto limit = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(512,used_frames > 16 ?
+                    used_frames-17 : 0));
+            for (std::uint32_t lead=1; lead<=limit; ++lead) {
+                if (lead==150) continue;
+                if (try_leading(lead,false) || try_leading(lead,true)) {
                     found = true;
                     break;
                 }
             }
-            if (found) break;
         }
+        require(found, "CHD CD track has no validated ISO/UDF data anchor");
+
     }
 }
 

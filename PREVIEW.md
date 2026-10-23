@@ -138,9 +138,10 @@ All new format decoders operate inside `ISO-WCX.wcx/.wcx64`, with no
 separate ISO conversion, external parser DLL, executable, mounting driver or
 runtime archive utility. Supported variants: unencrypted, single-file ISZ v1
 with zero/stored/zlib/bzip2 blocks; unencrypted single-file DAA 1.00 with raw
-DEFLATE and checked header CRC32; CHD v5 **uncompressed** with 2048-byte
-logical sector mapping. Both ISO9660 and UDF are parsed by the existing
-filesystem engine.
+DEFLATE and checked header CRC32; CHD v5 now decodes compressed maps and
+hunks using the statically linked BSD-licensed libchdr. ISO/UDF are mapped
+from 2048-byte DVD data or validated single-track Mode 1/2 Form 1 CD frames.
+All filesystem parsing is in the existing WCX engine.
 
 The bzip2 1.0.8 source is fetched with a pinned SHA-256 **at build time** and
 compiled statically into the WCX. This does not add a runtime DLL.
@@ -151,7 +152,7 @@ The format logic itself is independently authored; no GPL image decoder
 code was copied.
 
 **Not supported yet:** multi-volume ISZ, ISZ passwords/encryption, DAA 1.10,
-password-protected/multipart DAA, most real-world compressed CHD images,
-CHD CDDA/Mode 2 physical track mapping, CHD parent images, MDS v2/MDX
-encrypted metadata/track extraction. These deliberately fail closed.
+password-protected/multipart DAA, CHD audio, multi-track/mixed-mode,
+parent chains and unusual sector layouts, plus MDS v2/MDX metadata decryption.
+These deliberately fail closed.
 Authentic vendor samples and GUI testing are still required for stable.
