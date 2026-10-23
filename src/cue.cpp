@@ -10,6 +10,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <limits>
 
 namespace iso_wcx {
 namespace {
@@ -91,7 +92,14 @@ bool is_cue_path(const std::filesystem::path& path) {
     return upper(path.extension().string())==".CUE";
 }
 
-std::vector<CueTrack> cue_data_tracks(const std::filesystem::path& cue) {
+struct AllCueTracks {
+    std::vector<CueTrack> data;
+    std::vector<CueAudioTrack> audio;
+};
+
+// Both APIs use the same strict CUE syntax parser. This prevents audio and
+// data readers from disagreeing about INDEX/pregap track boundaries.
+static AllCueTracks parse_cue_tracks(const std::filesystem::path& cue) {
     std::ifstream in(cue,std::ios::binary|std::ios::ate);
     check(bool(in),"cannot open CUE sheet");
     const auto len=in.tellg();
@@ -152,10 +160,55 @@ std::vector<CueTrack> cue_data_tracks(const std::filesystem::path& cue) {
         }
         // Other metadata directives do not influence the data track mapping.
     }
-    std::vector<CueTrack> result;
+    AllCueTracks result;
     for(std::size_t i=0;i<tracks.size();++i) {
         const auto& t=tracks[i];
         if(!t.binary || !t.index1)continue;
+        // An audio CD frame contains 588 stereo PCM samples (2*16-bit), or
+        // 2352 bytes. A single FILE may hold many tracks; an INDEX 00 of the
+        // next track marks the end of the preceding track, excluding pregap.
+        if(t.type=="AUDIO") {
+            // A CUE's absent, optional audio file must not prevent access to
+            // a separate supported data FILE. Reject any unsafe existing
+            // reference via the same canonicalized resolver as data tracks.
+            std::string normalized=t.file_name;
+            std::replace(normalized.begin(),normalized.end(),'\\','/');
+            auto relative=std::filesystem::path(std::u8string(
+                reinterpret_cast<const char8_t*>(normalized.data()),normalized.size()));
+            check(!normalized.empty() && normalized.size()<=1024 &&
+                  !relative.is_absolute() && !relative.has_root_name(),
+                  "invalid CUE audio filename");
+            for(const auto& part:relative)check(part!=".." && part!="." && !part.empty(),
+                                                  "unsafe CUE audio filename");
+            if(!std::filesystem::exists(root/relative))continue;
+            auto source=safe_image(root,t.file_name);
+            const auto bytes=std::filesystem::file_size(source);
+            check(bytes%2352==0,"CUE BINARY AUDIO has an incomplete 2352-byte frame");
+            const auto total_frames=bytes/2352;
+            std::uint64_t first=*t.index1;
+            std::uint64_t last=total_frames;
+            for(std::size_t j=i+1;j<tracks.size();++j) {
+                const auto& next=tracks[j];
+                if(next.file_name!=t.file_name)break;
+                // Mixed-sector-sized tracks in one file cannot safely be
+                // addressed by a common MM:SS:FF index without explicit
+                // sector boundary metadata.
+                check(next.type!="MODE1/2048" && next.type!="MODE2/2336",
+                      "CUE mixed physical frame sizes in one BINARY FILE");
+                if(next.index0 || next.index1) {
+                    last=next.index0 ? *next.index0 : *next.index1;
+                    break;
+                }
+            }
+            check(first<last && last<=total_frames,"CUE AUDIO track outside BINARY source");
+            const std::uint64_t length=(last-first)*2352;
+            // Standard PCM RIFF WAV uses 32-bit chunk lengths. Reject tracks
+            // larger than 4 GiB rather than producing corrupt WAV headers.
+            check(length<=std::numeric_limits<std::uint32_t>::max()-36,
+                  "CUE AUDIO track too large for RIFF WAVE");
+            result.audio.push_back({std::move(source),first*2352,length,t.number});
+            continue;
+        }
         std::uint32_t size=0,offset_in_sector=0;
         std::uint8_t mode=0;
         if(t.type=="MODE1/2048") {size=2048;offset_in_sector=0;mode=0;}
@@ -175,9 +228,17 @@ std::vector<CueTrack> cue_data_tracks(const std::filesystem::path& cue) {
             }
         }
         if(end)check(*end>*t.index1,"CUE track boundaries overlap");
-        result.push_back({safe_image(root,t.file_name),*t.index1,end,size,offset_in_sector,mode,t.number});
+        result.data.push_back({safe_image(root,t.file_name),*t.index1,end,size,offset_in_sector,mode,t.number});
     }
-    check(!result.empty(),"CUE has no supported BINARY data tracks");
+    check(!result.data.empty() || !result.audio.empty(),
+          "CUE has no supported BINARY data or PCM audio tracks");
     return result;
+}
+
+std::vector<CueTrack> cue_data_tracks(const std::filesystem::path& cue) {
+    return parse_cue_tracks(cue).data;
+}
+std::vector<CueAudioTrack> cue_audio_tracks(const std::filesystem::path& cue) {
+    return parse_cue_tracks(cue).audio;
 }
 }
