@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.6.0 LANGUAGES CXX)
+project(ISO_WCX VERSION 0.7.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -46,6 +46,13 @@ if(BUILD_TESTING)
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cue.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME nrg_mds_track_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_nrg_mds.py" "$<TARGET_FILE:disc_inspect>")
+    if(UNIX)
+      add_test(NAME independent_libarchive_iso
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_independent_iso.py" "$<TARGET_FILE:disc_inspect>")
+      set_tests_properties(independent_libarchive_iso PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+    add_test(NAME disc_compatibility_v070
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compat_v070.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME iso_udf_image_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_images.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME disc_descriptor_mutations
