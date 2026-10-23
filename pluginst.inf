@@ -1,5 +1,5 @@
 [plugininstall]
-description=ISO-WCX v0.12.1 Preview - ISO/UDF recovery, Joliet, Rock Ridge, CUE, CCD, NRG, MDS
+description=ISO-WCX v0.12.1 Preview - ISO/UDF, optical containers + Setup repair
 version=0.12.1-preview
 type=wcx
 file=ISO-WCX.wcx
