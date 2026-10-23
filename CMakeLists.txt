@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.13.0 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.14.0 LANGUAGES C CXX)
 
 # Keep the released WCX ABI on its tested C++20 toolchain. The C++26 lane
 # exercises *exactly the same sources and tests*, without changing artifacts.
@@ -64,7 +64,7 @@ if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
   message(FATAL_ERROR "CTest requires ISO_WCX_BUILD_DEV_TOOLS=ON")
 endif()
 
-add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp)
+add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp src/packed_optical.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET})
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_disc PUBLIC cxx_std_20)
@@ -191,6 +191,7 @@ if(WIN32)
   if(BUILD_TESTING)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
+    add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()
 endif()
@@ -232,6 +233,15 @@ if(BUILD_TESTING)
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compressed_iso.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME iso_extended_attributes
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iso_attrs_v012.py" "$<TARGET_FILE:disc_inspect>")
+    if(WIN32)
+      add_test(NAME packed_optical_isz_daa_chd_wcx
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_packed_optical.py"
+          "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:ISO-WCX>" "$<TARGET_FILE:wcx_packed_smoke>")
+    else()
+      add_test(NAME packed_optical_isz_daa_chd_core
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_packed_optical.py"
+          "$<TARGET_FILE:disc_inspect>")
+    endif()
     add_test(NAME integrated_virtual_disk_fat_wcx
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_fat.py" "$<TARGET_FILE:disc_inspect>")
     set_tests_properties(integrated_virtual_disk_fat_wcx PROPERTIES TIMEOUT 180)
