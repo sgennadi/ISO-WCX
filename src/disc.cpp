@@ -2,6 +2,7 @@
 #include "iso_wcx/cd_sector.hpp"
 #include "iso_wcx/subq.hpp"
 #include "iso_wcx/compressed_image.hpp"
+#include "iso_wcx/packed_optical.hpp"
 #include "iso_wcx/cue.hpp"
 #include "iso_wcx/image_tracks.hpp"
 #include "iso_wcx/mds_probe.hpp"
@@ -69,6 +70,7 @@ void safe_name(const std::string& s) {
 class Source {
     std::ifstream file_;
     std::unique_ptr<CompressedImage> compressed_;
+    std::unique_ptr<PackedOptical> packed_;
     std::uint64_t raw_length_{};
     std::uint64_t logical_length_{};
     std::uint64_t raw_base_{};
@@ -87,6 +89,7 @@ class Source {
                 p<=static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()),
                 "raw extent outside image");
         if(compressed_)return compressed_->read(p,n);
+        if(packed_)return packed_->read(p,n);
         Bytes b(n);
         file_.clear();
         file_.seekg(static_cast<std::streamoff>(p));
@@ -157,6 +160,7 @@ class Source {
     }
     void open_image(const std::filesystem::path& p) {
         compressed_.reset();
+        packed_.reset();
         file_.close();
         file_.clear();
         file_.open(p,std::ios::binary|std::ios::ate);
@@ -170,6 +174,11 @@ class Source {
             raw_length_=compressed_->size();
             raw_end_=logical_length_=raw_length_;
             track_label_=compressed_->label();
+        } else if(is_packed_optical_path(p)) {
+            packed_=std::make_unique<PackedOptical>(p);
+            raw_length_=packed_->size();
+            raw_end_=logical_length_=raw_length_;
+            track_label_=packed_->label();
         }
     }
 public:
@@ -223,9 +232,9 @@ public:
         }
         require(!requested || *requested==0,"track index is unsupported for bare image");
         open_image(p);
-        if(compressed_) {
+        if(compressed_ || packed_) {
             require(candidate(2048,0,0,0) || candidate_udf(2048,0,0,0),
-                    "CSO/ZSO does not contain a recognized ISO or UDF filesystem");
+                    "packed optical image does not contain recognized ISO or UDF filesystem");
             return;
         }
         // Only select a raw layout after seeing a valid ISO PVD and raw sync/mode.
