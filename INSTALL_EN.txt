@@ -30,3 +30,17 @@ architecture (WCX vs WCX64), DLL dependencies and runtime errors separately.
 Sources:
 https://github.com/sgennadi/ISO-WCX
 https://www.ghisler.ch/wiki/index.php/Plugins_Automated_Installation
+
+OPTIONAL SAFE REPAIR UTILITY:
+Close ALL Total Commander windows, then run Repair-ISO-WCX.cmd from the
+installed ISO-WCX plugin folder. First it shows a DRY RUN; only a Y
+confirmation runs the -Apply step. This makes a timestamped backup of
+wincmd.ini, checks 32/64-bit DLL architectures and rewrites only the stale
+legacy ISO\\iso.wcx entry (or the modern ISO-WCX entry).
+Other packer registrations remain unchanged.
+
+If INI detection fails, run:
+  .\\Repair-ISO-WCX.ps1 -IniPath "FULL_PATH_TO_wincmd.ini"
+To apply, add -Apply and close Total Commander first. Optionally pass
+-IncludeOtherExtensions to add missing ISO-WCX file extensions without
+overwriting other plugins.
