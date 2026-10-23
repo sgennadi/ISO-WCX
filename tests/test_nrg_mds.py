@@ -202,6 +202,26 @@ def main(executable):
         (root/'image.mdf').write_bytes(v1_mdf)
         (root/'unsupported_mds_v2.mds').write_bytes(v2_descriptor)
         run(executable,root,'unsupported_mds_v2.mds',should_pass=False)
+        v2_error=subprocess.run([executable,str(root/'unsupported_mds_v2.mds')],
+                                capture_output=True,text=True,timeout=10)
+        assert v2_error.returncode==2
+        # Synthetic v1-shaped data marked v2 is rejected; the dedicated probe
+        # tests valid packed/encrypted v2 metadata pointers separately.
+        assert v2_error.stderr
+
+        # A valid MDX header envelope must be recognized and deliberately
+        # refused by the WCX extraction path until decoding is implemented.
+        mdx=bytearray(4096)
+        mdx[:16]=b'MEDIA DESCRIPTOR'
+        mdx[16]=2
+        mdx[0x2c:0x30]=le32(0xffffffff)
+        mdx[0x30:0x38]=le64(0x600)
+        mdx[0x38:0x40]=le64(0x300)
+        (root/'unsupported_mdx.mdx').write_bytes(mdx)
+        run(executable,root,'unsupported_mdx.mdx',should_pass=False)
+        mdx_error=subprocess.run([executable,str(root/'unsupported_mdx.mdx')],
+                                  capture_output=True,text=True,timeout=10)
+        assert mdx_error.returncode==2 and 'MDX recognized' in mdx_error.stderr,mdx_error.stderr
         # Metadata must not let us overread into the NRG trailer.
         broken=bytearray(nrg_tao())
         broken[-8:]=b'NER5'+be32(0xffffffff)
@@ -233,7 +253,7 @@ def main(executable):
             (root/name).write_bytes(case)
             result=subprocess.run([executable,str(root/name)],capture_output=True,timeout=10)
             assert result.returncode in (0,2),(name,result.returncode)
-    print('PASS: NRG NERO/NER5 DAO/TAO, MDS v1/MDF raw modes, explicit MDS v2 rejection, corrupt containers')
+    print('PASS: NRG NERO/NER5 DAO/TAO, MDS v1/MDF raw modes, explicit MDS v2/MDX rejection, corrupt containers')
 
 if __name__=='__main__':
     main(sys.argv[1])
