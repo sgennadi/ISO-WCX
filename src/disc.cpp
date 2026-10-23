@@ -149,12 +149,13 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
         auto key=std::make_pair(dir.lba,dir.size);
         require(active.insert(key).second,"cyclic ISO directories");
         auto data=src.read(std::uint64_t(dir.lba)*iso_sector,dir.size);
-        std::string pending_multiextent;
+        std::string pending_multiextent, pending_iso_name;
         for(std::size_t p=0;p<data.size();) {
             if(data[p]==0) {p+=iso_sector-(p%iso_sector);continue;}
             auto length=data[p];
             require(length>=34 && length<=data.size()-p && length<=iso_sector-(p%iso_sector),"invalid ISO record length");
             auto r=record(data,p,joliet);
+            const auto iso_identifier=r.name;
             if(r.name==".") {p+=length;continue;}
             if(rr_skip) {
                 const auto rr=rock_ridge_entry(
@@ -166,6 +167,8 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
                 if(rr.relocated || rr.symlink) {p+=length;continue;}
                 require(!rr.child_link,"Rock Ridge relocated directories not yet supported");
                 if(rr.alternate_name) {r.name=*rr.alternate_name;safe_name(r.name);}
+                else if(!pending_multiextent.empty() && iso_identifier==pending_iso_name)
+                    r.name=pending_multiextent.substr(base.size());
             }
             p+=length;
             Item item;item.path=base+r.name;item.directory=bool(r.flags&2);item.size=item.directory?0:r.size;
@@ -181,6 +184,7 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
                 append(out,std::move(item));
             }
             pending_multiextent=(r.flags&0x80u)?base+r.name:std::string{};
+            pending_iso_name=(r.flags&0x80u)?iso_identifier:std::string{};
             if(r.flags&2) self(self,r,base+r.name+"/",depth+1);
         }
         require(pending_multiextent.empty(),"missing final ISO multi-extent record");
