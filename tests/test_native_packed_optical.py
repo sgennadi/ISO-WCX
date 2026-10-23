@@ -64,7 +64,9 @@ def daa_image(raw: bytes) -> bytes:
     payload = bytearray()
     for i in range(count):
         block = raw[i * SECTOR:(i + 1) * SECTOR]
-        data = zlib.compress(block, 9)
+        # DAA v1 encodes bare RFC 1951 DEFLATE, without RFC 1950 zlib header.
+        compressor = zlib.compressobj(9, zlib.DEFLATED, -15)
+        data = compressor.compress(block) + compressor.flush()
         size = len(data)
         assert size < SECTOR + 65536
         # DAA v1 stores size as high, low, middle 8-bit bytes.
