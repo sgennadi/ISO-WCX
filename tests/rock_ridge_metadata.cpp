@@ -1,9 +1,13 @@
 #include "iso_wcx/legacy_formats.hpp"
+#include "iso_wcx/disc.hpp"
 #include "iso_wcx/rock_ridge.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <span>
 #include <stdexcept>
@@ -17,14 +21,15 @@ void expect(bool ok,const char* reason) {
     if(!ok)throw std::runtime_error(reason);
 }
 void invalid(const Bytes& record,std::uint8_t skip=0) {
-    bool caught=false;
+    bool caught=false,called=false;
     try {
         (void)iso_wcx::rock_ridge_entry(record,skip,
-           [](std::uint64_t,std::size_t)->Bytes {
-               throw std::runtime_error("unexpected continuation read");
+           [&](std::uint64_t,std::size_t)->Bytes {
+               called=true;
+               return Bytes{}; // any callback call is a test failure
            });
     }catch(const std::exception&){caught=true;}
-    expect(caught,"malformed Rock Ridge record accepted");
+    expect(caught && !called,"malformed Rock Ridge SUSP entry accepted or followed");
 }
 void lebe32(Bytes& b,std::size_t p,std::uint32_t v) {
     for(unsigned i=0;i<4;++i){
@@ -132,9 +137,10 @@ int main() {
                        "CE logical reference mismatch");
                 return continuation;
             });
-        expect(from_ce.modification_dos_time==r.modification_dos_time ||
-               from_ce.modification_dos_time.has_value(),
-               "RRIP TF not read through continuation");
+        expect(from_ce.modification_dos_time==
+               iso_wcx::iso_dos_timestamp({std::array<std::uint8_t,7>{
+                   126,10,23,12,34,58,0}}),
+               "RRIP TF not decoded through continuation");
         corrupt=source;
         corrupt[8]^=1; // mirrored CE block high-endian byte
         invalid(record(corrupt));
@@ -145,6 +151,11 @@ int main() {
         corrupt[24]^=1; // mirrored CE length high-endian byte
         invalid(record(corrupt));
 
+
+        // Unknown TF fields are accepted only when all advertised bytes exist.
+        auto malformed_long=tf_long();
+        malformed_long[2]=5; // declares too-short TF descriptor
+        invalid(record(malformed_long));
         const auto invalid_calendar=std::array<std::uint8_t,17>{
             '2','0','2','6','0','2','3','0','1','2','3','4','5','8','0','0',0};
         expect(iso_wcx::iso_long_dos_timestamp(invalid_calendar)==0,
