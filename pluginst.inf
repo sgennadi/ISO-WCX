@@ -1,6 +1,6 @@
 [plugininstall]
-description=ISO-WCX preview - ISO9660, Joliet, Rock Ridge, UDF Type 1
-version=0.3.0-preview
+description=ISO-WCX v0.4.0 Preview - ISO9660 Joliet Rock Ridge RAW BIN IMG and UDF
+version=0.4.0-preview
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX
