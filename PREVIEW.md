@@ -23,7 +23,7 @@ This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.
 - RAW Mode 2 Form 2, CD-Audio extraction, CD-Text and full CloneCD multisession are not supported. CloneCD raw `.sub` is preserved and position-type Q frames are CRC-checked; damaged Q data is not treated as an ISO failure. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
 - UDF VAT historical chains, every version of Metadata/Sparable, UDF pseudo-overwrite behavior and fragmented descriptor edge cases are not yet exhaustively covered.
 - Rock Ridge PX read-only permissions and TF modification timestamps are implemented in the development branch, with CE mirrored-endian validation. Full POSIX permissions, symlink extraction and creation/access times are not exposed by the WCX API.
-- Unsupported image containers remain ISZ, DAA, DMG and encrypted/compressed NRG/MDF variations. Indexed CSO/ZSO are supported. Only uncompressed NRG and MDS/MDF track subsets are implemented.
+- ISZ v1 (single-file zero/stored/zlib/bzip2) and DAA v1.00 (unencrypted single-file raw DEFLATE) are now supported; CHD v5 supports only uncompressed 2048-byte optical payloads. Broader/encrypted variants, DMG and encrypted/compressed NRG/MDF remain unsupported. Indexed CSO/ZSO and uncompressed NRG/MDS v1 remain supported.
 - Avoid extracting untrusted images into important directories; path checks cannot fully mitigate concurrent symlink races.
 - Unsigned binary; this is not an official release of the legacy ISO.WCX plugin.
 
@@ -90,6 +90,10 @@ installer does not associate .mdx. Read
 - Linux Clang ASan/UBSan CI scans parser and extraction regression runs; preview installers remain unsigned.
 
 **Concurrent file-system modifications:** This protection preserves existing destinations on ordinary failures, but it is not a substitute for an adversarially secure extraction sandbox. The destination-directory symlink check cannot prevent all external races.
+
+## Historical release notes (older versions)
+
+Support statements below describe their respective releases; see **v0.14** at the end for current additions.
 
 ## New in v0.9.0: boot, Xbox and sessions
 
