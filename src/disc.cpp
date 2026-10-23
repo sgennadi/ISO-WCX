@@ -274,7 +274,7 @@ void append(std::vector<Item>& out,Item entry) {
 }
 struct IsoRecord {
     std::uint32_t lba{},size{};
-    std::uint8_t flags{},unit{},gap{};
+    std::uint8_t flags{},unit{},gap{},ext_attr_blocks{};
     std::uint32_t dos_time{};
     std::string name;
 };
@@ -305,7 +305,20 @@ IsoRecord record(const Bytes& b,std::size_t p,bool joliet) {
     bounds(b,p,34);
     std::uint8_t len=b[p];require(len>=34 && len<=b.size()-p,"invalid ISO directory record");
     auto n=b[p+32];require(33u+n<=len,"invalid ISO filename field");
-    IsoRecord r;r.lba=u32(b,p+2);r.size=u32(b,p+10);r.dos_time=iso_dos_timestamp({b.data()+p+18,7});
+    IsoRecord r;r.lba=u32(b,p+2);r.size=u32(b,p+10);
+    // ECMA-119 stores the location and length in both endian orders. Treat
+    // disagreement as malformed media instead of trusting whichever half a
+    // damaged image happened to corrupt.
+    auto big32=[&](std::size_t at)->std::uint32_t {
+        return (std::uint32_t(b[at])<<24)|(std::uint32_t(b[at+1])<<16)|
+               (std::uint32_t(b[at+2])<<8)|std::uint32_t(b[at+3]);
+    };
+    require(r.lba==big32(p+6) && r.size==big32(p+14),
+            "mismatched ISO directory extent/length byte orders");
+    require(u16(b,p+28)==be16(b,p+30) && u16(b,p+28)>0,
+            "mismatched ISO file interleave sequence number");
+    r.ext_attr_blocks=b[p+1];
+    r.dos_time=iso_dos_timestamp({b.data()+p+18,7});
     r.flags=b[p+25];r.unit=b[p+26];r.gap=b[p+27];
     require(!r.gap || r.unit,"interleaved ISO file requires nonzero file unit size");
     require(!(r.flags&2) || !r.gap,"interleaved ISO directory unsupported");
@@ -336,7 +349,7 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
         const auto root=record(primary,156,false);
         auto root_ok=[&](std::uint32_t pos)->bool {
             try {
-                const auto data=src.read(std::uint64_t(pos)*iso_sector,iso_sector);
+                const auto data=src.read((std::uint64_t(pos)+root.ext_attr_blocks)*iso_sector,iso_sector);
                 if(data[0]<34 || data[0]>data.size())return false;
                 const auto dot=record(data,0,false);
                 return dot.name=="." && (dot.flags&2) && dot.lba==root.lba;
@@ -353,6 +366,13 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
     auto read_record=[&](const Bytes& data,std::size_t pos,bool use_joliet)->IsoRecord {
         auto r=record(data,pos,use_joliet);
         r.lba=adjusted_lba(r.lba,r.size);
+        // ECMA-119 directory record byte 1: the Extended Attribute Record
+        // occupies this many logical blocks before the actual file or
+        // directory data. The directory's logical block index points at the
+        // start of the attribute blocks, not the first content block.
+        require(r.lba<=std::numeric_limits<std::uint32_t>::max()-r.ext_attr_blocks,
+                "ISO extended-attribute extent overflow");
+        r.lba+=r.ext_attr_blocks;
         return r;
     };
     auto read_susp=[&](std::uint64_t pos,std::size_t length)->Bytes {
