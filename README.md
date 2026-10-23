@@ -121,8 +121,10 @@ primary GPT using an independently valid backup header and table. For example:
     virtual_partition_inspect C:\Images\disk.img
     virtual_partition_inspect C:\Images\disk-4k.img 4096
 
-This is **not yet a WCX archive reader** and cannot extract files from
-NTFS/FAT/ext partitions. The optical ISO/BIN `.img` path is unchanged. See
+The virtual-disk code is **not yet registered in WCX**. A separate,
+read-only `virtual_fat_inspect` CLI now lists and extracts FAT12/16/32
+files from discovered raw IMG or fixed VHD partitions. NTFS/exFAT/ext
+are not implemented. The optical ISO/BIN `.img` path is unchanged. See
 [virtual disk architecture](docs/virtual-disks.md), informed by
 [TalAloni/DiskAccessLibrary](https://github.com/TalAloni/DiskAccessLibrary)
 (LGPL-3.0-or-later; no source copied or linked).
@@ -141,10 +143,20 @@ the EOF footer signature, one's-complement checksum, format version, disk type,
 and exact logical size. No VHD data is written or mounted. Dynamic VHD/VHDX
 can be investigated via **optional Linux-only libvhdi**; Windows WCX does not
 link it. Differencing VHD and VMDK are not implemented. Filesystem extraction
-is not exposed until verified image and filesystem readers are available.
+is not exposed in WCX until filesystem and Windows GUI integration tests pass.
 
 We evaluated [libyal/libvhdi](https://github.com/libyal/libvhdi), an alpha
 LGPL-3.0-or-later C library. The Linux research build may link a separately
 installed libvhdi with `-DISO_WCX_WITH_LIBVHDI=ON`; it is never included in
 Windows WCX packages. See [virtual disk design](docs/virtual-disks.md) and
-[our 7-Zip source architecture study](docs/7zip-disk-formats.md).
+[our 7-Zip source architecture study](docs/7zip-disk-formats.md), and
+[FAT12/16/32 read-only implementation](docs/fat-filesystems.md).
+
+### FAT12/16/32 files inside raw IMG and fixed VHD (standalone CLI)
+
+`virtual_fat_inspect list disk.img 1` lists files in the first partition;
+`virtual_fat_inspect cat disk.img 1 README.TXT` streams its bytes to stdout.
+This supports verified nested directories, VFAT long filenames and
+non-contiguous file cluster chains. No disk is mounted and no host path is
+created from the image. The FAT reader is still **not included in the WCX
+DLL**, so Total Commander continues to use its validated optical engine.
