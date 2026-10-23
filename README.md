@@ -1,40 +1,34 @@
 # ISO-WCX
 
-Modern C++20 foundation for a read-only Total Commander WCX disc-image plugin.
+A modern **read-only Total Commander WCX** disc-image plugin based on C++20 and CMake.
 
-> **Status: early development.** This repository does not yet contain a working WCX plugin, and does not currently produce a `.wcx` or `.wcx64` file.
+> **Status: v0.2.0 preview, not a production release.** Windows x86 and x64 binaries compile and pass the automated WCX load/list/extract smoke tests. Compatibility with real-world discs and the Total Commander user interface still needs further validation.
 
-## Goals
+## Download the preview
 
-- Modern C++20 codebase, CMake and Windows x86/x64 builds.
-- ISO 9660, Joliet, Rock Ridge and UDF, followed by additional image formats.
-- Strict bounded parsing, Unicode, large files, safe extraction and robust malformed-image handling.
-- Continuous integration, regression tests and reproducible releases.
+Open [GitHub Actions](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml), choose a successful run, and download the **ISO-WCX-Installable-Preview** artifact. The artifact contains `ISO-WCX-preview.zip`, with both binaries and `pluginst.inf`. Open the inner ZIP in Total Commander to start its plugin installer.
 
-## Current contents
+## Current support
 
-An endian-safe binary-reader foundation, a standalone ISO9660/Joliet listing and extraction prototype, and synthetic regression tests are included. The ISO reader is not yet integrated with WCX and does not claim support for Rock Ridge, multi-extent files, or all physical sector layouts. The existing legacy ISO.WCX implementation and experimental UDF prototype are **not** published here. The migration requires separate validation of original code redistribution rights and regression testing.
+- ISO 9660 with 2048-byte sectors, including multi-extent file data.
+- Joliet (Unicode filenames).
+- Basic UDF Type-1 partition mapping, File Entry / Extended File Entry, short and long extents, and OSTA CS0 filenames.
+- Read-only archive navigation, testing, and extraction through WCX Unicode and ANSI API.
+- Streamed file reads with 64-bit sizes, bounded parsing and initial malformed-image checks.
+- Windows x86 `ISO-WCX.wcx` and x64 `ISO-WCX.wcx64` with GitHub Actions builds and tests.
+
+**Not yet implemented:** Rock Ridge, El Torito virtual folders, multisession/session offsets, 2352-byte sector BIN, UDF VAT/Metadata/Sparable partitions and allocation continuations, compressed ISO container formats. Do not assume every UDF 1.02–2.60 image works.
 
 ## Build
 
+Windows with Visual Studio 2022:
+
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-## Roadmap
+Use `-A Win32` for the 32-bit plugin. For Linux, the standalone `disc_inspect` utility and parser tests build with regular CMake commands; the WCX DLL is Windows-only.
 
-1. Verify legacy-source provenance and license.
-2. Build independently testable ISO9660/Joliet/Rock Ridge and UDF reader libraries.
-3. Integrate parsers behind the unchanged Total Commander WCX API.
-4. Produce and test 32-bit `.wcx` and 64-bit `.wcx64` on Windows.
-5. Add complex UDF partitions, fuzzing and release packaging.
-
-This is **not** a fork claiming ownership of the original ISO.WCX code. See [PROVENANCE.md](PROVENANCE.md).
-
-## Standalone ISO9660 / Joliet reader
-
-After a CMake build, run `iso9660_reader image.iso` to list entries, or `iso9660_reader image.iso --extract output_dir` to extract files. It currently expects 2048-byte logical sectors; extraction from untrusted images should be performed in an isolated test directory. UDF is not yet integrated in this GitHub repository.
-
-[Migration tracking issue](https://github.com/sgennadi/ISO-WCX/issues/1).
+See [PREVIEW.md](PREVIEW.md) for detailed build and install instructions and [PROVENANCE.md](PROVENANCE.md) for code provenance and licensing considerations. Original ISO.WCX 1.7.6 sources have **not** been republished. [Track additional format support in issue #1](https://github.com/sgennadi/ISO-WCX/issues/1).
