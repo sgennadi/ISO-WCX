@@ -75,6 +75,21 @@ add_library(iso_virtual_partitions STATIC src/partition_map.cpp src/virtual_disk
 target_include_directories(iso_virtual_partitions PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_virtual_partitions PUBLIC cxx_std_20)
 
+# libyal/libvhdi (LGPL-3.0-or-later, alpha) is NEVER an implicit dependency.
+# Opt-in is for standalone read-only virtual HDD inspection only. The Windows
+# WCX module does not link iso_virtual_partitions and shipping ZIP is unchanged.
+option(ISO_WCX_WITH_LIBVHDI "Experimental libvhdi backend for dynamic VHD/VHDX" OFF)
+if(ISO_WCX_WITH_LIBVHDI)
+  if(WIN32)
+    message(FATAL_ERROR "libvhdi backend is not yet validated on Windows; keep it disabled")
+  endif()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(ISO_WCX_LIBVHDI REQUIRED IMPORTED_TARGET libvhdi)
+  target_compile_definitions(iso_virtual_partitions PRIVATE ISO_WCX_WITH_LIBVHDI=1)
+  target_link_libraries(iso_virtual_partitions PRIVATE PkgConfig::ISO_WCX_LIBVHDI)
+  message(STATUS "EXPERIMENTAL read-only libvhdi backend enabled for virtual_partition_inspect")
+endif()
+
 # The libyal/libvhdi adapter is opt-in research for dynamic VHD/VHDX.
 # Do NOT add it to Windows WCX packages or silently fetch/redistribute LGPL
 # dependencies. Linux builds using system libvhdi only.
