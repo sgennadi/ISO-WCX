@@ -59,13 +59,13 @@ $bytes = [IO.File]::ReadAllBytes($ini)
 $skip = 0
 $encoding = [Text.Encoding]::Default
 if ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) {
-    $encoding = New-Object Text.UTF8Encoding($true, $true)
+    $encoding = [Text.UTF8Encoding]::new($true, $true)
     $skip = 3
 } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 255 -and $bytes[1] -eq 254) {
-    $encoding = New-Object Text.UnicodeEncoding($false, $true, $true)
+    $encoding = [Text.UnicodeEncoding]::new($false, $true, $true)
     $skip = 2
 } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 254 -and $bytes[1] -eq 255) {
-    $encoding = New-Object Text.UnicodeEncoding($true, $true, $true)
+    $encoding = [Text.UnicodeEncoding]::new($true, $true, $true)
     $skip = 2
 }
 $text = $encoding.GetString($bytes, $skip, $bytes.Length - $skip)
