@@ -26,8 +26,10 @@ static std::vector<std::uint8_t> record(std::uint32_t lba,std::uint32_t size,std
 }
 int main(int argc,char** argv){
     if(argc!=2)return 1;
+    std::cerr << "wcx smoke: loading DLL\n" << std::flush;
     HMODULE dll=LoadLibraryW(fs::path(argv[1]).wstring().c_str());
     if(!dll){std::cerr<<"Cannot load .wcx plugin\n";return 2;}
+    std::cerr << "wcx smoke: resolving exports\n" << std::flush;
     auto open=reinterpret_cast<OpenFn>(GetProcAddress(dll,"OpenArchiveW"));
     auto header=reinterpret_cast<HeaderFn>(GetProcAddress(dll,"ReadHeaderExW"));
     auto process=reinterpret_cast<ProcessFn>(GetProcAddress(dll,"ProcessFileW"));
@@ -50,15 +52,21 @@ int main(int argc,char** argv){
     auto file=folder/L"image.iso";auto output=folder/L"result.txt";
     {std::ofstream f(file,std::ios::binary);f.write(reinterpret_cast<const char*>(image.data()),static_cast<std::streamsize>(image.size()));}
     std::wstring source=file.wstring();OpenW options{};options.ArcName=source.data();
+    std::cerr << "wcx smoke: invoking OpenArchiveW\n" << std::flush;
     HANDLE state=open(&options);if(!state||options.OpenResult!=0){std::cerr<<"OpenArchiveW failed\n";return 4;}
+    std::cerr << "wcx smoke: invoking ReadHeaderExW\n" << std::flush;
     HeaderExW item{};if(header(state,&item)!=0||std::wstring(item.FileName)!=L"HELLO.TXT"||item.UnpSize!=5){std::cerr<<"ReadHeaderExW failed\n";close(state);return 5;}
     std::wstring dest=output.wstring();
+    std::cerr << "wcx smoke: invoking ProcessFileW\n" << std::flush;
     if(process(state,2,nullptr,dest.data())!=0){std::cerr<<"ProcessFileW failed\n";close(state);return 6;}
+    std::cerr << "wcx smoke: checking archive end\n" << std::flush;
     if(header(state,&item)!=10){std::cerr<<"Expected end of archive\n";close(state);return 7;}
+    std::cerr << "wcx smoke: closing state\n" << std::flush;
     close(state);
     std::ifstream result(output,std::ios::binary);
     std::string content((std::istreambuf_iterator<char>(result)),std::istreambuf_iterator<char>());
     fs::remove_all(folder);
+    std::cerr << "wcx smoke: unloading DLL\n" << std::flush;
     FreeLibrary(dll);
     if(content!="world"){std::cerr<<"File contents mismatch\n";return 8;}
     std::cout<<"WCX load/export/list/extract test passed\n";return 0;
