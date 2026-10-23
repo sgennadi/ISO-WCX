@@ -8,6 +8,7 @@ are advertised by these fixtures.
 """
 from __future__ import annotations
 
+import bz2
 import ctypes
 import pathlib
 import random
@@ -31,6 +32,11 @@ def isz_image(raw: bytes) -> bytes:
         block = raw[i * SECTOR:(i + 1) * SECTOR]
         if not any(block):
             kind, data, length = 0, b"", SECTOR
+        elif i % 3 == 0:
+            bzip = bz2.compress(block, compresslevel=9)
+            assert bzip[:3] == b"BZh"
+            kind, data = 3, b"\0\0\0" + bzip[3:]
+            length = len(data)
         elif i % 2:
             kind, data = 1, block
             length = len(data)
@@ -254,7 +260,7 @@ def main(reader: pathlib.Path, plugin: pathlib.Path | None = None,
                                     (".chd", chd_image)):
             invoke(reader, root / ("udf" + extension),
                    builder(test_images.udf_image()), expected="hello")
-        print("PASS: native ISZ v1 stored/zero/zlib, DAA v1 zlib, "
+        print("PASS: native ISZ v1 stored/zero/zlib/bzip2, DAA v1 raw DEFLATE, "
               "CHD v5 uncompressed, ISO/UDF, malformed offsets and WCX ABI")
 
 
