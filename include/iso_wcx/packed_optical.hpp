@@ -4,10 +4,12 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace iso_wcx {
+class ChdStream;
 
 // Read-only, random-access optical payload stream. All codecs are in-process.
 // No mounting, external helper executable, third-party plugin DLL or
@@ -17,6 +19,7 @@ bool is_packed_optical_path(const std::filesystem::path& path);
 class PackedOptical {
 public:
     explicit PackedOptical(const std::filesystem::path& path);
+    ~PackedOptical();
     [[nodiscard]] std::uint64_t size() const noexcept { return logical_size_; }
     [[nodiscard]] std::string label() const;
     [[nodiscard]] std::vector<std::uint8_t> read(std::uint64_t offset,
@@ -32,10 +35,10 @@ private:
 
     void parse_isz();
     void parse_daa();
-    void parse_chd();
     void decode(std::size_t index);
     [[nodiscard]] std::vector<std::uint8_t> physical_read(
         std::uint64_t position, std::size_t length);
+    std::unique_ptr<ChdStream> chd_;
     std::ifstream file_;
     std::uint64_t physical_size_ = 0;
     std::uint64_t logical_size_ = 0;

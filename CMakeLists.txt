@@ -263,6 +263,16 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_packed_optical.py"
           "$<TARGET_FILE:disc_inspect>")
     endif()
+    # Genuine MAME-produced compressed CD/DVD CHD fixtures, available in
+    # the Linux preview CI job. chdman is test-only, never a WCX dependency.
+    find_program(ISO_WCX_CHDMAN_EXECUTABLE NAMES chdman)
+    if(ISO_WCX_CHDMAN_EXECUTABLE)
+      add_test(NAME external_chdman_compressed_chd
+        COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chdman_interop.py"
+          "$<TARGET_FILE:disc_inspect>")
+      set_tests_properties(external_chdman_compressed_chd PROPERTIES TIMEOUT 240)
+    endif()
     add_test(NAME integrated_virtual_disk_fat_wcx
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_fat.py" "$<TARGET_FILE:disc_inspect>")
     set_tests_properties(integrated_virtual_disk_fat_wcx PROPERTIES TIMEOUT 180)

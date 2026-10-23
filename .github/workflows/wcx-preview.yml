@@ -55,6 +55,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Install MAME CHD fixture generator for CI only
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y mame-tools
+          chdman help createdvd
+          chdman help createcd
       - name: Confirm independent ISO writer test dependency
         run: python3 -c "import ctypes.util; assert ctypes.util.find_library('archive'), 'libarchive is required for independent ISO validation'"
       - name: Configure

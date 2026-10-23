@@ -1,4 +1,5 @@
 #include "iso_wcx/packed_optical.hpp"
+#include "iso_wcx/chd_stream.hpp"
 
 #include <zlib.h>
 #include <bzlib.h>
@@ -27,13 +28,6 @@ std::uint32_t le32(const std::uint8_t* p) {
 }
 std::uint64_t le64(const std::uint8_t* p) {
     return le32(p) | (std::uint64_t(le32(p + 4)) << 32);
-}
-std::uint32_t be32(const std::uint8_t* p) {
-    return (std::uint32_t(p[0]) << 24) | (std::uint32_t(p[1]) << 16) |
-           (std::uint32_t(p[2]) << 8) | std::uint32_t(p[3]);
-}
-std::uint64_t be64(const std::uint8_t* p) {
-    return (std::uint64_t(be32(p)) << 32) | be32(p + 4);
 }
 constexpr std::uint64_t max_logical = std::uint64_t(1) << 44;
 constexpr std::size_t max_chunks = 4'000'000;
@@ -92,7 +86,9 @@ PackedOptical::PackedOptical(const std::filesystem::path& path)
         parse_daa();
     } else if (extension == ".chd") {
         type_ = Type::chd_v5;
-        parse_chd();
+        chd_ = std::make_unique<ChdStream>(path);
+        logical_size_ = chd_->size();
+        block_bytes_ = 2048;
     } else {
         throw std::runtime_error("unsupported packed optical extension");
     }
@@ -100,16 +96,20 @@ PackedOptical::PackedOptical(const std::filesystem::path& path)
           block_bytes_ >= 2048 && block_bytes_ <= max_block &&
           block_bytes_ % 2048 == 0,
           "packed optical geometry is invalid");
-    const auto expected = (logical_size_ - 1) / block_bytes_ + 1;
-    check(expected == chunks_.size(),
-          "packed optical chunk count disagrees with logical size");
+    if (!chd_) {
+        const auto expected = (logical_size_ - 1) / block_bytes_ + 1;
+        check(expected == chunks_.size(),
+              "packed optical chunk count disagrees with logical size");
+    }
 }
+
+PackedOptical::~PackedOptical() = default;
 
 std::string PackedOptical::label() const {
     switch (type_) {
     case Type::isz: return "ISZ v1 / native stored-zlib-bzip2";
     case Type::daa_v1: return "DAA v1 / native raw DEFLATE";
-    case Type::chd_v5: return "CHD v5 / uncompressed hunks";
+    case Type::chd_v5: return chd_->label();
     }
     return "packed optical";
 }
@@ -275,56 +275,6 @@ void PackedOptical::parse_daa() {
     }
 }
 
-void PackedOptical::parse_chd() {
-    check(physical_size_ >= 124, "truncated CHD header");
-    const auto h = physical_read(0, 124);
-    check(std::memcmp(h.data(), "MComprHD", 8) == 0 &&
-          be32(h.data() + 8) == 124 &&
-          be32(h.data() + 12) == 5,
-          "only CHD v5 headers are supported");
-    for (std::size_t i = 0; i < 4; ++i)
-        check(be32(h.data() + 16 + i*4) == 0,
-              "compressed CHD v5 requires entropy map and codecs not yet implemented");
-    check(std::all_of(h.begin()+104,h.begin()+124,
-                      [](std::uint8_t c){return c==0;}),
-          "CHD parent chains are unsupported");
-    logical_size_ = be64(h.data()+32);
-    const auto map_offset = be64(h.data()+40);
-    block_bytes_ = be32(h.data()+56);
-    const auto unit_bytes = be32(h.data()+60);
-    check(logical_size_ != 0 && logical_size_ <= max_logical &&
-          logical_size_ % 2048 == 0 &&
-          block_bytes_ >= 2048 && block_bytes_ <= max_block &&
-          block_bytes_ % 2048 == 0 && unit_bytes == 2048,
-          "CHD v5 is not a supported 2048-byte logical optical stream");
-    const auto blocks = (logical_size_-1)/block_bytes_ + 1;
-    check(blocks <= max_chunks && map_offset >= 124 &&
-          map_offset <= physical_size_ &&
-          blocks*4 <= physical_size_ - map_offset,
-          "CHD v5 uncompressed hunk map is malformed");
-    const auto map_end = map_offset + blocks*4;
-    for (std::uint64_t base = 0; base < blocks; ) {
-        const auto count = static_cast<std::size_t>(
-            std::min<std::uint64_t>(blocks-base, 1u<<18));
-        const auto map = physical_read(map_offset+base*4,count*4);
-        for (std::size_t i=0;i<count;++i) {
-            const auto index = be32(map.data()+i*4);
-            if (!index) {
-                chunks_.push_back({0,0,Codec::zeros});
-                continue;
-            }
-            const auto at = std::uint64_t(index)*block_bytes_;
-            check(at >= 124 && at <= physical_size_ &&
-                  block_bytes_ <= physical_size_-at &&
-                  (at >= map_end || (at <= map_offset &&
-                                     block_bytes_ <= map_offset-at)),
-                  "CHD hunk overlaps map, header or end of image");
-            chunks_.push_back({at,block_bytes_,Codec::stored});
-        }
-        base += count;
-    }
-}
-
 void PackedOptical::decode(std::size_t index) {
     check(index < chunks_.size(), "packed optical block outside map");
     const auto expected = static_cast<std::size_t>(
@@ -369,6 +319,7 @@ void PackedOptical::decode(std::size_t index) {
 }
 
 std::vector<std::uint8_t> PackedOptical::read(std::uint64_t offset,std::size_t length) {
+    if (chd_) return chd_->read(offset,length);
     check(length <= 32u*1024u*1024u && offset <= logical_size_ &&
           length <= logical_size_-offset,
           "packed optical logical extent outside image");
