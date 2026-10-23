@@ -1,7 +1,5 @@
 #include "iso_wcx/rock_ridge.hpp"
 #include "iso_wcx/legacy_formats.hpp"
-#include <algorithm>
-#include <limits>
 #include <set>
 #include <stdexcept>
 #include <tuple>
