@@ -1,0 +1,39 @@
+ISO-WCX v0.12.1 Preview - исправление старой ассоциации Total Commander
+=======================================================================
+
+Ошибка: "File iso.wcx not found!" или "Error, could not load plugin!",
+например:
+  C:\Program Files\TotalCmd\plugins\wcx\ISO\iso.wcx
+
+Это СТАРЫЙ путь ISO.WCX. Новый ISO-WCX установлен отдельно:
+  C:\Program Files\TotalCmd\plugins\wcx\ISO-WCX\ISO-WCX.wcx
+  C:\Program Files\TotalCmd\plugins\wcx\ISO-WCX\ISO-WCX.wcx64
+
+Исправление:
+1. Configuration > Options > Packer > Configure packer extension WCXs.
+2. Введите расширение iso. В списке Associate with выделите старую
+   запись с путем ...\plugins\wcx\ISO\iso.wcx и нажмите Delete.
+3. Нажмите New type... и выберите существующий файл
+   ...\plugins\wcx\ISO-WCX\ISO-WCX.wcx.
+   Для 64-битного Total Commander рядом должен быть ISO-WCX.wcx64.
+4. Нажмите OK и перезапустите Total Commander.
+5. Откройте ISO клавишами Ctrl+PgDn.
+
+При необходимости проверьте остальные расширения: cue, ccd, nrg,
+mds, cso, zso. Меняйте только записи, указывающие на отсутствующий
+старый плагин. Не удаляйте ассоциации других работающих плагинов.
+
+Число 192 перед запятой - флаги возможностей WCX, НЕ часть пути.
+Не вводите 192 вручную в диалог выбора файла.
+
+pluginst.inf устанавливает новый WCX, но не удаляет старые ассоциации
+из wincmd.ini. Не нужно стирать все содержимое wincmd.ini.
+Актуальный путь к настройкам: Help > About Total Commander.
+
+Если ошибка остается после исправления пути, проверьте разрядность
+Total Commander (x64 должен видеть WCX64) и DLL зависимости.
+Файлы Preview не подписаны; проверка в реальном интерфейсе пока
+не заменена GitHub Actions.
+
+Исходный код: https://github.com/sgennadi/ISO-WCX
+Справка: https://www.ghisler.ch/wiki/index.php/Plugins_Automated_Installation
