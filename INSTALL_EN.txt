@@ -1,4 +1,4 @@
-ISO-WCX v0.14.0 Preview - standalone Total Commander WCX plugin
+ISO-WCX v0.15.0 Preview - standalone Total Commander WCX plugin
 ================================================================
 
 Installation (no additional tools)
@@ -52,3 +52,10 @@ compressed CD/arcade CHD, dynamic/differencing VHD, differencing/dirty
 VHDX, NTFS, exFAT and ext-family file systems.
 
 Source: https://github.com/sgennadi/ISO-WCX
+
+WIM / ESD
+---------
+Open install.wim or boot.wim using Ctrl+PgDn, then browse image1/, image2/.
+Supported ESD files are handled the same way. Read-only extraction with F5.
+The system's wimgapi.dll is used inside the WCX; no mounting or extra
+programs. Split SWM and reparse-point extraction are not yet supported.

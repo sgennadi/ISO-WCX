@@ -1,4 +1,4 @@
-# ISO-WCX v0.14.0 C++20 preview
+# ISO-WCX v0.15.0 C++20 preview
 
 Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
@@ -156,3 +156,15 @@ password-protected/multipart DAA, CHD audio, multi-track/mixed-mode,
 parent chains and unusual sector layouts, plus MDS v2/MDX metadata decryption.
 These deliberately fail closed.
 Authentic vendor samples and GUI testing are still required for stable.
+
+## WIM/ESD in v0.15 Preview
+
+The plugin can browse `boot.wim`, `install.wim`, and WIM-structured `.esd`
+directly in Total Commander. WIM indexes appear as `image1/`, `image2/`,
+etc. It uses system WIMGAPI from System32. No mount, additional DLL,
+third-party EXE or conversion to ISO is required. The OS WIM API may store
+temporary image metadata in the normal Windows temporary directory.
+See [WIM architecture](docs/wim-integration.md).
+
+Split SWM, NTFS alternative data streams and reparse point restoration
+are not yet supported. Read-only operations only.

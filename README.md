@@ -1,7 +1,7 @@
 # ISO-WCX
 
-**ISO-WCX v0.14.0 Preview** — a self-contained modern C++20, read-only
-Total Commander WCX plugin for optical disc images and virtual HDD filesystems.
+**ISO-WCX v0.15.0 Preview** — a self-contained modern C++20, read-only
+Total Commander WCX plugin for optical disc images, WIM/ESD archives and virtual HDD filesystems.
 
 ## Install into Total Commander
 
@@ -27,6 +27,7 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 
 | Format/layout | Coverage |
 | --- | --- |
+| WIM / ESD on Windows | In-process system WIMGAPI, read-only multiple image indexes under `image1/`, `image2/`, etc.; browse and extract files with XPRESS/LZX/LZMS as supported by Windows. No mount, added DLL or EXE. Split SWM, streams and reparse points excluded. |
 | ISO 9660 / Joliet | File listing and extraction, Unicode names, multi-extent and interleaved files; recover from broken Joliet directory using valid ISO9660 primary volume |
 | Rock Ridge | RRIP NM/CE and relocated CL directories; PX read-only and TF modification timestamps; no symlink/device extraction |
 | Raw BIN/IMG | CD Mode 1 / Mode 2 Form 1 (2352-byte), XA Form 1 (2336-byte); automatic probing limited to single-track images |
@@ -238,3 +239,15 @@ Real-world media/Total Commander GUI validation is pending.
   MDS v2/MDX and protected ISZ/DAA remain **unsupported**.
 
 See [bounded optical container design](docs/packed-optical.md).
+
+## What changed in v0.15.0 Preview
+
+- Browse WIM or Windows-compatible ESD inside Total Commander using the
+  system WIMGAPI already installed with Windows.
+- Exposes each edition/index as `image1/`, `image2/`, etc., with nested
+  folders, file sizes and DOS timestamps/attributes.
+- Streams individual files through the existing WCX atomic extraction and
+  cancellation path. No DISM, wimlib-imagex.exe, mount, external DLL or driver.
+- Split SWM, alternate streams, reparse-point restoration, unsupported ESD
+  compression and non-Windows systems are excluded in this preview.
+- See [WIM design notes](docs/wim-integration.md).
