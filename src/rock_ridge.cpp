@@ -123,7 +123,7 @@ RockRidgeEntry rock_ridge_entry(std::span<const std::uint8_t> record,
                 continuing_nm = (flags & 1) != 0;
                 if (!continuing_nm) name_finished = true;
             } else if (a=='P' && b=='X') {
-                check(!saw_px && length>=12 && (length-4)%8==0,
+                check(!saw_px && (length==36 || length==44),
                       "duplicate or truncated Rock Ridge PX record");
                 saw_px=true;
                 // Reject contradictory LE/BE copies even in unused PX fields.
@@ -167,7 +167,11 @@ RockRidgeEntry rock_ridge_entry(std::span<const std::uint8_t> record,
                 result.child_lba = lba;
             } else if (a=='C' && b=='E') {
                 check(length>=28 && !next,"invalid Rock Ridge CE entry");
-                Continuation ce{little32(current,p+4),little32(current,p+12),little32(current,p+20)};
+                // All three CE numbers have mirrored LE/BE values. A
+                // mismatch is corruption, not a reason to follow the LE half.
+                Continuation ce{mirrored32(current,p+4),
+                                mirrored32(current,p+12),
+                                mirrored32(current,p+20)};
                 check(ce.offset < sector_size && ce.length > 0 && ce.length <= max_ce_area,
                       "invalid Rock Ridge CE extent");
                 next = ce;
