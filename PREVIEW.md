@@ -1,4 +1,4 @@
-# ISO-WCX v0.5.0 C++20 preview
+# ISO-WCX v0.6.0 C++20 preview
 
 Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
@@ -16,10 +16,10 @@ Modern, read-only Total Commander WCX plugin. The codebase is clean-room and doe
 ## Limits and cautions
 
 - This is a **preview** tested primarily with deterministic synthetic image fixtures. Real DVD/BD/UDF compatibility is not yet guaranteed, especially rewritable/packet-written and damaged media.
-- RAW Mode 2 Form 2, audio tracks, mixed-mode tracks, complete CUE/CCD/MDS metadata and full multisession TOC are not supported.
+- RAW Mode 2 Form 2, audio extraction, subchannel processing, full TOC/CCD and nonstandard CUE/MDS layouts are not supported. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
 - UDF VAT historical chains, every version of Metadata/Sparable, UDF pseudo-overwrite behavior and fragmented descriptor edge cases are not yet exhaustively covered.
 - Rock Ridge POSIX permissions, TF timestamps and symlink extraction are not implemented.
-- Compression/container formats (ISZ, CSO, ZSO, DAA, DMG, NRG, MDF, etc.) are not supported yet.
+- Unsupported image containers remain ISZ, CSO, ZSO, DAA, DMG and encrypted/compressed NRG/MDF variations. Only uncompressed NRG and MDS/MDF track subsets are implemented.
 - Avoid extracting untrusted images into important directories; path checks cannot fully mitigate concurrent symlink races.
 - Unsigned binary; this is not an official release of the legacy ISO.WCX plugin.
 
@@ -46,3 +46,10 @@ CLI tool: `disc_inspect image.iso` or `disc_inspect image.iso --extract OUTPUT`.
 Download the **ISO-WCX-Installable-Preview** artifact from successful GitHub Actions runs. Unzip the outer GitHub artifact archive, then open `ISO-WCX-preview.zip` directly in Total Commander; `pluginst.inf` prompts installation. Alternatively configure `.iso`, `.img` or `.bin` manually under **Configuration > Options > Packer > Configure packer extension WCXs**. Only use `.bin` images in the supported single-track layouts above.
 
 CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list/extract smoke checks, and packages an installable ZIP when both architectures pass.
+
+## NRG and MDS/MDF preview support
+
+- Nero `.nrg`: NERO (32-bit) and NER5 (64-bit) trailer, bounded chunk list, DAOI/DAOX (disc-at-once) and ETNF/ETN2 (track-at-once), selected latest ISO9660/UDF data track.
+- Alcohol `.mds`/`.mdf`: validated MDS v1 session/track/filename/index blocks; uncompressed Mode 1, Mode 2 Form 1 and cooked 2048/2336 data tracks. `.mdf` is a sidecar, not a general Microsoft SQL MDF reader.
+- Raw-image probing is still available for `.img`/`.bin`; installer associations include `.iso`, `.cue`, `.nrg`, `.mds` but **not** `.bin` or `.mdf`, avoiding conflicts.
+- Synthetic NRG/MDS regression tests and malformed-metadata mutation tests are run by CTest on Linux and Windows. Real Nero/Alcohol images and actual Total Commander interaction still require manual compatibility testing.
