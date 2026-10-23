@@ -4,6 +4,7 @@
 #include "iso_wcx/compressed_image.hpp"
 #include "iso_wcx/cue.hpp"
 #include "iso_wcx/image_tracks.hpp"
+#include "iso_wcx/mds_probe.hpp"
 #include "iso_wcx/rock_ridge.hpp"
 #include "iso_wcx/legacy_formats.hpp"
 #include <algorithm>
@@ -1077,6 +1078,12 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
     const bool nrg=is_nrg_path(image_);
     const bool mds=is_mds_path(image_);
     const bool ccd=is_ccd_path(image_);
+    if(is_mdx_path(image_)) {
+        (void)probe_mds_descriptor(image_);
+        throw std::runtime_error(
+            "MDX recognized; encrypted/packed MDSv2 metadata and "
+            "data-track extraction are not implemented in ISO-WCX");
+    }
     if(cue || nrg || mds || ccd) {
         const std::size_t count=cue?cue_data_tracks(image_).size():
             (nrg?nrg_data_tracks(image_).size():
