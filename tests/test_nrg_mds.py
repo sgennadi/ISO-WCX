@@ -185,13 +185,23 @@ def main(executable):
         # Mixed-mode DAOX should skip CDDA/audio tracks.
         (root/'mixed.nrg').write_bytes(nrg_dao(raw=True,audio_first=True))
         run(executable,root,'mixed.nrg','NERODATA.TXT')
-        for version in (1,2):
-            for sector in (2048,2352,2336,2448):
-                descriptor,data=mds_layout(sector,mode2=(sector==2336))
-                (root/'image.mdf').write_bytes(data)
-                name=f'mds{version}_{sector}.mds'
-                (root/name).write_bytes(descriptor)
-                run(executable,root,name,'FROMMDF.TXT')
+        # Only MDS v1 is implemented. The previous synthetic loop misleadingly
+        # named a second copy "mds2" without changing header major version.
+        for sector in (2048,2352,2336,2448):
+            descriptor,data=mds_layout(sector,mode2=(sector==2336))
+            (root/'image.mdf').write_bytes(data)
+            name=f'mds_v1_{sector}.mds'
+            (root/name).write_bytes(descriptor)
+            run(executable,root,name,'FROMMDF.TXT')
+
+        # MDS major v2 has distinct metadata and must fail explicitly rather
+        # than passing accidentally through the v1 track table offsets.
+        v1_descriptor,v1_mdf=mds_layout()
+        v2_descriptor=bytearray(v1_descriptor)
+        v2_descriptor[16]=2
+        (root/'image.mdf').write_bytes(v1_mdf)
+        (root/'unsupported_mds_v2.mds').write_bytes(v2_descriptor)
+        run(executable,root,'unsupported_mds_v2.mds',should_pass=False)
         # Metadata must not let us overread into the NRG trailer.
         broken=bytearray(nrg_tao())
         broken[-8:]=b'NER5'+be32(0xffffffff)
@@ -223,7 +233,7 @@ def main(executable):
             (root/name).write_bytes(case)
             result=subprocess.run([executable,str(root/name)],capture_output=True,timeout=10)
             assert result.returncode in (0,2),(name,result.returncode)
-    print('PASS: NRG NERO/NER5 DAO/TAO, MDF/MDS, raw modes and corrupt containers')
+    print('PASS: NRG NERO/NER5 DAO/TAO, MDS v1/MDF raw modes, explicit MDS v2 rejection, corrupt containers')
 
 if __name__=='__main__':
     main(sys.argv[1])
