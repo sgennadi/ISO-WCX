@@ -36,7 +36,11 @@ The adapter deliberately exposes only ISO/UDF-bearing CD/DVD data tracks,
 with strict CHD map/CRC and logical-geometry validation.
 
 MAME `chdman` is used **only inside development CI** to produce independent
-zlib/LZMA DVD ISO/UDF and CD images. No end user installs or runs it. The
+zlib/LZMA DVD ISO/UDF and CD images. The WCX preview workflow also passes
+real chdman-generated compressed DVD LZMA and CD CD-LZMA fixtures to both
+Windows Win32 and x64 runners, where the exported WCX APIs are used to
+list and extract `HELLO.TXT` and verify its bytes. CI fixture generation
+is not a runtime tool, and test EXEs are never packaged. No end user installs or runs it. The
 WCX installer contains no libchdr DLL, mounted disk, helper or ISO staging file.
 
 Compressed CD support is currently experimental until verified against a wider
