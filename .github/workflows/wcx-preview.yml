@@ -72,7 +72,7 @@ jobs:
         run: python3 -c "import ctypes.util; assert ctypes.util.find_library('archive'), 'libarchive is required for independent ISO validation'"
       - name: Configure sanitizers
         run: |
-          cmake -S . -B build-sanitized -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++ \
+          cmake -S . -B build-sanitized -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
             '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -O1' \
             '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined'
       - name: Build sanitizers
