@@ -14,8 +14,8 @@ copied or linked into ISO-WCX.
 - Read-only, regular-file images only. Logical sectors 512 or 4096 bytes.
 - Primary MBR + bounded linked extended MBR (EBR), or GPT with protective MBR.
 - Bounds checking and 4 MiB cap on GPT partition entry metadata.
-- GPT header/entry-array CRC32 verification, usable range enforcement,
-  partition ordering and overlap rejection.
+- Primary and independent backup GPT header/entry-array CRC32 verification,
+  fallback recovery, usable range enforcement and overlap rejection.
 - Reject malformed/out-of-bounds EBR links, third/fourth EBR entries, reverse
   chains, overlapping partitions and hybrid GPT/MBR instead of guessing.
 - Synthetic fixtures: MBR NTFS/Linux partitions, overlapping/out-of-range
@@ -67,8 +67,8 @@ and
 
 1. Validate optional libvhdi against a real-world dynamic VHD/VHDX corpus,
    including corruption and parent/snapshot rejection, before any shipment.
-2. GPT backup-header fallback, GUID names and labels; linked EBR discovery
-   is implemented independently with a 128-link limit and mutation tests.
+2. GPT GUID names and labels, metadata consistency reporting; CRC-verified
+   backup fallback and linked EBR are implemented with mutation tests.
 3. Read-only FAT12/16/32, exFAT and NTFS volume readers; expose partition
    folders and file metadata with correct WCX extraction. NTFS sparse runs,
    compressed attributes, reparse points and alternate streams need careful
