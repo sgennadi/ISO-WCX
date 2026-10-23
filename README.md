@@ -115,7 +115,8 @@ The roadmap still includes *MDS v2, MDX, ISZ, DAA, CHD, DMG, ECM, GZ/XZ and CD-A
 An **independent CLI**, `virtual_partition_inspect`, reads primary MBR,
 linked extended MBR (EBR), and GPT partition tables from raw HDD `.img` and
 fixed VHD images (512/4096-byte logical sectors).
-It checks GPT CRC32, partition bounds and overlaps. For example:
+It checks GPT CRC32 and partition overlaps and can recover a corrupted
+primary GPT using an independently valid backup header and table. For example:
 
     virtual_partition_inspect C:\Images\disk.img
     virtual_partition_inspect C:\Images\disk-4k.img 4096
