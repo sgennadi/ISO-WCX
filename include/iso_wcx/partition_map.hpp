@@ -8,6 +8,7 @@ namespace iso_wcx {
 
 // Read-only partition discovery for *virtual hard disk images*.
 // Deliberately separate from optical ISO/UDF session/track readers.
+class VirtualDiskReader;
 enum class PartitionTableKind : std::uint8_t { mbr, gpt };
 
 struct PartitionEntry {
@@ -24,6 +25,11 @@ struct PartitionEntry {
 // No physical-drive access, mounting, writes or external parent-file traversal.
 // If primary GPT is damaged, a fully checked backup GPT may be used.
 // Throws std::runtime_error for truncated, invalid, or unsupported layouts.
+// Reuse an already-open container (avoids re-opening libvhdi and re-reading
+// metadata in the CLI or future filesystem adapters).
+[[nodiscard]] std::vector<PartitionEntry> inspect_partition_table(
+    VirtualDiskReader& disk, std::uint32_t logical_sector_size=512);
+
 [[nodiscard]] std::vector<PartitionEntry> inspect_partition_table(
     const std::filesystem::path& raw_image,
     std::uint32_t logical_sector_size=512);
