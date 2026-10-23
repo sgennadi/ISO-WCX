@@ -93,7 +93,7 @@ def run(exe,image,name,expected,fail=False):
     with tempfile.TemporaryDirectory() as tmp:
         src=pathlib.Path(tmp)/'test.iso';src.write_bytes(image)
         dst=pathlib.Path(tmp)/'output'
-        proc=subprocess.run([exe,str(src),'--extract',str(dst)],capture_output=True,text=True)
+        proc=subprocess.run([exe,str(src),'--extract',str(dst)],capture_output=True,text=True,encoding='utf-8')
         if fail:
             assert proc.returncode!=0,(proc.returncode,proc.stdout,proc.stderr)
             return
