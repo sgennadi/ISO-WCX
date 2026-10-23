@@ -9,6 +9,7 @@ on:
       - 'src/**'
       - 'include/**'
       - 'tests/**'
+      - 'tools/**'
       - 'CMakeLists.txt'
       - '.github/workflows/wcx-preview.yml'
       - 'INSTALL_*.txt'
@@ -34,6 +35,10 @@ jobs:
         run: cmake --build build --config Release --parallel 2
       - name: Run tests including WCX DLL loading
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Test safe Total Commander legacy association repair
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: ./tests/test_tc_assoc_repair.ps1
       - name: Upload preview binaries
         uses: actions/upload-artifact@v4
         with:
@@ -91,7 +96,8 @@ jobs:
           test -s package/ISO-WCX.wcx
           test -s package/ISO-WCX.wcx64
           cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt ISO-WCX.wcx ISO-WCX.wcx64)
+          cp tools/Repair-ISO-WCX.ps1 tools/Repair-ISO-WCX.cmd package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt Repair-ISO-WCX.ps1 Repair-ISO-WCX.cmd ISO-WCX.wcx ISO-WCX.wcx64)
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v4
         with:
