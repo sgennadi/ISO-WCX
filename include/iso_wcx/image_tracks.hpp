@@ -17,6 +17,7 @@ struct ImageTrack {
     std::uint32_t session_lba{}; // Optional absolute LBA for later sessions
     unsigned track_number{};
     std::string container;
+    bool scrambled=false; // ECMA-130 CD data scrambler indicated by CloneCD CCD
 };
 [[nodiscard]] bool is_nrg_path(const std::filesystem::path& image);
 [[nodiscard]] bool is_mds_path(const std::filesystem::path& descriptor);
