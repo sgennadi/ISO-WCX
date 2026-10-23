@@ -12,12 +12,12 @@ copied or linked into ISO-WCX.
 - New standalone native C++20-compatible `iso_virtual_partitions` library and
   `virtual_partition_inspect` CLI.
 - Read-only, regular-file images only. Logical sectors 512 or 4096 bytes.
-- Primary MBR entries, or GPT with a protective MBR.
+- Primary MBR + bounded linked extended MBR (EBR), or GPT with protective MBR.
 - Bounds checking and 4 MiB cap on GPT partition entry metadata.
 - GPT header/entry-array CRC32 verification, usable range enforcement,
   partition ordering and overlap rejection.
-- Reject invalid/cyclic/extended legacy MBR forms rather than presenting
-  incorrect or partially reconstructed data.
+- Reject malformed/out-of-bounds EBR links, third/fourth EBR entries, reverse
+  chains, overlapping partitions and hybrid GPT/MBR instead of guessing.
 - Synthetic fixtures: MBR NTFS/Linux partitions, overlapping/out-of-range
   entries, GPT valid/invalid CRC32 and both logical sector sizes.
 
@@ -42,8 +42,8 @@ data region; the footer can never be interpreted as a partition or file.
     virtual_partition_inspect path/to/windows-fixed.vhd
 
 Synthetic regression tests cover fixed VHD partition enumeration, byte reads,
-invalid footer CRC/checksum, corrupt capacity, incomplete footer, saved-state
-images, dynamic type rejection and unsupported VHDX. This is an isolated
+invalid footer checksum, corrupt capacity, incomplete footer, saved-state
+images; without the optional library, dynamic VHD and VHDX are rejected. This is an isolated
 **CLI and library reader**, not a registered WCX format. It does not mount
 disks, enumerate physical drives, perform writes or follow differencing
 parents. The existing optical ISO/BIN/IMG parsers are not changed.
@@ -53,11 +53,10 @@ parents. The existing optical ISO/BIN/IMG parsers are not changed.
 [libvhdi](https://github.com/libyal/libvhdi) is a native C library whose
 upstream README lists VHD v1, VHDX v2, fixed/dynamic and differencing formats.
 It currently labels itself **alpha** and uses **LGPL-3.0-or-later**.
-No code was copied, no binary was linked, and no extra DLL is distributed by
-ISO-WCX. Dynamic/differencing VHD and VHDX are **not currently supported**
-by ISO-WCX. The next step is an explicitly opt-in, read-only libvhdi adapter
-that validates dependencies, parent-file behavior and licensing before
-shipping it in a Windows plugin.
+No code was copied and no extra DLL is distributed in the Windows WCX package.
+An **optional Linux-only, read-only** libvhdi adapter can be enabled with
+`-DISO_WCX_WITH_LIBVHDI=ON` for dynamic VHD/VHDX research. It is off by default,
+and parent/differencing images remain disabled. Windows WCX does not link it.
 
 For format references, see
 [libvhdi's VHD specification](https://github.com/libyal/libvhdi/blob/main/documentation/Virtual%20Hard%20Disk%20%28VHD%29%20image%20format.asciidoc)
@@ -66,11 +65,10 @@ and
 
 ## Stage 3–5 (not yet implemented)
 
-1. Optional libvhdi read-only adapter for **dynamic VHD and VHDX**,
-   with explicit opt-in and strict validation; parent/snapshot chains remain
-   disabled until safe resolution and real-image tests exist.
-2. GPT backup-header fallback, extended MBR (EBR) with strict cycle limits,
-   GUID names and labels. Keep mutation tests for malicious metadata.
+1. Validate optional libvhdi against a real-world dynamic VHD/VHDX corpus,
+   including corruption and parent/snapshot rejection, before any shipment.
+2. GPT backup-header fallback, GUID names and labels; linked EBR discovery
+   is implemented independently with a 128-link limit and mutation tests.
 3. Read-only FAT12/16/32, exFAT and NTFS volume readers; expose partition
    folders and file metadata with correct WCX extraction. NTFS sparse runs,
    compressed attributes, reparse points and alternate streams need careful
@@ -97,5 +95,6 @@ DiskAccessLibrary's README specifically warns that **NTFS write/create**
 was tested only against XP/Server 2003 behavior. ISO-WCX must not expose
 disk writes or present vendor VHD/VMDK coverage until independently tested.
 
-This is a format-interoperability research and implementation effort, not
-a dependency on, fork of, or endorsement by Tal Aloni.
+This is a format-interoperability research and implementation effort, not a
+fork of, or endorsement by Tal Aloni. The architecture also draws on the
+[official 7-Zip disk handlers](7zip-disk-formats.md); no 7-Zip code was copied.
