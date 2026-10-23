@@ -98,9 +98,12 @@ std::uint32_t dos_time(const FILETIME& utc) noexcept {
 }
 
 bool end_of_find(DWORD code) noexcept {
+    // WIMGAPI enumeration uses ERROR_NO_MORE_ITEMS (259), not just the
+    // Win32 FindFirstFile/FindNextFile ERROR_NO_MORE_FILES (18).
     return code == ERROR_FILE_NOT_FOUND ||
            code == ERROR_PATH_NOT_FOUND ||
-           code == ERROR_NO_MORE_FILES;
+           code == ERROR_NO_MORE_FILES ||
+           code == ERROR_NO_MORE_ITEMS;
 }
 } // namespace
 
