@@ -16,7 +16,8 @@ struct RockRidgeEntry {
     bool extension = false; // recognized RRIP ER identifier
     bool symlink = false;
     bool relocated = false;
-    bool child_link = false;  // CL relocation is intentionally unsupported.
+    bool child_link = false;
+    std::optional<std::uint32_t> child_lba; // RRIP CL relocated directory block
 };
 
 // Returns SUSP skip length when a valid SP entry is present on the root "."
