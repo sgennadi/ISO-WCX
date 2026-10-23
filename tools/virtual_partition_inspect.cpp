@@ -10,7 +10,7 @@
 
 int main(int argc,char** argv) {
     if(argc!=2 && argc!=3) {
-        std::cerr<<"Usage: virtual_partition_inspect IMAGE.img|IMAGE.vhd [512|4096]\n";
+        std::cerr<<"Usage: virtual_partition_inspect IMAGE.img|IMAGE.vhd|IMAGE.vhdx [512|4096]\n";
         return 2;
     }
     unsigned sector=512;
@@ -25,8 +25,21 @@ int main(int argc,char** argv) {
     try {
         iso_wcx::VirtualDiskReader device{std::filesystem::path(argv[1])};
         const auto result=iso_wcx::inspect_partition_table(argv[1],sector);
-        std::cout<<"Container: "<<(device.format()==iso_wcx::VirtualDiskFormat::fixed_vhd ?
-                    "fixed VHD" : "raw hard-disk image")
+        const char* container="raw hard-disk image";
+        switch(device.format()) {
+            case iso_wcx::VirtualDiskFormat::raw_image:
+                break;
+            case iso_wcx::VirtualDiskFormat::fixed_vhd:
+                container="fixed VHD";
+                break;
+            case iso_wcx::VirtualDiskFormat::dynamic_vhd:
+                container="dynamic VHD (experimental libvhdi)";
+                break;
+            case iso_wcx::VirtualDiskFormat::vhdx:
+                container="VHDX (experimental libvhdi)";
+                break;
+        }
+        std::cout<<"Container: "<<container
                  <<" ("<<device.size()<<" logical bytes)\n";
         std::cout<<"Scheme\tFirstLBA\tSectors\tType\n";
         for(const auto& partition:result) {
