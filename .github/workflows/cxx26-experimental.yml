@@ -2,7 +2,7 @@ name: Experimental C++26 compatibility
 
 on:
   push:
-    branches: [main, 'feature/**']
+    branches: [main]
     paths:
       - 'src/**'
       - 'include/**'
@@ -22,6 +22,9 @@ on:
 
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   linux-cxx26:
