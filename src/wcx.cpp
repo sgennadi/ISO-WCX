@@ -69,7 +69,8 @@ void fill_common(HeaderExW& h,const iso_wcx::Item& item) {
     h.UnpSize=static_cast<unsigned>(item.size);
     h.PackSizeHigh=static_cast<unsigned>(item.size>>32);
     h.UnpSizeHigh=static_cast<unsigned>(item.size>>32);
-    h.FileAttr=item.directory?ATTR_DIR:ATTR_ARCHIVE;
+    h.FileAttr=static_cast<int>(item.attributes?item.attributes:(item.directory?ATTR_DIR:ATTR_ARCHIVE));
+    h.FileTime=static_cast<int>(item.dos_time);
 }
 int header_w(State* state,HeaderExW* result) {
     if(!state||!result)return E_BAD_ARCHIVE;
@@ -91,7 +92,7 @@ int header_a(State* state,HeaderExA* result) {
     if(!copy_fixed(result->FileName,name))return E_SMALL_BUF;
     result->PackSize=wide.PackSize;result->PackSizeHigh=wide.PackSizeHigh;
     result->UnpSize=wide.UnpSize;result->UnpSizeHigh=wide.UnpSizeHigh;
-    result->FileAttr=wide.FileAttr;
+    result->FileAttr=wide.FileAttr;result->FileTime=wide.FileTime;
     return 0;
 }
 std::filesystem::path destination(const iso_wcx::Item& item,const wchar_t* dest_path,const wchar_t* dest_name) {
@@ -111,13 +112,15 @@ int do_process(State* state,int operation,const wchar_t* dest_path,const wchar_t
     const auto& item=state->disc.items()[pos];
     try {
         std::wstring wide=item_path(item);
-        auto ansi=to_ansi(wide);
+        // Total Commander can register both callbacks. Report to Unicode only
+        // when available; otherwise every byte is counted twice in its UI.
+        auto ansi=(!state->progress_w && state->progress_a) ? to_ansi(wide) : std::string{};
         std::uint64_t prior=0;
         auto callback=[&](std::uint64_t done) {
             auto delta=static_cast<int>(done-prior);
             prior=done;
-            if(state->progress_w && !state->progress_w(wide.data(),delta))return false;
-            if(state->progress_a && !state->progress_a(ansi.data(),delta))return false;
+            if(state->progress_w)return state->progress_w(wide.data(),delta)!=0;
+            if(state->progress_a)return state->progress_a(ansi.data(),delta)!=0;
             return true;
         };
         bool test_only=operation==PK_TEST;
@@ -164,7 +167,7 @@ WCX_EXPORT int __stdcall ReadHeader(HANDLE handle,HeaderA* result) {
         if(std::strlen(ex.FileName)>=sizeof(result->FileName))return E_SMALL_BUF;
         std::memcpy(result->FileName,ex.FileName,std::strlen(ex.FileName)+1);
         result->PackSize=static_cast<int>(ex.PackSize);result->UnpSize=static_cast<int>(ex.UnpSize);
-        result->FileAttr=ex.FileAttr;return 0;
+        result->FileAttr=ex.FileAttr;result->FileTime=ex.FileTime;return 0;
     }catch(...){return E_BAD_ARCHIVE;}
 }
 WCX_EXPORT int __stdcall ProcessFileW(HANDLE handle,int operation,wchar_t* path,wchar_t* name) {

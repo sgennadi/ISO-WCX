@@ -2,6 +2,7 @@
 #include "iso_wcx/cue.hpp"
 #include "iso_wcx/image_tracks.hpp"
 #include "iso_wcx/rock_ridge.hpp"
+#include "iso_wcx/legacy_formats.hpp"
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -11,6 +12,8 @@
 #include <stdexcept>
 #include <cctype>
 #include <string_view>
+#include <random>
+#include <system_error>
 
 namespace iso_wcx {
 namespace {
@@ -142,12 +145,14 @@ class Source {
         logical_length_=raw_length_;
     }
 public:
-    explicit Source(const std::filesystem::path& p) {
+    explicit Source(const std::filesystem::path& p, std::optional<std::size_t> requested = std::nullopt) {
         if(is_nrg_path(p) || is_mds_path(p)) {
             const auto tracks=is_nrg_path(p)?nrg_data_tracks(p):mds_data_tracks(p);
             // Prefer a later playable data track, never probe across track
             // boundaries or metadata appended after the disc content.
             for(auto it=tracks.rbegin();it!=tracks.rend();++it) {
+                const auto index=static_cast<std::size_t>(std::distance(tracks.begin(),it.base())-1);
+                if(requested && *requested!=index)continue;
                 open_image(it->image);
                 require(it->begin<=it->end && it->end<=raw_length_,
                         "descriptor track range exceeds image");
@@ -167,6 +172,8 @@ public:
             // Prefer the latest track containing a recognizable file system.
             auto tracks=cue_data_tracks(p);
             for(auto it=tracks.rbegin();it!=tracks.rend();++it) {
+                const auto index=static_cast<std::size_t>(std::distance(tracks.begin(),it.base())-1);
+                if(requested && *requested!=index)continue;
                 open_image(it->image);
                 if(it->start_frame >= raw_length_/it->physical_sector)continue;
                 choose(it->physical_sector,it->data_offset,it->start_frame,it->mode);
@@ -182,6 +189,7 @@ public:
             }
             throw std::runtime_error("no ISO9660/UDF data track found in CUE");
         }
+        require(!requested || *requested==0,"track index is unsupported for bare image");
         open_image(p);
         // Only select a raw layout after seeing a valid ISO PVD and raw sync/mode.
         // A no-header 2048 image is left unchanged so that UDF anchors still work.
@@ -248,6 +256,7 @@ void append(std::vector<Item>& out,Item entry) {
 struct IsoRecord {
     std::uint32_t lba{},size{};
     std::uint8_t flags{},unit{},gap{};
+    std::uint32_t dos_time{};
     std::string name;
 };
 std::string iso_name(const Bytes& data,std::size_t p,std::size_t n,bool joliet) {
@@ -277,7 +286,7 @@ IsoRecord record(const Bytes& b,std::size_t p,bool joliet) {
     bounds(b,p,34);
     std::uint8_t len=b[p];require(len>=34 && len<=b.size()-p,"invalid ISO directory record");
     auto n=b[p+32];require(33u+n<=len,"invalid ISO filename field");
-    IsoRecord r;r.lba=u32(b,p+2);r.size=u32(b,p+10);
+    IsoRecord r;r.lba=u32(b,p+2);r.size=u32(b,p+10);r.dos_time=iso_dos_timestamp({b.data()+p+18,7});
     r.flags=b[p+25];r.unit=b[p+26];r.gap=b[p+27];
     require(!r.gap || r.unit,"interleaved ISO file requires nonzero file unit size");
     require(!(r.flags&2) || !r.gap,"interleaved ISO directory unsupported");
@@ -286,12 +295,15 @@ IsoRecord record(const Bytes& b,std::size_t p,bool joliet) {
     return r;
 }
 std::vector<Item> parse_iso(Source& src,std::string& format) {
-    Bytes primary,alternative;
+    Bytes primary,alternative,boot_record;
     for(std::uint64_t i=16;i<16+128;i++) {
         require(i<=src.size()/iso_sector && src.size()/iso_sector-i>=1,"ISO volume descriptors truncated");
         auto b=src.read(i*iso_sector,iso_sector);
         require(std::string_view(reinterpret_cast<const char*>(b.data()+1),5)=="CD001" && b[6]==1,"not ISO 9660");
         if(b[0]==1 && primary.empty()) primary=b;
+        if(b[0]==0 && boot_record.empty() &&
+           std::string_view(reinterpret_cast<const char*>(b.data()+7),23)=="EL TORITO SPECIFICATION")
+            boot_record=b;
         if(b[0]==2 && b[88]=='%' && b[89]=='/' && (b[90]=='@'||b[90]=='C'||b[90]=='E'))alternative=b;
         if(b[0]==255)break;
     }
@@ -400,11 +412,16 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
             }
             p+=length;
             Item item;item.path=base+r.name;item.directory=bool(r.flags&2);item.size=item.directory?0:r.size;
+            item.dos_time=r.dos_time;
+            item.attributes=item.directory?0x10u:0x20u;
+            if(r.flags&1)item.attributes|=0x02u;
             if(!item.directory) {
                 if(!r.gap) {
                     item.extents.push_back({std::uint64_t(r.lba)*iso_sector,r.size,false});
                 } else {
-                    // ISO9660: file units alternate with interleave gaps.
+                    // ISO9660 7.1.5: file units (contiguous logical blocks)
+                    // alternate with interleave gaps. Gaps are not file data.
+                    // A file may end halfway through its final unit.
                     const auto unit_bytes=std::uint64_t(r.unit)*iso_sector;
                     auto remaining=std::uint64_t(r.size);
                     auto sector=std::uint64_t(r.lba);
@@ -441,8 +458,9 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
     try {
         walk(walk,root,"",0);
     } catch(const std::exception&) {
-        // A valid ISO9660 primary descriptor may accompany a broken Joliet
-        // tree. Fall back to PVD atomically without leaking a partial listing.
+        // Some mastering programs ship a valid ISO9660 primary descriptor
+        // alongside a broken/incomplete Joliet tree. The base ISO tree must
+        // remain accessible. Never let an incomplete Joliet listing leak out.
         if(!joliet || primary.empty())throw;
         out.clear();active.clear();
         joliet=false;
@@ -451,6 +469,21 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
         format="ISO 9660 (Joliet fallback)";
         if(absolute_lba)format+=" / session absolute-LBA";
         walk(walk,root,"",0);
+    }
+    if(!boot_record.empty()) {
+        // The virtual folder is a view on boot catalog sectors and load
+        // images; never overwrite an ordinary ISO folder of the same name.
+        const bool collision=std::any_of(out.begin(),out.end(),[](const Item& item){
+            return item.path=="boot.images" || item.path.rfind("boot.images/",0)==0;
+        });
+        if(!collision) {
+            try {
+                auto boot=el_torito_images(boot_record,src.size(),
+                    [&](std::uint64_t p,std::size_t n){return src.read(p,n);},
+                    absolute_lba?session:0);
+                for(auto& item:boot)append(out,std::move(item));
+            } catch(const std::exception&) { /* Malformed boot catalog does not hide ISO files. */ }
+        }
     }
     return out;
 }
@@ -493,7 +526,7 @@ std::string udf_name(const Bytes& b,std::size_t p,std::size_t n) {
     }
     safe_name(result);return result;
 }
-struct UdfFe {std::uint64_t size{};std::uint8_t type{};std::vector<Extent> extents;Bytes inline_bytes;};
+struct UdfFe {std::uint64_t size{};std::uint8_t type{};std::uint32_t dos_time{};std::vector<Extent> extents;Bytes inline_bytes;};
 class Udf {
     Source& src_;
     std::uint32_t block_{};
@@ -785,6 +818,7 @@ class Udf {
         auto extra=u32(b,ea), ads=u32(b,adl);
         require(extra<=b.size()-base && ads<=b.size()-base-extra,"UDF allocation descriptors outside FE");
         UdfFe result;result.type=b[27];result.size=u64(b,56);
+        result.dos_time=udf_dos_timestamp({b.data()+(id==261?84u:92u),12});
         auto mode=u16(b,34)&7;
         std::size_t begin=base+extra;
         if(mode==3) {
@@ -870,6 +904,7 @@ class Udf {
                 auto child_lba=u32(bytes,p+24);auto child_map=u16(bytes,p+28);
                 auto child=fe(child_lba,child_map);
                 Item item;item.path=prefix+item_name;item.directory=child.type==4;
+                item.attributes=item.directory?0x10u:0x20u;item.dos_time=child.dos_time;
                 item.size=item.directory?0:child.size;
                 item.extents=std::move(child.extents);item.inline_data=std::move(child.inline_bytes);
                 append(entries_,std::move(item));
@@ -963,10 +998,66 @@ public:
 }
 
 Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
+    // For descriptor-driven disc images, each independently recognizable
+    // filesystem track is made available. Do not scan raw media heuristically:
+    // only CUE/MDS/NRG tables provide trusted track start/end boundaries.
+    const bool cue=is_cue_path(image_);
+    const bool nrg=is_nrg_path(image_);
+    const bool mds=is_mds_path(image_);
+    if(cue || nrg || mds) {
+        const std::size_t count=cue?cue_data_tracks(image_).size():
+            (nrg?nrg_data_tracks(image_).size():mds_data_tracks(image_).size());
+        require(count<=512,"too many descriptor tracks");
+        struct View {std::uint32_t index;std::string format;std::vector<Item> entries;};
+        std::vector<View> views;
+        for(std::size_t i=0;i<count;i++) {
+            try {
+                Source src(image_,i);
+                std::string detected;
+                std::vector<Item> list;
+                Udf udf(src);
+                if(udf.parse()){list=udf.take();detected="UDF";}
+                else list=parse_iso(src,detected);
+                if(list.empty())continue;
+                detected+=" / "+src.layout();
+                views.push_back({static_cast<std::uint32_t>(i),std::move(detected),std::move(list)});
+            } catch(const std::exception&) { /* Track has no supported filesystem. */ }
+        }
+        require(!views.empty(),"no supported filesystem track in image descriptor");
+        if(views.size()>1) {
+            format_="Multisession / ";
+            format_+=cue?"CUE tracks":(nrg?"NRG tracks":"MDS sessions");
+            for(std::size_t v=0;v<views.size();v++) {
+                const auto prefix="session"+std::to_string(v+1);
+                Item directory;directory.directory=true;directory.path=prefix;
+                directory.attributes=0x10u;
+                append(entries_,std::move(directory));
+                for(auto& item:views[v].entries) {
+                    item.path=prefix+"/"+item.path;
+                    item.source_index=views[v].index;
+                    append(entries_,std::move(item));
+                }
+            }
+        } else {
+            format_=views[0].format;
+            entries_=std::move(views[0].entries);
+            for(auto& item:entries_)item.source_index=views[0].index;
+        }
+        return;
+    }
     Source source(image_);
     Udf udf(source);
-    if(udf.parse()) {entries_=udf.take();format_="UDF Type-1";}
-    else entries_=parse_iso(source,format_);
+    if(udf.parse()) {entries_=udf.take();format_="UDF";}
+    else {
+        try {entries_=parse_iso(source,format_);}
+        catch(const std::exception&) {
+            // Original Xbox XDVDFS uses a different volume descriptor at
+            // logical sector 32 and does not have ISO9660's PVD at sector 16.
+            auto xbox=xbox_xdvdfs(source.size(),[&](std::uint64_t p,std::size_t n){return source.read(p,n);});
+            if(xbox.empty())throw;
+            entries_=std::move(xbox);format_="Xbox XDVDFS";
+        }
+    }
     if(!source.layout().empty())format_+=" / "+source.layout();
 }
 
@@ -985,8 +1076,25 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
         }
         return true;
     }
-    Source source(image_);
+    std::optional<std::size_t> track;
+    if(entry.source_index!=0xffffffffu) track.emplace(entry.source_index);
+    Source source(image_,track);
     std::ofstream sink;
+    std::filesystem::path pending;
+    // Keep the original destination intact until every extent is read,
+    // written and closed successfully. A cancelled extraction must not leave
+    // an apparently valid but truncated file in Total Commander.
+    struct PendingCleanup {
+        std::ofstream& stream;
+        std::filesystem::path& path;
+        ~PendingCleanup() noexcept {
+            if(stream.is_open())stream.close();
+            if(!path.empty()) {
+                std::error_code ec;
+                std::filesystem::remove(path,ec);
+            }
+        }
+    } cleanup{sink,pending};
     if(!test_only) {
         auto parent=output.parent_path();
         // Check existing ancestors before creating directories. Recheck after creation.
@@ -997,8 +1105,20 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
             }
             if(pass==0 && !parent.empty())std::filesystem::create_directories(parent);
         }
-        sink.open(output,std::ios::binary|std::ios::trunc);
-        require(sink.is_open(),"cannot create extracted file");
+        // Write to a random sibling staging file rather than truncating an
+        // existing output. The sibling lives on the same filesystem so the
+        // final rename cannot require a cross-volume copy.
+        std::random_device random;
+        for(unsigned attempt=0;attempt<16 && pending.empty();++attempt) {
+            auto candidate=output;
+            const std::uint64_t nonce=(std::uint64_t(random())<<32)|random();
+            candidate += ".iso-wcx-" + std::to_string(nonce) + ".part";
+            if(std::filesystem::exists(candidate))continue;
+            sink.open(candidate,std::ios::binary|std::ios::trunc);
+            if(sink.is_open())pending=std::move(candidate);
+            else sink.clear();
+        }
+        require(sink.is_open(),"cannot create temporary extracted file");
     }
     std::uint64_t written=0;
     auto deliver=[&](const std::uint8_t* bytes,std::size_t n) {
@@ -1028,7 +1148,15 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
         }
     }
     require(written==entry.size,"extraction length mismatch");
-    if(sink.is_open()) {sink.close();require(!sink.fail(),"output close failed");}
+    if(sink.is_open()) {
+        sink.close();
+        require(!sink.fail(),"output close failed");
+        // Atomic replacement on the same filesystem, including an existing
+        // destination, is provided by std::filesystem::rename. A failed rename
+        // leaves the prior destination unchanged; cleanup removes the staging.
+        std::filesystem::rename(pending,output);
+        pending.clear();
+    }
     return true;
 }
 }

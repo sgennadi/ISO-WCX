@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.7.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
+**ISO-WCX v0.9.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
 
 ## Preview installation
 
@@ -14,15 +14,18 @@ For details, compatibility notes and source build commands, see [PREVIEW.md](PRE
 
 | Format/layout | Coverage |
 | --- | --- |
-| ISO 9660 / Joliet | File listing, extraction, Unicode names, multi-extent files |
+| ISO 9660 / Joliet | File listing and extraction, Unicode names, multi-extent and interleaved files; recover from broken Joliet directory using valid ISO9660 primary volume |
 | Rock Ridge | RRIP NM/CE and relocated CL directories, no symlink extraction |
 | Raw BIN/IMG | CD Mode 1 / Mode 2 Form 1 (2352-byte), XA Form 1 (2336-byte); automatic probing limited to single-track images |
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
 | 150-sector prefix | Relative and some absolute-LBA cases (not full multisession parsing) |
-| UDF Type 1 | File Entry/Extended File Entry, OSTA CS0 and AED extents |
+| UDF Type 1 | File Entry/Extended File Entry, OSTA CS0 (including UTF-16 surrogate-pair names), AED extents and reserve VDS failover |
 | UDF Metadata / VAT / Sparable | Experimental, synthetic-fixture coverage; not comprehensive UDF 1.02–2.60 |
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
 | Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352 data sectors); synthetic-test coverage |
+| El Torito | Exposes validated BIOS and EFI boot-load images and the boot catalog under `boot.images/`; EFI FAT BPB sizing when valid |
+| Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
+| Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
 | Compressed or encrypted proprietary variants | Not implemented (NRG subchannels, MDS v2, MDX, ISZ, CSO/ZSO, DAA) |
 
 ## Development
@@ -37,13 +40,31 @@ Windows uses Visual Studio 2022 via CMake (`-G "Visual Studio 17 2022" -A x64` o
 
 This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg` and `.mds` are registered by the ZIP installer, while `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
 
+## What changed in v0.7.0
 
-## v0.7.0 compatibility fixes
+- ISO9660 interleaved file units and gaps are now extracted in correct byte order, including multi-extent/interleaved combinations. Interleaved directories are rejected rather than silently read incorrectly.
+- When an optional Joliet directory is corrupt, the reader can recover through the intact ISO9660 primary volume.
+- UDF OSTA CS0 16-bit names support valid supplementary Unicode code points represented by UTF-16 surrogate pairs. Invalid pairs are rejected.
+- UDF mounting tries the **reserve Volume Descriptor Sequence** when the main VDS is corrupt, before trying other UDF anchors or ISO9660 fallback.
+- 12 added deterministic success/failure cases and an **independently mastered** ISO image built using libarchive on supported Linux systems. That fixture tests nested directories, Unicode, 1 MiB streamed extraction and symlink rejection.
 
-- **ISO interleaved extents:** respect File Unit Size and Interleave Gap Size; combine interleaved segments correctly in multi-extent files. Reject unsupported interleaved directories.
-- **Joliet fallback:** if the supplementary Joliet directory is invalid, retry the complete directory scan from a valid ISO9660 primary volume.
-- **UDF CS0 Unicode:** validate and decode UTF-16 surrogate pairs (for example emoji in filenames), rejecting unpaired or truncated pairs.
-- **UDF reserve VDS:** when a main Volume Descriptor Sequence cannot be parsed, try its reserve sequence from the same anchor before trying a different anchor.
-- **Test coverage:** 12 synthetic success/failure cases, plus an independently mastered Rock Ridge/ISO9660 image generated with libarchive on Linux that includes nested directories, a 1 MiB file, Unicode, and an omitted symlink.
+**Real optical disc validation is still outstanding**: an independently mastered fixture exercises a real ISO writer, but it is not equivalent to testing a representative collection of commercial/recordable DVD or Blu-ray media, damaged sessions and every UDF version.
 
-**Preview limits remain:** real optical media, broad Nero/Alcohol and mixed sessions, actual Total Commander GUI integration, and complex UDF versions still require sample-based validation. Do not regard this as full UDF 1.02-2.60 coverage.
+## What changed in v0.8.0
+
+- **Rollback-safe extraction:** write file data to a randomized staging file in the same destination directory, close successfully and rename it over the destination only after completing every extent. A cancellation, incomplete source read or write failure removes the staging file and leaves an existing destination intact.
+- **WCX Unicode progress:** when Total Commander installs both ANSI and Unicode progress handlers, the plugin reports progress through the Unicode handler only, rather than double-counting bytes. The ANSI callback remains supported as a fallback.
+- **Regression coverage:** a native public-API test covers cancellation, overwriting, source truncation, successful commit, test-only reads and no orphaned staging files. The Windows WCX loader test additionally validates `SetProcessDataProcW`, ANSI fallback, byte deltas and `E_EABORTED`.
+- **CI hardening:** Linux Clang AddressSanitizer/UndefinedBehaviorSanitizer testing is now a regular GitHub Actions job, alongside Windows x86/x64 build and DLL smoke tests.
+
+As before, the WCX adapter is read-only and **Preview** quality. We have not demonstrated compatibility with every optical-media image format, commercial disc or live Total Commander installation. Destination path symlinks are checked, but extracting into a directory modified concurrently by an adversary remains outside the current threat model.
+
+## What changed in v0.9.0
+
+- **El Torito:** inspect the ISO boot record and validated boot catalog; expose read-only BIOS and EFI boot images in the virtual `boot.images` directory. Advertised no-emulation SectorCount is a boot-load size, not proof of the entire image length; EFI FAT BPB is used only after validation. Invalid catalog checksums or out-of-bounds images are rejected.
+- **Original Xbox XDVDFS:** parse the volume descriptor, sibling directory tree and nested folders with cycle checks, bounded metadata and secure filenames. This does not support Xbox 360 XGD discs.
+- **Descriptor-driven multisession views:** enumerate more than one filesystem-bearing CUE, NRG or MDS track under `session1/`, `session2/` etc. Track indices are preserved for extraction, including earlier tracks. Does not replace a full TOC-based multisession implementation for raw `.iso`/`.bin` files.
+- **Metadata:** ISO 9660 and UDF timestamps and file attributes are passed through the WCX API. Xbox XDVDFS entries inherit the volume creation date when per-file timestamps are unavailable.
+- **Security and rollback:** preserves the v0.8 staging-file extraction and single Unicode progress callback behavior.
+- **Validation:** independent synthetic tests for El Torito BIOS/EFI, XDVDFS nested trees, multisession extraction and malformed descriptors; Linux tests and sanitizers. MDS v2, MDX and compressed ISZ/CSO/ZSO/DAA are still **not supported**.
+

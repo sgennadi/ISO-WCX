@@ -74,10 +74,17 @@ def case_choose_latest(binary):
         root=pathlib.Path(dirname)
         (root/'multi.bin').write_bytes(first+second)
         # 36 frames is 00:00:36, corresponding to second volume start.
-        invoke(binary,root,
-               'FILE "multi.bin" BINARY\n'
-               ' TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n'
-               ' TRACK 02 MODE1/2352\n  INDEX 01 00:00:36\n', 'SECOND.BIN')
+        sheet=root/'image.cue'
+        sheet.write_text('FILE "multi.bin" BINARY\n'
+                         ' TRACK 01 MODE1/2352\n  INDEX 01 00:00:00\n'
+                         ' TRACK 02 MODE1/2352\n  INDEX 01 00:00:36\n',encoding='utf-8')
+        target=root/'all-sessions'
+        proc=subprocess.run([binary,str(sheet),'--extract',str(target)],
+                            capture_output=True,text=True,encoding='utf-8')
+        assert proc.returncode==0,(proc.stdout,proc.stderr)
+        assert (target/'session1'/'HELLO.TXT').read_bytes()==b'world'
+        assert (target/'session2'/'SECOND.BIN').read_bytes()==b'world'
+        assert 'Multisession' in proc.stdout
 
 
 def case_track_bounds(binary):

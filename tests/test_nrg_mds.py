@@ -137,7 +137,8 @@ def mixed_session_image(executable, root):
     trailer=daox(1,0,len(first))+nrg_chunk(b'SINF',be32(1))+daox(2,len(first),len(all_data))
     image=all_data+trailer+nrg_chunk(b'END!',b'')+b'NER5'+be64(len(all_data))
     (root/'sessions.nrg').write_bytes(image)
-    run(executable,root,'sessions.nrg','LAST.TXT')
+    run(executable,root,'sessions.nrg','session2/LAST.TXT')
+    assert (root/'out'/'session1'/'FIRST.TXT').read_bytes()==b'world'
     # Alcohol MDS: two sessions, each with its own track description.
     descr=bytearray(380)
     descr[:16]=b'MEDIA DESCRIPTOR'
@@ -157,7 +158,8 @@ def mixed_session_image(executable, root):
     descr[352:358]=b'*.mdf\0'
     (root/'sessions.mdf').write_bytes(all_data)
     (root/'sessions.mds').write_bytes(descr)
-    run(executable,root,'sessions.mds','LAST.TXT')
+    run(executable,root,'sessions.mds','session2/LAST.TXT')
+    assert (root/'out'/'session1'/'FIRST.TXT').read_bytes()==b'world'
 
 def main(executable):
     with tempfile.TemporaryDirectory() as td:
