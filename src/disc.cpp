@@ -1,4 +1,5 @@
 #include "iso_wcx/disc.hpp"
+#include "iso_wcx/cd_sector.hpp"
 #include "iso_wcx/compressed_image.hpp"
 #include "iso_wcx/cue.hpp"
 #include "iso_wcx/image_tracks.hpp"
@@ -73,6 +74,7 @@ class Source {
     std::uint32_t data_offset_ = 0;
     std::uint32_t leading_sectors_ = 0;
     std::uint8_t mode_ = 0;
+    bool scrambled_ = false;
     std::optional<unsigned> cue_track_number_;
 
     Bytes raw_read(std::uint64_t p, std::size_t n) {
@@ -85,6 +87,16 @@ class Source {
         file_.seekg(static_cast<std::streamoff>(p));
         require(bool(file_) && (n==0 || bool(file_.read(reinterpret_cast<char*>(b.data()),
                 static_cast<std::streamsize>(n)))),"raw image read failed");
+        if(scrambled_) {
+            // Do not trust the raw header: the LFSR is reset per physical
+            // sector, including when the caller only reads a small slice.
+            require(p>=raw_base_,"CloneCD scrambled sector offset precedes track");
+            const auto& mask=cd_scramble_mask();
+            for(std::size_t i=0;i<b.size();++i) {
+                const auto local=(p-raw_base_+i)%2352u;
+                if(local>=12) b[i]^=mask[static_cast<std::size_t>(local-12)];
+            }
+        }
         return b;
     }
     bool candidate(std::uint32_t physical,std::uint32_t data_offset,
@@ -146,7 +158,7 @@ class Source {
         require(file_.is_open(),"cannot open disc image");
         auto n=file_.tellg();require(n>=0,"cannot stat disc image");
         raw_length_=static_cast<std::uint64_t>(n);
-        raw_base_=0;raw_end_=raw_length_;session_lba_.reset();track_label_.clear();
+        raw_base_=0;raw_end_=raw_length_;session_lba_.reset();track_label_.clear();scrambled_=false;
         logical_length_=raw_length_;
         if(is_compressed_image_path(p)) {
             compressed_=std::make_unique<CompressedImage>(p);
@@ -169,6 +181,9 @@ public:
                 require(it->begin<=it->end && it->end<=raw_length_,
                         "descriptor track range exceeds image");
                 raw_base_=it->begin;raw_end_=it->end;
+                scrambled_=it->scrambled;
+                require(!scrambled_ || it->physical_sector==2352,
+                        "scrambled CloneCD requires 2352-byte sectors");
                 choose(it->physical_sector,it->data_offset,0,it->mode);
                 if(candidate(it->physical_sector,it->data_offset,0,it->mode) ||
                    candidate_udf(it->physical_sector,it->data_offset,0,it->mode)) {
