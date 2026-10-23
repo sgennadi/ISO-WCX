@@ -20,6 +20,7 @@ struct Item {
     std::uint32_t attributes = 0; // Windows FILE_ATTRIBUTE_* mask.
     std::uint32_t source_index = 0xffffffffu; // Descriptor track for multisession views.
     std::filesystem::path direct_source; // Validated raw sidecar, e.g. CloneCD .sub
+    unsigned audio_track_number = 0; // CUE BINARY CD-Audio, virtual PCM WAV.
     std::vector<Extent> extents;
     std::vector<std::uint8_t> inline_data;
 };
