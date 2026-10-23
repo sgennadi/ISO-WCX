@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.9.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
+**ISO-WCX v0.10.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
 
 ## Preview installation
 
@@ -22,11 +22,12 @@ For details, compatibility notes and source build commands, see [PREVIEW.md](PRE
 | UDF Type 1 | File Entry/Extended File Entry, OSTA CS0 (including UTF-16 surrogate-pair names), AED extents and reserve VDS failover |
 | UDF Metadata / VAT / Sparable | Experimental, synthetic-fixture coverage; not comprehensive UDF 1.02–2.60 |
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
-| Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352 data sectors); synthetic-test coverage |
+| Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352/2448 data sectors); synthetic-test coverage |
 | El Torito | Exposes validated BIOS and EFI boot-load images and the boot catalog under `boot.images/`; EFI FAT BPB sizing when valid |
 | Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
-| Compressed or encrypted proprietary variants | Not implemented (NRG subchannels, MDS v2, MDX, ISZ, CSO/ZSO, DAA) |
+| CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
+| Other compressed/encrypted containers | Not implemented: ISZ, DAA, CHD, NRG encrypted/compressed, MDS v2, MDX; raw CD subchannels are ignored |
 
 ## Development
 
@@ -38,7 +39,7 @@ Build with CMake 3.21+, a C++20 compiler and Python 3 for tests:
 
 Windows uses Visual Studio 2022 via CMake (`-G "Visual Studio 17 2022" -A x64` or `-A Win32`). CI produces both binary architectures and tests the WCX DLL APIs.
 
-This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg` and `.mds` are registered by the ZIP installer, while `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
+This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg`, `.mds`, `.cso` and `.zso` are registered by the ZIP installer, while `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
 
 ## What changed in v0.7.0
 
@@ -68,3 +69,10 @@ As before, the WCX adapter is read-only and **Preview** quality. We have not dem
 - **Security and rollback:** preserves the v0.8 staging-file extraction and single Unicode progress callback behavior.
 - **Validation:** independent synthetic tests for El Torito BIOS/EFI, XDVDFS nested trees, multisession extraction and malformed descriptors; Linux tests and sanitizers. MDS v2, MDX and compressed ISZ/CSO/ZSO/DAA are still **not supported**.
 
+
+## What changed in v0.10.0
+
+- New independent bounded CSO v1, CSO v2 (DEFLATE/LZ4), and ZSO (LZ4) on-demand reader; one-block cache, no full ISO staging.
+- Extend raw ISO and MDS to 2448-byte sectors (2352-byte CD frame + 96 subchannel bytes); subchannel metadata is deliberately ignored.
+- Synthetic random-access and extraction tests for stored, DEFLATE, LZ4, shifted indexes, UDF and corrupted compressed blocks. Windows CI also loads compressed ISO images through the WCX API.
+- Compared bchunk, mdf2iso and daa2iso for interoperability. Their GPL source code is **not** copied. DAA and MDS v2 are not yet supported.
