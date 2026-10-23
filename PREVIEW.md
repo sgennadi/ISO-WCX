@@ -23,7 +23,7 @@ This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.
 - RAW Mode 2 Form 2, CD-Audio extraction, CD-Text and full CloneCD multisession are not supported. CloneCD raw `.sub` is preserved and position-type Q frames are CRC-checked; damaged Q data is not treated as an ISO failure. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
 - UDF VAT historical chains, every version of Metadata/Sparable, UDF pseudo-overwrite behavior and fragmented descriptor edge cases are not yet exhaustively covered.
 - Rock Ridge PX read-only permissions and TF modification timestamps are implemented in the development branch, with CE mirrored-endian validation. Full POSIX permissions, symlink extraction and creation/access times are not exposed by the WCX API.
-- ISZ v1 (single-file zero/stored/zlib/bzip2) and DAA v1.00 (unencrypted single-file raw DEFLATE) are now supported; CHD v5 supports only uncompressed 2048-byte optical payloads. Broader/encrypted variants, DMG and encrypted/compressed NRG/MDF remain unsupported. Indexed CSO/ZSO and uncompressed NRG/MDS v1 remain supported.
+- ISZ v1 (single-file zero/stored/zlib/bzip2) and DAA v1.00 (unencrypted single-file raw DEFLATE) are now supported; CHD v5 handles compressed 2048-byte DVD ISO/UDF and experimental one-track raw Mode 1 / Mode 2 Form 1 CD frames using statically linked libchdr. Broader/encrypted variants, DMG and encrypted/compressed NRG/MDF remain unsupported. Indexed CSO/ZSO and uncompressed NRG/MDS v1 remain supported.
 - Avoid extracting untrusted images into important directories; path checks cannot fully mitigate concurrent symlink races.
 - Unsigned binary; this is not an official release of the legacy ISO.WCX plugin.
 

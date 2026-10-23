@@ -45,10 +45,12 @@ limited single-file isz/daa, partitioned img, raw, vhd and vhdx.
 
 This is read-only preview software. Supported compressed optical subsets:
 single-file ISZ v1 (zero/raw/zlib/bzip2) and DAA 1.00 (raw DEFLATE).
-Experimental CHD v5 uncompressed 2048-byte data is readable when manually
-opened, but CHD is NOT registered by default.
+CHD v5 compressed maps and hunks are decoded by statically linked libchdr
+(zlib/LZMA/Zstandard/FLAC/CD codecs). ISO/UDF DVD and experimental single-
+track Mode 1 / Mode 2 Form 1 CD data are supported. CHD is NOT associated
+by default because CDDA, mixed and multi-track discs are not decoded.
 Not supported: MDS v2/MDX, encrypted/multipart ISZ or DAA, DAA 1.10,
-compressed CD/arcade CHD, dynamic/differencing VHD, differencing/dirty
-VHDX, NTFS, exFAT and ext-family file systems.
+CHD audio/multi-track/parent images, dynamic/differencing VHD,
+differencing/dirty VHDX, NTFS, exFAT and ext-family file systems.
 
 Source: https://github.com/sgennadi/ISO-WCX

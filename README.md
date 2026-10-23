@@ -45,7 +45,7 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 | DAA v1.00 | Built-in single-file raw DEFLATE chunks with header CRC32 and bounds checking; v1.10, encryption and multipart images rejected |
 | CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and experimental single-track Mode 1/Mode 2 Form 1 CD frames (2448 bytes); no CDDA, multiple tracks, parents or mixed modes; `.chd` association is manual in Preview |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
-| Other compressed/encrypted containers | Not implemented: encrypted ISZ/DAA, multipart ISZ, DAA v1.10, compressed CHD, NRG encrypted/compressed, MDS v2, MDX; only CloneCD Q position decoding is implemented; other raw CD subchannels are not interpreted |
+| Other compressed/encrypted containers | Not implemented: encrypted ISZ/DAA, multipart ISZ, DAA v1.10, CHD CDDA/multi-track/parent images, NRG encrypted/compressed, MDS v2, MDX; only CloneCD Q position decoding is implemented; other raw CD subchannels are not interpreted |
 
 ## Development
 
@@ -63,7 +63,7 @@ For a minimal Windows release build containing **only the WCX DLL**, use
 The standalone diagnostic/test EXEs are internal development targets, not
 WCX runtime dependencies or parts of the installable ZIP.
 
-This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg`, `.mds`, `.cso`, `.zso`, `.isz` and `.daa` are registered by the ZIP installer, while `.chd`, `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
+This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg`, `.mds`, `.cso`, `.zso`, `.isz` and `.daa` are registered by the ZIP installer, while `.chd`, `.bin` and `.mdf` remain unassociated. Most preview images are synthetic; authentic MAME chdman-generated compressed CHD CD/DVD fixtures now exercise ISO/UDF. Tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
 
 ## What changed in v0.7.0
 

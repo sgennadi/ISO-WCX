@@ -40,8 +40,8 @@ private:
     std::uint64_t logical_size_ = 0;    // Exposed ISO/UDF stream, 2048/sector.
     std::uint32_t hunk_bytes_ = 0;
     std::uint32_t unit_bytes_ = 0;      // 2048 (DVD) or 2448 (CD frame).
-    std::uint32_t data_offset_ = 0;
-    std::uint32_t leading_frames_ = 0; // Validated 0/150-sector optical prefix.     // 16 (Mode 1) or 24 (Mode 2 Form 1).
+    std::uint32_t data_offset_ = 0;     // CD Mode 1: 16, Mode 2 Form 1: 24.
+    std::uint32_t leading_frames_ = 0; // Validated optical track prefix.
     std::uint64_t cached_hunk_ = ~std::uint64_t(0);
     std::vector<std::uint8_t> hunk_;
     std::string label_;
