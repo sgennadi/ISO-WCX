@@ -20,6 +20,14 @@ on:
 permissions:
   contents: read
 jobs:
+  association_repair:
+    name: TC legacy association repair safety
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test INI migration and rollback protections
+        shell: pwsh
+        run: ./tests/test_tc_assoc_repair.ps1
   windows:
     name: Windows ${{ matrix.arch }} WCX
     runs-on: windows-2022
@@ -81,7 +89,7 @@ jobs:
         run: ctest --test-dir build-sanitized --output-on-failure
   package:
     name: Total Commander ZIP installer
-    needs: windows
+    needs: [windows, association_repair]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
