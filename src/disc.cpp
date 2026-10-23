@@ -1102,6 +1102,10 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
         open_virtual();
         return;
     }
+    if(extension == L".img") {
+        try {open_virtual(); return;}
+        catch(const std::exception&) { /* Fall back to optical parsing. */ }
+    }
     if(cue || nrg || mds || ccd) {
         const std::size_t count=cue?cue_data_tracks(image_).size():
             (nrg?nrg_data_tracks(image_).size():

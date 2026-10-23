@@ -220,6 +220,9 @@ if(BUILD_TESTING)
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compressed_iso.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME iso_extended_attributes
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iso_attrs_v012.py" "$<TARGET_FILE:disc_inspect>")
+    add_test(NAME integrated_virtual_disk_fat_wcx
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_fat.py" "$<TARGET_FILE:disc_inspect>")
+    set_tests_properties(integrated_virtual_disk_fat_wcx PROPERTIES TIMEOUT 180)
     add_test(NAME iso_udf_image_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_images.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME disc_descriptor_mutations
