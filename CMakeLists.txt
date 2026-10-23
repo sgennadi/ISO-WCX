@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.10.0 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.11.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -19,7 +19,7 @@ else()
   set(ISO_WCX_ZLIB_TARGET ZLIB::ZLIB)
 endif()
 
-add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/legacy_formats.cpp src/compressed_image.cpp)
+add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/legacy_formats.cpp src/compressed_image.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET})
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_disc PUBLIC cxx_std_20)
@@ -64,6 +64,8 @@ if(BUILD_TESTING)
   add_test(NAME copy_transaction_rollback COMMAND copy_transaction_tests)
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
+    add_test(NAME clonecd_track_smoke
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_clonecd.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME cue_track_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cue.py" "$<TARGET_FILE:disc_inspect>")
     add_test(NAME nrg_mds_track_smoke
