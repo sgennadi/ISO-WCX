@@ -118,6 +118,26 @@ endif()
 add_executable(virtual_partition_inspect tools/virtual_partition_inspect.cpp)
 target_link_libraries(virtual_partition_inspect PRIVATE iso_virtual_partitions)
 
+# Independent FAT12/16/32 filesystem reader above the virtual block layer.
+# Deliberately not linked into ISO-WCX until WCX extraction and security tests pass.
+add_library(iso_virtual_fat STATIC src/fat_volume.cpp)
+target_include_directories(iso_virtual_fat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(iso_virtual_fat PUBLIC iso_virtual_partitions)
+target_compile_features(iso_virtual_fat PUBLIC cxx_std_20)
+if(MSVC)
+  target_compile_options(iso_virtual_fat PRIVATE /W4 /EHsc)
+else()
+  target_compile_options(iso_virtual_fat PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_executable(virtual_fat_inspect tools/virtual_fat_inspect.cpp)
+target_link_libraries(virtual_fat_inspect PRIVATE iso_virtual_fat)
+if(BUILD_TESTING)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME fat12_fat16_fat32_virtual_disk_filesystems
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_virtual_fat.py"
+            "$<TARGET_FILE:virtual_fat_inspect>")
+endif()
+
 add_executable(disc_inspect tools/disc_inspect.cpp)
 target_link_libraries(disc_inspect PRIVATE iso_disc)
 
