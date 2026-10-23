@@ -97,6 +97,23 @@ std::vector<std::uint8_t> gpt(std::uint32_t sector,bool overlapping=false) {
     put32(d,header+16,crc(d.data()+header,92));
     return d;
 }
+std::vector<std::uint8_t> gpt_with_backup(std::uint32_t sector) {
+    auto bytes=gpt(sector);
+    const auto sectors=bytes.size()/sector;
+    const auto primary_header=std::size_t(sector);
+    const auto backup_header=std::size_t(sectors-1)*sector;
+    const auto backup_table=std::size_t(sectors-2)*sector;
+    // Independent entry-array copy, not an alias of the primary array.
+    std::copy_n(bytes.begin()+2u*sector,512,bytes.begin()+backup_table);
+    std::copy_n(bytes.begin()+primary_header,sector,bytes.begin()+backup_header);
+    put64(bytes,backup_header+24,sectors-1); // current backup GPT LBA
+    put64(bytes,backup_header+32,1); // backlink to primary
+    put64(bytes,backup_header+72,sectors-2); // backup table immediately before header
+    put32(bytes,backup_header+16,0);
+    put32(bytes,backup_header+16,crc(bytes.data()+backup_header,92));
+    return bytes;
+}
+
 void write(const fs::path& path,const std::vector<std::uint8_t>& d) {
     std::ofstream out(path,std::ios::binary|std::ios::trunc);
     check(bool(out),"cannot create synthetic image");
@@ -191,9 +208,48 @@ int main() {
             d=gpt(sector);
             d[sector+8]='X'; // malformed revision (CRC will also fail)
             rejects(path,d,sector);
+
+            // A corrupt primary GPT must be recovered only from a valid
+            // secondary header AND its own entry-array checksum.
+            d=gpt_with_backup(sector);
+            write(path,d);
+            auto healthy=inspect_partition_table(path,sector);
+            check(healthy.size()==2 &&
+                  healthy[0].first_lba==128 && healthy[1].first_lba==256,
+                  "dual GPT header image not recognized");
+            d=gpt_with_backup(sector);
+            d[sector+16]^=1; // damaged primary header CRC
+            write(path,d);
+            auto backup_recovered=inspect_partition_table(path,sector);
+            check(backup_recovered.size()==2 &&
+                  backup_recovered[0].first_lba==128 &&
+                  backup_recovered[1].first_lba==256,
+                  "valid backup GPT did not recover corrupted primary");
+            d=gpt_with_backup(sector);
+            d[2*sector+100]^=1; // primary array corrupted
+            write(path,d);
+            backup_recovered=inspect_partition_table(path,sector);
+            check(backup_recovered.size()==2 &&
+                  backup_recovered[1].first_lba==256,
+                  "backup GPT did not recover corrupted primary entry array");
+            d=gpt_with_backup(sector);
+            d[sector+16]^=1;
+            d[(d.size()/sector-1)*sector+16]^=1; // both headers CRC damaged
+            rejects(path,d,sector);
+            d=gpt_with_backup(sector);
+            d[sector+16]^=1;
+            d[(d.size()/sector-2)*sector+100]^=1; // backup entries damaged
+            rejects(path,d,sector);
+            d=gpt_with_backup(sector);
+            d[sector+16]^=1;
+            const auto backup_offset=std::size_t(d.size()-sector);
+            put64(d,backup_offset+32,2); // backup points to wrong primary LBA
+            put32(d,backup_offset+16,0);
+            put32(d,backup_offset+16,crc(d.data()+backup_offset,92));
+            rejects(path,d,sector);
         }
         fs::remove(path);
-        std::cout<<"PASS: read-only MBR/EBR/GPT, 512/4096-byte logical sectors, CRC, cycles and bounds\n";
+        std::cout<<"PASS: read-only MBR/EBR/GPT primary+backup, 512/4096 logical sectors, CRC and bounds\n";
     } catch(const std::exception& e) {
         std::error_code ignore;
         fs::remove(path,ignore);
