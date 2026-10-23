@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.11.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
+**ISO-WCX v0.12.0 Preview** — modern C++20, read-only [Total Commander](https://www.ghisler.com/) WCX disc-image plugin.
 
 ## Preview installation
 
@@ -18,7 +18,7 @@ For details, compatibility notes and source build commands, see [PREVIEW.md](PRE
 | Rock Ridge | RRIP NM/CE and relocated CL directories, no symlink extraction |
 | Raw BIN/IMG | CD Mode 1 / Mode 2 Form 1 (2352-byte), XA Form 1 (2336-byte); automatic probing limited to single-track images |
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
-| CloneCD CCD/IMG | `.ccd` version 3 + matching `.img` (2352-byte sectors), single-session unscrambled Mode 1 / Mode 2 Form 1 data tracks. `.sub` ignored; audio not decoded. |
+| CloneCD CCD/IMG | `.ccd` version 3 + matching `.img` (2352-byte sectors), single-session Mode 1 / Mode 2 Form 1 data tracks, including ECMA-130 scrambled sectors. Optional `.sub` sidecar exposed byte-for-byte under `subchannels/disc.sub`; CD-Audio and detailed P-W/Q decoding not implemented. |
 | 150-sector prefix | Relative and some absolute-LBA cases (not full multisession parsing) |
 | UDF Type 1 | File Entry/Extended File Entry, OSTA CS0 (including UTF-16 surrogate-pair names), AED extents and reserve VDS failover |
 | UDF Metadata / VAT / Sparable | Experimental, synthetic-fixture coverage; not comprehensive UDF 1.02–2.60 |
