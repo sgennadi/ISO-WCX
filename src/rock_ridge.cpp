@@ -135,7 +135,10 @@ RockRidgeEntry rock_ridge_entry(std::span<const std::uint8_t> record,
                 const auto width=(flags&0x80u)?17u:7u;
                 unsigned count=0;
                 for(unsigned bit=0;bit<7;++bit)if(flags&(1u<<bit))++count;
-                check(count>0 && length==5u+count*width,
+                // libarchive emits a valid empty TF record (length 5,
+                // flags 0) when no timestamps are available. An empty
+                // optional timestamp set must not hide the ISO directory.
+                check(length==5u+count*width,
                       "Rock Ridge TF timestamp list has invalid length");
                 std::size_t at=p+5;
                 for(unsigned bit=0;bit<7;++bit) {
