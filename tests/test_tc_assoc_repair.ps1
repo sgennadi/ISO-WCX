@@ -28,7 +28,7 @@ try {
     Assert ((Get-ChildItem $folder -Filter '*backup*').Count -eq 0) 'Dry run wrote a backup'
     & $repair -IniPath $ini -PluginDirectory $p -Apply | Out-Null
     $out = $enc.GetString([IO.File]::ReadAllBytes($ini))
-    Assert ($out -match '(?im)^iso=192,.+ISO-WCX\\ISO-WCX\.wcx\r?$') 'Missing migrated ISO association'
+    Assert ($out -match '(?im)^iso=192,.+\\ISO-WCX\.wcx\r?$') 'Missing migrated ISO association'
     Assert ($out.Contains('cue=192,C:\Tools\Other.wcx')) 'Other WCX association corrupted'
     Assert ($out.Contains('zip=0,C:\Tools\Archive.wcx')) 'Other archive association corrupted'
     Assert ($out.Contains("RussianByte=" + [char]0xe0)) 'Legacy byte changed'
@@ -45,7 +45,7 @@ try {
     $withoutIso = $orig.Replace("iso=192,C:\Program Files\TotalCmd\plugins\wcx\ISO\iso.wcx`r`n",'')
     [IO.File]::WriteAllBytes($ini,$enc.GetBytes($withoutIso))
     & $repair -IniPath $ini -PluginDirectory $p -Apply | Out-Null
-    Assert ($enc.GetString([IO.File]::ReadAllBytes($ini)) -match '(?im)^iso=192,.+ISO-WCX\\ISO-WCX\.wcx\r?$') 'Missing ISO key not created'
+    Assert ($enc.GetString([IO.File]::ReadAllBytes($ini)) -match '(?im)^iso=192,.+\\ISO-WCX\.wcx\r?$') 'Missing ISO key not created'
     Write-Host 'PASS: TC repair dry-run, backup, byte preservation, old ISO, other plugin, idempotence and missing key'
 } finally {
     Remove-Item -LiteralPath $folder -Force -Recurse -ErrorAction SilentlyContinue
