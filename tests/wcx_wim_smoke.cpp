@@ -67,6 +67,7 @@ int wmain(int argc,wchar_t** argv) {
         const auto first=root/L"first";
         const auto second=root/L"second";
         write(first/L"HELLO.TXT","hello-one");
+        write(first/L"EmptyFile.bin","");
         write(first/L"Nested"/L"folder.bin","nested-data");
         fs::create_directories(first/L"Empty");
         write(second/L"HELLO.TXT","hello-two");
@@ -121,7 +122,8 @@ int wmain(int argc,wchar_t** argv) {
                 if(name==L"image1\\HELLO.TXT"||
                    name==L"image1\\Nested\\folder.bin"||
                    name==L"image2\\HELLO.TXT"||
-                   name==L"image2\\SECOND.TXT") {
+                   name==L"image2\\SECOND.TXT"||
+                   name==L"image1\\EmptyFile.bin") {
                     const fs::path output=root/L"extracted"/fs::path(name);
                     fs::create_directories(output.parent_path());
                     std::wstring target=output.wstring();
@@ -137,9 +139,11 @@ int wmain(int argc,wchar_t** argv) {
             if(names.count(L"image1")==0 || names.count(L"image2")==0 ||
                names.count(L"image1\\Empty")==0 ||
                names.count(L"image1\\Nested\\folder.bin")==0 ||
+               names.count(L"image1\\EmptyFile.bin")==0 ||
                names.count(L"image2\\SECOND.TXT")==0)return false;
             if(load(root/L"extracted"/L"image1"/L"HELLO.TXT")!="hello-one" ||
                load(root/L"extracted"/L"image1"/L"Nested"/L"folder.bin")!="nested-data"||
+               load(root/L"extracted"/L"image1"/L"EmptyFile.bin")!="" ||
                load(root/L"extracted"/L"image2"/L"HELLO.TXT")!="hello-two" ||
                load(root/L"extracted"/L"image2"/L"SECOND.TXT")!="second-image")
                 return false;

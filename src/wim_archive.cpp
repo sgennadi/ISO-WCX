@@ -286,6 +286,8 @@ bool WimArchive::read(
             location.image_index <= api_->images.size(),
             "invalid WIM image index");
 
+    // Empty WIM file resources may have no backing stream.
+    if (file.size == 0) return true;
     const HANDLE loaded = api_->images[location.image_index - 1];
     HANDLE stream = api_->create_file(loaded, location.image_path.c_str(),
                                       GENERIC_READ, OPEN_EXISTING, 0);
