@@ -1,4 +1,4 @@
-# ISO-WCX v0.11.0 C++20 preview
+# ISO-WCX v0.12.0 C++20 preview
 
 Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
