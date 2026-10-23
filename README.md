@@ -140,9 +140,13 @@ without changing the Total Commander ABI or release package.
 The isolated `virtual_partition_inspect` tool can now parse MBR/EBR/GPT in
 both raw HDD IMG and **fixed-size VHD v1** files. Fixed VHD validation includes
 the EOF footer signature, one's-complement checksum, format version, disk type,
-and exact logical size. No VHD data is written or mounted. Dynamic and
-differencing VHD, VHDX and VMDK are **not implemented**. Filesystem extraction
-is not exposed by WCX until Windows extraction and GUI tests pass.
+and exact logical size. No VHD data is written or mounted. The
+**experimental native VHDX v1 reader** now handles clean fixed/dynamic base
+images, including sparse BAT blocks and 512/4096-byte sectors, through
+standalone partition and FAT tools. Differencing VHD/VHDX and VMDK remain
+unsupported. These virtual disk readers are **not yet included in WCX**
+until real-image interoperability and Windows GUI extraction are validated.
+See [native VHDX design and test boundaries](docs/vhdx-native.md).
 
 **No external disk DLLs:** The experimental libvhdi adapter and its CI
 have been removed. ISO-WCX has its own native C++ raw IMG/fixed VHD reader.

@@ -1,4 +1,5 @@
 #include "iso_wcx/virtual_disk.hpp"
+#include "iso_wcx/vhdx_reader.hpp"
 
 #include <algorithm>
 #include <array>
@@ -87,12 +88,17 @@ VirtualDiskReader::VirtualDiskReader(const std::filesystem::path& image) {
     input_.seekg(0);
     input_.read(identifier.data(),static_cast<std::streamsize>(identifier.size()));
     require(bool(input_),"cannot read virtual disk signature");
-    require(std::string_view(identifier.data(),identifier.size())!="vhdxfile",
-            "VHDX identifier detected: native reader not implemented");
-
+    const bool is_vhdx=std::string_view(identifier.data(),identifier.size())=="vhdxfile";
     const auto suffix=lowercase(image.extension().wstring());
-    if(suffix==L".vhdx")
-        throw std::runtime_error("VHDX is not supported by native ISO-WCX yet");
+    if(suffix==L".vhdx") {
+        require(is_vhdx,".vhdx extension has invalid VHDX file identifier");
+        vhdx_=std::make_unique<VhdxReader>(image);
+        capacity_=vhdx_->size();
+        format_=VirtualDiskFormat::vhdx;
+        input_.close();
+        return;
+    }
+    require(!is_vhdx,"VHDX renamed to another extension is not a raw image");
     if(suffix==L".vhd") {
         require(physical_length>=1024,"VHD image has no full footer and disk data");
         input_.seekg(static_cast<std::streamoff>(physical_length-512));
@@ -115,6 +121,12 @@ VirtualDiskReader::VirtualDiskReader(const std::filesystem::path& image) {
     require(capacity_>=512,"virtual disk has no sector data");
 }
 
+VirtualDiskReader::~VirtualDiskReader() noexcept = default;
+
+std::uint32_t VirtualDiskReader::logical_sector_size() const noexcept {
+    return vhdx_ ? vhdx_->logical_sector_size() : 512u;
+}
+
 std::vector<std::uint8_t> VirtualDiskReader::read(
         std::uint64_t offset,std::size_t length) {
     require(length<=4u*1024u*1024u,"virtual disk metadata read exceeds 4 MiB");
@@ -122,6 +134,7 @@ std::vector<std::uint8_t> VirtualDiskReader::read(
             "read exceeds virtual disk capacity");
     require(offset<=static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()),
             "virtual disk offset exceeds supported seek range");
+    if(vhdx_)return vhdx_->read(offset,length);
     std::vector<std::uint8_t> output(length);
     if(length==0)return output;
     input_.clear();
