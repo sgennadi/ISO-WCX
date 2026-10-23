@@ -25,6 +25,7 @@ concurrency:
 jobs:
   windows:
     name: Windows ${{ matrix.arch }} WCX
+    needs: chd-fixtures
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -38,6 +39,24 @@ jobs:
         run: cmake --build build --config Release --parallel 2
       - name: Run tests including WCX DLL loading
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Download genuine MAME-generated compressed CHD fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: ISO-WCX-CHD-CI-fixtures
+          path: ci-fixtures
+      - name: Verify compressed CHD extraction through actual WCX ABI
+        shell: pwsh
+        run: |
+          $plugin = if ("${{ matrix.arch }}" -eq "Win32") { "build/Release/ISO-WCX.wcx" } else { "build/Release/ISO-WCX.wcx64" }
+          $probe = "build/Release/wcx_packed_smoke.exe"
+          foreach ($image in @("ci-fixtures/dvd-lzma.chd", "ci-fixtures/cd-cdlz.chd")) {
+            if (-not (Test-Path -LiteralPath $image)) { throw "Missing genuine CHD fixture: $image" }
+            $output = Join-Path $env:RUNNER_TEMP ("iso-wcx-" + [guid]::NewGuid().ToString("N") + ".txt")
+            & $probe $plugin $image $output
+            if ($LASTEXITCODE -ne 0) { throw "WCX compressed CHD smoke failed: $image ($LASTEXITCODE)" }
+            if ([System.IO.File]::ReadAllText($output) -cne "world") { throw "Wrong extracted bytes from $image" }
+            Remove-Item -LiteralPath $output -Force
+          }
       - name: Verify safe WCX association repair
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
@@ -50,6 +69,25 @@ jobs:
             build/Release/ISO-WCX.wcx64
           if-no-files-found: error
           retention-days: 14
+  chd-fixtures:
+    name: Generate independent compressed CHD fixtures (CI only)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MAME chdman (test-only, never shipped)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mame-tools
+          command -v chdman
+      - name: Generate genuine compressed DVD and CD fixtures
+        run: python3 tests/create_chd_ci_fixtures.py ci-fixtures
+      - name: Share binary fixtures with Windows x86/x64 WCX API tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: ISO-WCX-CHD-CI-fixtures
+          path: ci-fixtures/*.chd
+          retention-days: 1
+          if-no-files-found: error
   linux:
     name: Linux core tests
     runs-on: ubuntu-24.04
