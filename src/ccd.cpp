@@ -1,5 +1,6 @@
 // Independent, read-only CloneCD CCD/IMG track layout parser.
-// .SUB subchannels and scrambled sectors are intentionally not decoded.
+// Handles unswizzled/scrambled Mode1/2 data and preserves optional .SUB bytes.
+// P-W subchannel decoding and audio extraction are not implemented.
 #include "iso_wcx/image_tracks.hpp"
 #include <algorithm>
 #include <charconv>
