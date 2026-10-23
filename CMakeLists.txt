@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.3.0 LANGUAGES CXX)
+project(ISO_WCX VERSION 0.4.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -44,6 +44,8 @@ if(BUILD_TESTING)
   if(Python3_Interpreter_FOUND)
     add_test(NAME iso_udf_image_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_images.py" "$<TARGET_FILE:disc_inspect>")
+    add_test(NAME disc_descriptor_mutations
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mutations.py" "$<TARGET_FILE:disc_inspect>")
   endif()
 endif()
 

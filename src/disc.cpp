@@ -55,20 +55,131 @@ void safe_name(const std::string& s) {
 
 class Source {
     std::ifstream file_;
-    std::uint64_t length_{};
+    std::uint64_t raw_length_{};
+    std::uint64_t logical_length_{};
+    std::uint32_t physical_sector_ = 2048;
+    std::uint32_t data_offset_ = 0;
+    std::uint32_t leading_sectors_ = 0;
+    std::uint8_t mode_ = 0;
+
+    Bytes raw_read(std::uint64_t p, std::size_t n) {
+        require(p<=raw_length_ && n<=raw_length_-p &&
+                p<=static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()),
+                "raw extent outside image");
+        Bytes b(n);
+        file_.clear();
+        file_.seekg(static_cast<std::streamoff>(p));
+        require(bool(file_) && (n==0 || bool(file_.read(reinterpret_cast<char*>(b.data()),
+                static_cast<std::streamsize>(n)))),"raw image read failed");
+        return b;
+    }
+    bool candidate(std::uint32_t physical,std::uint32_t data_offset,
+                   std::uint32_t leading,std::uint8_t mode) {
+        constexpr std::uint64_t vd_sector = 16;
+        const auto record = (std::uint64_t(leading)+vd_sector)*physical;
+        if(record>raw_length_ || raw_length_-record<physical)return false;
+        auto frame=raw_read(record,physical);
+        if (physical==2352) {
+            if (frame[0]!=0 || frame[11]!=0 || frame[15]!=mode) return false;
+            for(int i=1;i<=10;i++)if(frame[i]!=0xff)return false;
+            if(mode==2) {
+                if (!std::equal(frame.begin()+16,frame.begin()+20,frame.begin()+20) ||
+                    (frame[18]&0x20))return false; // XA Form 2 has 2324 data bytes.
+            }
+        }
+        if (physical==2336 && ((frame[2]&0x20)!=0 ||
+            !std::equal(frame.begin(),frame.begin()+4,frame.begin()+4)))return false;
+        if(data_offset>frame.size() || 7>frame.size()-data_offset)return false;
+        return frame[data_offset]==1 &&
+               std::string_view(reinterpret_cast<const char*>(frame.data()+data_offset+1),5)=="CD001" &&
+               frame[data_offset+6]==1;
+    }
+    bool candidate_udf(std::uint32_t physical,std::uint32_t offset,
+                       std::uint32_t leading,std::uint8_t mode) {
+        const auto physical_at=(std::uint64_t(leading)+256)*physical;
+        if(physical_at>raw_length_ || physical>raw_length_-physical_at)return false;
+        const auto frame=raw_read(physical_at,physical);
+        if(physical==2352) {
+            if(frame[0]!=0 || frame[11]!=0 || frame[15]!=mode)return false;
+            for(int i=1;i<=10;i++)if(frame[i]!=0xff)return false;
+            if(mode==2 && ((frame[18]&0x20) ||
+                 !std::equal(frame.begin()+16,frame.begin()+20,frame.begin()+20)))return false;
+        }
+        if(physical==2336 && ((frame[2]&0x20) ||
+            !std::equal(frame.begin(),frame.begin()+4,frame.begin()+4)))return false;
+        if(offset>frame.size() || 16>frame.size()-offset)return false;
+        const auto* data=frame.data()+offset;
+        if(data[0]!=2 || data[1]!=0)return false; // Anchor Volume Descriptor Pointer, tag 2
+        unsigned sum=0;
+        for(int i=0;i<16;i++)if(i!=4)sum+=data[i];
+        return (sum&255)==data[4];
+    }
+    void choose(std::uint32_t physical,std::uint32_t offset,std::uint32_t leading,
+                std::uint8_t mode) {
+        physical_sector_=physical;data_offset_=offset;leading_sectors_=leading;mode_=mode;
+        require(raw_length_ >= std::uint64_t(leading)*physical,"invalid sector prefix");
+        const auto sectors = raw_length_/physical - leading;
+        require(sectors<=std::numeric_limits<std::uint64_t>::max()/2048,
+                "image too large");
+        logical_length_ = sectors*2048;
+    }
 public:
     explicit Source(const std::filesystem::path& p) : file_(p,std::ios::binary|std::ios::ate) {
         require(file_.is_open(),"cannot open disc image");
         auto n=file_.tellg();require(n>=0,"cannot stat disc image");
-        length_=static_cast<std::uint64_t>(n);
+        raw_length_=static_cast<std::uint64_t>(n);
+        logical_length_=raw_length_;
+        // Only select a raw layout after seeing a valid ISO PVD and raw sync/mode.
+        // A no-header 2048 image is left unchanged so that UDF anchors still work.
+        if(candidate(2048,0,0,0))return;
+        for(const auto leading: {0u,150u}) {
+            for(const auto layout: {
+                    std::array<std::uint32_t,3>{2352,16,1},
+                    std::array<std::uint32_t,3>{2352,24,2},
+                    std::array<std::uint32_t,3>{2336,8,2},
+                    std::array<std::uint32_t,3>{2048,0,0}}) {
+                if(leading==0 && layout[0]==2048)continue;
+                if(candidate(layout[0],layout[1],leading,static_cast<std::uint8_t>(layout[2])) ||
+                   candidate_udf(layout[0],layout[1],leading,static_cast<std::uint8_t>(layout[2]))) {
+                    choose(layout[0],layout[1],leading,static_cast<std::uint8_t>(layout[2]));
+                    return;
+                }
+            }
+        }
     }
-    [[nodiscard]] std::uint64_t size() const {return length_;}
+    [[nodiscard]] std::uint64_t size() const {return logical_length_;}
+    [[nodiscard]] bool raw_mode() const {return physical_sector_!=2048;}
+    [[nodiscard]] std::uint32_t session_leadin() const {return leading_sectors_;}
+    [[nodiscard]] std::string layout() const {
+        if(physical_sector_==2048)return leading_sectors_?"2048-sector, 150-sector prefix":"";
+        return std::to_string(physical_sector_)+"-sector Mode "+std::to_string(mode_)+
+               (leading_sectors_?", 150-sector prefix":"");
+    }
     Bytes read(std::uint64_t p, std::size_t n) {
-        require(n<=max_directory && p<=length_ && n<=length_-p &&
-                p<=static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()),"extent outside image");
+        require(n<=max_directory && p<=logical_length_ && n<=logical_length_-p,
+                "extent outside image");
+        if(physical_sector_==2048)
+            return raw_read(std::uint64_t(leading_sectors_)*2048+p,n);
         Bytes b(n);
-        file_.clear();file_.seekg(static_cast<std::streamoff>(p));
-        require(bool(file_) && (n==0 || bool(file_.read(reinterpret_cast<char*>(b.data()), static_cast<std::streamsize>(n)))),"image read failed");
+        std::size_t copied=0;
+        while(copied<n) {
+            const auto logical=p+copied;
+            const auto sector=logical/2048;
+            const auto inside=static_cast<std::size_t>(logical%2048);
+            const auto count=std::min<std::size_t>(n-copied,2048-inside);
+            const auto physical=(std::uint64_t(leading_sectors_)+sector)*physical_sector_;
+            if(physical_sector_==2352) {
+                auto h=raw_read(physical,mode_==1?16:24);
+                require(h[0]==0 && h[11]==0 && h[15]==mode_,"raw sector mode mismatch");
+                for(int i=1;i<=10;i++)require(h[i]==0xff,"raw CD sector sync invalid");
+                if(mode_==2)require(!(h[18]&0x20) &&
+                    std::equal(h.begin()+16,h.begin()+20,h.begin()+20),
+                    "unsupported Mode 2 Form 2 sector");
+            }
+            auto payload=raw_read(physical+data_offset_+inside,count);
+            std::copy(payload.begin(),payload.end(),b.begin()+static_cast<std::ptrdiff_t>(copied));
+            copied+=count;
+        }
         return b;
     }
 };
@@ -119,11 +230,48 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
         if(b[0]==2 && b[88]=='%' && b[89]=='/' && (b[90]=='@'||b[90]=='C'||b[90]=='E'))alternative=b;
         if(b[0]==255)break;
     }
+    // Track images sometimes record directory LBAs as absolute disc sectors,
+    // while the descriptor set appears 16 sectors into a prefixed session.
+    // Detect the LBA convention using the ISO root '.' record rather than
+    // guessing based on file extension or the numerical LBA itself.
+    bool absolute_lba=false;
+    const auto session=src.session_leadin();
+    if(session && !primary.empty()) {
+        const auto root=record(primary,156,false);
+        auto root_ok=[&](std::uint32_t pos)->bool {
+            try {
+                const auto data=src.read(std::uint64_t(pos)*iso_sector,iso_sector);
+                if(data[0]<34 || data[0]>data.size())return false;
+                const auto dot=record(data,0,false);
+                return dot.name=="." && (dot.flags&2) && dot.lba==root.lba;
+            } catch(const std::exception&){return false;}
+        };
+        if(!root_ok(root.lba) && root.lba>=session && root_ok(root.lba-session))
+            absolute_lba=true;
+    }
+    auto adjusted_lba=[&](std::uint32_t lba,std::uint32_t length)->std::uint32_t {
+        if(!absolute_lba || length==0)return lba;
+        require(lba>=session,"absolute ISO extent predates the current session");
+        return lba-session;
+    };
+    auto read_record=[&](const Bytes& data,std::size_t pos,bool use_joliet)->IsoRecord {
+        auto r=record(data,pos,use_joliet);
+        r.lba=adjusted_lba(r.lba,r.size);
+        return r;
+    };
+    auto read_susp=[&](std::uint64_t pos,std::size_t length)->Bytes {
+        if(absolute_lba) {
+            const auto base=std::uint64_t(session)*iso_sector;
+            require(pos>=base,"absolute SUSP CE points before current session");
+            pos-=base;
+        }
+        return src.read(pos,length);
+    };
     // The root '.' entry advertises Rock Ridge through SUSP SP. When both
     // Rock Ridge and Joliet are present, prefer RRIP's original POSIX names.
     std::optional<std::uint8_t> rr_skip;
     if(!primary.empty()) {
-        auto pvd_root=record(primary,156,false);
+        auto pvd_root=read_record(primary,156,false);
         if((pvd_root.flags&2) && pvd_root.size>=34) {
             auto first=src.read(std::uint64_t(pvd_root.lba)*iso_sector,
                                 std::min<std::uint32_t>(pvd_root.size,2048));
@@ -131,7 +279,7 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
                 auto dot=std::span<const std::uint8_t>(first.data(),first[0]);
                 auto sp=rock_ridge_skip(dot);
                 if(sp && rock_ridge_entry(dot,*sp,[&](std::uint64_t offset,std::size_t n) {
-                    return src.read(offset,n);
+                    return read_susp(offset,n);
                 }).extension)rr_skip=sp;
             }
         }
@@ -139,8 +287,9 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
     bool joliet=!alternative.empty() && !rr_skip.has_value();
     require(joliet||!primary.empty(),"no ISO volume descriptor");
     const auto& volume=joliet?alternative:primary;
-    auto root=record(volume,156,joliet);require(root.flags&2,"ISO root is not a directory");
+    auto root=read_record(volume,156,joliet);require(root.flags&2,"ISO root is not a directory");
     format=rr_skip?"Rock Ridge":(joliet?"Joliet":"ISO 9660");
+    if(absolute_lba)format+=" / session absolute-LBA";
     std::vector<Item> out;
     std::set<std::pair<std::uint32_t,std::uint32_t>> active;
     auto walk=[&](auto&& self,const IsoRecord& dir,const std::string& base,unsigned depth)->void {
@@ -154,18 +303,32 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
             if(data[p]==0) {p+=iso_sector-(p%iso_sector);continue;}
             auto length=data[p];
             require(length>=34 && length<=data.size()-p && length<=iso_sector-(p%iso_sector),"invalid ISO record length");
-            auto r=record(data,p,joliet);
+            auto r=read_record(data,p,joliet);
             const auto iso_identifier=r.name;
             if(r.name==".") {p+=length;continue;}
             if(rr_skip) {
                 const auto rr=rock_ridge_entry(
                     std::span<const std::uint8_t>(data.data()+p,length),*rr_skip,
-                    [&](std::uint64_t offset,std::size_t size){return src.read(offset,size);});
+                    [&](std::uint64_t offset,std::size_t size){return read_susp(offset,size);});
                 // Never traverse a link on the host. A relocated child (CL)
                 // needs directory-structure rewriting; fail instead of silently
                 // listing the wrong files. RE entries are duplicate placeholders.
                 if(rr.relocated || rr.symlink) {p+=length;continue;}
-                require(!rr.child_link,"Rock Ridge relocated directories not yet supported");
+                if(rr.child_link) {
+                    require((r.flags&2) && rr.child_lba.has_value(),
+                            "Rock Ridge CL must reference a directory");
+                    auto normalized_child=adjusted_lba(*rr.child_lba,iso_sector);
+                    auto first=src.read(std::uint64_t(normalized_child)*iso_sector,iso_sector);
+                    require(first[0]>=34 && first[0]<=first.size(),
+                            "invalid relocated Rock Ridge directory");
+                    auto relocated_dot=read_record(first,0,joliet);
+                    require(relocated_dot.name=="." && (relocated_dot.flags&2) &&
+                            relocated_dot.lba==normalized_child &&
+                            relocated_dot.size>=34 && relocated_dot.size<=max_directory,
+                            "invalid Rock Ridge CL destination");
+                    r.lba=normalized_child;
+                    r.size=relocated_dot.size;
+                }
                 if(rr.alternate_name) {r.name=*rr.alternate_name;safe_name(r.name);}
                 else if(!pending_multiextent.empty() && iso_identifier==pending_iso_name)
                     r.name=pending_multiextent.substr(base.size());
@@ -228,17 +391,281 @@ class Udf {
     Source& src_;
     std::uint32_t block_{};
     std::map<std::uint16_t,std::pair<std::uint32_t,std::uint32_t>> partitions_;
-    std::vector<int> mapping_;
+    std::vector<int> mapping_; // >=0 physical, -2 metadata, -3 virtual, -4 sparable
+    struct MetadataMap {
+        std::uint16_t partition{};
+        std::uint32_t icb{}, mirror{};
+        std::uint64_t size{};
+        std::vector<Extent> extents;
+    };
+    struct VirtualMap {
+        std::uint16_t partition{};
+        std::vector<std::uint32_t> entries;
+    };
+    struct SparableMap {
+        std::uint16_t partition{},packet{};
+        std::uint32_t table_size{};
+        std::vector<std::uint32_t> locations;
+        std::map<std::uint32_t,std::uint32_t> redirects;
+    };
+    std::map<std::uint16_t,MetadataMap> metadata_;
+    std::map<std::uint16_t,VirtualMap> virtual_;
+    std::map<std::uint16_t,SparableMap> sparable_;
     std::vector<Item> entries_;
     std::set<std::uint64_t> active_;
     [[nodiscard]] std::uint64_t address(std::uint32_t lba,std::uint16_t map,
                                          std::uint64_t extent_length=0) const {
-        require(map<mapping_.size()&&mapping_[map]>=0,"unsupported UDF partition map");
-        auto it=partitions_.find(static_cast<std::uint16_t>(mapping_[map]));
-        require(it!=partitions_.end() && lba<it->second.second,"UDF extent outside partition");
-        require(extent_length <= std::uint64_t(it->second.second-lba)*block_,
+        require(map<mapping_.size(),"unsupported UDF partition map index");
+        const auto kind=mapping_[map];
+        if(kind==-2) {
+            auto it=metadata_.find(map);
+            require(it!=metadata_.end() && !it->second.extents.empty(),
+                    "uninitialized UDF metadata partition");
+            const auto at=std::uint64_t(lba)*block_;
+            require(at<it->second.size && extent_length<=it->second.size-at,
+                    "UDF metadata partition boundary");
+            // Resolve the logical position using cumulative extent lengths.
+            std::uint64_t pos=0;
+            for(const auto& ex:it->second.extents) {
+                if(at>=pos && at-pos<ex.length) {
+                    const auto delta=at-pos;
+                    require(!ex.sparse && extent_length<=ex.length-delta,
+                            "UDF metadata mapping crosses an extent");
+                    return ex.offset+delta;
+                }
+                require(pos<=std::numeric_limits<std::uint64_t>::max()-ex.length,
+                        "UDF metadata allocation overflow");
+                pos+=ex.length;
+            }
+            throw std::runtime_error("UDF metadata block not mapped");
+        }
+        std::uint32_t physical_lba=lba;
+        std::uint16_t physical_partition{};
+        if(kind==-4) {
+            auto st=sparable_.find(map);
+            require(st!=sparable_.end() && st->second.packet>0,"missing sparable map");
+            const auto packet=st->second.packet;
+            const auto packet_start=(lba/packet)*packet;
+            require(extent_length<=std::uint64_t(packet-(lba%packet))*block_,
+                    "Sparable extent crosses packet boundary");
+            auto partition=partitions_.find(st->second.partition);
+            require(partition!=partitions_.end() && lba<partition->second.second,
+                    "Sparable extent outside partition");
+            require(extent_length<=std::uint64_t(partition->second.second-lba)*block_,
+                    "Sparable extent crosses partition boundary");
+            auto it=st->second.redirects.find(packet_start);
+            const auto sector=it==st->second.redirects.end()?
+                              std::uint64_t(partition->second.first)+lba:
+                              std::uint64_t(it->second)+(lba-packet_start);
+            require(sector<src_.size()/block_ &&
+                    extent_length<=(src_.size()-sector*block_),
+                    "Sparable physical address outside image");
+            return sector*block_;
+        }
+        if(kind==-3) {
+            auto it=virtual_.find(map);
+            require(it!=virtual_.end() && lba<it->second.entries.size(),
+                    "unmapped UDF VAT virtual address");
+            physical_lba=it->second.entries[lba];
+            require(physical_lba!=0xffffffffu && extent_length<=block_,
+                    "invalid UDF VAT block reference");
+            physical_partition=it->second.partition;
+        } else {
+            require(kind>=0,"unsupported UDF partition map");
+            physical_partition=static_cast<std::uint16_t>(kind);
+        }
+        auto it=partitions_.find(physical_partition);
+        require(it!=partitions_.end() && physical_lba<it->second.second,
+                "UDF extent outside partition");
+        require(extent_length <= std::uint64_t(it->second.second-physical_lba)*block_,
                 "UDF extent crosses partition boundary");
-        return (std::uint64_t(it->second.first)+lba)*block_;
+        return (std::uint64_t(it->second.first)+physical_lba)*block_;
+    }
+    void mapped_data(std::vector<Extent>& result, std::uint32_t lba,
+                     std::uint16_t map, std::uint64_t length, bool sparse) const {
+        if(!length)return;
+        require(map<mapping_.size(),"invalid UDF allocation map index");
+        if(sparse) { result.push_back({0,length,true});return; }
+        if(mapping_[map]==-2) {
+            const auto it=metadata_.find(map);
+            require(it!=metadata_.end(),"missing metadata map");
+            const auto at=std::uint64_t(lba)*block_;
+            require(at<it->second.size && length<=it->second.size-at,
+                    "metadata file extent beyond partition");
+            std::uint64_t logical=0;
+            std::uint64_t remain=length;
+            std::uint64_t current=at;
+            for(const auto& run:it->second.extents) {
+                require(logical<=std::numeric_limits<std::uint64_t>::max()-run.length,
+                        "metadata run overflow");
+                const auto next=logical+run.length;
+                if(current>=next){logical=next;continue;}
+                require(current>=logical && !run.sparse,"unrecorded metadata extent");
+                const auto inside=current-logical;
+                const auto n=std::min<std::uint64_t>(remain,run.length-inside);
+                require(result.size()<max_entries,"too many metadata file extents");
+                result.push_back({run.offset+inside,n,false});
+                current+=n;remain-=n;
+                if(!remain)break;
+                logical=next;
+            }
+            require(remain==0,"incomplete metadata partition mapping");
+        } else if(mapping_[map]==-4) {
+            auto it=sparable_.find(map);
+            require(it!=sparable_.end() && it->second.packet,"invalid sparable map");
+            std::uint64_t consumed=0;
+            while(consumed<length) {
+                const auto block=std::uint64_t(lba)+consumed/block_;
+                require(block<=std::numeric_limits<std::uint32_t>::max(),"sparable LBA overflow");
+                const auto packets_left=it->second.packet-(block%it->second.packet);
+                const auto n=std::min<std::uint64_t>(length-consumed,
+                                                    packets_left*block_);
+                require(result.size()<max_entries,"too many sparable file extents");
+                result.push_back({address(static_cast<std::uint32_t>(block),map,n),n,false});
+                consumed+=n;
+            }
+        } else if(mapping_[map]==-3) {
+            // VAT remaps logical blocks independently. Split the byte run at
+            // virtual-block boundaries rather than assuming contiguity.
+            std::uint64_t consumed=0;
+            while(consumed<length) {
+                require(result.size()<max_entries,"too many virtual file extents");
+                const auto block=lba+consumed/block_;
+                require(block<=std::numeric_limits<std::uint32_t>::max(),"VAT LBA overflow");
+                const auto n=std::min<std::uint64_t>(block_,length-consumed);
+                result.push_back({address(static_cast<std::uint32_t>(block),map,n),n,false});
+                consumed+=n;
+            }
+        } else result.push_back({address(lba,map,length),length,false});
+    }
+    Bytes data_bytes(const UdfFe& file, std::size_t limit) {
+        require(file.size<=limit,"UDF embedded metadata too large");
+        if(!file.inline_bytes.empty())return file.inline_bytes;
+        Bytes data;
+        data.reserve(static_cast<std::size_t>(file.size));
+        for(const auto& e:file.extents){
+            require(e.length<=limit-data.size(),"UDF extents too large");
+            if(e.sparse)data.insert(data.end(),static_cast<std::size_t>(e.length),0);
+            else {
+                auto b=src_.read(e.offset,static_cast<std::size_t>(e.length));
+                data.insert(data.end(),b.begin(),b.end());
+            }
+        }
+        require(data.size()==file.size,"incomplete UDF metadata file");
+        return data;
+    }
+    std::uint16_t physical_map(std::uint16_t partition) const {
+        for(std::size_t i=0;i<mapping_.size();++i)
+            if(mapping_[i]==partition)return static_cast<std::uint16_t>(i);
+        for(const auto& [id,map]:sparable_)
+            if(map.partition==partition)return id;
+        throw std::runtime_error("missing backing physical or sparable partition map");
+    }
+    void init_sparable() {
+        for(auto& [map,sp]:sparable_) {
+            require(sp.packet>0 && sp.packet<=256 && sp.table_size>=56 &&
+                    sp.table_size<=max_directory && !sp.locations.empty(),
+                    "invalid sparable partition map");
+            bool valid=false;
+            std::uint32_t selected_seq=0;
+            for(const auto table_location:sp.locations) {
+                if(table_location==0xffffffffu)continue;
+                try {
+                    const auto b=src_.read(std::uint64_t(table_location)*block_,sp.table_size);
+                    check_tag(b,0,0);
+                    require(std::string_view(reinterpret_cast<const char*>(b.data()+17),18)==
+                            "*UDF Sparing Table","invalid sparing table identifier");
+                    const auto records=u16(b,48);
+                    require(records<=static_cast<std::size_t>(b.size()-56)/8,
+                            "invalid sparing table records count");
+                    const auto sequence=u32(b,52);
+                    std::map<std::uint32_t,std::uint32_t> redirects;
+                    for(std::uint16_t i=0;i<records;i++) {
+                        const auto old=u32(b,56+8u*i),replacement=u32(b,60+8u*i);
+                        if(old>=0xfffffff0u)continue;
+                        require(old%sp.packet==0 &&
+                                std::uint64_t(replacement)+sp.packet<=src_.size()/block_,
+                                "invalid sparing entry packet");
+                        require(redirects.emplace(old,replacement).second,
+                                "duplicate sparable packet replacement");
+                    }
+                    if(!valid || sequence>selected_seq){
+                        sp.redirects=std::move(redirects);
+                        selected_seq=sequence;valid=true;
+                    }
+                } catch(const std::exception&) { /* Use another valid table copy. */ }
+            }
+            require(valid,"no valid UDF sparing table available");
+        }
+    }
+    void init_metadata() {
+        for(auto& [map,md]:metadata_) {
+            const auto physical=physical_map(md.partition);
+            bool loaded=false;
+            for(auto location:{md.icb,md.mirror}) {
+                if(location==0xffffffffu)continue;
+                try {
+                    auto file=fe(location,physical);
+                    require(file.type==250||file.type==251,
+                            "metadata map must reference Metadata File Entry");
+                    require(file.size>=block_ && file.size%block_==0,
+                            "invalid metadata partition length");
+                    require(file.inline_bytes.empty(),"embedded metadata partition unsupported");
+                    for(const auto& run:file.extents)
+                        require(!run.sparse && run.length%block_==0,
+                                "sparse or unaligned metadata partition");
+                    md.size=file.size;
+                    md.extents=std::move(file.extents);
+                    loaded=true;break;
+                } catch(const std::exception&) { /* Try metadata mirror if available. */ }
+            }
+            require(loaded,"unable to load UDF metadata partition");
+        }
+    }
+    void init_virtual() {
+        for(auto& [map,vt]:virtual_) {
+            const auto physical=physical_map(vt.partition);
+            const auto partition=partitions_.find(vt.partition);
+            require(partition!=partitions_.end(),"missing backing partition for UDF VAT");
+            // The VAT ICB is the last recorded data sector of a transaction.
+            // Search near the end of its containing partition; do not use the
+            // backup anchor as a replacement for a validated FE/EFE descriptor.
+            const auto start=partition->second.first;
+            const auto count=partition->second.second;
+            const auto available=src_.size()/block_;
+            require(start<available,"VAT partition outside disc image");
+            const auto max_lba=std::min<std::uint64_t>(count,available-start);
+            require(max_lba>0,"empty VAT partition");
+            bool found=false;
+            for(std::uint64_t next=max_lba, probes=0;next>0 && probes<8192;--next,++probes) {
+                const auto at=next-1;
+                auto descriptor=src_.read((std::uint64_t(start)+at)*block_,block_);
+                if(u16(descriptor,0)!=261 && u16(descriptor,0)!=266)continue;
+                try {
+                    check_tag(descriptor,0,u16(descriptor,0));
+                    if(descriptor[27]!=248)continue;
+                    const auto file=fe(static_cast<std::uint32_t>(at),physical);
+                    const auto vat=data_bytes(file,16*1024*1024);
+                    std::size_t header=0,entries_end=vat.size();
+                    if(vat.size()>=152 && u16(vat,0)>=152 && u16(vat,0)<=vat.size() &&
+                       u16(vat,0)==152u+u16(vat,2)) header=u16(vat,0);
+                    else {
+                        // UDF 1.50 layout has a 36-byte trailer, not a header.
+                        require(vat.size()>=40 &&
+                                std::string_view(reinterpret_cast<const char*>(vat.data()+vat.size()-35),22)==
+                                "*UDF Virtual Alloc Tbl","invalid VAT header or trailer");
+                        entries_end=vat.size()-36;
+                    }
+                    require((entries_end-header)%4==0 && entries_end>header &&
+                            (entries_end-header)/4<=8*1024*1024,
+                            "invalid VAT length");
+                    vt.entries.clear();
+                    for(auto p=header;p<entries_end;p+=4)vt.entries.push_back(u32(vat,p));
+                    found=true;break;
+                } catch(const std::exception&) { /* Ignore damaged historic VAT ICB. */ }
+            }
+            require(found,"UDF virtual partition requires a valid VAT ICB");
+        }
     }
     Bytes read_extent(std::uint64_t p,std::size_t n){return src_.read(p,n);}
     UdfFe fe(std::uint32_t lba,std::uint16_t map) {
@@ -297,9 +724,7 @@ class Udf {
             const auto chunk=std::min(length,remain);
             if(!chunk)continue;
             const bool sparse=kind!=0;
-            std::uint64_t offset=0;
-            if(!sparse)offset=address(current_lba,current_map,chunk);
-            result.extents.push_back({offset,chunk,sparse});
+            mapped_data(result.extents,current_lba,current_map,chunk,sparse);
             remain-=chunk;
         }
         require(remain==0,"UDF file allocation shorter than information length");
@@ -361,7 +786,8 @@ public:
                     check_tag(a,0,2);
                     auto length=u32(a,16),start=u32(a,20);
                     require(length>0 && length<=16*1024*1024,"invalid UDF volume descriptor span");
-                    partitions_.clear();mapping_.clear();entries_.clear();active_.clear();
+                    partitions_.clear();mapping_.clear();metadata_.clear();virtual_.clear();sparable_.clear();
+                    entries_.clear();active_.clear();
                     Bytes lvd;
                     for(std::uint64_t i=0;i<(length+sector-1)/sector && i<8192;i++) {
                         auto b=src_.read((std::uint64_t(start)+i)*sector,sector);
@@ -381,9 +807,35 @@ public:
                         require(p+2<=440+map_bytes,"short UDF partition map");
                         auto type=lvd[p],n=lvd[p+1];
                         require(n>=2 && n<=440+map_bytes-p,"truncated UDF partition map");
-                        mapping_.push_back(type==1 && n==6?int(u16(lvd,p+4)):-1);
+                        if(type==1 && n==6)mapping_.push_back(int(u16(lvd,p+4)));
+                        else if(type==2 && n==64) {
+                            require(p+64<=lvd.size(),"short UDF Type-2 map");
+                            std::string_view identifier(reinterpret_cast<const char*>(lvd.data()+p+5),23);
+                            if(identifier=="*UDF Metadata Partition") {
+                                auto map_index=static_cast<std::uint16_t>(mapping_.size());
+                                mapping_.push_back(-2);
+                                metadata_[map_index]={u16(lvd,p+38),u32(lvd,p+40),u32(lvd,p+44),0,{}};
+                            } else if(identifier.substr(0,22)=="*UDF Virtual Partition") {
+                                auto map_index=static_cast<std::uint16_t>(mapping_.size());
+                                mapping_.push_back(-3);
+                                virtual_[map_index]={u16(lvd,p+38),{}};
+                            } else if(identifier=="*UDF Sparable Partition") {
+                                auto map_index=static_cast<std::uint16_t>(mapping_.size());
+                                mapping_.push_back(-4);
+                                auto& sp=sparable_[map_index];
+                                sp.partition=u16(lvd,p+38);
+                                sp.packet=u16(lvd,p+40);
+                                sp.table_size=u32(lvd,p+44);
+                                const auto count=lvd[p+42];
+                                require(count>=1&&count<=4,"invalid number of sparing tables");
+                                for(unsigned t=0;t<count;t++)sp.locations.push_back(u32(lvd,p+48+t*4));
+                            } else mapping_.push_back(-1);
+                        } else mapping_.push_back(-1);
                         p+=n;
                     }
+                    init_sparable();
+                    init_metadata();
+                    init_virtual();
                     auto fsd_len=u32(lvd,248)&0x3fffffffu;
                     require(fsd_len>=416 && fsd_len<=max_directory,"invalid UDF file-set descriptor length");
                     auto fsd=src_.read(address(u32(lvd,252),u16(lvd,256)),static_cast<std::size_t>(fsd_len));
@@ -404,6 +856,7 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
     Udf udf(source);
     if(udf.parse()) {entries_=udf.take();format_="UDF Type-1";}
     else entries_=parse_iso(source,format_);
+    if(!source.layout().empty())format_+=" / "+source.layout();
 }
 
 bool Disc::copy(std::size_t index, const std::filesystem::path& output,
@@ -449,7 +902,7 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
         require(entry.inline_data.size()==entry.size,"invalid inline data length");
         if(!deliver(entry.inline_data.data(),entry.inline_data.size()))return false;
     } else {
-        std::vector<std::uint8_t> zeros(1024*1024,0); // Heap storage avoids Windows 1 MiB stack overflow.
+        std::vector<std::uint8_t> zeros(1024*1024,0); // Heap storage: Windows default stack is only 1 MiB.
         for(const auto& ex:entry.extents) {
             std::uint64_t remain=ex.length, offset=ex.offset;
             while(remain) {

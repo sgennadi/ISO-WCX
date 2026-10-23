@@ -117,7 +117,14 @@ RockRidgeEntry rock_ridge_entry(std::span<const std::uint8_t> record,
                 result.relocated = true;
             } else if (a=='C' && b=='L') {
                 check(length>=12,"truncated Rock Ridge CL record");
+                check(!result.child_lba,"duplicate Rock Ridge CL record");
+                auto lba=little32(current,p+4);
+                auto big=(std::uint32_t(current[p+8])<<24) |
+                         (std::uint32_t(current[p+9])<<16) |
+                         (std::uint32_t(current[p+10])<<8) | current[p+11];
+                check(lba==big,"Rock Ridge CL both-endian LBA mismatch");
                 result.child_link = true;
+                result.child_lba = lba;
             } else if (a=='C' && b=='E') {
                 check(length>=28 && !next,"invalid Rock Ridge CE entry");
                 Continuation ce{little32(current,p+4),little32(current,p+12),little32(current,p+20)};
