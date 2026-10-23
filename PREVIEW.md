@@ -1,4 +1,4 @@
-# ISO-WCX v0.6.0 C++20 preview
+# ISO-WCX v0.7.0 C++20 preview
 
 Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
@@ -53,3 +53,14 @@ CI compiles Windows x64 and Win32 binaries, runs CTest including WCX export/list
 - Alcohol `.mds`/`.mdf`: validated MDS v1 session/track/filename/index blocks; uncompressed Mode 1, Mode 2 Form 1 and cooked 2048/2336 data tracks. `.mdf` is a sidecar, not a general Microsoft SQL MDF reader.
 - Raw-image probing is still available for `.img`/`.bin`; installer associations include `.iso`, `.cue`, `.nrg`, `.mds` but **not** `.bin` or `.mdf`, avoiding conflicts.
 - Synthetic NRG/MDS regression tests and malformed-metadata mutation tests are run by CTest on Linux and Windows. Real Nero/Alcohol images and actual Total Commander interaction still require manual compatibility testing.
+
+
+## v0.7.0 compatibility fixes
+
+- **ISO interleaved extents:** respect File Unit Size and Interleave Gap Size; combine interleaved segments correctly in multi-extent files. Reject unsupported interleaved directories.
+- **Joliet fallback:** if the supplementary Joliet directory is invalid, retry the complete directory scan from a valid ISO9660 primary volume.
+- **UDF CS0 Unicode:** validate and decode UTF-16 surrogate pairs (for example emoji in filenames), rejecting unpaired or truncated pairs.
+- **UDF reserve VDS:** when a main Volume Descriptor Sequence cannot be parsed, try its reserve sequence from the same anchor before trying a different anchor.
+- **Test coverage:** 12 synthetic success/failure cases, plus an independently mastered Rock Ridge/ISO9660 image generated with libarchive on Linux that includes nested directories, a 1 MiB file, Unicode, and an omitted symlink.
+
+**Preview limits remain:** real optical media, broad Nero/Alcohol and mixed sessions, actual Total Commander GUI integration, and complex UDF versions still require sample-based validation. Do not regard this as full UDF 1.02-2.60 coverage.
