@@ -8,7 +8,18 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <wimgapi.h>
+// Public Windows WIMGAPI ABI; no optional ADK wimgapi.h header required.
+// This structure starts with WIN32_FIND_DATAW, followed by WIM metadata.
+struct WimFindData {
+    WIN32_FIND_DATAW find_data;
+    BYTE hash[20];
+    SECURITY_DESCRIPTOR* security_descriptor;
+    wchar_t** alternate_names;
+    BYTE* reparse_data;
+    DWORD reparse_length;
+    ULARGE_INTEGER resource_size;
+};
+
 
 #include <algorithm>
 #include <array>
@@ -94,15 +105,15 @@ bool end_of_find(DWORD code) noexcept {
 } // namespace
 
 struct WimArchive::Impl {
-    using CreateFileFn = decltype(&WIMCreateFile);
-    using CloseFn = decltype(&WIMCloseHandle);
-    using SetTempFn = decltype(&WIMSetTemporaryPath);
-    using CountFn = decltype(&WIMGetImageCount);
-    using LoadFn = decltype(&WIMLoadImage);
-    using FirstFn = decltype(&WIMFindFirstImageFile);
-    using NextFn = decltype(&WIMFindNextImageFile);
-    using CreateImageFileFn = decltype(&WIMCreateImageFile);
-    using ReadImageFileFn = decltype(&WIMReadImageFile);
+    using CreateFileFn = HANDLE (WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD);
+    using CloseFn = BOOL (WINAPI*)(HANDLE);
+    using SetTempFn = BOOL (WINAPI*)(HANDLE,PCWSTR);
+    using CountFn = DWORD (WINAPI*)(HANDLE);
+    using LoadFn = HANDLE (WINAPI*)(HANDLE,DWORD);
+    using FirstFn = HANDLE (WINAPI*)(HANDLE,PCWSTR,WimFindData*);
+    using NextFn = BOOL (WINAPI*)(HANDLE,WimFindData*);
+    using CreateImageFileFn = HANDLE (WINAPI*)(HANDLE,PCWSTR,DWORD,DWORD,DWORD);
+    using ReadImageFileFn = BOOL (WINAPI*)(HANDLE,BYTE*,DWORD,DWORD*,OVERLAPPED*);
 
     HMODULE module = nullptr;
     HANDLE archive = nullptr;
@@ -163,7 +174,7 @@ WimArchive::WimArchive(const std::filesystem::path& image)
 
     DWORD opened = 0;
     api_->archive = api_->create(input.c_str(), GENERIC_READ, OPEN_EXISTING,
-                                   0, WIM_COMPRESS_NONE, &opened);
+                                   0, 0u, &opened);
     if (!is_valid(api_->archive)) fail_windows("cannot open WIM archive");
 
     // WIMGAPI expands internal image metadata in Windows' temporary directory
@@ -207,7 +218,7 @@ WimArchive::WimArchive(const std::filesystem::path& image)
             require(current.depth <= 128,
                     "WIM directory depth exceeds safe limit");
             const auto pattern = current.path + L"\\*.*";
-            WIM_FIND_DATA data{};
+            WimFindData data{};
             HANDLE found = api_->first(himage, pattern.c_str(), &data);
             if (!is_valid(found)) {
                 if (end_of_find(GetLastError())) continue;
@@ -215,15 +226,15 @@ WimArchive::WimArchive(const std::filesystem::path& image)
             }
             Impl::CloseHandle find_guard(api_.get(), found);
             for (;;) {
-                const std::wstring name(data.cFileName);
+                const std::wstring name(data.find_data.cFileName);
                 if (name != L"." && name != L"..") {
                     require(safe_name(name),
                             "WIM contains unsafe Windows filename");
                     const bool directory =
-                        (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                        (data.find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
                     // Do not expose junctions/reparse points as regular files
                     // or follow them into a different path tree.
-                    if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                    if (!(data.find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
                         const auto relative = current.relative + "/" + utf8(name);
                         const auto source = current.path + L"\\" + name;
                         require(relative.size() <= 2048 && source.size() <= 2048,
@@ -236,10 +247,10 @@ WimArchive::WimArchive(const std::filesystem::path& image)
                         item.path = relative;
                         item.directory = directory;
                         item.size = directory ? 0 :
-                           (std::uint64_t(data.nFileSizeHigh) << 32) |
-                            std::uint64_t(data.nFileSizeLow);
-                        item.dos_time = dos_time(data.ftLastWriteTime);
-                        item.attributes = data.dwFileAttributes;
+                           (std::uint64_t(data.find_data.nFileSizeHigh) << 32) |
+                            std::uint64_t(data.find_data.nFileSizeLow);
+                        item.dos_time = dos_time(data.find_data.ftLastWriteTime);
+                        item.attributes = data.find_data.dwFileAttributes;
                         entries_.push_back(std::move(item));
                         locations_.push_back({index, source});
                         if (directory)

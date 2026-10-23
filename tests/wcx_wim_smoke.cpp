@@ -6,7 +6,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <wimgapi.h>
+// WIMGAPI is resolved dynamically; the optional Windows ADK header is not needed.
 
 #include <array>
 #include <cstdint>
@@ -38,10 +38,10 @@ using ReadFn=int(__stdcall*)(HANDLE,HeaderExW*);
 using ProcessFn=int(__stdcall*)(HANDLE,int,wchar_t*,wchar_t*);
 using CloseFn=int(__stdcall*)(HANDLE);
 using SetProgressFn=void(__stdcall*)(HANDLE,int(__stdcall*)(wchar_t*,int));
-using WimCreateFn=decltype(&WIMCreateFile);
-using WimCaptureFn=decltype(&WIMCaptureImage);
-using WimTempFn=decltype(&WIMSetTemporaryPath);
-using WimCloseFn=decltype(&WIMCloseHandle);
+using WimCreateFn=HANDLE(WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD);
+using WimCaptureFn=HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD);
+using WimTempFn=BOOL(WINAPI*)(HANDLE,PCWSTR);
+using WimCloseFn=BOOL(WINAPI*)(HANDLE);
 
 template<typename F>
 F bind(HMODULE library,const char* export_name) {
@@ -81,7 +81,7 @@ int wmain(int argc,wchar_t** argv) {
         const auto original=root/L"test.wim";
         DWORD creation=0;
         HANDLE archive=create(original.c_str(),GENERIC_READ|GENERIC_WRITE,
-                              CREATE_ALWAYS,0,WIM_COMPRESS_LZX,&creation);
+                              CREATE_ALWAYS,0,2u,&creation);
         if(!archive||archive==INVALID_HANDLE_VALUE)return 4;
         if(!set_temp(archive,root.c_str())){close_wim(archive);return 5;}
         for(const auto& folder:{first,second}) {
