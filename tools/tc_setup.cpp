@@ -16,6 +16,7 @@
 #include <array>
 #include <cwctype>
 #include <cstring>
+#include <cwchar>
 #include <fstream>
 #include <cstdint>
 #include <filesystem>
@@ -216,6 +217,46 @@ bool looks_installed(const fs::path& folder) {
     return lower(folder.filename().wstring()) == L"iso-wcx" &&
            lower(folder.parent_path().filename().wstring()) == L"wcx";
 }
+// Win32 profile APIs can rewrite UTF-8-with-BOM config using the system ANSI
+// codepage. Refuse rather than risk corrupting non-ASCII Total Commander data.
+// The bundled PowerShell repair script handles UTF-8 BOM safely.
+void validate_ini_encoding(const fs::path& ini) {
+    std::ifstream stream(ini, std::ios::binary | std::ios::ate);
+    if (!stream || stream.tellg() < 0 || stream.tellg() > 16 * 1024 * 1024)
+        throw std::runtime_error("Cannot safely inspect INI (missing or >16 MiB)");
+    stream.seekg(0);
+    std::array<unsigned char, 3> bytes{};
+    stream.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
+    const auto n = stream.gcount();
+    if (n >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf)
+        throw std::runtime_error("UTF-8 BOM INI: use bundled ISO-WCX-Repair.ps1 to preserve encoding");
+    if (n >= 2 && bytes[0] == 0xfe && bytes[1] == 0xff)
+        throw std::runtime_error("UTF-16BE INI: native profile API cannot edit this encoding");
+}
+void validate_unique_plugin_keys(const fs::path& ini) {
+    std::vector<wchar_t> buffer(32768, L'\0');
+    const auto n = GetPrivateProfileSectionW(L"PackerPlugins", buffer.data(),
+                    static_cast<DWORD>(buffer.size()), ini.c_str());
+    if (n >= buffer.size() - 2)
+        throw std::runtime_error("PackerPlugins section exceeds safe size");
+    std::vector<std::wstring> seen;
+    const auto is_target = [](const std::wstring& name) {
+        for (const wchar_t* ext : {L"iso", L"cue", L"ccd", L"nrg",
+                                   L"mds", L"cso", L"zso"})
+            if (name == ext) return true;
+        return false;
+    };
+    for (const wchar_t* p = buffer.data(); *p; p += std::wcslen(p) + 1) {
+        const std::wstring line(p);
+        const auto separator = line.find(L'=');
+        if (separator == std::wstring::npos) continue;
+        const auto key = lower(trim(line.substr(0, separator)));
+        if (!is_target(key)) continue;
+        if (std::find(seen.begin(), seen.end(), key) != seen.end())
+            throw std::runtime_error("Duplicate WCX extension in PackerPlugins: use TC UI");
+        seen.push_back(key);
+    }
+}
 std::wstring old_path(const std::wstring& value) {
     if (value.empty()) return {};
     const auto at = value.find(L',');
@@ -284,6 +325,10 @@ std::wstring run(const Options& opts) {
 
     const auto assoc_ini = redirect_ini(ini, L"PackerPlugins");
     const auto checksum_ini = redirect_ini(ini, L"PackerPlugins64");
+    validate_ini_encoding(ini);
+    validate_ini_encoding(assoc_ini);
+    validate_ini_encoding(checksum_ini);
+    validate_unique_plugin_keys(assoc_ini);
 
     fs::path destination;
     fs::path binary_source;
