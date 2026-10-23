@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
-#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -204,9 +203,8 @@ std::vector<PartitionEntry> read_gpt(Input& disk,std::uint32_t sector) {
 } // namespace
 
 std::vector<PartitionEntry> inspect_partition_table(
-    const std::filesystem::path& raw_image,std::uint32_t sector) {
+    VirtualDiskReader& disk,std::uint32_t sector) {
     require(sector==512 || sector==4096,"unsupported logical sector size");
-    Input disk(raw_image);
     require(disk.size()%sector==0,"virtual disk size not sector aligned");
     const auto total=disk.size()/sector;
     auto mbr=disk.read(0,512);
@@ -252,5 +250,11 @@ std::vector<PartitionEntry> inspect_partition_table(
     }
     check_ranges(result);
     return result;
+}
+
+std::vector<PartitionEntry> inspect_partition_table(
+    const std::filesystem::path& path,std::uint32_t sector) {
+    VirtualDiskReader disk(path);
+    return inspect_partition_table(disk,sector);
 }
 } // namespace iso_wcx
