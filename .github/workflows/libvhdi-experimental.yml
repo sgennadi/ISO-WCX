@@ -2,7 +2,7 @@ name: Optional libvhdi VHD/VHDX validation
 
 on:
   push:
-    branches: [main, 'feature/**']
+    branches: [main]
     paths:
       - 'src/virtual_disk.cpp'
       - 'src/partition_map.cpp'
@@ -32,6 +32,9 @@ on:
 
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   linux:
