@@ -88,7 +88,10 @@ def chd_image(raw: bytes) -> bytes:
     assert len(raw) % SECTOR == 0 and len(raw) > 0
     count = len(raw) // SECTOR
     table_offset = 124
-    image = bytearray(SECTOR)
+    # A CHD v5 hunk map is 4 bytes per block; large UDF images need
+    # more than a single 2048-byte metadata sector for their map.
+    map_bytes = table_offset + count * 4
+    image = bytearray(((map_bytes + SECTOR - 1) // SECTOR) * SECTOR)
     image[:8] = b"MComprHD"
     struct.pack_into(">I", image, 8, 124)
     struct.pack_into(">I", image, 12, 5)
