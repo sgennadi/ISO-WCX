@@ -40,7 +40,7 @@ experimental support. See [v0.16.0 release notes](RELEASE_NOTES.md).
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
 | CloneCD CCD/IMG | `.ccd` version 3 + matching `.img` (2352-byte sectors), single-session Mode 1 / Mode 2 Form 1 data tracks, including ECMA-130 scrambled sectors. Optional `.sub` sidecar exposed byte-for-byte under `subchannels/disc.sub`; CD-Audio and CD-Text decoding not implemented; CRC-valid Q track/index frames summarized in `subchannels/q-index.csv`. |
 | 150-sector prefix | Relative and some absolute-LBA cases (not full multisession parsing) |
-| UDF Type 1 | Browse FE/EFE, OSTA CS0 Unicode, AED continuations and reserve VDS failover. Read-only whole-disk UDF 2.01 with 512–32768-byte power-of-two blocks and optional compatibility fake MBR (.iso/.udf/.img/.raw). **Write Preview (single physical 2048-byte UDF-only Type-1):** replace/resize regular files within prior allocations, logical FID deletion without file-block reclamation, create one file up to 8 MiB or one empty directory per transaction, and automatically expand/reallocate compatible parent directories via contiguous ShortAD extents with bitmap/LVID updates (directory size limit 8 MiB). ISO/UDF Bridge metadata, VAT and Metadata/Sparable partitions remain read-only. See [UDF writer](docs/udf-type1-writer.md) and [portability](docs/udf-cross-platform.md). |
+| UDF Type 1 | Browse FE/EFE, OSTA CS0 Unicode, AED continuations and reserve VDS failover. Read-only whole-disk UDF 2.01 with 512–32768-byte power-of-two blocks and optional compatibility fake MBR (.iso/.udf/.img/.raw). **Write Preview (single physical 2048-byte UDF-only Type-1):** replace/resize regular files within prior allocations, logical FID deletion without file-block reclamation, create one regular file of any size fitting the image/partition and FE ShortAD slots (including fragmented, multi-gigabyte data), or one empty directory per transaction, and automatically expand/reallocate compatible parent directories via contiguous ShortAD extents with bitmap/LVID updates (directory size limit 8 MiB). ISO/UDF Bridge metadata, VAT and Metadata/Sparable partitions remain read-only. See [UDF writer](docs/udf-type1-writer.md) and [portability](docs/udf-cross-platform.md). |
 | UDF Metadata / VAT / Sparable | Experimental read-only partition-map support with synthetic fixtures, not comprehensive UDF 1.02–2.60. The UDF reader exposes regular files and directories; symlinks, block devices and other special ICB types are not materialized as ordinary files. |
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
 | Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352/2448 data sectors); synthetic-test coverage |
@@ -300,8 +300,12 @@ The in-process writer edits compatible standalone 2048-byte UDF Type-1 images
 without third-party DLLs or executables. It can replace/grow/shrink existing
 regular files within their recorded FE/EFE or one ShortAD allocation and
 logically delete file FIDs (without freeing deleted file blocks). The Preview
-allocator can create **one new regular file up to 8 MiB** or **one empty
-directory** per atomic transaction, updating the bitmap, LVID and unique IDs.
+allocator can create **one new regular file bounded by image/partition space
+and FE ShortAD capacity** or **one empty directory** per atomic transaction,
+updating the bitmap, LVID and unique IDs. For nonembedded files the writer
+supports several fragmented ShortAD runs and streamed verification without
+allocating a second extracted copy. Writes beyond 4 GiB remain experimental
+and require broader independent large-media coverage.
 
 Parent directories may automatically move from inline FE data to contiguous
 ShortAD blocks and grow across multiple sectors (8 MiB directory-data limit).
@@ -311,7 +315,8 @@ ownership is unambiguous. The original image is not replaced until a staged
 copy is structurally reparsed and extracted bytes verified.
 
 Hybrid ISO/UDF Bridge mutation, FAT/NTFS in virtual drives, VAT/Metadata/
-Sparable writers, fragmented file data, deleted-file block reclamation and
-unsupported layouts remain read-only or are explicitly refused. See
+Sparable writers, sparse/unrecorded allocation descriptors, AED continuation
+writing, deleted-file block reclamation and unsupported layouts remain
+read-only or are explicitly refused. See
 [UDF writer scope](docs/udf-type1-writer.md) and
 [portable UDF recognition](docs/udf-cross-platform.md).
