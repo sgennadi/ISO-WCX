@@ -110,6 +110,18 @@ Support statements below describe their respective releases; see **v0.14** at th
 - 2448-byte physical sectors are accepted for unswizzled raw MODE1/MODE2 Form 1 data, including supported MDS v1 subchannel layouts. Extra subchannel bytes are not exposed as ISO data.
 - Does not support `.isz`, `.daa`, `.mdx`, `.chd`, proprietary encryption, mixed audio extraction or all vendor MDF sector patterns. The bchunk and mdf2iso projects are useful test references; their GPL source is not included.
 
+## Native FAT12 VFAT + WinImage IMZ preview
+
+- Raw IMA/IMG/VFD/FLP superfloppy images need no MBR; native FAT12/16/32 browse/extract.
+- Valid FAT-backed BIF images browse as filesystems. Non-FAT El Torito BIF exports
+  the original bytes as `boot-image.bin` and remains read-only.
+- FAT12 writes now support Unicode VFAT long names with strict UTF-8/UTF-16,
+  DOS 8.3 alias allocation/collision checks and contiguous LFN slot allocation,
+  including directory-chain extensions. Atomic staging is verified before commit.
+- WinImage IMZ uses one ZIP stored or raw-DEFLATE member with CRC32, bounded
+  in-memory decompression (32 MiB image max), no additional DLL or helper.
+  ZIP64, multiple files, encrypted ZIP and non-FAT images are refused.
+
 ## v0.11.0 CloneCD CCD/IMG preview
 
 - Open a `.ccd` descriptor paired with a same-base `.img` file. Parses CloneCD version 3 `[Disc]` / `[TRACK N]` fields, including MODE and INDEX 0/1. Validated Mode 1 and Mode 2 Form 1 data tracks use the existing sector reader.

@@ -139,6 +139,49 @@ def main(editor: pathlib.Path, reader: pathlib.Path):
         }, root / "edit-out")
         mirrors_ok(image.read_bytes())
 
+        # Existing LFN replacement must change data without losing its
+        # original display name, VFAT metadata or DOS alias.
+        run(editor, image, "add", "long filename.TXT", payload)
+        readback(reader, image, {
+            "Long Filename.txt": payload.read_bytes(),
+            "HELLO.TXT": b"Hello floppy",
+        }, root / "replace-existing-lfn")
+        run(editor, image, "delete", "LONGNA~1.TXT")
+        assert "Long Filename.txt" not in run(reader, image).stdout.decode()
+
+        # Create and extract true Unicode long names: Cyrillic, Hebrew,
+        # supplementary emoji, and two colliding 8.3 alias prefixes.
+        name_ru = "Очень длинное имя файла 📦.txt"
+        name_he = "תיקיית מסמכים"
+        name_deep = "D" * 60 + "📦.dat"
+        name_second = "Y" * 65 + ".BIN"
+        run(editor, image, "mkdir", name_he)
+        run(editor, image, "add", name_ru, payload)
+        run(editor, image, "add", name_he + "/תקציב 2026.xlsx", payload)
+        run(editor, image, "add", name_he + "/" + name_deep, payload)
+        # Two >13-unit names force an LFN chain across a FAT directory cluster.
+        run(editor, image, "add", name_he + "/" + name_second, payload)
+        run(editor, image, "add", "Documents version one.txt", payload)
+        run(editor, image, "add", "Documents version two.txt", payload)
+        run(editor, image, "add", "lowercase.txt", payload)
+        readback(reader, image, {
+            name_ru: payload.read_bytes(),
+            name_he + "/תקציב 2026.xlsx": payload.read_bytes(),
+            name_he + "/" + name_deep: payload.read_bytes(),
+            name_he + "/" + name_second: payload.read_bytes(),
+            "Documents version one.txt": payload.read_bytes(),
+            "Documents version two.txt": payload.read_bytes(),
+            "lowercase.txt": payload.read_bytes(),
+        }, root / "unicode-lfn")
+        assert b"DOCUME~1TXT" in image.read_bytes()
+        assert b"DOCUME~2TXT" in image.read_bytes()
+        run(editor, image, "delete", name_he)
+        listing = run(reader, image).stdout.decode("utf-8")
+        assert name_he not in listing
+        run(editor, image, "delete", name_ru)
+        assert name_ru not in run(reader, image).stdout.decode("utf-8")
+        mirrors_ok(image.read_bytes())
+
         # Batch mkdir and file additions must be ordered correctly.
         image.write_bytes(original)
         run(editor, image, "batch", "add", "DATA/FILE.TXT", payload,
@@ -154,8 +197,9 @@ def main(editor: pathlib.Path, reader: pathlib.Path):
 
         # Keep original bytes on cancellation and unsupported operation.
         for op, name in (("cancel", "CANCEL.TXT"),
-                         ("add", "Long file name.txt"),
-                         ("add", "../unsafe.txt")):
+                         ("add", "bad?.txt"),
+                         ("add", "../unsafe.txt"),
+                         ("add", "X" * 256 + ".txt")):
             before = image.read_bytes()
             run(editor, image, op, name, payload, ok=False)
             assert image.read_bytes() == before
