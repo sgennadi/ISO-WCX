@@ -222,9 +222,11 @@ def test_relocation_and_rollback(editor, inspector, root):
     cancelling.write_bytes(bitmap_image())
     run(editor, cancelling, "add", "REPLACE-ME.bin", short)
     cancel_before = cancelling.read_bytes()
+    cancel_replacement = root / "cancel-replacement.dat"
+    cancel_replacement.write_bytes(b"SMALL REPLACEMENT")
     planned = [
         ("delete", "hello", None),
-        ("add", "REPLACE-ME.bin", original_big),
+        ("add", "REPLACE-ME.bin", cancel_replacement),
     ] + [("add", f"CANCEL-{n:03d}.bin", short) for n in range(25)]
     proc = subprocess.run(
         [str(editor), str(cancelling), "batchcancel",
