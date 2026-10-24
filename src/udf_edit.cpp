@@ -852,6 +852,26 @@ private:
     }
 };
 
+// Zero only in the transaction's staged image. Large ShortAD extents are
+// scrubbed with one bounded buffer; any I/O failure aborts the transaction.
+void staged_zero(std::fstream& file,std::uint64_t at,std::uint64_t count,
+                 const EditProgress& progress) {
+    constexpr std::size_t chunk_size=1024u*1024u;
+    const Bytes zeros(chunk_size,0);
+    while(count) {
+        edit_tick(progress);
+        const auto portion=static_cast<std::size_t>(
+            std::min<std::uint64_t>(count,zeros.size()));
+        file.clear();
+        file.seekp(static_cast<std::streamoff>(at));
+        need(bool(file),"cannot seek UDF reclaimed sector");
+        file.write(reinterpret_cast<const char*>(zeros.data()),
+                   static_cast<std::streamsize>(portion));
+        need(bool(file),"cannot wipe UDF reclaimed sector");
+        at+=portion;
+        count-=portion;
+    }
+}
 void staged_write(std::fstream& file,std::uint64_t at,const Bytes& b) {
     file.clear();
     file.seekp(static_cast<std::streamoff>(at));
@@ -1470,8 +1490,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                             Type1& volume,
                             const std::vector<ArchiveChange>& changes,
                             const EditProgress& progress) {
-    need(changes.size()>1 && changes.size()<=max_items && volume.has_bitmap(),
-         "UDF batch requires multiple new objects and a valid bitmap");
+    need(!changes.empty() && changes.size()<=max_items &&
+         volume.has_bitmap(),
+         "UDF transaction needs a valid bitmap and changes");
     struct Prepared {
         ArchiveChange change;
         std::string key,parent;
@@ -1726,6 +1747,12 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                  volume.logical_of(existing.fe.at),
              "UDF deleted FID identity or state mismatch");
         parent.payload[p+18]|=0x04u;
+        // A freed FE must never remain reachable by a tombstone long_ad.
+        // Zero only the FID ICB extent (16 bytes), retaining its diagnostic
+        // name, version and deleted flag. Recalculate descriptor CRC.
+        std::fill(parent.payload.begin()+static_cast<std::ptrdiff_t>(p+20u),
+                  parent.payload.begin()+static_cast<std::ptrdiff_t>(p+36u),
+                  std::uint8_t{0});
         tag_update(parent.payload,p,existing.fid_bytes);
     }
 
@@ -1842,9 +1869,30 @@ void create_udf_type1_batch(const std::filesystem::path& image,
             released+=parent.old_blocks;
         }
     }
-    need(allocated>released &&
-         allocated-released<=std::numeric_limits<std::uint32_t>::max(),
-         "UDF batch has invalid net allocation count");
+    std::vector<Location> deleted_regions;
+    std::uint64_t deleted_blocks=0;
+    std::uint32_t deleted_files=0;
+    for(const auto& change:existing_changes) {
+        if(!change.remove)continue;
+        edit_tick(progress);
+        const auto& file=volume.files().at(edit_path(change.path));
+        const auto regions=volume.reclaim_file_blocks(file);
+        for(const auto& region:regions) {
+            need(region.bytes%block==0 &&
+                 region.bytes/block<=
+                     std::numeric_limits<std::uint32_t>::max()-deleted_blocks,
+                 "UDF deleted file allocation counter overflow");
+            deleted_blocks+=region.bytes/block;
+            deleted_regions.push_back(region);
+        }
+        need(deleted_files<std::numeric_limits<std::uint32_t>::max(),
+             "UDF deleted file count overflow");
+        ++deleted_files;
+    }
+    need(released<=std::numeric_limits<std::uint32_t>::max()-
+         deleted_blocks,
+         "UDF aggregate released block counter overflow");
+    released+=deleted_blocks;
 
     EditTransaction tx(image);
     std::fstream out(tx.output,std::ios::binary|std::ios::in|
@@ -1896,10 +1944,15 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                          parent.content_write);
         staged_write(out,parent.original.at,parent.fe_write);
     }
+    // Wipe the released FE and every recorded ShortAD sector only after
+    // parent FIDs have lost their ICB pointers. No new allocation reuses
+    // these blocks in the current transaction.
+    for(const auto& region:deleted_regions)
+        staged_zero(out,region.at,region.bytes,progress);
     const auto [bitmap_at,bitmap_bytes]=volume.updated_bitmap();
     staged_write(out,bitmap_at,bitmap_bytes);
-    const auto [lvid_at,lvid_bytes]=volume.updated_integrity_batch(
-        files_added,dirs_added,static_cast<std::uint32_t>(allocated-released));
+    const auto [lvid_at,lvid_bytes]=volume.updated_integrity_delta(
+        files_added,dirs_added,deleted_files,allocated,released);
     staged_write(out,lvid_at,lvid_bytes);
     out.flush();
     need(bool(out),"cannot flush staged UDF batch image");
@@ -1910,6 +1963,12 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     // file through Disc extents and compare its complete source stream.
     {
         Type1 strict(tx.output);
+        for(const auto& region:deleted_regions) {
+            const auto start=strict.logical_of(region.at);
+            for(std::uint64_t i=0;i<region.bytes/block;++i)
+                need(strict.is_free(start+static_cast<std::uint32_t>(i)),
+                     "UDF reclaimed sector remains allocated after staging");
+        }
         for(const auto& child:children) {
             need(child.directory?
                  strict.directories().count(child.key)!=0:
@@ -1977,12 +2036,12 @@ void edit_udf(const std::filesystem::path& image,
     // A mixed creation/replacement/deletion batch shares one allocator and
     // one atomic image commit. Existing-only edits retain their original
     // bounded, non-allocating transaction path.
-    if(changes.size()>1 && std::any_of(changes.begin(),changes.end(),
+    if(volume.has_bitmap() && std::any_of(changes.begin(),changes.end(),
         [&](const ArchiveChange& change) {
             const auto key=edit_path(change.path);
-            return !change.remove &&
-                   !volume.files().count(key) &&
-                   !volume.directories().count(key);
+            return change.remove ||
+                   (!volume.files().count(key) &&
+                    !volume.directories().count(key));
         })) {
         create_udf_type1_batch(image,volume,changes,progress);
         return;
