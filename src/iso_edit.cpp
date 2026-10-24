@@ -1,4 +1,5 @@
 #include "iso_wcx/archive_edit.hpp"
+#include "iso_wcx/disc.hpp"
 #include "iso_wcx/edit_transaction.hpp"
 #include <algorithm>
 #include <array>
@@ -112,12 +113,22 @@ public:
     std::set<std::uint32_t> boot_lbas;
     std::unique_ptr<Node> root;
     bool joliet=false;
+    bool udf_bridge=false;
     std::size_t items=0;
-    explicit Image(const std::filesystem::path& p):file(p,std::ios::binary),size(std::filesystem::file_size(p)) {
+    explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false)
+        :file(p,std::ios::binary),size(std::filesystem::file_size(p)) {
         need(file.good()&&size>=18*block&&size%block==0&&size/block<0xffffffffu,"unsupported ISO size/layout");
         auto system=read(0,16*block);need(std::all_of(system.begin(),system.end(),[](auto c){return c==0;}),"hybrid/system-area ISO editing is not supported");
-        // Refuse UDF bridges before touching either namespace.
-        for(std::uint32_t lba=16;lba<256&&std::uint64_t(lba+1)*block<=size;++lba){auto b=read(std::uint64_t(lba)*block,8);need(std::memcmp(b.data()+1,"BEA01",5)&&std::memcmp(b.data()+1,"NSR02",5)&&std::memcmp(b.data()+1,"NSR03",5),"UDF/ISO bridge editing is not supported");}
+        // Detect UDF bridges. General directory rebuilding is still
+        // forbidden: only a separately validated equal-length data edit
+        // may leave both on-disc ISO and UDF namespaces unchanged.
+        for(std::uint32_t lba=16;lba<256&&std::uint64_t(lba+1)*block<=size;++lba) {
+            auto b=read(std::uint64_t(lba)*block,8);
+            if(!std::memcmp(b.data()+1,"BEA01",5)||
+               !std::memcmp(b.data()+1,"NSR02",5)||
+               !std::memcmp(b.data()+1,"NSR03",5))
+                udf_bridge=true;
+        }
         // A damaged or nonstandard bridge can be missing its VRS sequence
         // while still carrying live UDF anchors. Never rewrite only the ISO
         // namespace of an image with a plausible ECMA-167 AVDP.
@@ -132,9 +143,10 @@ public:
                 if(i!=4)sum+=tag[i];
             return static_cast<unsigned char>(sum)==tag[4];
         };
-        need(!avdp(256) && !(sectors>256 && avdp(sectors-256)) &&
-             !avdp(sectors-1),
-             "UDF anchor detected; ISO/UDF Bridge editing requires a synchronized UDF writer");
+        udf_bridge=udf_bridge || avdp(256) ||
+                   (sectors>256 && avdp(sectors-256)) || avdp(sectors-1);
+        need(allow_udf_bridge || !udf_bridge,
+             "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         Bytes primary,supplementary;bool end=false;
         for(std::uint32_t lba=16;lba<64;++lba){auto b=read(std::uint64_t(lba)*block,block);need(std::memcmp(b.data()+1,"CD001",5)==0&&b[6]==1,"unsupported ISO descriptors");
             if(b[0]==255){end=true;break;}
@@ -292,9 +304,182 @@ void write(std::fstream& out,const Bytes& b){out.write(reinterpret_cast<const ch
 void copy_bytes(std::istream& in,std::fstream& out,std::uint64_t size,const EditProgress& progress) {
     Bytes b(1024*1024);while(size){edit_tick(progress);auto count=std::min<std::uint64_t>(size,b.size());in.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(count));need(bool(in),"source shortened during ISO edit");out.write(reinterpret_cast<const char*>(b.data()),static_cast<std::streamsize>(count));if(!out)throw std::runtime_error("ISO output write failed");size-=count;}
 }
+
+struct BridgePatch {
+    std::string path;
+    std::filesystem::path source;
+    std::uint64_t at{};
+    std::uint64_t bytes{};
+};
+
+bool intersect(std::uint64_t a,std::uint64_t a_bytes,
+               std::uint64_t b,std::uint64_t b_bytes) noexcept {
+    // Callers validate that both bounded extents fit the image file.
+    return a_bytes && b_bytes && a<b+b_bytes && b<a+a_bytes;
+}
+
+void edit_iso_udf_bridge_equal_length(
+    const std::filesystem::path& path,Image& iso,
+    const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
+    need(iso.udf_bridge,"not an ISO/UDF bridge");
+    need(iso.boot_lbas.empty(),
+         "bootable ISO/UDF Bridge editing requires further boot-range checks");
+    const Disc udf(path);
+    need(udf.format()=="UDF","UDF filesystem could not be validated");
+    std::map<std::string,const Item*> udf_files;
+    for(const auto& item:udf.items())
+        if(!item.directory)
+            need(udf_files.emplace(item.path,&item).second,
+                 "duplicate UDF bridge path");
+
+    std::vector<Node*> iso_nodes{iso.root.get()};
+    for(std::size_t i=0;i<iso_nodes.size();++i)
+        for(const auto& child:iso_nodes[i]->children)
+            iso_nodes.push_back(child.get());
+
+    std::vector<BridgePatch> patches;
+    patches.reserve(changes.size());
+    for(const auto& change:changes) {
+        edit_tick(progress);
+        need(!change.remove && !change.directory,
+             "ISO/UDF Bridge supports equal-length replacement only");
+        const auto key=edit_path(change.path);
+        Node* node=iso.root.get();
+        std::istringstream parts(key);
+        std::string component;
+        while(std::getline(parts,component,'/')) {
+            auto it=std::find_if(node->children.begin(),node->children.end(),
+                [&](const auto& candidate){return candidate->logical==component;});
+            need(it!=node->children.end(),"path missing from ISO bridge namespace");
+            node=it->get();
+        }
+        need(node && !node->directory && node->size>0,
+             "bridge target must be an existing nonempty ISO file");
+        const auto it=udf_files.find(key);
+        need(it!=udf_files.end(),"path missing from UDF bridge namespace");
+        const auto& entry=*it->second;
+        need(entry.inline_data.empty() && entry.direct_source.empty() &&
+             entry.extents.size()==1 && !entry.extents[0].sparse,
+             "bridge file requires a single nonembedded, nonsparse UDF extent");
+        const auto offset=std::uint64_t(node->lba)*block;
+        need(offset>=257ull*block && node->size==entry.size &&
+             entry.extents[0].offset==offset &&
+             entry.extents[0].length==node->size &&
+             offset<=iso.size && node->size<=iso.size-offset,
+             "ISO and UDF do not share an identical bounded file extent");
+        need(std::filesystem::is_regular_file(
+                 std::filesystem::symlink_status(change.source)),
+             "replacement must be a regular file, not a link");
+        need(std::filesystem::file_size(change.source)==node->size,
+             "bridge replacement must have exactly the original file size");
+        protect_boot(*node,iso.boot_lbas);
+        for(const auto* other:iso_nodes) {
+            if(other==node || other->size==0)continue;
+            need(!intersect(offset,node->size,
+                            std::uint64_t(other->lba)*block,other->size),
+                 "bridge file extent overlaps another ISO entry");
+        }
+        for(const auto& other:udf.items()) {
+            if(other.path==key)continue;
+            for(const auto& extent:other.extents)
+                if(!extent.sparse)
+                    need(!intersect(offset,node->size,
+                                    extent.offset,extent.length),
+                         "bridge file shares an extent with another UDF entry");
+        }
+        for(const auto& previous:patches)
+            need(!intersect(offset,node->size,previous.at,previous.bytes),
+                 "overlapping or repeated bridge file replacements");
+        patches.push_back({key,change.source,offset,node->size});
+    }
+    need(!patches.empty(),"empty ISO/UDF Bridge replacement list");
+
+    // Full sibling copy and byte-restricted patches: no UDF/ISO metadata,
+    // file extents or boot sectors are modified by this operation.
+    EditTransaction tx(path);
+    std::fstream out(tx.output,std::ios::in|std::ios::out|
+                     std::ios::binary|std::ios::trunc);
+    need(bool(out),"cannot create staged bridge ISO");
+    iso.file.clear();
+    iso.file.seekg(0);
+    copy_bytes(iso.file,out,iso.size,progress);
+    Bytes chunk(1024*1024);
+    for(const auto& item:patches) {
+        edit_tick(progress);
+        out.clear();
+        out.seekp(static_cast<std::streamoff>(item.at),std::ios::beg);
+        need(bool(out),"cannot seek staged bridge extent");
+        std::ifstream source(item.source,std::ios::binary);
+        need(bool(source),"cannot open bridge replacement data");
+        auto remaining=item.bytes;
+        while(remaining) {
+            edit_tick(progress);
+            const auto n=static_cast<std::size_t>(
+                std::min<std::uint64_t>(remaining,chunk.size()));
+            source.read(reinterpret_cast<char*>(chunk.data()),
+                        static_cast<std::streamsize>(n));
+            need(bool(source),"replacement file shortened during bridge edit");
+            out.write(reinterpret_cast<const char*>(chunk.data()),
+                      static_cast<std::streamsize>(n));
+            need(bool(out),"cannot write replacement UDF bridge data");
+            remaining-=n;
+        }
+    }
+    out.flush();
+    need(bool(out),"staged bridge flush failed");
+    out.close();
+    iso.file.close();
+
+    // Independently reparse both namespaces in the staged image and
+    // compare every requested replacement, byte for byte.
+    {
+        Image primary(tx.output,true);
+        need(primary.udf_bridge && primary.size==iso.size,
+             "staged image lost its ISO/UDF bridge descriptors");
+        const Disc checked(tx.output);
+        need(checked.format()=="UDF","staged UDF could not be validated");
+        std::ifstream staged(tx.output,std::ios::binary);
+        for(const auto& item:patches) {
+            const auto v=std::find_if(checked.items().begin(),checked.items().end(),
+                [&](const Item& entry) {
+                    return !entry.directory && entry.path==item.path;
+                });
+            need(v!=checked.items().end() && v->size==item.bytes &&
+                 v->inline_data.empty() && v->extents.size()==1 &&
+                 v->extents[0].offset==item.at,
+                 "staged UDF bridge file map changed");
+            std::ifstream input(item.source,std::ios::binary);
+            need(bool(input),"cannot reopen bridge verification source");
+            staged.clear();
+            staged.seekg(static_cast<std::streamoff>(item.at));
+            auto remain=item.bytes;
+            Bytes from_file(chunk.size()),from_stage(chunk.size());
+            while(remain) {
+                edit_tick(progress);
+                const auto n=static_cast<std::size_t>(
+                    std::min<std::uint64_t>(remain,chunk.size()));
+                input.read(reinterpret_cast<char*>(from_file.data()),
+                           static_cast<std::streamsize>(n));
+                staged.read(reinterpret_cast<char*>(from_stage.data()),
+                            static_cast<std::streamsize>(n));
+                need(bool(input) && bool(staged) &&
+                     std::equal(from_file.begin(),
+                                from_file.begin()+static_cast<std::ptrdiff_t>(n),
+                                from_stage.begin()),
+                     "ISO/UDF staged data differs from replacement source");
+                remain-=n;
+            }
+        }
+    }
+    tx.commit(progress);
+}
 }
 void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
-    edit_tick(progress);Image image(path);
+    edit_tick(progress);Image image(path,true);
+    if(image.udf_bridge) {
+        edit_iso_udf_bridge_equal_length(path,image,changes,progress);
+        return;
+    }
     for(const auto& change:changes){auto p=edit_path(change.path);std::istringstream split(p);std::string name;Node* parent=image.root.get();
         std::vector<std::string> parts;while(std::getline(split,name,'/'))parts.push_back(name);
         for(std::size_t i=0;i<parts.size();++i){const bool last=i+1==parts.size();const auto key=upper(parts[i]);auto it=std::find_if(parent->children.begin(),parent->children.end(),[&](const auto& n){return upper(n->logical)==key;});
