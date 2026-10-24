@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -429,7 +430,7 @@ MdsV2TrackStream::Impl::Impl(const std::filesystem::path& descriptor) {
         auto& track=tracks[r-1];
         auto try_lead=[&](u64 shift)->bool {
             for(const auto off:{track.data_offset,0u,16u,24u}) {
-                if(off>track.sector_bytes-16u)continue;
+                if(off>track.sector_bytes-logical_sector)continue;
                 if(!has_anchor(track,shift,off,false) &&
                    !has_anchor(track,shift,off,true))continue;
                 selected=r-1;
