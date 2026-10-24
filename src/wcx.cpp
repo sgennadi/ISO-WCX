@@ -235,7 +235,9 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         if(flags&1)return E_NOT_SUPPORTED;
         std::lock_guard lock(edit_mutex);
         std::filesystem::path image(archive);auto ext=image.extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return std::towlower(c);});
-        if(ext!=L".iso"&&ext!=L".udf"&&ext!=L".wim")return E_NOT_SUPPORTED;
+        if(ext!=L".iso"&&ext!=L".udf"&&ext!=L".wim"&&
+           ext!=L".ima"&&ext!=L".img"&&ext!=L".vfd"&&
+           ext!=L".flp"&&ext!=L".bif")return E_NOT_SUPPORTED;
         if(!std::filesystem::exists(image))return E_NOT_SUPPORTED;
         std::vector<iso_wcx::ArchiveChange> changes;
         for(auto name:names){
@@ -253,7 +255,8 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         const auto progress=[&]{if(pw)return pw(wide.data(),0)!=0;if(pa)return pa(ansi.data(),0)!=0;return true;};
         if(ext==L".iso"||ext==L".udf")
              iso_wcx::edit_optical(image,changes,progress);
-         else iso_wcx::edit_wim(image,changes,progress);
+        else if(ext==L".wim") iso_wcx::edit_wim(image,changes,progress);
+        else iso_wcx::edit_fat12(image,changes,progress);
         return 0;
     }catch(const iso_wcx::EditCancelled&){return E_EABORTED;}
      catch(const iso_wcx::EditUnsupported&){return E_NOT_SUPPORTED;}
