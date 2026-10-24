@@ -1194,8 +1194,32 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
         throw std::runtime_error("WIM/ESD browsing requires Windows WIMGAPI");
 #endif
     }
-    if(extension == L".vhd" || extension == L".vhdx") {
+    if(extension == L".vhd" || extension == L".vhdx" ||
+       extension == L".ima" || extension == L".vfd" ||
+       extension == L".flp") {
         open_virtual();
+        return;
+    }
+    if(extension == L".bif") {
+        // UltraISO-style El Torito boot extracts can contain a floppy FAT
+        // image, an HDD layout, or an opaque no-emulation boot loader.
+        // Never invent a filesystem for non-FAT boot code.
+        try { open_virtual(); return; }
+        catch (const std::exception&) { /* Explicit opaque fallback below. */ }
+        require(std::filesystem::is_regular_file(image_) &&
+                !std::filesystem::is_symlink(image_),
+                "BIF boot image must be a regular file");
+        const auto length = std::filesystem::file_size(image_);
+        require(length >= 512 && length <= 512u * 1024u * 1024u,
+                "BIF boot image size is unsupported");
+        Item raw;
+        raw.path = "boot-image.bin";
+        raw.size = length;
+        raw.attributes = 0x20;
+        raw.direct_source = image_;
+        raw.extents.push_back({0,length,false});
+        append(entries_,std::move(raw));
+        format_ = "BIF / opaque El Torito boot data (read-only)";
         return;
     }
     if(extension == L".img" || extension == L".raw") {
