@@ -50,7 +50,7 @@ experimental support. See [v0.16.0 release notes](RELEASE_NOTES.md).
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
 | ISZ v1 (single-file and split; experimental) | Built-in 2048-byte optical streams; 48/64-byte headers, 2/3/4-byte chunk indexes or implicit stored data, zero/raw/zlib/bzip2; split `.isz` + `.i01/.i02` or `.part01.isz` + `.part02.isz` without intermediate ISO. Encryption, non-first segment as input, other sector geometry and uncommon vendor variants remain unsupported. |
 | DAA v1.00 | Built-in single-file raw DEFLATE chunks with header CRC32 and bounds checking; v1.10, encryption and multipart images rejected |
-| CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and experimental single-track Mode 1/Mode 2 Form 1 CD frames (2448 bytes); no CDDA, multiple tracks, parents or mixed modes; `.chd` association is manual in Preview |
+| CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and **experimental multi-track** Mode 1/Mode 2 Form 1 CD frames (2448 bytes). MAME 4-frame track padding is mapped, audio tracks are skipped and the last ISO/UDF-bearing data track is selected after a validated filesystem anchor. No CDDA extraction, parent-chain resolution or full multisession mergings; `.chd` association is manual in Preview |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
 | Other compressed/encrypted containers | Not implemented: encrypted ISZ, multipart DAA, DAA v1.10, CD-Audio/mixed/multi-track CHD, CHD parent chains, encrypted/compressed NRG, MDS v2 and MDX; only CRC-valid CloneCD Q positions are interpreted among raw CD subchannels |
 
@@ -242,7 +242,7 @@ Real-world media/Total Commander GUI validation is pending.
 - Linux and Windows x86/x64 tests exercise synthetic ISO/UDF data, byte
   extraction and corrupt-container rejection. Windows tests use the actual
   WCX export functions, not an external extractor.
-- No automatic `.chd` association yet: audio/multi-track and mixed-mode CHDs
+- No automatic `.chd` association yet: CD-Audio extraction and some mixed-mode CHDs
   are not decoded, so registering every CHD globally would be misleading.
   MDS v2/MDX and protected ISZ/DAA remain **unsupported**.
 

@@ -108,6 +108,50 @@ def main(reader: pathlib.Path) -> None:
              "-c", "cdlz", "-np", "1"])
         verify(reader, cd, root / "out-cd", "HELLO.TXT", b"world")
 
+        # CHD CD tracks are individually padded to four 2448-byte frames.
+        # Test padding plus audio before/after the filesystem, using actual
+        # chdman output rather than hand-built metadata. The WCX runtime
+        # never invokes chdman.
+        audio = root / "audio.bin"
+        audio.write_bytes(bytes(i & 255 for i in range(37 * 2352)))
+        first_cd = root / "first.bin"
+        first_cd.write_bytes(raw_cd_image(
+            iso_image(filename="FIRST.TXT;1"), mode=1))
+        second_cd = root / "second.bin"
+        second_cd.write_bytes(raw_cd_image(
+            iso_image(filename="SECOND.TXT;1"), mode=1))
+
+        def multitrack(name: str, tracks: list[tuple[str, str]],
+                       expected: str) -> None:
+            cue_file = root / (name + ".cue")
+            cue_file.write_text("".join(
+                f'FILE "{filename}" BINARY\n'
+                f'  TRACK {index:02d} {kind}\n'
+                f'    INDEX 01 00:00:00\n'
+                for index, (filename, kind) in enumerate(tracks, 1)),
+                encoding="ascii")
+            output_chd = root / (name + ".chd")
+            run([chdman, "createcd", "-i", str(cue_file), "-o",
+                 str(output_chd), "-c", "cdlz", "-np", "1"])
+            verify(reader, output_chd, root / ("out-" + name),
+                   expected, b"world")
+
+        # The 37-frame AUDIO track requires three physical padding frames
+        # before the next CD track. A simplistic cumulative offset fails.
+        multitrack("audio-before-data",
+                   [("audio.bin", "AUDIO"),
+                    ("second.bin", "MODE1/2352")], "SECOND.TXT")
+        multitrack("data-before-audio",
+                   [("first.bin", "MODE1/2352"),
+                    ("audio.bin", "AUDIO")], "FIRST.TXT")
+        multitrack("two-data-tracks",
+                   [("first.bin", "MODE1/2352"),
+                    ("second.bin", "MODE1/2352")], "SECOND.TXT")
+        multitrack("audio-data-audio",
+                   [("audio.bin", "AUDIO"),
+                    ("second.bin", "MODE1/2352"),
+                    ("audio.bin", "AUDIO")], "SECOND.TXT")
+
         # Fail closed on malformed file signatures and unsupported parents.
         raw = bytearray(cd.read_bytes())
         negative(reader, root / "corrupt.chd", b"NotAChd!" + raw[8:],
@@ -125,8 +169,9 @@ def main(reader: pathlib.Path) -> None:
         struct.pack_into(">Q", oversized, 40, 0x7fffffffffffffff)
         negative(reader, root / "huge-map.chd", bytes(oversized),
                  root / "bad-map")
-        print("PASS: MAME chdman compressed CHD v5 DVD zlib/lzma, "
-              "UDF lzma, CD cdlz Mode1 and malformed/parent rejection")
+        print("PASS: MAME chdman CHD v5 DVD zlib/lzma, UDF lzma, "
+              "CD cdlz Mode1, four-frame padded audio/mixed-mode tracks, "
+              "last data track selection, malformed/parent rejection")
 
 
 if __name__ == "__main__":
