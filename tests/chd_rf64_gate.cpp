@@ -95,7 +95,7 @@ void large_probe(const std::filesystem::path& image) {
         0, 2, 2352-10, 2352, 63*2352, 64*2352-12,
         64*2352, 1024*2352, 0x100000000ull-4096,
         0x100000000ull-2, 0x100000000ull,
-        0x100000000ull+4096, pcm_size-4096, pcm_size-64
+        0x100000000ull+512, pcm_size-4096, pcm_size-64
     };
     for(auto offset:samples) {
         offset&=~std::uint64_t(1);
