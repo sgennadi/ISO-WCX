@@ -112,7 +112,7 @@ def main(editor: pathlib.Path, inspector: pathlib.Path):
         raw = image.read_bytes()
         storage, old_lba, capacity, count, crosses = validate_root_fids(raw)
         assert storage == 0 and capacity >= 2 * B and crosses
-        assert count == 1 + 17 + 4, count  # Original parent FID + root children.
+        assert count == 1 + 17 + 3, count  # Existing FID + 20 root children.
         assert struct.unpack_from("<Q", raw, LVID_AT + 40)[0] == (
             before_id + len(changes))
         assert struct.unpack_from("<I", raw, LVID_AT + 80)[0] < before_free
