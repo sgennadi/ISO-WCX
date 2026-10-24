@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.17.0 — 2026-10-25 — Stable Core + Transactional UDF Preview
+
+- UDF physical Type-1 writer: atomic multi-file/mkdir batches and mixed
+  create/replace/delete operations, including nested paths and rollback.
+- UDF bitmap and LVID: bounded multi-ShortAD allocation and >4-GiB files,
+  safe deleted FE/data sector reclamation, next-transaction block reuse,
+  reclaimed FID slot reuse and independent mkudffs/7-Zip verification.
+- UDF staging performance: optional Linux reflink / Windows block cloning
+  with automatic sparse streaming fallback and SHA-256 parity tests.
+- CHD v5 CDDA WAV/RF64 support with synchronized decoder access and
+  full >4-GiB RF64 SHA-256 validation.
+- Additional Preview interop for native MDS v2/MDX image data-track decoding.
+- Stable release gates: Windows x86/x64, Linux C++20, ASan/UBSan, real and
+  >4-GiB UDF readback, SHA256-checked installer ZIP. UDF write remains
+  experimental for compatible UDF-only Type-1 media; no universal writer.
+
 ## v0.16.0 — 2026-10-24 — Stable Core
 
 - First Stable packaging channel with installable Total Commander ZIP for
