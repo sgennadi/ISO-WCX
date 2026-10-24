@@ -202,10 +202,80 @@ def external_directory_spill(editor,inspector,root):
           'FID sector offsets/CRC, free-block reclamation, LVID and rollback')
 
 
+def fragmented_large_file(editor, inspector, root):
+    """Independent 72 MiB bitmap fixture; file spans many nonadjacent ShortADs."""
+    partition_blocks = 36000
+    image = root / 'fragmented-big.udf'
+    source = root / 'large-data.bin'
+    raw = bitmap_image()
+    image_bytes = (PARTITION + partition_blocks + 4)*B
+    raw.extend(bytes(image_bytes-len(raw)))
+    pd = 260*B
+    p32(raw, pd+192, partition_blocks)
+    bitmap_bytes = (partition_blocks+7)//8
+    bitmap_length = 24+bitmap_bytes
+    bitmap_sectors = (bitmap_length+B-1)//B
+    p32(raw, pd+64, bitmap_length)
+    update_tag(raw, pd, 16)
+    bitmap_at = (PARTITION+BITMAP_LOGICAL)*B
+    bits = bytearray(bitmap_bytes)
+    reserved = {0, 1, 2, *range(BITMAP_LOGICAL,
+                                  BITMAP_LOGICAL+bitmap_sectors)}
+    # Every other 512-sector group is deliberately occupied. Contiguous
+    # allocation is impossible even though total free space is sufficient.
+    for i in range(partition_blocks):
+        if i not in reserved and (i//512)%2 == 0:
+            bits[i//8] |= 1<<(i%8)
+    p32(raw, bitmap_at+16, partition_blocks)
+    p32(raw, bitmap_at+20, bitmap_bytes)
+    raw[bitmap_at+24:bitmap_at+24+bitmap_bytes] = bits
+    update_tag(raw, bitmap_at, 24+bitmap_bytes, BITMAP_LOGICAL)
+    lvid = INTEGRITY_LBA*B
+    p32(raw, lvid+80, sum(b.bit_count() for b in bits))
+    p32(raw, lvid+84, partition_blocks)
+    update_tag(raw, lvid, 88, INTEGRITY_LBA)
+    image.write_bytes(raw)
+    del raw
+    name = 'FRAGMENTED-LARGE-DATA.BIN'
+    data = bytearray(14*1024*1024+193)
+    # Distinguishable markers make extent reordering/data corruption visible.
+    for offset in range(0, len(data), 65536):
+        data[offset:offset+8] = struct.pack('<Q', offset)
+    source.write_bytes(data)
+    run(editor, image, 'add', name, source)
+    # Inspect the FE independently: it must contain multiple ShortADs,
+    # each <=30 bits, and its allocation must cover InformationLength.
+    with image.open('rb') as stream:
+        stream.seek((PARTITION+3)*B)
+        # FE is first free block at logical 3 in this synthetic fixture.
+        fe = stream.read(B)
+    assert struct.unpack_from('<H', fe, 0)[0] == 261
+    assert struct.unpack_from('<Q', fe, 56)[0] == len(data)
+    ads = struct.unpack_from('<I', fe, 172)[0]
+    assert ads % 8 == 0 and ads >= 2*8, ads
+    ad_lengths = [struct.unpack_from('<I', fe, 176+i)[0]
+                  for i in range(0, ads, 8)]
+    assert all(0 < x <= 0x3fffffff for x in ad_lengths)
+    assert sum(ad_lengths) == len(data), (len(data), ad_lengths)
+    output = root / 'fragmented-extract'
+    run(inspector, image, '--extract', output)
+    assert (output/name).read_bytes() == data
+    # The existing multi-ShortAD reservation also supports bounded shrink.
+    shortened = bytes(data[:6*1024*1024+17])
+    source.write_bytes(shortened)
+    run(editor, image, 'add', name, source)
+    output2 = root / 'fragmented-shrunk'
+    run(inspector, image, '--extract', output2)
+    assert (output2/name).read_bytes() == shortened
+    print('PASS UDF 72MiB multi-sector bitmap / >8MiB fragmented ShortAD, '
+          'big-file readback, shrink and preserved data', flush=True)
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-allocator-') as temp:
         root=pathlib.Path(temp)
         external_directory_spill(editor,inspector,root)
+        fragmented_large_file(editor,inspector,root)
         image=root/'test.udf'
         source=root/'new.dat'
         cases=[
