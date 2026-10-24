@@ -557,7 +557,7 @@ public:
         put32(b,80,old_free-allocated_blocks);
         put64(b,40,integrity_->next_id+entries);
         if(integrity_->impl_bytes>=40) {
-            for(const auto [counter,change] :
+            for(const auto& [counter,change] :
                 {std::pair{120u,files},std::pair{124u,dirs}}) {
                 const auto previous=u32(b,counter);
                 need(change<=std::numeric_limits<std::uint32_t>::max()-previous,
