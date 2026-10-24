@@ -1248,11 +1248,6 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
              "staged UDF file map was not updated");
         need( (strict.directories().count(key)!=0)==change.directory,
              "staged UDF directory map was not updated");
-        for(const auto& change:existing_changes) {
-            const auto key=edit_path(change.path);
-            need((strict.files().count(key)!=0)==!change.remove,
-                 "UDF mixed batch deletion/replacement namespace mismatch");
-        }
         strict.close();
         const Disc inspected(tx.output);
         need(inspected.format()=="UDF","staged UDF allocation unreadable");
@@ -1833,6 +1828,11 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                  strict.directories().count(child.key)!=0:
                  strict.files().count(child.key)!=0,
                  "UDF batch staged namespace is incomplete");
+        }
+        for(const auto& change:existing_changes) {
+            const auto key=edit_path(change.path);
+            need((strict.files().count(key)!=0)==!change.remove,
+                 "UDF mixed batch deletion/replacement namespace mismatch");
         }
         strict.close();
         const Disc inspected(tx.output);
