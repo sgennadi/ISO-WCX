@@ -9,6 +9,8 @@
 // WIMGAPI is resolved dynamically; the optional Windows ADK header is not needed.
 
 #include <array>
+#include <atomic>
+#include <thread>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -45,6 +47,11 @@ using WimCaptureFn=HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD);
 using WimTempFn=BOOL(WINAPI*)(HANDLE,PCWSTR);
 using WimSplitFn=BOOL(WINAPI*)(HANDLE,PCWSTR,PLARGE_INTEGER,DWORD);
 using WimCloseFn=BOOL(WINAPI*)(HANDLE);
+static std::atomic<unsigned> pack_progress_calls{0};
+static int __stdcall count_pack_progress(wchar_t*,int) {
+    ++pack_progress_calls;
+    return 1;
+}
 
 template<typename F>
 F bind(HMODULE library,const char* export_name) {
@@ -203,13 +210,20 @@ int wmain(int argc,wchar_t** argv) {
         if(!verify(renamed)||!verify(swm.parent_path()/L"RENAMED.swm"))return 19;
         // Transactional WIM changes through the real WCX ABI.
         auto pack=bind<PackFn>(dll,"PackFilesW");auto erase=bind<DeleteFn>(dll,"DeleteFilesW");
-        if(!pack||!erase)return 20;
+        auto set_progress=bind<SetProgressFn>(dll,"SetProcessDataProcW");
+        if(!pack||!erase||!set_progress)return 20;
         const auto incoming=root/L"incoming";
         write(incoming/L"HELLO.TXT","replacement");write(incoming/L"ADDED.TXT","new-file");
         std::wstring packed=original.wstring(),src=incoming.wstring(),sub=L"image1";
         wchar_t add_list[]=L"HELLO.TXT\0ADDED.TXT\0\0";
-        const auto packed_result=pack(packed.data(),sub.data(),src.data(),add_list,0);
+        // WCX callback registration may happen on another thread than packing.
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        int packed_result=-1;
+        std::thread worker([&]{packed_result=pack(packed.data(),sub.data(),src.data(),add_list,0);});
+        worker.join();
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
         if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";return 21;}
+        if(!pack_progress_calls.load())return 26;
         auto content=[&](const std::wstring& wanted,std::string& data){
             OpenW a{};a.ArcName=packed.data();HANDLE h=open(&a);if(!h)return false;
             for(;;){HeaderExW head{};const int r=read(h,&head);if(r==10){close(h);return false;}if(r){close(h);return false;}

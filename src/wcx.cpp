@@ -3,6 +3,7 @@
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/archive_edit.hpp"
 #include <mutex>
+#include <atomic>
 #include <type_traits>
 #include <cwctype>
 #include <windows.h>
@@ -31,8 +32,10 @@ struct HeaderExA {char ArcName[1024],FileName[1024];int Flags;unsigned int PackS
 struct HeaderExW {wchar_t ArcName[1024],FileName[1024];int Flags;unsigned int PackSize,PackSizeHigh,UnpSize,UnpSizeHigh;int HostOS,FileCRC,FileTime,UnpVer,Method,FileAttr;char* CmtBuf;int CmtBufSize,CmtSize,CmtState;char Reserved[1024];};
 using ProgressA=int (__stdcall*)(char*,int);
 using ProgressW=int (__stdcall*)(wchar_t*,int);
-thread_local ProgressA pack_progress_a=nullptr;
-thread_local ProgressW pack_progress_w=nullptr;
+// Total Commander may register the packing callback on a different thread
+// from the one invoking PackFiles. Snapshot callbacks for each operation.
+std::atomic<ProgressA> pack_progress_a{nullptr};
+std::atomic<ProgressW> pack_progress_w{nullptr};
 std::mutex edit_mutex;
 using ChangeA=int (__stdcall*)(char*,int);
 using ChangeW=int (__stdcall*)(wchar_t*,int);
@@ -193,11 +196,11 @@ WCX_EXPORT int __stdcall CloseArchive(HANDLE handle) {
     delete reinterpret_cast<State*>(handle);return 0;
 }
 WCX_EXPORT void __stdcall SetProcessDataProcW(HANDLE handle,ProgressW proc) {
-    if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_w=proc;return;}
+    if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_w.store(proc);return;}
     if(auto* state=reinterpret_cast<State*>(handle))state->progress_w=proc;
 }
 WCX_EXPORT void __stdcall SetProcessDataProc(HANDLE handle,ProgressA proc) {
-    if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_a=proc;return;}
+    if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_a.store(proc);return;}
     if(auto* state=reinterpret_cast<State*>(handle))state->progress_a=proc;
 }
 WCX_EXPORT void __stdcall SetChangeVolProcW(HANDLE handle,ChangeW proc) {
@@ -246,7 +249,7 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             }changes.push_back(std::move(c));
         }
         if(changes.empty())return 0;
-        auto wide=archive;auto ansi=to_ansi(archive);const auto pw=pack_progress_w;const auto pa=pack_progress_a;
+        auto wide=archive;auto ansi=to_ansi(archive);const auto pw=pack_progress_w.load();const auto pa=pack_progress_a.load();
         const auto progress=[&]{if(pw)return pw(wide.data(),0)!=0;if(pa)return pa(ansi.data(),0)!=0;return true;};
         if(ext==L".iso")iso_wcx::edit_iso(image,changes,progress);else iso_wcx::edit_wim(image,changes,progress);
         return 0;
