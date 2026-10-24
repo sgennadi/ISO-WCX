@@ -18,6 +18,8 @@ void edit_iso(const std::filesystem::path&, const std::vector<ArchiveChange>&, c
 // UDF Type-1 Preview: bounded new file/dir allocation with a verified bitmap,
 // existing-file replacement and logical FID deletion; no bridge rewriting.
 void edit_udf(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
+// Transactional native FAT12 floppy editor (8.3 names, no partitions).
+void edit_fat12(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
 // Content-based ISO/Joliet, ISO/UDF Bridge and UDF-only dispatch.
 void edit_optical(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
 #ifdef _WIN32
