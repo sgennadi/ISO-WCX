@@ -86,10 +86,42 @@ const char* disk_name(VirtualDiskFormat type) {
 VirtualArchive::VirtualArchive(const std::filesystem::path& image)
     : disk_(image) {
     const auto sector = disk_.logical_sector_size();
-    const auto partitions = inspect_partition_table(disk_, sector);
-    require(!partitions.empty(), "virtual disk has no partition table");
-    format_ = std::string(disk_name(disk_.format())) + " / FAT12/16/32/exFAT/ext2/3/4/NTFS";
+    // A raw floppy (superfloppy) begins with the FAT boot sector at byte zero:
+    // it has no MBR or GPT. The normal partition parser must still take
+    // priority for partitioned IMG/RAW and VHD/VHDX containers.
+    std::vector<PartitionEntry> partitions;
+    try {
+        partitions = inspect_partition_table(disk_, sector);
+    } catch (const std::exception&) {
+        // Only independently validated FAT at byte zero may be used below.
+    }
     constexpr std::size_t max_items = 100000;
+    if (partitions.empty()) {
+        require(disk_.format() == VirtualDiskFormat::raw_image,
+                "virtual disk has no valid partition table");
+        auto volume = std::make_unique<FatVolume>(disk_, 0, disk_.size());
+        auto files = volume->list();
+        require(files.size() <= max_items,
+                "too many FAT superfloppy directory entries");
+        for (const auto& file : files) {
+            check_path(file.path);
+            Item item;
+            item.path = file.path;
+            item.directory = file.directory;
+            item.size = file.directory ? 0 : file.size;
+            item.dos_time = file.dos_time;
+            item.attributes = file.attributes != 0 ? file.attributes :
+                              (file.directory ? 0x10u : 0x20u);
+            items_.push_back(std::move(item));
+            files_.push_back({0, file.path});
+        }
+        format_ = volume->kind() == FatKind::fat12 ? "Raw FAT12 floppy" :
+                  volume->kind() == FatKind::fat16 ? "Raw FAT16 superfloppy" :
+                                                     "Raw FAT32 superfloppy";
+        volumes_.push_back(std::move(volume));
+        return;
+    }
+    format_ = std::string(disk_name(disk_.format())) + " / FAT12/16/32/exFAT/ext2/3/4/NTFS";
     for (std::size_t i = 0; i < partitions.size(); ++i) {
         const auto& partition = partitions[i];
         require(partition.first_lba <= disk_.size() / sector &&
