@@ -1281,8 +1281,23 @@ void edit_udf(const std::filesystem::path& image,
                      std::filesystem::symlink_status(change.source)),
                  "UDF replacement must be a regular file, not symlink");
             const auto len=std::filesystem::file_size(change.source);
-            need(len<=target.fe.capacity &&
-                 (target.fe.runs.size()<=1 || len<=target.fe.recorded),
+            // Only the last ShortAD's unused final sector can grow without
+            // moving data or changing the order of existing logical runs.
+            // Earlier runs may have padding but extending them would shift
+            // every subsequent file offset. Keep the growth fully in place.
+            std::uint64_t available=target.fe.capacity;
+            if(!target.fe.runs.empty()) {
+                const auto& last=target.fe.runs.back();
+                const auto last_allocated=std::uint64_t(last.blocks)*block;
+                need(last.recorded<=last_allocated,
+                     "UDF final ShortAD exceeds its allocated blocks");
+                const auto last_limit=std::min<std::uint64_t>(
+                    last_allocated,0x3fffffffull);
+                need(last.recorded<=last_limit,
+                     "UDF final ShortAD exceeds 30-bit recorded length");
+                available=target.fe.recorded+(last_limit-last.recorded);
+            }
+            need(len<=target.fe.capacity && len<=available,
                  "UDF replacement exceeds existing ShortAD allocation");
             for(const auto& run:target.fe.runs) {
                 const Location dest{run.at,std::uint64_t(run.blocks)*block};
@@ -1353,10 +1368,14 @@ void edit_udf(const std::filesystem::path& image,
             std::ifstream source(change.source,std::ios::binary);
             need(bool(source),"cannot open UDF replacement content");
             std::uint64_t remaining=len;
-            for(const auto& run:target.fe.runs) {
+            for(std::size_t i=0;i<target.fe.runs.size();++i) {
                 if(!remaining)break;
-                const auto count=target.fe.runs.size()==1?remaining:
-                                 std::min(remaining,run.recorded);
+                const auto& run=target.fe.runs[i];
+                const bool last=i+1==target.fe.runs.size();
+                // The final run is allowed to consume its sector tail.
+                const auto run_limit=last?
+                    std::uint64_t(run.blocks)*block:run.recorded;
+                const auto count=std::min(remaining,run_limit);
                 out.clear();
                 out.seekp(static_cast<std::streamoff>(run.at));
                 need(bool(out),"cannot seek UDF content ShortAD run");
@@ -1366,16 +1385,17 @@ void edit_udf(const std::filesystem::path& image,
             need(remaining==0,"UDF replacement ShortAD sequence incomplete");
             put64(fe,56,len);
             if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
-            // Grow a single ShortAD within its already allocated blocks.
-            // Multi-extent replacement/shrink retains the AD reservations.
-            if(target.fe.runs.size()==1) {
-                const auto current=target.fe.runs.front().recorded;
-                if(len>current) {
-                    need(len<=0x3fffffffull,
-                         "UDF short AD cannot describe this file size");
-                    put32(fe,target.fe.ad_offset,
-                          static_cast<std::uint32_t>(len));
-                }
+            if(len>target.fe.recorded) {
+                // Preserve every preceding ShortAD and extend only the
+                // last recorded length, not its logical LBA or allocation.
+                const auto& last=target.fe.runs.back();
+                const auto grown=last.recorded+(len-target.fe.recorded);
+                need(grown<=0x3fffffffull &&
+                     grown<=std::uint64_t(last.blocks)*block,
+                     "UDF final ShortAD cannot accommodate growth");
+                put32(fe,target.fe.ad_offset+
+                      (target.fe.runs.size()-1u)*8u,
+                      static_cast<std::uint32_t>(grown));
             }
             tag_update(fe,0,target.fe.ad_offset+target.fe.ads);
             staged_write(out,target.fe.at,fe);
