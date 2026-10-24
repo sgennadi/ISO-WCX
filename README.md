@@ -30,7 +30,7 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 | Format/layout | Coverage |
 | --- | --- |
 | WIM / ESD / SWM on Windows | Browse/extract multiple `imageN/` indexes with system WIMGAPI (XPRESS/LZX/LZMS as supported by Windows), including complete split SWM sets validated by GUID and sequence. **Edit:** standard unsplit WIM only, using Windows WIMGAPI and an NTFS staging workspace with elevated privileges; ESD/SWM read-only. No external utility or extra DLL. |
-| ISO 9660 / Joliet | Browse/extract Unicode names, multi-extent and interleaved files; fallback from corrupt Joliet. **Edit:** add/replace/delete files and folders in validated plain 2048-byte ISO9660/Joliet images; experimental long primary ISO identifiers up to 221 bytes and relaxed Joliet identifiers up to 110 UTF-16 units, including surrogate pairs. Deterministic collision-checked short aliases and El Torito boot-extent safeguards. Rejects hybrid/system-area, UDF-bridge, Rock Ridge and multi-extent rewriting. Stages and verifies the new image. |
+| ISO 9660 / Joliet | Browse/extract Unicode names, multi-extent and interleaved files; fallback from corrupt Joliet. **Edit:** add/replace/delete files and folders in validated plain 2048-byte ISO9660/Joliet images; experimental long primary ISO identifiers up to 221 bytes and relaxed Joliet identifiers up to 110 UTF-16 units, including surrogate pairs. Deterministic collision-checked short aliases and El Torito boot-extent safeguards. Rejects system-area hybrid and Rock Ridge/multi-extent rebuilding. **ISO/UDF Bridge:** supports only equal-size replacement of an existing nonbootable file when ISO and UDF share its exact single data extent. No adding/deleting, resizing, or UDF metadata editing. Stages and validates both namespaces. |
 | Rock Ridge | RRIP NM/CE and relocated CL directories; PX read-only and TF modification timestamps; no symlink/device extraction |
 | Raw BIN/IMG | CD Mode 1 / Mode 2 Form 1 (2352-byte), XA Form 1 (2336-byte); automatic probing limited to single-track images |
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
@@ -255,13 +255,18 @@ See [bounded optical container design](docs/packed-optical.md).
 - Split SWM sets: open any part with all `.swm` files in the same folder.
   Parts are matched by GUID and part number, including renamed files.
 - Plain ISO9660/Joliet editing adds/replaces/removes files and folders
-  transactionally; unsupported hybrid, UDF and Rock Ridge layouts fail
-  without modifying the input. Existing boot-image sectors are preserved.
+  transactionally; unsupported hybrid/Rock Ridge layouts fail without
+  modifying the input. A narrow ISO/UDF Bridge mode permits only identical-
+  length replacement of nonboot files whose physical data extent is shared
+  across both namespaces; metadata-changing Bridge edits are refused.
+  Existing supported boot-image sectors are preserved in plain ISO editing.
 - Standard unsplit WIM editing can add/replace/remove files and directories,
   and remove existing image indexes except the final one. It uses native
   WIMGAPI apply/capture with an NTFS workspace and elevated backup/restore/
   security privileges. The result is validated before replacing the input.
-- ESD/SWM, virtual disks, UDF and compressed optical formats stay read-only.
+- ESD/SWM, virtual disks, UDF-only and compressed optical formats stay
+  read-only. ISO/UDF Bridge is write-limited to shared-extent equal-length
+  replacement; full UDF filesystem mutation is **not** implemented.
   Individual WCX file extraction does not restore alternate data streams or
   reparse points. Unsupported ESD compression remains excluded.
 - See [WIM design notes](docs/wim-integration.md).

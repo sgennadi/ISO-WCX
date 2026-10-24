@@ -32,13 +32,20 @@ unsupported catalogs.
 
 ## ISO/UDF Bridge boundary
 
-**UDF and ISO/UDF Bridge writes are not implemented in this release.**
-The current ISO writer deliberately rejects UDF Volume Recognition Sequence
-markers `BEA01`, `NSR02` and `NSR03` in the scanned descriptor area. A
-future UDF writer must update UDF anchors, VDS/partition metadata, FE/EFE,
-FID trees, mapping tables, allocation state and independently validate both
-ISO and UDF views. Updating only ISO descriptors would be unsafe and is
-not offered. Existing supported UDF images remain read-only.
+**General-purpose UDF and ISO/UDF Bridge writes are not implemented.**
+A narrow, transactional equal-length replacement is possible on a validated
+nonbootable ISO/UDF Bridge image when an existing ISO file and UDF regular
+file have the same relative name, unchanged positive length and identical
+single physical data extent. This modifies only content bytes: directory
+descriptors, UDF FE/EFE/FID records, anchors, VAT, partition maps and
+the El Torito catalog remain byte-for-byte unchanged. Files with multiple
+extents, inline/sparse/shared data or conflicting mappings are refused.
+
+ISO/UDF bridges are still identified by VRS markers `BEA01`, `NSR02`,
+`NSR03` and/or validated AVDP anchors. A future UDF writer must update
+anchors, VDS/partition metadata, FE/EFE, FID trees, mapping tables,
+allocation state and independently validate both namespaces before
+offering add/delete/resize. Existing UDF-only images remain read-only.
 
 ## Validation
 

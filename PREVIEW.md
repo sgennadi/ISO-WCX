@@ -175,8 +175,12 @@ lengths of up to 221 bytes and relaxed Joliet length up to 110 UTF-16 units
 (including UTF-16 surrogate pairs) are supported in editing, although such
 long-name layouts are not portable to every optical image reader.
 Existing BIOS and EFI El Torito catalog/image sectors are preserved, and
-edits to overlapping file extents are refused. Hybrid, UDF-bridge,
-Rock Ridge and multi-extent ISO editing is not supported. WIM edits require
+edits to overlapping file extents are refused. ISO/UDF Bridge images have
+one narrow write mode: equal-length replacement of an existing regular file
+whose ISO and UDF entries share a single physical extent. Bridge bootable
+images, addition/deletion, resize, embedded/sparse/hard-linked extents and
+UDF metadata rebuilding remain unsupported. Hybrid system-area ISO,
+Rock Ridge and multi-extent rewrites are refused. WIM edits require
 an NTFS staging workspace and elevated Windows backup/restore/security
 privileges; new indexes, SWM edits and ESD writes are unsupported.
 

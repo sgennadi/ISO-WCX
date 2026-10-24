@@ -71,8 +71,11 @@ privileges. ESD and SWM writes are not supported. Plain ISO9660/Joliet
 images support restricted, transactional file/folder edits, including
 experimental ISO Long(221) identifiers and Joliet Long(110) UTF-16 units.
 Long names can be incompatible with other readers. BIOS/EFI El Torito
-sectors are retained and modifications overlapping them are rejected;
-hybrid, UDF-bridge and Rock Ridge ISO images remain read-only. Important media
+sectors are retained and modifications overlapping them are rejected.
+ISO/UDF Bridge has limited, byte-only replacement of existing equal-size
+files when both filesystems point at one identical physical extent. Bootable
+Bridge images, add/delete, resize and UDF metadata edits are refused. Hybrid
+system-area and Rock Ridge rewrites remain unsupported. Important media
 should be edited as copies. System wimgapi.dll runs inside the WCX;
 no additional DLL, EXE, mount or driver is required. NTFS alternate
 streams and reparse points are not restored by individual-file extraction.
