@@ -17,8 +17,8 @@ A fake MBR is not a real partition; do **not** shift UDF byte offsets, mount
 it as FAT, or format any physical disk. This is a read-only feature.
 
 **Writing remains strictly narrower:** only compatible, plain 2048-byte
-UDF-only Type-1 images with a verified single-block bitmap/closed LVID are
-writable in Preview. A nonzero system area (fake MBR/hybrid) and non-2048
+UDF-only Type-1 images with a verified single- or multi-sector bitmap
+and closed LVID are writable in Preview. A nonzero system area (fake MBR/hybrid) and non-2048
 UDF are rejected without changing the source. No mount or system formatter
 is part of the WCX plugin.
 
