@@ -1,0 +1,44 @@
+name: Real UDF Type-1 mkudffs interoperability
+
+on:
+  pull_request:
+    paths:
+      - 'src/udf_edit.cpp'
+      - 'tests/test_udf_mkudffs.py'
+      - '.github/workflows/udf-real-media.yml'
+  push:
+    branches:
+      - feature/udf-bitmap-allocator
+    paths:
+      - 'src/udf_edit.cpp'
+      - 'tests/test_udf_mkudffs.py'
+      - '.github/workflows/udf-real-media.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  independent-udf-media:
+    name: mkudffs 1.02 / udfinfo / 7z
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install independent UDF fixture and readback utilities (CI only)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends udftools p7zip-full libarchive-dev
+          command -v mkudffs
+          command -v udfinfo
+          command -v 7z
+      - name: Build native WCX library and test inspection tools
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel 2
+      - name: Verify existing independent synthetic UDF cases
+        run: ctest --test-dir build -R 'udf_type1_(native_resize_delete|space_bitmap_allocator)' --output-on-failure
+      - name: Validate real mkudffs images with native writer
+        run: |
+          python3 tests/test_udf_mkudffs.py \
+            build/archive_edit_fixture build/disc_inspect
