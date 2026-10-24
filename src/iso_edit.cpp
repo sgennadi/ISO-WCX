@@ -163,7 +163,14 @@ public:
         need(a.children.size()==b.children.size(),"ISO and Joliet trees differ");std::set<const Node*> used;
         for(auto& x:a.children){std::vector<const Node*> found;
             for(const auto& y:b.children)if(!used.count(y.get())&&x->directory==y->directory&&x->size==y->size&&(x->directory||x->lba==y->lba))found.push_back(y.get());
-            if(found.size()>1){std::vector<const Node*> named;for(auto* y:found)if(upper(x->name)==upper(y->name))named.push_back(y);found=std::move(named);}
+            if(found.size()>1) {
+                std::vector<const Node*> named;
+                for(const auto* y:found)
+                    if(upper(x->name)==upper(y->name))named.push_back(y);
+                // A generated ISO alias is never equal to the Unicode
+                // name. Preserve candidates to attempt exact hash pairing.
+                if(named.size()==1)found=std::move(named);
+            }
             if(found.size()>1) {
                 // Resolve a generated primary ISO alias against the long
                 // Joliet name, without guessing based on directory order.
