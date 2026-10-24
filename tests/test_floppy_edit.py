@@ -153,11 +153,14 @@ def main(editor: pathlib.Path, reader: pathlib.Path):
         # supplementary emoji, and two colliding 8.3 alias prefixes.
         name_ru = "Очень длинное имя файла 📦.txt"
         name_he = "תיקיית מסמכים"
-        name_deep = "D" * 205 + "📦.dat"
+        name_deep = "D" * 60 + "📦.dat"
+        name_second = "Y" * 65 + ".BIN"
         run(editor, image, "mkdir", name_he)
         run(editor, image, "add", name_ru, payload)
         run(editor, image, "add", name_he + "/תקציב 2026.xlsx", payload)
         run(editor, image, "add", name_he + "/" + name_deep, payload)
+        # Two >13-unit names force an LFN chain across a FAT directory cluster.
+        run(editor, image, "add", name_he + "/" + name_second, payload)
         run(editor, image, "add", "Documents version one.txt", payload)
         run(editor, image, "add", "Documents version two.txt", payload)
         run(editor, image, "add", "lowercase.txt", payload)
@@ -165,6 +168,7 @@ def main(editor: pathlib.Path, reader: pathlib.Path):
             name_ru: payload.read_bytes(),
             name_he + "/תקציב 2026.xlsx": payload.read_bytes(),
             name_he + "/" + name_deep: payload.read_bytes(),
+            name_he + "/" + name_second: payload.read_bytes(),
             "Documents version one.txt": payload.read_bytes(),
             "Documents version two.txt": payload.read_bytes(),
             "lowercase.txt": payload.read_bytes(),
