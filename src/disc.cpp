@@ -310,7 +310,7 @@ struct IsoRecord {
     std::uint32_t dos_time{};
     std::string name;
 };
-std::string iso_name(const Bytes& data,std::size_t p,std::size_t n,bool joliet) {
+std::string iso_name(const Bytes& data,std::size_t p,std::size_t n,bool joliet,bool directory) {
     bounds(data,p,n);
     std::string name;
     if(joliet) {
@@ -327,7 +327,7 @@ std::string iso_name(const Bytes& data,std::size_t p,std::size_t n,bool joliet) 
     } else name.assign(reinterpret_cast<const char*>(data.data()+p),n);
     // Strip ISO9660 version suffix, not embedded semicolons without a numeric version.
     auto split=name.rfind(';');
-    if(split!=std::string::npos && split+1<name.size() &&
+    if(!directory && split!=std::string::npos && split+1<name.size() &&
        std::all_of(name.begin()+static_cast<std::ptrdiff_t>(split+1),name.end(),[](unsigned char c){return c>='0'&&c<='9';}))
         name.resize(split);
     while(!name.empty()&&name.back()=='.') name.pop_back();
@@ -355,7 +355,7 @@ IsoRecord record(const Bytes& b,std::size_t p,bool joliet) {
     require(!r.gap || r.unit,"interleaved ISO file requires nonzero file unit size");
     require(!(r.flags&2) || !r.gap,"interleaved ISO directory unsupported");
     if(n==1&&(b[p+33]==0||b[p+33]==1)) r.name=".";
-    else r.name=iso_name(b,p+33,n,joliet);
+    else r.name=iso_name(b,p+33,n,joliet,(r.flags&2)!=0);
     return r;
 }
 std::vector<Item> parse_iso(Source& src,std::string& format) {

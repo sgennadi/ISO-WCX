@@ -14,7 +14,7 @@ def both(b, at, value, n=4):
     b[at+n:at+2*n] = value.to_bytes(n, 'big')
 
 
-def fixture(joliet=False, boot=False):
+def fixture(joliet=False, boot=False, boot_efi=False):
     b=iso_image(joliet=joliet)
     for sector in (16,17) if joliet else (16,):
         at=sector*B
@@ -31,6 +31,14 @@ def fixture(joliet=False, boot=False):
         struct.pack_into('<H',b,24*B+28,(-sum(struct.unpack('<16H',b[24*B:24*B+32])))&65535)
         b[24*B+32]=0x88;struct.pack_into('<I',b,24*B+40,25)
         b[25*B:26*B]=b'B'*B
+        if boot_efi:
+            # El Torito final section header, EFI platform ID, one image.
+            b[24*B+64]=0x91
+            b[24*B+65]=0xef
+            struct.pack_into('<H',b,24*B+66,1)
+            b[24*B+96]=0x88
+            struct.pack_into('<I',b,24*B+104,26)
+            b[26*B:27*B]=b'E'*B
     return b
 
 
@@ -45,7 +53,9 @@ def read_image(path, joliet=False):
             if not n:at=(at//B+1)*B;continue
             r=data[at:at+n];at+=n;name=r[33:33+r[32]]
             if name in (b'\0',b'\1'):continue
-            name=name.decode('utf-16-be' if joliet else 'ascii').removesuffix(';1')
+            name=name.decode('utf-16-be' if joliet else 'ascii')
+            if not (r[25]&2):
+                name=name.removesuffix(';1')
             name=prefix+name
             if r[25]&2:out[name+'/']=None;visit(r,name+'/')
             else:
@@ -124,7 +134,7 @@ def independent_read(path):
     return out
 
 
-def main(binary):
+def main(binary, reader=None):
     with tempfile.TemporaryDirectory() as temp:
         root=pathlib.Path(temp);image=root/'test.iso';source=root/'replacement';source.write_bytes(b'new content'*1000)
         def run(op,name,ok=True):
@@ -145,8 +155,76 @@ def main(binary):
         validate_path_tables(image)
         assert read_image(image,True)['café.txt']==source.read_bytes()
         assert read_image(image)['HELLO.TXT']==source.read_bytes()
+        # ISO9660 Long(221): 219-byte ASCII name plus the ;1 version suffix.
+        longest_iso='A'*219
+        image.write_bytes(fixture())
+        run('add',longest_iso)
+        assert read_image(image)[longest_iso]==source.read_bytes()
+        validate_path_tables(image)
+        # Anything that cannot fit the physical 255-byte ISO directory
+        # record must fail without replacing the original image.
+        run('add','B'*220,False)
+        # Joliet Long(110) is measured in UTF-16 code units, not Python
+        # characters. Non-BMP emoji consumes two UTF-16 code units.
+        image.write_bytes(fixture(joliet=True))
+        longest_joliet='Ж'*106+'📦'  # 108 UTF-16 units + ;1 = 110.
+        run('add',longest_joliet)
+        assert read_image(image,True)[longest_joliet]==source.read_bytes()
+        validate_path_tables(image)
+        run('add','Ж'*109,False)
+        # Deterministic 8.3-compatible ISO aliases should remain stable
+        # when several Unicode-only Joliet subdirectories share sizes.
+        image.write_bytes(fixture(joliet=True))
+        folder_a='Инсталляция 📦'
+        folder_b='Инсталляция 🔧'
+        run('mkdir',folder_a)
+        run('mkdir',folder_b)
+        run('add',folder_a+'/kernel.bin')
+        run('add',folder_b+'/kernel.bin')
+        assert read_image(image,True)[folder_a+'/kernel.bin']==source.read_bytes()
+        assert read_image(image,True)[folder_b+'/kernel.bin']==source.read_bytes()
+        run('mkdir','directory;1')
+        run('add','directory;1/name;1.txt')
+        assert read_image(image,True)['directory;1/name;1.txt']==source.read_bytes()
+        if reader:
+            inspected=subprocess.run([reader,str(image)],capture_output=True,
+                                     text=True,encoding='utf-8',check=True)
+            assert 'directory;1/name;1.txt' in inspected.stdout,inspected.stdout
+        validate_path_tables(image)
+        run('delete',folder_b)
+        assert folder_b+'/kernel.bin' not in read_image(image,True)
+        # Use independent ISO reader for portable long-primary names.
         image.write_bytes(fixture(boot=True));old=image.read_bytes();run('add','NEW.TXT')
         assert image.read_bytes()[24*B:26*B]==old[24*B:26*B],'boot catalog/image changed'
+        image.write_bytes(fixture(boot=True,boot_efi=True))
+        before=image.read_bytes()
+        run('add','EFI_DATA.TXT')
+        assert image.read_bytes()[17*B:18*B]==before[17*B:18*B], 'El Torito boot descriptor changed'
+        assert image.read_bytes()[24*B:27*B]==before[24*B:27*B], 'BIOS/EFI boot data changed'
+        # The payload of a boot image may be embedded in a file extent
+        # whose first LBA is NOT the catalog or the image's first LBA.
+        b=fixture(boot=True)
+        first_dir_record=iso_record(20,B,2,bytes([0]))
+        second_dir_record=iso_record(20,B,2,bytes([1]))
+        file_record=20*B+len(first_dir_record)+len(second_dir_record)
+        both(b,file_record+2,23)
+        both(b,file_record+10,3*B)
+        image.write_bytes(b)
+        run('delete','HELLO.TXT',False)
+        run('add','HELLO.TXT',False)
+
+        # Even without the NSR02/NSR03 VRS sequence, a valid UDF anchor
+        # means the editor must NOT update only the ISO namespace.
+        anchor=bytearray(fixture())
+        anchor.extend(bytes((600-len(anchor)//B)*B))
+        both(anchor,16*B+80,len(anchor)//B)
+        at=256*B
+        struct.pack_into('<H',anchor,at,2)  # UDF AVDP tag
+        struct.pack_into('<H',anchor,at+2,2)
+        struct.pack_into('<I',anchor,at+12,256)
+        anchor[at+4]=sum(anchor[at+i] for i in range(16) if i!=4)&255
+        image.write_bytes(anchor)
+        run('add','NEW.TXT',False)
         for mode in ('hybrid','udf','rockridge','bad_extent'):
             b=fixture()
             if mode=='hybrid':b[0]=1
@@ -158,4 +236,4 @@ def main(binary):
             image.write_bytes(b);run('add','NEW.TXT',False)
     print('PASS: ISO replace/add/delete, nested paths, Joliet, independent reader, boot preservation, cancellation and refusal rollback')
 
-if __name__=='__main__':main(sys.argv[1])
+if __name__=='__main__':main(sys.argv[1],sys.argv[2] if len(sys.argv)>2 else None)

@@ -26,18 +26,71 @@ std::string upper(std::string s){for(auto& c:s)if(c>='a'&&c<='z')c=char(c-32);re
 std::u16string utf16(const std::string& text) {
     std::u16string out;
     for(std::size_t i=0;i<text.size();) {
-        const auto c=static_cast<unsigned char>(text[i++]);unsigned value=c,count=0;
-        if(c>=0xc2&&c<=0xdf){value=c&31;count=1;}else if(c>=0xe0&&c<=0xef){value=c&15;count=2;}
-        else need(c<128,"Joliet editing requires BMP Unicode names");
-        for(unsigned j=0;j<count;++j){need(i<text.size(),"truncated UTF-8");auto x=static_cast<unsigned char>(text[i++]);need((x&0xc0)==0x80,"invalid UTF-8");value=(value<<6)|(x&63);}
-        need((count!=1||value>=128)&&(count!=2||value>=2048)&&!(value>=0xd800&&value<=0xdfff),"invalid UTF-8");out.push_back(static_cast<char16_t>(value));
-    }return out;
+        const auto c=static_cast<unsigned char>(text[i++]);
+        unsigned value=c,count=0;
+        if(c<128) {
+            need(c>=32 && c!=127,"invalid control in Joliet name");
+        } else if(c>=0xc2&&c<=0xdf) {
+            value=c&31;count=1;
+        } else if(c>=0xe0&&c<=0xef) {
+            value=c&15;count=2;
+        } else if(c>=0xf0&&c<=0xf4) {
+            value=c&7;count=3;
+        } else {
+            throw EditUnsupported("invalid leading UTF-8 byte in Joliet name");
+        }
+        for(unsigned j=0;j<count;++j) {
+            need(i<text.size(),"truncated UTF-8");
+            const auto x=static_cast<unsigned char>(text[i++]);
+            need((x&0xc0)==0x80,"invalid UTF-8 continuation");
+            value=(value<<6)|(x&63);
+        }
+        need((count!=1||value>=128) &&
+             (count!=2||value>=2048) &&
+             (count!=3||value>=65536) &&
+             value<=0x10ffff &&
+             !(value>=0xd800&&value<=0xdfff),"overlong or invalid UTF-8");
+        if(value<=0xffff) out.push_back(static_cast<char16_t>(value));
+        else {
+            value-=0x10000;
+            out.push_back(static_cast<char16_t>(0xd800+(value>>10)));
+            out.push_back(static_cast<char16_t>(0xdc00+(value&0x3ff)));
+        }
+    }
+    return out;
 }
-std::string decode(const Bytes& name,bool joliet) {
+std::string decode(const Bytes& name,bool joliet,bool directory) {
     std::string s;
-    if(!joliet)s.assign(name.begin(),name.end());
-    else {need(name.size()%2==0,"invalid Joliet name");for(std::size_t i=0;i<name.size();i+=2){unsigned c=(unsigned(name[i])<<8)|name[i+1];need(!(c>=0xd800&&c<=0xdfff),"unsupported Joliet surrogate");if(c<128)s+=char(c);else if(c<2048){s+=char(0xc0|(c>>6));s+=char(0x80|(c&63));}else{s+=char(0xe0|(c>>12));s+=char(0x80|((c>>6)&63));s+=char(0x80|(c&63));}}}
-    if(s.ends_with(";1"))s.resize(s.size()-2);
+    if(!joliet) s.assign(name.begin(),name.end());
+    else {
+        need((name.size()%2)==0,"invalid Joliet UTF-16 byte length");
+        for(std::size_t i=0;i<name.size();i+=2) {
+            unsigned cp=(unsigned(name[i])<<8)|name[i+1];
+            if(cp>=0xd800&&cp<=0xdbff) {
+                need(i+3<name.size(),"truncated Joliet surrogate pair");
+                const auto low=(unsigned(name[i+2])<<8)|name[i+3];
+                need(low>=0xdc00&&low<=0xdfff,"invalid Joliet surrogate pair");
+                cp=0x10000+((cp-0xd800)<<10)+(low-0xdc00);i+=2;
+            } else {
+                need(cp<0xdc00||cp>0xdfff,"isolated Joliet low surrogate");
+            }
+            if(cp<128) s+=static_cast<char>(cp);
+            else if(cp<2048) {
+                s+=static_cast<char>(0xc0|(cp>>6));
+                s+=static_cast<char>(0x80|(cp&63));
+            } else if(cp<65536) {
+                s+=static_cast<char>(0xe0|(cp>>12));
+                s+=static_cast<char>(0x80|((cp>>6)&63));
+                s+=static_cast<char>(0x80|(cp&63));
+            } else {
+                s+=static_cast<char>(0xf0|(cp>>18));
+                s+=static_cast<char>(0x80|((cp>>12)&63));
+                s+=static_cast<char>(0x80|((cp>>6)&63));
+                s+=static_cast<char>(0x80|(cp&63));
+            }
+        }
+    }
+    if(!directory && s.ends_with(";1"))s.resize(s.size()-2);
     return edit_path(s);
 }
 struct Node {
@@ -50,6 +103,7 @@ struct Node {
     std::vector<std::unique_ptr<Node>> children;
     std::array<std::uint32_t,2> new_lba{},new_size{};
 };
+std::string iso_alias(const std::string& name,bool directory,unsigned salt=0);
 class Image {
 public:
     std::ifstream file;
@@ -64,6 +118,23 @@ public:
         auto system=read(0,16*block);need(std::all_of(system.begin(),system.end(),[](auto c){return c==0;}),"hybrid/system-area ISO editing is not supported");
         // Refuse UDF bridges before touching either namespace.
         for(std::uint32_t lba=16;lba<256&&std::uint64_t(lba+1)*block<=size;++lba){auto b=read(std::uint64_t(lba)*block,8);need(std::memcmp(b.data()+1,"BEA01",5)&&std::memcmp(b.data()+1,"NSR02",5)&&std::memcmp(b.data()+1,"NSR03",5),"UDF/ISO bridge editing is not supported");}
+        // A damaged or nonstandard bridge can be missing its VRS sequence
+        // while still carrying live UDF anchors. Never rewrite only the ISO
+        // namespace of an image with a plausible ECMA-167 AVDP.
+        const auto sectors=size/block;
+        auto avdp=[&](std::uint64_t lba) {
+            if(lba>=sectors)return false;
+            const auto tag=read(lba*block,16);
+            if(le(tag,0,2)!=2 || (le(tag,2,2)!=2 && le(tag,2,2)!=3) ||
+               le(tag,12)!=lba)return false;
+            unsigned sum=0;
+            for(std::size_t i=0;i<tag.size();++i)
+                if(i!=4)sum+=tag[i];
+            return static_cast<unsigned char>(sum)==tag[4];
+        };
+        need(!avdp(256) && !(sectors>256 && avdp(sectors-256)) &&
+             !avdp(sectors-1),
+             "UDF anchor detected; ISO/UDF Bridge editing requires a synchronized UDF writer");
         Bytes primary,supplementary;bool end=false;
         for(std::uint32_t lba=16;lba<64;++lba){auto b=read(std::uint64_t(lba)*block,block);need(std::memcmp(b.data()+1,"CD001",5)==0&&b[6]==1,"unsupported ISO descriptors");
             if(b[0]==255){end=true;break;}
@@ -94,7 +165,7 @@ public:
         const std::size_t idlen=r[32],base=33+idlen+(idlen%2==0?1:0);need(idlen&&base<=r.size(),"bad ISO identifier");
         need(std::all_of(r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),[](auto c){return c==0;}),"Rock Ridge/system-use ISO editing is not supported");
         n->identifier.assign(r.begin()+33,r.begin()+33+static_cast<std::ptrdiff_t>(idlen));
-        if(parent)n->name=n->logical=decode(n->identifier,j);
+        if(parent)n->name=n->logical=decode(n->identifier,j,n->directory);
         need(++items<=200000&&depth<=64,"ISO edit tree limit exceeded");
         if(n->directory){need(seen.insert(n->lba).second&&n->size<=64*1024*1024,"cyclic or oversized ISO directory");auto data=read(std::uint64_t(n->lba)*block,n->size);std::set<std::string> names;
             for(std::size_t at=0;at<data.size();){unsigned len=data[at];if(!len){at=(at/block+1)*block;continue;}need(len>=34&&len<=data.size()-at&&at%block+len<=block,"bad ISO directory record");Bytes child(data.begin()+static_cast<std::ptrdiff_t>(at),data.begin()+static_cast<std::ptrdiff_t>(at+len));at+=len;
@@ -109,18 +180,91 @@ public:
         need(a.children.size()==b.children.size(),"ISO and Joliet trees differ");std::set<const Node*> used;
         for(auto& x:a.children){std::vector<const Node*> found;
             for(const auto& y:b.children)if(!used.count(y.get())&&x->directory==y->directory&&x->size==y->size&&(x->directory||x->lba==y->lba))found.push_back(y.get());
-            if(found.size()>1){std::vector<const Node*> named;for(auto* y:found)if(upper(x->name)==upper(y->name))named.push_back(y);found=std::move(named);}
+            if(found.size()>1) {
+                std::vector<const Node*> named;
+                for(const auto* y:found)
+                    if(upper(x->name)==upper(y->name))named.push_back(y);
+                // A generated ISO alias is never equal to the Unicode
+                // name. Preserve candidates to attempt exact hash pairing.
+                if(named.size()==1)found=std::move(named);
+            }
+            if(found.size()>1) {
+                // Resolve a generated primary ISO alias against the long
+                // Joliet name, without guessing based on directory order.
+                std::vector<const Node*> aliased;
+                for(const auto* y:found) {
+                    for(unsigned salt=0;salt<128;++salt) {
+                        if(upper(x->name)==iso_alias(y->logical,y->directory,salt)) {
+                            aliased.push_back(y);break;
+                        }
+                    }
+                }
+                if(aliased.size()==1) found=std::move(aliased);
+            }
             need(found.size()==1,"cannot safely match ISO and Joliet names");used.insert(found[0]);pair(*x,*found[0]);
         }
     }
 };
+// The directory record is stored in one 255-byte field: 33-byte header,
+// identifier and an optional pad byte. Relaxed Joliet Long(110) uses up to
+// 110 UTF-16 code units, including the ;1 version suffix for files.
 Bytes identifier(const std::string& name,bool j,bool dir) {
     Bytes b;
-    if(j){auto wide=utf16(name);need(wide.size()<=64,"Joliet name exceeds 64 characters");if(!dir)wide+=u";1";for(char16_t c:wide){b.push_back(static_cast<unsigned char>(c>>8));b.push_back(static_cast<unsigned char>(c));}}
-    else {auto text=upper(name);need(text.size()<=31,"ISO name exceeds 31 characters");for(unsigned char c:text)need((c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='.',"primary ISO names must use A-Z, digits, underscore or dot");if(!dir)text+=";1";b.assign(text.begin(),text.end());}
+    if(j) {
+        auto wide=utf16(name);
+        if(!dir) wide+=u";1";
+        need(wide.size()<=110,"Joliet identifier exceeds 110 UTF-16 units");
+        b.reserve(wide.size()*2);
+        for(const char16_t c:wide) {
+            b.push_back(static_cast<unsigned char>(c>>8));
+            b.push_back(static_cast<unsigned char>(c));
+        }
+    } else {
+        auto text=upper(name);
+        // The semicolon is reserved for the generated ISO file-version
+        // field. A literal semicolon in a Joliet name needs an ISO alias,
+        // otherwise a directory like "folder;1" loses part of its name
+        // when an ISO reader interprets it as a version suffix.
+        for(const unsigned char c:text)
+            need((c>='A'&&c<='Z')||(c>='0'&&c<='9')||
+                 c=='_'||c=='.',
+                 "primary ISO identifier contains nonportable characters");
+        if(!dir)text+=";1";
+        need(text.size()<=221,"ISO identifier exceeds directory-record limit");
+        b.assign(text.begin(),text.end());
+    }
+    need(!b.empty() && (33+b.size()+(b.size()%2==0?1u:0))<=255,
+         "ISO/Joliet directory record exceeds 255 bytes");
     return b;
 }
-void protect_boot(const Node& n,const std::set<std::uint32_t>& boot){need(!boot.count(n.lba),"editing a boot catalog/image is not supported");for(const auto& c:n.children)protect_boot(*c,boot);}
+// Deterministic collision-resistant aliases for Unicode names unrepresentable
+// in primary ISO. No unstable parent-child array indexes, no truncation that
+// can collapse two distinct filenames.
+std::string iso_alias(const std::string& name,bool directory,unsigned salt) {
+    std::uint64_t hash=14695981039346656037ull;
+    for(const unsigned char c:name) {
+        hash^=c;hash*=1099511628211ull;
+    }
+    hash^=directory?0x44u:0x46u;
+    hash*=1099511628211ull;
+    hash^=salt;hash*=1099511628211ull;
+    static constexpr char digits[]="0123456789ABCDEF";
+    std::string out="WCX_";
+    for(unsigned i=0;i<16;++i)
+        out+=digits[(hash>>(4*(15-i)))&15u];
+    if(!directory) out+=".BIN";
+    return out;
+}
+void protect_boot(const Node& n,const std::set<std::uint32_t>& boot) {
+    // El Torito image/catalog locations can be contained inside an extent
+    // whose first sector precedes the referenced LBA. Protect the entire
+    // original file extent, not only a matching first-sector address.
+    const auto sectors=(std::uint64_t(n.size)+block-1)/block;
+    for(const auto lba:boot)
+        need(!(lba>=n.lba && std::uint64_t(lba)-n.lba<sectors),
+             "editing an extent containing an El Torito boot image/catalog is not supported");
+    for(const auto& child:n.children) protect_boot(*child,boot);
+}
 Bytes record(const Node& n,const Bytes& id,unsigned view,const Node* directory=nullptr) {
     Bytes b(33+id.size()+(id.size()%2==0?1:0),0);need(b.size()<=255,"ISO record too long");
     std::copy_n(n.record.begin(),std::min<std::size_t>(33,n.record.size()),b.begin());b[0]=static_cast<unsigned char>(b.size());b[32]=static_cast<unsigned char>(id.size());
@@ -159,8 +303,21 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 if(change.remove)break;
                 auto n=std::make_unique<Node>();n->parent=parent;n->logical=parts[i];n->name=upper(parts[i]);n->directory=!last||change.directory;n->record.resize(34,0);n->record[18]=126;n->record[19]=1;n->record[20]=1;
                 // For new Joliet names, generate a deterministic short ISO alias when necessary.
-                try{n->identifier=identifier(parts[i],false,n->directory);}catch(const EditUnsupported&){need(image.joliet,"name cannot be represented in ISO9660");n->name="WCX_"+std::to_string(parent->children.size()+1);n->identifier=identifier(n->name,false,n->directory);}
-                for(const auto& c:parent->children)need(c->identifier!=n->identifier,"ISO alias collision");
+                try {
+                    n->identifier=identifier(parts[i],false,n->directory);
+                } catch(const EditUnsupported&) {
+                    need(image.joliet,"name cannot be represented in ISO9660");
+                    bool unique=false;
+                    for(unsigned salt=0;salt<128 && !unique;++salt) {
+                        n->name=iso_alias(parts[i],n->directory,salt);
+                        n->identifier=identifier(n->name,false,n->directory);
+                        unique=std::none_of(parent->children.begin(),parent->children.end(),
+                            [&](const auto& child){return child->identifier==n->identifier;});
+                    }
+                    need(unique,"too many generated ISO alias collisions");
+                }
+                for(const auto& c:parent->children)
+                    need(c->identifier!=n->identifier,"ISO alias collision");
                 if(image.joliet)n->joliet_identifier=identifier(parts[i],true,n->directory);
                 parent->children.push_back(std::move(n));it=std::prev(parent->children.end());
             }

@@ -170,7 +170,12 @@ Complete split SWM sets can be read and extracted from any part; all parts
 must be present in the same directory. ESD and SWM remain read-only.
 
 Existing plain ISO9660/Joliet and non-solid, unsplit standard WIM support
-restricted add/replace/delete through the WCX API. Hybrid, UDF-bridge,
+restricted add/replace/delete through the WCX API. New ISO identifier
+lengths of up to 221 bytes and relaxed Joliet length up to 110 UTF-16 units
+(including UTF-16 surrogate pairs) are supported in editing, although such
+long-name layouts are not portable to every optical image reader.
+Existing BIOS and EFI El Torito catalog/image sectors are preserved, and
+edits to overlapping file extents are refused. Hybrid, UDF-bridge,
 Rock Ridge and multi-extent ISO editing is not supported. WIM edits require
 an NTFS staging workspace and elevated Windows backup/restore/security
 privileges; new indexes, SWM edits and ESD writes are unsupported.
