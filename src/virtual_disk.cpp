@@ -1,5 +1,6 @@
 #include "iso_wcx/virtual_disk.hpp"
 #include "iso_wcx/vhdx_reader.hpp"
+#include "iso_wcx/imz_reader.hpp"
 
 #include <algorithm>
 #include <array>
@@ -90,6 +91,13 @@ VirtualDiskReader::VirtualDiskReader(const std::filesystem::path& image) {
     require(bool(input_),"cannot read virtual disk signature");
     const bool is_vhdx=std::string_view(identifier.data(),identifier.size())=="vhdxfile";
     const auto suffix=lowercase(image.extension().wstring());
+    if(suffix==L".imz") {
+        imz_bytes_=decode_imz(input_,physical_length);
+        capacity_=imz_bytes_.size();
+        format_=VirtualDiskFormat::compressed_floppy;
+        input_.close();
+        return;
+    }
     if(suffix==L".vhdx") {
         require(is_vhdx,".vhdx extension has invalid VHDX file identifier");
         vhdx_=std::make_unique<VhdxReader>(image);
@@ -137,6 +145,11 @@ std::vector<std::uint8_t> VirtualDiskReader::read(
     if(vhdx_)return vhdx_->read(offset,length);
     std::vector<std::uint8_t> output(length);
     if(length==0)return output;
+    if(format_==VirtualDiskFormat::compressed_floppy) {
+        std::copy_n(imz_bytes_.data()+static_cast<std::size_t>(offset),length,
+                    output.data());
+        return output;
+    }
     input_.clear();
     input_.seekg(static_cast<std::streamoff>(offset),std::ios::beg);
     require(bool(input_),"cannot seek in virtual disk");
