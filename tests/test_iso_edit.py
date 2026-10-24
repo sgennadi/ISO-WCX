@@ -204,6 +204,18 @@ def main(binary):
         run('delete','HELLO.TXT',False)
         run('add','HELLO.TXT',False)
 
+        # Even without the NSR02/NSR03 VRS sequence, a valid UDF anchor
+        # means the editor must NOT update only the ISO namespace.
+        anchor=bytearray(fixture())
+        anchor.extend(bytes((600-len(anchor)//B)*B))
+        both(anchor,16*B+80,len(anchor)//B)
+        at=256*B
+        struct.pack_into('<H',anchor,at,2)  # UDF AVDP tag
+        struct.pack_into('<H',anchor,at+2,2)
+        struct.pack_into('<I',anchor,at+12,256)
+        anchor[at+4]=sum(anchor[at+i] for i in range(16) if i!=4)&255
+        image.write_bytes(anchor)
+        run('add','NEW.TXT',False)
         for mode in ('hybrid','udf','rockridge','bad_extent'):
             b=fixture()
             if mode=='hybrid':b[0]=1
