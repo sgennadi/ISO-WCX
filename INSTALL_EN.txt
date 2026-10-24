@@ -47,11 +47,13 @@ This is PREVIEW software: most formats are read-only. Only plain ISO9660/
 Joliet and standard unsplit WIM support restricted editing.
 Supported compressed optical subsets:
 single-file ISZ v1 (zero/raw/zlib/bzip2) and DAA 1.00 (raw DEFLATE).
-Experimental CHD v5 uncompressed 2048-byte data is readable when manually
-opened, but CHD is NOT registered by default.
+CHD v5 supports compressed optical 2048-byte ISO/UDF and experimental
+single-track CD Mode 1/Mode 2 Form 1 using statically linked libchdr;
+CHD is not registered by default because audio and mixed/multi-track
+images remain unsupported.
 Not supported: MDS v2/MDX, encrypted/multipart ISZ or DAA, DAA 1.10,
-compressed CD/arcade CHD, dynamic/differencing VHD, differencing/dirty
-VHDX, NTFS, exFAT and ext-family file systems.
+CHD audio/mixed/multi-track/parent chains, dynamic/differencing VHD,
+differencing/dirty VHDX, NTFS, exFAT and ext-family filesystems.
 
 Source: https://github.com/sgennadi/ISO-WCX
 

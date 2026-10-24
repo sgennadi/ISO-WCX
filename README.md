@@ -48,7 +48,7 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 | DAA v1.00 | Built-in single-file raw DEFLATE chunks with header CRC32 and bounds checking; v1.10, encryption and multipart images rejected |
 | CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and experimental single-track Mode 1/Mode 2 Form 1 CD frames (2448 bytes); no CDDA, multiple tracks, parents or mixed modes; `.chd` association is manual in Preview |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
-| Other compressed/encrypted containers | Not implemented: encrypted ISZ/DAA, multipart ISZ, DAA v1.10, compressed CHD, NRG encrypted/compressed, MDS v2, MDX; only CloneCD Q position decoding is implemented; other raw CD subchannels are not interpreted |
+| Other compressed/encrypted containers | Not implemented: encrypted/multipart ISZ/DAA, DAA v1.10, CD-Audio/mixed/multi-track CHD, CHD parent chains, encrypted/compressed NRG, MDS v2 and MDX; only CRC-valid CloneCD Q positions are interpreted among raw CD subchannels |
 
 ## Development
 
