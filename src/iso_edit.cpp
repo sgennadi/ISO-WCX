@@ -227,7 +227,16 @@ std::string iso_alias(const std::string& name,bool directory,unsigned salt) {
     if(!directory) out+=".BIN";
     return out;
 }
-void protect_boot(const Node& n,const std::set<std::uint32_t>& boot){need(!boot.count(n.lba),"editing a boot catalog/image is not supported");for(const auto& c:n.children)protect_boot(*c,boot);}
+void protect_boot(const Node& n,const std::set<std::uint32_t>& boot) {
+    // El Torito image/catalog locations can be contained inside an extent
+    // whose first sector precedes the referenced LBA. Protect the entire
+    // original file extent, not only a matching first-sector address.
+    const auto sectors=(std::uint64_t(n.size)+block-1)/block;
+    for(const auto lba:boot)
+        need(!(lba>=n.lba && std::uint64_t(lba)-n.lba<sectors),
+             "editing an extent containing an El Torito boot image/catalog is not supported");
+    for(const auto& child:n.children) protect_boot(*child,boot);
+}
 Bytes record(const Node& n,const Bytes& id,unsigned view,const Node* directory=nullptr) {
     Bytes b(33+id.size()+(id.size()%2==0?1:0),0);need(b.size()<=255,"ISO record too long");
     std::copy_n(n.record.begin(),std::min<std::size_t>(33,n.record.size()),b.begin());b[0]=static_cast<unsigned char>(b.size());b[32]=static_cast<unsigned char>(id.size());
