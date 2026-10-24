@@ -53,9 +53,8 @@ std::string upper(std::string name) {
 // Stable, locale-independent simple folding for common Latin, Cyrillic,
 // and Greek letters. Other Unicode scalars remain exact.
 std::string fold_name(std::string_view value) {
-    const auto units = vfat::utf16(value);
-    std::string out;
-    for (const char16_t unit : units) {
+    auto units = vfat::utf16(value);
+    for (auto& unit : units) {
         auto cp = static_cast<std::uint32_t>(unit);
         if (cp >= 0x61 && cp <= 0x7a) cp -= 0x20;
         else if (cp >= 0xe0 && cp <= 0xf6) cp -= 0x20;
@@ -64,9 +63,9 @@ std::string fold_name(std::string_view value) {
         else if (cp >= 0x450 && cp <= 0x45f) cp -= 0x50;
         else if (cp >= 0x3b1 && cp <= 0x3cb && cp != 0x3c2) cp -= 0x20;
         else if (cp == 0x3c2) cp = 0x3a3;
-        vfat::put_scalar(out, cp);
+        unit = static_cast<char16_t>(cp);
     }
-    return out;
+    return vfat::utf8(units);
 }
 std::string join(const std::string& dir, const std::string& name) {
     return dir.empty() ? name : dir + "/" + name;
