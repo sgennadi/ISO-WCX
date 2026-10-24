@@ -260,6 +260,44 @@ def fragmented_large_file(editor, inspector, root):
     output = root / 'fragmented-extract'
     run(inspector, image, '--extract', output)
     assert (output/name).read_bytes() == data
+    # Grow into the already reserved tail of the LAST ShortAD. All earlier
+    # descriptors must retain their recorded lengths and physical offsets.
+    before_growth = image.read_bytes()
+    grown = bytes(data) + b'G'*1000
+    source.write_bytes(grown)
+    run(editor, image, 'add', name, source)
+    after_growth = image.read_bytes()
+    old_ads = struct.unpack_from('<I', before_growth, (PARTITION+3)*B+172)[0]
+    new_ads = struct.unpack_from('<I', after_growth, (PARTITION+3)*B+172)[0]
+    assert old_ads == new_ads == ads
+    old_shortads = [before_growth[(PARTITION+3)*B+176+i:
+                               (PARTITION+3)*B+184+i]
+                    for i in range(0, ads, 8)]
+    new_shortads = [after_growth[(PARTITION+3)*B+176+i:
+                               (PARTITION+3)*B+184+i]
+                    for i in range(0, ads, 8)]
+    assert old_shortads[:-1] == new_shortads[:-1], (
+        'multi-ShortAD growth changed a preceding run')
+    assert new_shortads[-1][4:] == old_shortads[-1][4:], (
+        'multi-ShortAD growth moved the last extent LBA')
+    assert (struct.unpack_from('<I', new_shortads[-1])[0] ==
+            struct.unpack_from('<I', old_shortads[-1])[0]+1000)
+    assert struct.unpack_from('<Q', after_growth, (PARTITION+3)*B+56)[0] == len(grown)
+    bitmap_at = (PARTITION+BITMAP_LOGICAL)*B
+    assert before_growth[bitmap_at:bitmap_at+bitmap_length] == (
+        after_growth[bitmap_at:bitmap_at+bitmap_length])
+    assert (struct.unpack_from('<I',before_growth,INTEGRITY_LBA*B+80)[0] ==
+            struct.unpack_from('<I',after_growth,INTEGRITY_LBA*B+80)[0])
+    output_grown = root / 'fragmented-grown'
+    run(inspector, image, '--extract', output_grown)
+    assert (output_grown/name).read_bytes() == grown
+
+    # Exceeding the final reserved sector must refuse before staging.
+    source.write_bytes(bytes(data) + b'X'*2000)
+    blocked = image.read_bytes()
+    run(editor, image, 'add', name, source, success=False)
+    assert image.read_bytes() == blocked, 'growth rejection changed UDF image'
+    assert not list(root.glob('.iso-wcx-edit-*'))
     # The existing multi-ShortAD reservation also supports bounded shrink.
     shortened = bytes(data[:6*1024*1024+17])
     source.write_bytes(shortened)
@@ -267,8 +305,8 @@ def fragmented_large_file(editor, inspector, root):
     output2 = root / 'fragmented-shrunk'
     run(inspector, image, '--extract', output2)
     assert (output2/name).read_bytes() == shortened
-    print('PASS UDF 72MiB multi-sector bitmap / >8MiB fragmented ShortAD, '
-          'big-file readback, shrink and preserved data', flush=True)
+    print('PASS UDF 72MiB multi-sector bitmap / fragmented ShortAD, '
+          'last-run in-place growth, overflow rollback and shrink', flush=True)
 
 
 def main(editor,inspector):
