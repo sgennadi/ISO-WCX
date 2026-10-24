@@ -3,6 +3,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -45,13 +47,49 @@ static int invoke(const std::filesystem::path& image,
     }
 }
 
+
+static int invoke_batch(const std::filesystem::path& image,
+                        const std::vector<iso_wcx::ArchiveChange>& changes,
+                        bool cancel) {
+    try {
+        unsigned ticks=0;
+        iso_wcx::edit_optical(image,changes,[&] {
+            return !cancel || ++ticks<=25;
+        });
+        return cancel ? 1 : 0; // A cancellation probe must not succeed.
+    } catch (const iso_wcx::EditCancelled&) {
+        return cancel ? 1 : 2;
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}
+
 #ifdef _WIN32
 // Windows' narrow main() receives the active ANSI code page, not UTF-8.
 // Use the Unicode CRT entry point and encode only WCX's logical path as UTF-8.
 int wmain(int argc, wchar_t** argv) {
     if (argc < 4) return 2;
     try {
-        return invoke(std::filesystem::path(argv[1]), wide_to_utf8(argv[2]),
+        const auto operation=wide_to_utf8(argv[2]);
+        if(operation=="batch" || operation=="batchcancel") {
+            std::vector<iso_wcx::ArchiveChange> changes;
+            for(int at=3;at<argc;) {
+                const auto kind=wide_to_utf8(argv[at++]);
+                if(at==argc)return 2;
+                iso_wcx::ArchiveChange c;
+                c.path=wide_to_utf8(argv[at++]);
+                if(kind=="mkdir")c.directory=true;
+                else if(kind=="add") {
+                    if(at==argc)return 2;
+                    c.source=std::filesystem::path(argv[at++]);
+                } else return 2;
+                changes.push_back(std::move(c));
+            }
+            return invoke_batch(std::filesystem::path(argv[1]),changes,
+                                operation=="batchcancel");
+        }
+        return invoke(std::filesystem::path(argv[1]),operation,
                       wide_to_utf8(argv[3]),
                       argc >= 5 ? std::filesystem::path(argv[4]) : std::filesystem::path{},
                       argc >= 5);
@@ -63,7 +101,25 @@ int wmain(int argc, wchar_t** argv) {
 #else
 int main(int argc, char** argv) {
     if (argc < 4) return 2;
-    return invoke(std::filesystem::path(argv[1]), argv[2], argv[3],
+    const std::string operation(argv[2]);
+    if(operation=="batch" || operation=="batchcancel") {
+        std::vector<iso_wcx::ArchiveChange> changes;
+        for(int at=3;at<argc;) {
+            const std::string kind(argv[at++]);
+            if(at==argc)return 2;
+            iso_wcx::ArchiveChange c;
+            c.path=argv[at++];
+            if(kind=="mkdir")c.directory=true;
+            else if(kind=="add") {
+                if(at==argc)return 2;
+                c.source=std::filesystem::path(argv[at++]);
+            } else return 2;
+            changes.push_back(std::move(c));
+        }
+        return invoke_batch(std::filesystem::path(argv[1]),changes,
+                            operation=="batchcancel");
+    }
+    return invoke(std::filesystem::path(argv[1]),operation,argv[3],
                   argc >= 5 ? std::filesystem::path(argv[4]) : std::filesystem::path{},
                   argc >= 5);
 }
