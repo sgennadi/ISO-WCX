@@ -1097,6 +1097,83 @@ void retag_directory_fids(Bytes& bytes,std::uint32_t logical) {
         p+=record;
     }
 }
+// Deleted FIDs remain part of a directory's logical byte stream. A new
+// entry may overwrite a tombstone only when its ICB long_ad has been fully
+// cleared and its original byte span can be preserved exactly. Never split,
+// shift or compact other records: 7-Zip requires packed aligned FIDs.
+struct FreeFidSlot {
+    std::size_t offset=0,span=0;
+};
+std::vector<FreeFidSlot> collect_free_fid_slots(const Bytes& payload) {
+    std::vector<FreeFidSlot> slots;
+    for(std::size_t p=0;p<payload.size();) {
+        const auto remaining=payload.size()-p;
+        if(remaining<38) {
+            need(std::all_of(payload.begin()+static_cast<std::ptrdiff_t>(p),
+                             payload.end(),[](std::uint8_t value) {
+                                 return value==0;
+                             }),"UDF reusable FID trailing bytes are invalid");
+            break;
+        }
+        if(std::all_of(payload.begin()+static_cast<std::ptrdiff_t>(p),
+                       payload.begin()+static_cast<std::ptrdiff_t>(p+16),
+                       [](std::uint8_t value){return value==0;})) {
+            const auto pad=std::min<std::size_t>(block-p%block,remaining);
+            need(std::all_of(payload.begin()+static_cast<std::ptrdiff_t>(p),
+                             payload.begin()+static_cast<std::ptrdiff_t>(p+pad),
+                             [](std::uint8_t value){return value==0;}),
+                 "UDF free FID scanner encountered nonzero sector padding");
+            p+=pad;
+            continue;
+        }
+        tag_check(payload,p,257);
+        const auto implementation=std::size_t(u16(payload,p+36));
+        const auto name_bytes=std::size_t(payload[p+19]);
+        need(implementation<=remaining-38 &&
+             name_bytes<=remaining-38-implementation,
+             "UDF old FID name or ImplementationUse overflows directory");
+        const auto span=(38u+implementation+name_bytes+3u)&~std::size_t(3);
+        need(span>=40 && span<=remaining && p%4u==0,
+             "UDF tombstone has invalid record size/alignment");
+        const bool is_file_tombstone=
+            (payload[p+18]&0x0eu)==0x04u;
+        const bool cleared_icb=
+            std::all_of(payload.begin()+static_cast<std::ptrdiff_t>(p+20),
+                        payload.begin()+static_cast<std::ptrdiff_t>(p+36),
+                        [](std::uint8_t value){return value==0;});
+        if(is_file_tombstone && cleared_icb && span<=4096u &&
+           u16(payload,p+10)+16u<=span)
+            slots.push_back({p,span});
+        p+=span;
+    }
+    return slots;
+}
+
+struct ReusedFid {
+    std::size_t offset=0,span=0,implementation=0;
+};
+std::optional<ReusedFid> choose_reused_fid(
+        const std::vector<FreeFidSlot>& slots,
+        std::size_t name_bytes,const std::set<std::size_t>& used) {
+    const auto minimum=(38u+name_bytes+3u)&~std::size_t(3);
+    std::optional<ReusedFid> padded;
+    for(const auto& slot:slots) {
+        if(used.count(slot.offset) || slot.span<minimum)continue;
+        if(slot.span==minimum)return ReusedFid{slot.offset,slot.span,0};
+        // UDF's FID ImplementationUse must contain a 32-byte EntityID
+        // whenever nonempty. Do not invent 4..31-byte implementation areas.
+        const auto impl=slot.span-(38u+name_bytes);
+        if(impl>=32u && impl<=65535u &&
+           (!padded || slot.span<padded->span))
+            padded=ReusedFid{slot.offset,slot.span,impl};
+    }
+    return padded;
+}
+
+void create_udf_type1_batch(const std::filesystem::path& image,Type1& volume,
+                            const std::vector<ArchiveChange>& changes,
+                            const EditProgress& progress);
+
 // Allocate one FE and optionally a contiguous ShortAD run for file data.
 // Embedded or external parent directories may grow to a larger contiguous
 // ShortAD run. FIDs are tightly packed (and may straddle sector boundaries)
@@ -1182,6 +1259,14 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     const auto old_directory=volume.directory_payload(parent);
     need(old_directory.size()==parent.size,
          "UDF parent directory data size mismatch");
+    // A normal single-file addition uses the shared batch planner only if
+    // an existing, safely cleared tombstone can hold this FID. This keeps
+    // legacy single-add behavior unchanged when no reusable slot exists.
+    if(choose_reused_fid(collect_free_fid_slots(old_directory),
+                         encoded_name.size(),std::set<std::size_t>{})) {
+        create_udf_type1_batch(image,volume,{change},progress);
+        return;
+    }
 
     const auto new_lba=volume.allocate_block();
     const auto data_runs=data_blocks?
