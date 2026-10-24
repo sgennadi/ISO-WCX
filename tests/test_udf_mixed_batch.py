@@ -216,8 +216,28 @@ def test_relocation_and_rollback(editor, inspector, root):
     refuse([("delete", "keep-new.bin", None),
             ("delete", "keep-new.bin", None),
             ("add", "uncommitted.txt", short)])
+    # An actual cancellation must interrupt mixed staging after all
+    # creations have been allocated, not merely fail during preflight.
+    cancelling = root / "mixed-cancel.udf"
+    cancelling.write_bytes(bitmap_image())
+    run(editor, cancelling, "add", "REPLACE-ME.bin", short)
+    cancel_before = cancelling.read_bytes()
+    planned = [
+        ("delete", "hello", None),
+        ("add", "REPLACE-ME.bin", original_big),
+    ] + [("add", f"CANCEL-{n:03d}.bin", short) for n in range(25)]
+    proc = subprocess.run(
+        [str(editor), str(cancelling), "batchcancel",
+         *(str(x) for x in operations(planned))],
+        capture_output=True, timeout=60, check=False)
+    assert proc.returncode == 3, (
+        "mixed staging did not raise EditCancelled", proc.returncode,
+        proc.stderr.decode(errors="replace"))
+    assert cancelling.read_bytes() == cancel_before
+    no_temp(root)
     print("PASS mixed external directory relocation, old FID deletion, "
-          "bounded ShortAD growth/shrink, out-of-space and rollback", flush=True)
+          "bounded ShortAD growth/shrink, out-of-space, cancellation "
+          "and rollback", flush=True)
 
 
 def main(editor, inspector):
