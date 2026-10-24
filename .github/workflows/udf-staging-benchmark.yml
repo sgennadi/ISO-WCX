@@ -1,0 +1,57 @@
+name: UDF COW staging performance and rollback
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/udf_edit.cpp'
+      - 'tests/test_udf_stage_performance.py'
+      - 'CMakeLists.txt'
+      - '.github/workflows/udf-staging-benchmark.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/udf_edit.cpp'
+      - 'tests/test_udf_stage_performance.py'
+      - 'CMakeLists.txt'
+      - '.github/workflows/udf-staging-benchmark.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: UDF 512-MiB stage auto vs sparse (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+          - os: windows-2022
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+      - name: Build native UDF editor and inspector
+        run: cmake --build build --config Release --target archive_edit_fixture disc_inspect --parallel 2
+      - name: Measure 512-MiB clone/fallback staging and verify SHA256
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python tests/test_udf_stage_performance.py build/Release/archive_edit_fixture.exe build/Release/disc_inspect.exe --benchmark
+          else
+            python3 tests/test_udf_stage_performance.py build/archive_edit_fixture build/disc_inspect --benchmark
+          fi

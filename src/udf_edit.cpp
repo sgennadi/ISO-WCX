@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -17,6 +18,20 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <winioctl.h>
+#elif defined(__linux__)
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <linux/fs.h>
+#endif
 
 namespace iso_wcx {
 namespace {
@@ -950,6 +965,106 @@ void copy_image_sparse(std::ifstream& in,std::fstream& out,std::uint64_t n,
     out.put(static_cast<char>(last));
     need(bool(out),"cannot finalize sparse UDF staging image");
 }
+// Best-effort filesystem copy-on-write stage. Never use hardlinks:
+// modifications to the staged destination must not touch the original.
+// Failed/unsupported clones are removed before the sparse-copy fallback.
+bool try_clone_udf_stage(const std::filesystem::path& original,
+                         const std::filesystem::path& staged,
+                         std::uint64_t size) {
+    if(std::getenv("ISO_WCX_UDF_FORCE_SPARSE_STAGE")!=nullptr)return false;
+#ifdef __linux__
+    const int source=::open(original.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    if(source<0)return false;
+    const int dest=::open(staged.c_str(),
+                          O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);
+    if(dest<0) {
+        ::close(source);
+        return false;
+    }
+    struct stat st{};
+    const bool source_ok=::fstat(source,&st)==0 && S_ISREG(st.st_mode) &&
+                         st.st_size>=0 &&
+                         static_cast<std::uint64_t>(st.st_size)==size;
+    const bool cloned=source_ok && ::ioctl(dest,FICLONE,source)==0;
+    const bool closed_dest=::close(dest)==0;
+    ::close(source);
+    if(cloned && closed_dest &&
+       std::filesystem::file_size(staged)==size)return true;
+    std::error_code ec;
+    std::filesystem::remove(staged,ec);
+    need(!ec,"cannot discard incomplete UDF reflink stage");
+    return false;
+#elif defined(_WIN32)
+    // ReFS and supported NTFS block cloning require aligned offsets and
+    // lengths. 2-KiB-only tail images fall back to ordinary sparse copy.
+    constexpr std::uint64_t alignment=64u*1024u;
+    constexpr std::uint64_t chunk=64u*1024u*1024u;
+    if(size==0 || size%alignment!=0 ||
+       size>static_cast<std::uint64_t>(
+           std::numeric_limits<LONGLONG>::max()))return false;
+    const HANDLE source=CreateFileW(
+        original.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,
+        nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(source==INVALID_HANDLE_VALUE)return false;
+    const HANDLE dest=CreateFileW(
+        staged.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,
+        CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(dest==INVALID_HANDLE_VALUE) {
+        CloseHandle(source);
+        return false;
+    }
+    LARGE_INTEGER end{};
+    end.QuadPart=static_cast<LONGLONG>(size);
+    bool cloned=SetFilePointerEx(dest,end,nullptr,FILE_BEGIN)!=0 &&
+                SetEndOfFile(dest)!=0;
+    for(std::uint64_t offset=0;cloned && offset<size;) {
+        const auto length=std::min<std::uint64_t>(size-offset,chunk);
+        DUPLICATE_EXTENTS_DATA data{};
+        data.FileHandle=source;
+        data.SourceFileOffset.QuadPart=static_cast<LONGLONG>(offset);
+        data.TargetFileOffset.QuadPart=static_cast<LONGLONG>(offset);
+        data.ByteCount.QuadPart=static_cast<LONGLONG>(length);
+        DWORD returned=0;
+        cloned=DeviceIoControl(dest,FSCTL_DUPLICATE_EXTENTS_TO_FILE,
+                               &data,sizeof(data),nullptr,0,
+                               &returned,nullptr)!=0;
+        offset+=length;
+    }
+    const bool closed_dest=CloseHandle(dest)!=0;
+    CloseHandle(source);
+    if(cloned && closed_dest &&
+       std::filesystem::file_size(staged)==size)return true;
+    std::error_code ec;
+    std::filesystem::remove(staged,ec);
+    need(!ec,"cannot discard incomplete UDF block-clone stage");
+    return false;
+#else
+    (void)original;
+    (void)staged;
+    (void)size;
+    return false;
+#endif
+}
+
+// Prepare a distinct sibling stage. The existing EditTransaction still
+// performs the final atomic rename, including timestamp/size validation.
+void prepare_udf_stage(const std::filesystem::path& original,
+                       const std::filesystem::path& staged,
+                       std::uint64_t size,const EditProgress& progress) {
+    edit_tick(progress);
+    need(size==std::filesystem::file_size(original),
+         "UDF original changed size before staging");
+    if(try_clone_udf_stage(original,staged,size))return;
+    std::ifstream in(original,std::ios::binary);
+    need(bool(in),"cannot open UDF source for sparse staging");
+    std::fstream out(staged,std::ios::binary|std::ios::in|
+                     std::ios::out|std::ios::trunc);
+    need(bool(out),"cannot create UDF sparse stage");
+    copy_image_sparse(in,out,size,progress);
+    out.flush();
+    need(bool(out),"cannot flush UDF sparse stage");
+}
+
 bool same_staged_item(const std::filesystem::path& staged,const Item& item,
                       const std::filesystem::path& source,
                       const EditProgress& progress) {
@@ -1394,13 +1509,10 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     }
 
     EditTransaction tx(image);
+    prepare_udf_stage(image,tx.output,volume.image_size(),progress);
     std::fstream out(tx.output,std::ios::binary|std::ios::in|
-                     std::ios::out|std::ios::trunc);
-    need(bool(out),"cannot open staged UDF allocation image");
-    std::ifstream original(image,std::ios::binary);
-    need(bool(original),"cannot read original UDF for allocation");
-    copy_image_sparse(original,out,volume.image_size(),progress);
-    original.close();
+                     std::ios::out);
+    need(bool(out),"cannot open prepared UDF transaction stage");
     volume.close();
 
     staged_write(out,new_offset,child);
@@ -2019,13 +2131,10 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     released+=deleted_blocks;
 
     EditTransaction tx(image);
+    prepare_udf_stage(image,tx.output,volume.image_size(),progress);
     std::fstream out(tx.output,std::ios::binary|std::ios::in|
-                     std::ios::out|std::ios::trunc);
-    need(bool(out),"cannot create staged UDF batch image");
-    std::ifstream original(image,std::ios::binary);
-    need(bool(original),"cannot open UDF batch source image");
-    copy_image_sparse(original,out,volume.image_size(),progress);
-    original.close();
+                     std::ios::out);
+    need(bool(out),"cannot open prepared UDF transaction stage");
     volume.close();
     for(const auto& child:children) {
         edit_tick(progress);
@@ -2186,13 +2295,10 @@ void edit_udf(const std::filesystem::path& image,
     }
 
     EditTransaction tx(image);
+    prepare_udf_stage(image,tx.output,std::filesystem::file_size(image),progress);
     std::fstream out(tx.output,std::ios::binary|std::ios::in|
-                     std::ios::out|std::ios::trunc);
-    need(bool(out),"cannot create staged UDF image");
-    std::ifstream original(image,std::ios::binary);
-    need(bool(original),"cannot open original UDF image");
-    copy_image_sparse(original,out,std::filesystem::file_size(image),progress);
-    original.close();
+                     std::ios::out);
+    need(bool(out),"cannot open prepared UDF transaction stage");
     volume.close();
     for(const auto& change:changes) {
         edit_tick(progress);

@@ -123,6 +123,10 @@ if(BUILD_TESTING)
   add_test(NAME udf_type1_deleted_fid_slot_reuse
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_fid_reuse.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  add_test(NAME udf_stage_clone_sparse_parity
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_stage_performance.py"
+      "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  set_tests_properties(udf_stage_clone_sparse_parity PROPERTIES TIMEOUT 240)
   add_executable(wim_parts_tests tests/wim_parts.cpp)
   target_include_directories(wim_parts_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME wim_split_parts COMMAND wim_parts_tests)
