@@ -363,6 +363,42 @@ def check_real_reclaim_reuse(editor, inspector, root):
           flush=True)
 
 
+def check_real_fid_slot_reuse(editor, inspector, root):
+    """Independent 7z/udfinfo proof of exact and padded tombstone reuse."""
+    image = image_with_mkudffs(root, "hd", "real-fid-slot-reuse")
+    source = root / "real-reused-fid.bin"
+    source.write_bytes(b"RECYCLED FILE IDENTIFIER DATA\n" * 19)
+    old = "Recycled-000.TXT"
+    command(editor, image, "add", old, source)
+    for number in range(1, 13):
+        command(editor, image, "delete", old)
+        old = f"Recycled-{number:03d}.TXT"
+        command(editor, image, "add", old, source)
+        if number in (1, 6, 12):
+            command("udfinfo", image)
+            listing = command("7z", "l", image).stdout.decode("utf-8")
+            assert old in listing
+    independent_extract(image, root, old, source.read_bytes())
+    listing = command(inspector, image).stdout.decode("utf-8")
+    assert "Recycled-000.TXT" not in listing
+    assert old in listing
+
+    image2 = image_with_mkudffs(root, "hd", "real-padded-fid-reuse")
+    long_name = "LONG-FID-" + "A" * 57 + ".TXT"
+    short_name = "small.bin"
+    command(editor, image2, "add", long_name, source)
+    command(editor, image2, "delete", long_name)
+    command(editor, image2, "add", short_name, source)
+    command("udfinfo", image2)
+    listing2 = command("7z", "l", image2).stdout.decode("utf-8")
+    assert short_name in listing2 and long_name not in listing2
+    independent_extract(image2, root, short_name, source.read_bytes())
+    assert not list(root.glob(".iso-wcx-edit-*"))
+    print("PASS real mkudffs 12 FID slot reuse cycles, padded "
+          "ImplementationUse and independent 7-Zip extraction",
+          flush=True)
+
+
 def main(editor, inspector):
     for command_name in ("mkudffs", "udfinfo", "7z"):
         assert shutil.which(command_name), f"missing CI test-only tool {command_name}"
@@ -372,6 +408,7 @@ def main(editor, inspector):
         check_real_atomic_batch(editor,inspector,root)
         check_real_mixed_batch(editor,inspector,root)
         check_real_reclaim_reuse(editor,inspector,root)
+        check_real_fid_slot_reuse(editor,inspector,root)
         for media in ("hd", "dvdram"):
             image = image_with_mkudffs(root, media, "real-" + media)
             before = image.read_bytes()
