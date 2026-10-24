@@ -187,7 +187,8 @@ def main(binary, reader=None):
         run('add','directory;1/name;1.txt')
         assert read_image(image,True)['directory;1/name;1.txt']==source.read_bytes()
         if reader:
-            inspected=subprocess.run([reader,str(image)],capture_output=True,text=True,check=True)
+            inspected=subprocess.run([reader,str(image)],capture_output=True,
+                                     text=True,encoding='utf-8',check=True)
             assert 'directory;1/name;1.txt' in inspected.stdout,inspected.stdout
         validate_path_tables(image)
         run('delete',folder_b)
