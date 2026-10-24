@@ -668,13 +668,17 @@ Bytes encode_udf_cs0(std::string_view component) {
     need(!scalars.empty(),"empty UDF filename");
     const auto encoded_bytes=1u+scalars.size()*(needs_16bit?2u:1u);
     need(encoded_bytes<=255,"UDF CS0 filename exceeds 255 bytes");
-    Bytes result;
-    result.reserve(encoded_bytes);
-    result.push_back(needs_16bit?16u:8u);
+    // The exact encoded length is already checked. Fixed-size writes
+    // avoid reallocations and eliminate GCC 14's false positive for the
+    // C++26 vector::_M_realloc_append inlining path under -Werror.
+    Bytes result(encoded_bytes,0);
+    result[0]=needs_16bit?16u:8u;
+    std::size_t pos=1;
     for(const auto cp:scalars) {
-        if(needs_16bit)result.push_back(static_cast<std::uint8_t>(cp>>8));
-        result.push_back(static_cast<std::uint8_t>(cp));
+        if(needs_16bit)result[pos++]=static_cast<std::uint8_t>(cp>>8);
+        result[pos++]=static_cast<std::uint8_t>(cp);
     }
+    need(pos==result.size(),"UDF CS0 length encoding mismatch");
     return result;
 }
 // First allocator-backed writer stage: new small embedded regular files and
