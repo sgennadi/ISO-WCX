@@ -103,6 +103,7 @@ struct Node {
     std::vector<std::unique_ptr<Node>> children;
     std::array<std::uint32_t,2> new_lba{},new_size{};
 };
+std::string iso_alias(const std::string& name,bool directory,unsigned salt=0);
 class Image {
 public:
     std::ifstream file;
@@ -211,7 +212,7 @@ Bytes identifier(const std::string& name,bool j,bool dir) {
 // Deterministic collision-resistant aliases for Unicode names unrepresentable
 // in primary ISO. No unstable parent-child array indexes, no truncation that
 // can collapse two distinct filenames.
-std::string iso_alias(const std::string& name,bool directory,unsigned salt=0) {
+std::string iso_alias(const std::string& name,bool directory,unsigned salt) {
     std::uint64_t hash=14695981039346656037ull;
     for(const unsigned char c:name) {
         hash^=c;hash*=1099511628211ull;
