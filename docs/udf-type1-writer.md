@@ -1,53 +1,59 @@
 # Native UDF Type-1 Writer — ISO-WCX Preview
 
-The plugin handles **nonhybrid UDF-only optical images** through its in-process
-C++20 writer. It does not mount the image or require third-party executables,
-kernel drivers or additional runtime DLLs.
+The WCX plugin supports **in-process edits on nonhybrid UDF-only 2048-byte
+Type-1 optical images**. It does not mount the image or require external
+executables, disk drivers or parser DLLs. This is an experimental write mode,
+not universal UDF 1.02–2.60 editing.
 
 ## Supported writes
 
-- Replace existing **regular** files, including those inside nested directories
-- Grow or shrink within the file's existing reserved space — for embedded
-  FE/EFE data or a single Short Allocation Descriptor (ShortAD), never by
-  allocating new blocks or changing the logical partition mapping
-- Update Information Length, EFE Object Size, embedded AD lengths and ShortAD
-  extent lengths where needed
-- Mark an existing regular file's FID as **deleted**, with appropriate CRC16
-  and descriptor-tag checksum updates; any embedded parent FE checksum is
-  recalculated too. This hides the file, **but does not reclaim its blocks**
+- Replace existing regular files and grow/shrink only within their previously
+  reserved FE/EFE embedded space or one existing Short Allocation Descriptor
+  (ShortAD) extent. Supports nested paths.
+- Logically delete an existing regular file by setting its FID deleted bit,
+  updating descriptor CRC/checksum. Deletion **does not reclaim blocks**.
+- Create **one new file per transaction, up to 8 MiB**, in an already existing
+  embedded directory with enough room for a new File Identifier Descriptor.
+  Files up to 1872 bytes use an embedded File Entry; larger files use one
+  contiguous ShortAD run allocated from a validated Type-1 Space Bitmap.
+- Create **one empty subdirectory per transaction** with an embedded FE.
+  Subsequent operations can create files in the new directory.
+- Encode newly created names with OSTA CS0 (BMP Unicode including Cyrillic and
+  Hebrew; non-BMP names intentionally rejected in this write mode).
+- Update the parent directory FE, new child FE/FID, bitmap, closed LVID free
+  block count, next unique ID and file/directory counter in the same staged
+  transaction. Reparse the entire result and compare extracted file bytes.
 
-The editor copies the full source to a sibling staging image, performs only
-validated targeted updates, reparses the staged UDF and extracts every changed
-file to verify exact byte equality. Only then does it atomically replace the
-original archive, subject to the source image not having changed.
+## Write preconditions
 
-## Strict preconditions
+- UDF-only image, empty 16-sector system area, no ISO/UDF Bridge and no
+  bootable/hybrid system-area rewriting.
+- 2048-byte logical sectors, one physical Type-1 partition map, validated AVDP,
+  File Set Descriptor, LVID and descriptor tag CRC16/checksums.
+- New allocations require a **single-sector** consistent Unallocated Space
+  Bitmap Descriptor and a closed LVID. A contiguous free run must exist for
+  the new FE and file content. Existing embedded directories must have enough
+  bytes remaining for their new FID.
+- No VAT, Metadata Partition, Sparable partition, hard-link, sparse-file,
+  multi-extent or conflicting allocator edits; no symlink source files.
+- An entire copy of the source image must fit in a sibling temporary workspace.
 
-- UDF-only (no hybrid system area / ISO9660 Bridge), 2048-byte sectors
-- Valid AVDP, File Set Descriptor, UDF descriptor tags and CRC16
-- One Type-1 physical partition map; no VAT, Metadata, Sparable or snapshot
-  partition maps, unknown FE object types, hard links, sparse allocations,
-  multi-extent file modifications or overlapping target allocations
-- Target is an existing file; requested replacement fits into its previously
-  allocated whole blocks or embedded FE/EFE capacity
-- Replacement comes from an ordinary file, not a reparse/symlink
-- Sufficient free disk space for a **complete duplicate staged image**
+## Explicitly unsupported
 
-## Not implemented
+Renaming, removing directories, editing ISO/UDF Bridge metadata, allocating
+multiple new files atomically, growing directory data beyond embedded capacity,
+freeing blocks from deleted files, multi-sector bitmap descriptors, fragmented
+new files, non-BMP new names and any VAT/Sparable/Metadata writer.
 
-No creation or rename of files, no deletion/creation of directories, no UDF
-free-space allocator, no reclamation of blocks after a FID deletion, no complex
-UDF allocation descriptors or metadata/VAT/sparable writers, no ISO/UDF Bridge
-metadata changes, and no hybrid BIOS/UEFI image rewriting.
-
-Those features require an allocation bitmap and consistent FE/FID/
-partition bookkeeping, plus independent validation of ISO and UDF views
-for bridges. They must not be simulated through partial ISO-only changes.
+A rejected mutation, validation failure or cancellation must leave the
+original image byte-for-byte unchanged.
 
 ## Validation
 
-The independent Python fixture generates UDF file entries and FIDs, including
-FE/EFE embedded data, bounded ShortAD size changes, nested directory targets,
-FID deletion, malformed CRC16, over-capacity and overlapping allocations,
-cancellation and original-byte-preserving rollback. Linux and Windows x86/x64
-CI include the test; real media plus GUI compatibility still need validation.
+Synthetic fixtures check FE/EFE replacement, ShortAD growth, FID deletion,
+embedded and multi-block file creation, bitmap overlap/counter consistency,
+Unicode, no-space conditions and rollback. CI independently generates real
+UDF 1.02 HD/DVD-RAM images with `mkudffs` and validates edits via
+`udfinfo` and 7-Zip. Those three programs are CI-only test utilities and are
+**not** runtime dependencies. Manual Total Commander GUI coverage and broader
+real-disc interoperability remain necessary before stable write support.

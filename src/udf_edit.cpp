@@ -373,26 +373,38 @@ public:
     [[nodiscard]] bool has_bitmap() const noexcept {return bitmap_.has_value();}
     [[nodiscard]] std::uint64_t image_size() const noexcept {return size_;}
     [[nodiscard]] std::uint32_t part_start() const noexcept {return partition_;}
-    // Allocated blocks are immediately removed from the in-memory bitmap
-    // so a second allocation in the same transaction cannot reuse them.
-    [[nodiscard]] std::uint32_t allocate_block() {
+    // A single ShortAD requires one contiguous allocation. Reserve a
+    // validated run before writing any staged file content; bitmap changes
+    // stay in memory until the entire image transaction is committed.
+    [[nodiscard]] std::uint32_t allocate_blocks(std::uint32_t count) {
         need(bitmap_.has_value(),
-             "UDF new-file allocation requires a valid Space Bitmap Descriptor");
+             "UDF creation requires a valid Space Bitmap Descriptor");
+        need(count>0 && count<=partition_blocks_,
+             "UDF requested allocation exceeds partition");
         auto& bitmap=*bitmap_;
-        for(std::uint32_t logical=0;logical<bitmap.bits;++logical) {
-            if(!bitmap_free(bitmap,logical))continue;
-            const Location candidate{(std::uint64_t(partition_)+logical)*block,
-                                     block};
-            bool collision=false;
-            for(const auto& object:reserved_)
-                if(intersects(candidate,object.range)){collision=true;break;}
-            need(!collision,
-                 "UDF bitmap marks an occupied or unknown extent as free");
-            bitmap_reserve(bitmap,logical);
-            reserved_.push_back({candidate,0});
-            return logical;
+        for(std::uint32_t start=0;start<bitmap.bits;) {
+            if(!bitmap_free(bitmap,start)){++start;continue;}
+            std::uint32_t run=0;
+            while(run<count && run<bitmap.bits-start &&
+                  bitmap_free(bitmap,start+run))++run;
+            if(run==count) {
+                const Location candidate{
+                    (std::uint64_t(partition_)+start)*block,
+                    std::uint64_t(count)*block};
+                for(const auto& object:reserved_)
+                    need(!intersects(candidate,object.range),
+                         "UDF bitmap contradicts an occupied extent");
+                for(std::uint32_t i=0;i<count;++i)
+                    bitmap_reserve(bitmap,start+i);
+                reserved_.push_back({candidate,0});
+                return start;
+            }
+            start+=run+1;
         }
-        throw EditUnsupported("UDF partition bitmap has no free blocks");
+        throw EditUnsupported("UDF bitmap has no sufficiently long free run");
+    }
+    [[nodiscard]] std::uint32_t allocate_block() {
+        return allocate_blocks(1);
     }
     [[nodiscard]] std::pair<std::uint64_t,Bytes> updated_bitmap() const {
         need(bitmap_.has_value(),"UDF bitmap is absent");
@@ -401,12 +413,13 @@ public:
         return {bitmap_->at,std::move(b)};
     }
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
-    updated_integrity(bool directory) const {
+    updated_integrity(bool directory,std::uint32_t reserved_blocks=1) const {
         need(integrity_.has_value(),"UDF LVID is absent");
         auto b=integrity_->bytes;
         const auto old_free=u32(b,80);
-        need(old_free>0,"UDF LVID reports no free blocks");
-        put32(b,80,old_free-1);
+        need(reserved_blocks>0 && old_free>=reserved_blocks,
+             "UDF LVID reports insufficient free blocks");
+        put32(b,80,old_free-reserved_blocks);
         put64(b,40,integrity_->next_id+1);
         if(integrity_->impl_bytes>=40) {
             const auto counter=88u+32u+(directory?4u:0u);
@@ -686,8 +699,8 @@ Bytes encode_udf_cs0(std::string_view component) {
     need(pos==result.size(),"UDF CS0 length encoding mismatch");
     return result;
 }
-// First allocator-backed writer stage: new small embedded regular files and
-// empty embedded directories in an existing embedded directory. We avoid
+// Allocate one FE and optionally a contiguous ShortAD data run for new regular
+// files. Parent FIDs must fit an existing embedded directory. We still avoid
 // directory relocation, VAT, sparse files, extent chains and ISO/UDF bridges.
 void create_udf_type1(const std::filesystem::path& image,Type1& volume,
                       const ArchiveChange& change,
@@ -735,15 +748,20 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     }
 
     constexpr std::size_t fe_header=176;
+    // Bounded Preview writer: one ShortAD extent, at most 8 MiB per file.
+    constexpr std::uint64_t max_new_file=8u*1024u*1024u;
     std::uint64_t length=0;
     if(!change.directory) {
         need(std::filesystem::is_regular_file(
                  std::filesystem::symlink_status(change.source)),
              "UDF create source must be a regular file, not symlink");
         length=std::filesystem::file_size(change.source);
-        need(length<=block-fe_header,
-             "UDF allocator currently creates only embedded small files");
+        need(length<=max_new_file,
+             "UDF new-file size exceeds validated Preview writer limit");
     }
+    const bool embedded=length<=block-fe_header;
+    const auto data_blocks=embedded?0u:static_cast<std::uint32_t>(
+        (length+block-1u)/block);
     const auto fid_id_size=encoded_name.size();
     const auto fid_size=(38u+fid_id_size+3u)&~std::size_t(3);
     need(fid_size<=255 && parent.size+fid_size<=parent.capacity,
@@ -753,31 +771,39 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
          "new FID would cross UDF directory file-entry bounds");
 
     const auto new_lba=volume.allocate_block();
+    // Embedded files need no data extents. ShortAD files consume one
+    // additional contiguous run of data blocks, after the new FE block.
+    const auto data_lba=data_blocks?volume.allocate_blocks(data_blocks):0u;
     const auto new_offset=volume.absolute(new_lba);
     Bytes child(block,0);
     put16(child,0,261); // ECMA-167 File Entry
     put16(child,2,2);   // DescriptorVersion
     put32(child,12,new_lba);
     child[27]=change.directory?4u:5u; // Directory or ordinary file
-    put16(child,34,3u); // ICB allocation flags: embedded data
+    put16(child,34,embedded?3u:0u); // ICB embedded or ShortAD
     put32(child,36,0xffffffffu); // UID not supplied
     put32(child,40,0xffffffffu); // GID not supplied
     put32(child,44,change.directory?0x000001ffu:0x000001b6u);
     put16(child,48,1); // Link count
     put64(child,56,length);
-    put64(child,64,0); // No external data blocks
+    put64(child,64,data_blocks); // LogicalBlocksRecorded
     put32(child,108,1); // Checkpoint
     put64(child,160,volume.new_unique_id());
     put32(child,168,0); // ExtendedAttributes length
-    put32(child,172,static_cast<std::uint32_t>(length));
-    if(length) {
+    put32(child,172,embedded?static_cast<std::uint32_t>(length):8u);
+    if(!embedded) {
+        // ECMA-167 ShortAD: recorded allocation length, logical start block.
+        put32(child,176,static_cast<std::uint32_t>(length));
+        put32(child,180,data_lba);
+    } else if(length) {
         std::ifstream input(change.source,std::ios::binary);
         need(bool(input),"cannot read new UDF embedded source");
         input.read(reinterpret_cast<char*>(child.data()+fe_header),
                    static_cast<std::streamsize>(length));
         need(bool(input),"new UDF embedded source shortened");
     }
-    tag_update(child,0,fe_header+static_cast<std::size_t>(length));
+    tag_update(child,0,embedded?fe_header+static_cast<std::size_t>(length):
+               fe_header+8u);
 
     Bytes fid(fid_size,0);
     put16(fid,0,257); // File Identifier Descriptor
@@ -820,11 +846,25 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     volume.close();
 
     staged_write(out,new_offset,child);
+    if(data_blocks) {
+        const auto data_at=volume.absolute(data_lba);
+        out.clear();
+        out.seekp(static_cast<std::streamoff>(data_at));
+        need(bool(out),"cannot seek new UDF data run");
+        std::ifstream source(change.source,std::ios::binary);
+        need(bool(source),"cannot open new UDF file content");
+        copy(source,out,length,progress);
+        // Clear any trailing bytes of the last allocated block.
+        const auto tail=std::uint64_t(data_blocks)*block-length;
+        if(tail)
+            staged_write(out,data_at+length,
+                         Bytes(static_cast<std::size_t>(tail),0));
+    }
     staged_write(out,parent.at,parent_bytes);
     const auto [bitmap_at,bitmap_data]=volume.updated_bitmap();
     staged_write(out,bitmap_at,bitmap_data);
     const auto [integrity_at,integrity_data]=
-        volume.updated_integrity(change.directory);
+        volume.updated_integrity(change.directory,1u+data_blocks);
     staged_write(out,integrity_at,integrity_data);
     out.flush();
     need(bool(out),"staged UDF allocation flush failed");

@@ -70,6 +70,15 @@ def main(editor, inspector):
             entries = command(inspector, image).stdout.decode("utf-8")
             assert path in entries
             independent_extract(image, root, path, PAYLOAD)
+            # Large files need their own ShortAD contiguous data extents.
+            for large_name, large_payload in (
+                ("SHORTAD-4-SECTORS.BIN", b"L" * (3*2048+17)),
+                ("SHORTAD-HALF-MIB.BIN", b"M" * (512*1024+103)),
+            ):
+                source.write_bytes(large_payload)
+                command(editor,image,"add",large_name,source)
+                command("udfinfo",image)
+                independent_extract(image,root,large_name,large_payload)
             # Verify non-ASCII OSTA CS0 identifiers against a second decoder,
             # not only the native ISO-WCX parser.
             for utf8_name in ("Привет.txt", "שלום.txt"):
@@ -103,7 +112,7 @@ def main(editor, inspector):
                                 b"NESTED REAL UDF CONTENT")
             # No rename/delete/snapshot directory mutation is implied.
             # Failures leave the entire original image byte-for-byte intact.
-            source.write_bytes(b"R" * 5000)
+            source.write_bytes(b"R" * (8*1024*1024+1))
             original = image.read_bytes()
             failure = command(editor, image, "add", "TOO-LARGE.BIN", source,
                               allowed=(1,))

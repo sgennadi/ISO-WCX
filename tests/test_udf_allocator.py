@@ -88,6 +88,8 @@ def main(editor,inspector):
         source=root/'new.dat'
         cases=[
             (False,'new_file.bin',b'HELLO UDF ALLOCATOR',False),
+            (False,'shortad-4-blocks.bin',b'S'*(B*3+137),False),
+            (False,'empty-file.bin',b'',False),
             (True,'docs/new_file.bin',b'NESTED NEW FILE',False),
             (False,'EMPTYDIR',b'',True),
             (False,'Привет.txt',b'UNICODE CYRILLIC UDF',False),
@@ -110,6 +112,17 @@ def main(editor,inspector):
             bit=(updated[(PARTITION+BITMAP_LOGICAL)*B+24+new_lba//8]
                  >> (new_lba%8))&1
             assert bit==0,('new UDF FE block remains free',i)
+            if len(payload)>B-176 and not directory:
+                # FE logical block 3 + four data blocks 7..10; block 6
+                # belongs to the bitmap descriptor and cannot be allocated.
+                bitmap_offset=(PARTITION+BITMAP_LOGICAL)*B+24
+                for logical in range(7,11):
+                    assert not (updated[bitmap_offset+logical//8]
+                                & (1<<(logical%8))), (i,logical)
+                lvid=INTEGRITY_LBA*B
+                before_free=struct.unpack_from('<I',before,lvid+80)[0]
+                after_free=struct.unpack_from('<I',updated,lvid+80)[0]
+                assert before_free-after_free==5, (before_free,after_free)
             listed=run(inspector,image).decode('utf-8')
             assert target in listed,(i,target,listed)
             if not directory:
@@ -130,14 +143,17 @@ def main(editor,inspector):
         refuse('bitmap absent',no_bitmap=True)
         image.write_bytes(bitmap_image())
         baseline=image.read_bytes()
-        source.write_bytes(b'Z'*(B-176+1))
+        source.write_bytes(b'Z'*(8*1024*1024+1))
         run(editor,image,'add','too_big.bin',source,success=False)
+        source.write_bytes(b'Q'*(260*B))
+        run(editor,image,'add','no_contiguous_run.bin',source,success=False)
         run(editor,image,'add','📦.txt',source,success=False)
         run(editor,image,'mkdir','hello',success=False)
         run(editor,image,'cancel','new_file.bin',source,success=False)
         assert image.read_bytes()==baseline,'rejection changed original'
         print('PASS UDF bitmap/LVID small-file allocation, directory creation, '
-              'nested entries, OSTA CS0 BMP Unicode, readback, free-space consistency and rollback')
+              'nested entries, ShortAD multi-block extents, BMP Unicode, readback, '
+              'free-space consistency and rollback')
 
 if __name__=='__main__':
     main(sys.argv[1],sys.argv[2])
