@@ -274,6 +274,7 @@ private:
             need(fe.size<=fe.ads,"UDF embedded file size exceeds AD length");
             fe.data_at=offset+fe.ad_offset;
             fe.capacity=block-fe.ad_offset;
+            need(fe.size<=fe.capacity,"UDF embedded data outside descriptor");
         } else {
             need(fe.ads==8,"only one short UDF extent can be rewritten");
             const auto raw=u32(fe.bytes,fe.ad_offset);
@@ -284,8 +285,13 @@ private:
                  sectors<=partition_blocks_-lba_data,
                  "UDF data extent outside partition");
             fe.data_at=physical(lba_data);
-            fe.capacity=raw&0x3fffffffu;
-            need(fe.size<=fe.capacity,"UDF file size exceeds allocated extent");
+            // The allocation occupies whole logical blocks, although the
+            // shortAD recorded length may be smaller than one block.
+            // Growth is permitted only inside those blocks and after an
+            // overlap check against all indexed data/metadata allocations.
+            fe.capacity=sectors*block;
+            need(fe.size<=std::uint64_t(raw&0x3fffffffu),
+                 "UDF file size exceeds recorded extent");
             need(fe.capacity<=size_-fe.data_at,
                  "UDF extent outside disk");
         }
@@ -499,11 +505,10 @@ void edit_udf(const std::filesystem::path& image,
                           at+std::max<std::uint64_t>(len,target.fe.size)),0);
             std::copy(data.begin(),data.end(),
                       fe.begin()+static_cast<std::ptrdiff_t>(at));
-            put32(fe,target.fe.type==4?172u:172u,
+            // For Extended File Entry this is at 212; regular File
+            // Entries keep the allocation-descriptor length at 172.
+            put32(fe,u16(fe,0)==266?212u:172u,
                   static_cast<std::uint32_t>(len));
-            // For EFE the AD length sits at 212, FE at 172.
-            if(u16(fe,0)==266)put32(fe,212,static_cast<std::uint32_t>(len));
-            else put32(fe,172,static_cast<std::uint32_t>(len));
             put64(fe,56,len);
             tag_update(fe,0,target.fe.ad_offset+static_cast<std::size_t>(len));
             staged_write(out,target.fe.at,fe);
@@ -515,6 +520,15 @@ void edit_udf(const std::filesystem::path& image,
             need(bool(source),"cannot open UDF replacement content");
             copy(source,out,len,progress);
             put64(fe,56,len);
+            // Maintain the old extent length on shrink, otherwise extend
+            // the short AD only within the already-allocated full blocks.
+            const auto current=u32(fe,target.fe.ad_offset)&0x3fffffffu;
+            if(len>current) {
+                need(len<=0x3fffffffull,
+                     "UDF short AD cannot describe this file size");
+                put32(fe,target.fe.ad_offset,
+                      static_cast<std::uint32_t>(len));
+            }
             tag_update(fe,0,target.fe.ad_offset+target.fe.ads);
             staged_write(out,target.fe.at,fe);
         }
