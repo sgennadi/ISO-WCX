@@ -326,6 +326,15 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_packed_optical.py"
           "$<TARGET_FILE:disc_inspect>")
     endif()
+    if(WIN32)
+      add_test(NAME native_isz_multisegment_wcx
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_isz_multisegment.py"
+          "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:ISO-WCX>" "$<TARGET_FILE:wcx_packed_smoke>")
+    else()
+      add_test(NAME native_isz_multisegment_core
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_isz_multisegment.py"
+          "$<TARGET_FILE:disc_inspect>")
+    endif()
     # Genuine MAME-produced compressed CD/DVD CHD fixtures, available in
     # the Linux preview CI job. chdman is test-only, never a WCX dependency.
     find_program(ISO_WCX_CHDMAN_EXECUTABLE NAMES chdman)
