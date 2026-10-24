@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pathlib
 import struct
+import subprocess
 import tempfile
 
 from test_images import B
@@ -193,7 +194,14 @@ def main(editor: pathlib.Path, inspector: pathlib.Path):
         cancelled = root / "cancelled.udf"
         cancelled.write_bytes(bitmap_image())
         original = cancelled.read_bytes()
-        run(editor, cancelled, "batchcancel", *args, success=False)
+        cancelled_run = subprocess.run(
+            [str(editor), str(cancelled), "batchcancel",
+             *(str(value) for value in args)],
+            capture_output=True, timeout=60, check=False)
+        assert cancelled_run.returncode == 3, (
+            "expected an explicit EditCancelled exception from staged batch",
+            cancelled_run.returncode, cancelled_run.stderr.decode(
+                errors="replace"))
         assert cancelled.read_bytes() == original
         assert_no_staging(root)
         print("PASS UDF atomic multi-file/mkdir batch, nested parents, "
