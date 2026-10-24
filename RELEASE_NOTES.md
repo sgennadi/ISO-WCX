@@ -43,12 +43,12 @@ C++26 compiler compatibility, CHD RF64, VHDX/QEMU and MDS/MDX interop.
 
 Download **ISO-WCX-v0.17.0.zip** from this release and open it directly in
 Total Commander. Accept the plugin installation prompt. Keep
-\`ISO-WCX.wcx\` and \`ISO-WCX.wcx64\` together and check \`SHA256SUMS.txt\`
+`ISO-WCX.wcx` and `ISO-WCX.wcx64` together and check `SHA256SUMS.txt`
 when verifying a downloaded ZIP.
 
-If an old missing \`iso.wcx\` registration persists, remove only that obsolete
+If an old missing `iso.wcx` registration persists, remove only that obsolete
 association in Total Commander packer configuration and associate the new
-\`ISO-WCX.wcx\`. Installation instructions are included in English/Russian.
+`ISO-WCX.wcx`. Installation instructions are included in English/Russian.
 
 ## Write safety and limitations
 
