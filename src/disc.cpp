@@ -1196,7 +1196,7 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
     }
     if(extension == L".vhd" || extension == L".vhdx" ||
        extension == L".ima" || extension == L".vfd" ||
-       extension == L".flp") {
+       extension == L".flp" || extension == L".imz") {
         open_virtual();
         return;
     }
