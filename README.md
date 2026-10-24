@@ -27,7 +27,7 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 
 | Format/layout | Coverage |
 | --- | --- |
-| WIM / ESD on Windows | In-process system WIMGAPI, read-only multiple image indexes under `image1/`, `image2/`, etc.; browse and extract files with XPRESS/LZX/LZMS as supported by Windows. No mount, added DLL or EXE. Split SWM, streams and reparse points excluded. |
+| WIM / ESD on Windows | In-process system WIMGAPI, read-only multiple image indexes under `image1/`, `image2/`, etc.; browse and extract files with XPRESS/LZX/LZMS as supported by Windows. No mount, added DLL or EXE. Split SWM sets are discovered beside the selected part; missing/duplicate parts are rejected. Streams and reparse points excluded. |
 | ISO 9660 / Joliet | File listing and extraction, Unicode names, multi-extent and interleaved files; recover from broken Joliet directory using valid ISO9660 primary volume |
 | Rock Ridge | RRIP NM/CE and relocated CL directories; PX read-only and TF modification timestamps; no symlink/device extraction |
 | Raw BIN/IMG | CD Mode 1 / Mode 2 Form 1 (2352-byte), XA Form 1 (2336-byte); automatic probing limited to single-track images |
@@ -248,6 +248,9 @@ See [bounded optical container design](docs/packed-optical.md).
   folders, file sizes and DOS timestamps/attributes.
 - Streams individual files through the existing WCX atomic extraction and
   cancellation path. No DISM, wimlib-imagex.exe, mount, external DLL or driver.
-- Split SWM, alternate streams, reparse-point restoration, unsupported ESD
+- Split SWM sets: open any part with all `.swm` files in the same folder.
+  Parts are matched by GUID and part number, including renamed files.
+- Alternate streams, reparse-point restoration, unsupported ESD
   compression and non-Windows systems are excluded in this preview.
 - See [WIM design notes](docs/wim-integration.md).
+

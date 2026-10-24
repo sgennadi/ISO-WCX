@@ -97,6 +97,11 @@ FetchContent_Declare(iso_wcx_chdr
 FetchContent_MakeAvailable(iso_wcx_chdr)
 
 include(CTest)
+if(BUILD_TESTING)
+  add_executable(wim_parts_tests tests/wim_parts.cpp)
+  target_include_directories(wim_parts_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME wim_split_parts COMMAND wim_parts_tests)
+endif()
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
 # runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
 option(ISO_WCX_BUILD_DEV_TOOLS "Build internal inspection and test EXEs" ${BUILD_TESTING})
@@ -322,3 +327,4 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/binary_reader_tes
   target_include_directories(binary_reader_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME binary_reader_tests COMMAND binary_reader_tests)
 endif()
+

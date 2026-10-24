@@ -1110,7 +1110,7 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
         format_ = archive->format();
         virtual_archive_ = std::move(archive);
     };
-    if(extension == L".wim" || extension == L".esd") {
+    if(extension == L".wim" || extension == L".esd" || extension == L".swm") {
 #ifdef _WIN32
         // WIMGAPI is a Windows system component, not an external helper.
         auto archive = std::make_shared<WimArchive>(image_);
@@ -1352,3 +1352,4 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
     return true;
 }
 }
+

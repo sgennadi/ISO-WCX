@@ -41,6 +41,7 @@ using SetProgressFn=void(__stdcall*)(HANDLE,int(__stdcall*)(wchar_t*,int));
 using WimCreateFn=HANDLE(WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD);
 using WimCaptureFn=HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD);
 using WimTempFn=BOOL(WINAPI*)(HANDLE,PCWSTR);
+using WimSplitFn=BOOL(WINAPI*)(HANDLE,PCWSTR,PLARGE_INTEGER,DWORD);
 using WimCloseFn=BOOL(WINAPI*)(HANDLE);
 
 template<typename F>
@@ -72,6 +73,15 @@ int wmain(int argc,wchar_t** argv) {
         fs::create_directories(first/L"Empty");
         write(second/L"HELLO.TXT","hello-two");
         write(second/L"SECOND.TXT","second-image");
+        // Incompressible distinct resources force multiple SWM parts.
+        std::vector<std::string> payloads;
+        std::uint32_t random=0x13579bdf;
+        for(unsigned n=0;n<4;++n) {
+            std::string data(1024*1024,'\0');
+            for(auto& c:data) { random^=random<<13;random^=random>>17;random^=random<<5;c=static_cast<char>(random); }
+            write(first/(L"payload"+std::to_wstring(n)+L".bin"),data);
+            payloads.push_back(std::move(data));
+        }
         HMODULE system=LoadLibraryExW(L"wimgapi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
         if(!system) return 2;
         const auto create=bind<WimCreateFn>(system,"WIMCreateFile");
@@ -79,6 +89,8 @@ int wmain(int argc,wchar_t** argv) {
         const auto capture=bind<WimCaptureFn>(system,"WIMCaptureImage");
         const auto close_wim=bind<WimCloseFn>(system,"WIMCloseHandle");
         if(!create||!set_temp||!capture||!close_wim)return 3;
+        const auto split=bind<WimSplitFn>(system,"WIMSplitFile");
+        if(!split)return 13;
         const auto original=root/L"test.wim";
         DWORD creation=0;
         HANDLE archive=create(original.c_str(),GENERIC_READ|GENERIC_WRITE,
@@ -103,6 +115,7 @@ int wmain(int argc,wchar_t** argv) {
         const auto close=bind<CloseFn>(dll,"CloseArchive");
         if(!open||!read||!process||!close)return 8;
         auto verify=[&](const fs::path& file) {
+            fs::remove_all(root/L"extracted");
             std::wstring path=file.wstring();
             OpenW args{};
             args.ArcName=path.data();
@@ -119,7 +132,8 @@ int wmain(int argc,wchar_t** argv) {
                 if(status!=0){close(handle);return false;}
                 const std::wstring name(header.FileName);
                 names.insert(name);
-                if(name==L"image1\\HELLO.TXT"||
+                if(name.rfind(L"image1\\payload",0)==0||
+                   name==L"image1\\HELLO.TXT"||
                    name==L"image1\\Nested\\folder.bin"||
                    name==L"image2\\HELLO.TXT"||
                    name==L"image2\\SECOND.TXT"||
@@ -147,6 +161,8 @@ int wmain(int argc,wchar_t** argv) {
                load(root/L"extracted"/L"image2"/L"HELLO.TXT")!="hello-two" ||
                load(root/L"extracted"/L"image2"/L"SECOND.TXT")!="second-image")
                 return false;
+            for(unsigned n=0;n<payloads.size();++n)
+                if(load(root/L"extracted"/L"image1"/(L"payload"+std::to_wstring(n)+L".bin"))!=payloads[n])return false;
             return true;
         };
         if(!verify(original))return 9;
@@ -154,6 +170,35 @@ int wmain(int argc,wchar_t** argv) {
         const auto esd=root/L"test.esd";
         fs::copy_file(original,esd);
         if(!verify(esd))return 10;
+        // Generate real split resources, then open both first and later parts.
+        const auto swm=root/L"split"/L"install.swm";
+        fs::create_directories(swm.parent_path());
+        archive=create(original.c_str(),GENERIC_READ,OPEN_EXISTING,0,0,&creation);
+        if(!archive||archive==INVALID_HANDLE_VALUE)return 14;
+        LARGE_INTEGER size{};size.QuadPart=512*1024;
+        if(!split(archive,swm.c_str(),&size,0)) {
+            std::cerr<<"WIMSplitFile failed: "<<GetLastError()<<"\n";
+            close_wim(archive);return 15;
+        }
+        close_wim(archive);
+        const auto later=swm.parent_path()/L"install2.swm";
+        if(!fs::exists(later)||!verify(swm)||!verify(later))return 16;
+        auto reject=[&](const fs::path& p) {
+            std::wstring name=p.wstring();OpenW a{};a.ArcName=name.data();
+            const auto h=open(&a);if(h){close(h);return false;}return a.OpenResult!=0;
+        };
+        const auto hidden=root/L"hidden.part";
+        fs::rename(later,hidden);
+        if(!reject(swm))return 17;
+        fs::rename(hidden,later);
+        const auto duplicate=swm.parent_path()/L"duplicate.swm";
+        fs::copy_file(later,duplicate);
+        if(!reject(swm))return 18;
+        fs::remove(duplicate);
+        // Names do not determine membership or order.
+        const auto renamed=swm.parent_path()/L"renamed.SWM";
+        fs::rename(later,renamed);
+        if(!verify(renamed))return 19;
         // Malformed files must not be reported as a valid WIM archive.
         const auto bad=root/L"corrupt.wim";
         write(bad,"NOT A WIM");
@@ -164,7 +209,7 @@ int wmain(int argc,wchar_t** argv) {
         if(broken){close(broken);return 11;}
         std::error_code ec;
         fs::remove_all(root,ec);
-        std::cout<<"PASS: Windows WIMGAPI multi-index LZX WIM and ESD through WCX x86/x64 API\n";
+        std::cout<<"PASS: Windows WIMGAPI multi-index LZX WIM, ESD and split SWM through WCX x86/x64 API\n";
         return 0;
     }catch(const std::exception& e){
         std::cerr<<"WIM WCX test error: "<<e.what()<<"\n";
@@ -172,3 +217,4 @@ int wmain(int argc,wchar_t** argv) {
     }
 }
 #endif
+

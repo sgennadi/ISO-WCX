@@ -1,4 +1,4 @@
-# Integrated WIM and ESD reader (v0.15 Preview)
+# Integrated WIM, ESD and SWM reader (v0.15 Preview)
 
 **One WCX binary, no external helpers.** On Windows the plugin loads the
 system component `wimgapi.dll` from System32. Each Windows image index is
@@ -13,7 +13,7 @@ content is streamed to ISO-WCX's existing transactional extraction stage,
 which supports cancellation without damaging existing output.
 
 Supported: single-file standard WIM and compatible ESD compression that
-the host Windows WIMGAPI can decode. Not supported: split SWM,
+the host Windows WIMGAPI can decode, plus complete split SWM sets. Not supported:
 independent WIM browsing on non-Windows OS, alternate data streams,
 reparse point recreation, extraction of NTFS security descriptors and
 unusual vendor-encrypted containers.
@@ -32,4 +32,14 @@ extra redistributables.
 The Windows CI test `wcx_wim_smoke.cpp` creates a small two-index LZX WIM
 with directory entries, opens it through 32/64-bit WCX exports and verifies
 selected files byte-for-byte. It checks WIM-compatible ESD naming and
-malformed WIM rejection. Test binaries and generated images are not shipped.
+malformed WIM rejection. It also splits a WIM with WIMSplitFile, verifies
+files from multiple parts byte-for-byte, opens later/renamed parts, and rejects
+missing and duplicate parts. Test binaries and generated images are not shipped.
+
+
+SWM discovery scans only the selected file's directory (at most 10,000 entries,
+4,096 parts), matching the WIM GUID and part numbers, not filename suffixes.
+All parts must be present as regular non-symlink `.swm` files. The first part
+is opened and exact paths to other parts are registered with WIMSetReferenceFile
+(WIM_REFERENCE_APPEND) before WIMLoadImage. No joining or mounting is performed.
+The cross-platform wim_split_parts test validates malformed set handling.

@@ -1,4 +1,5 @@
 #include "iso_wcx/wim_archive.hpp"
+#include "iso_wcx/wim_parts.hpp"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -110,6 +111,7 @@ bool end_of_find(DWORD code) noexcept {
 struct WimArchive::Impl {
     using CreateFileFn = HANDLE (WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD);
     using CloseFn = BOOL (WINAPI*)(HANDLE);
+    using ReferenceFn = BOOL (WINAPI*)(HANDLE,PCWSTR,DWORD);
     using SetTempFn = BOOL (WINAPI*)(HANDLE,PCWSTR);
     using CountFn = DWORD (WINAPI*)(HANDLE);
     using LoadFn = HANDLE (WINAPI*)(HANDLE,DWORD);
@@ -124,6 +126,7 @@ struct WimArchive::Impl {
     CloseFn close = nullptr;
     CreateFileFn create = nullptr;
     SetTempFn set_temp = nullptr;
+    ReferenceFn reference = nullptr;
     CountFn count = nullptr;
     LoadFn load = nullptr;
     FirstFn first = nullptr;
@@ -138,6 +141,7 @@ struct WimArchive::Impl {
             close = get_api<CloseFn>(module, "WIMCloseHandle");
             create = get_api<CreateFileFn>(module, "WIMCreateFile");
             set_temp = get_api<SetTempFn>(module, "WIMSetTemporaryPath");
+            reference = get_api<ReferenceFn>(module, "WIMSetReferenceFile");
             count = get_api<CountFn>(module, "WIMGetImageCount");
             load = get_api<LoadFn>(module, "WIMLoadImage");
             first = get_api<FirstFn>(module, "WIMFindFirstImageFile");
@@ -172,7 +176,8 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     require(std::filesystem::is_regular_file(image) &&
             !std::filesystem::is_symlink(image),
             "WIM input must be a regular non-symlink file");
-    const auto input = image.wstring();
+    const auto parts = resolve_wim_parts(image);
+    const auto input = parts.front().wstring();
     require(!input.empty(), "invalid WIM archive path");
 
     DWORD opened = 0;
@@ -190,11 +195,17 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     if (!api_->set_temp(api_->archive, temporary.data()))
         fail_windows("WIMSetTemporaryPath failed");
 
+    for (std::size_t i = 1; i < parts.size(); ++i) {
+        // WIM_REFERENCE_APPEND, register exact validated paths before loading metadata.
+        if (!api_->reference(api_->archive, parts[i].c_str(), 0x00010000u))
+            fail_windows("WIMSetReferenceFile failed for SWM part");
+    }
+
     const DWORD count = api_->count(api_->archive);
     require(count > 0 && count <= 256,
             "WIM has no image indexes or too many images");
     format_ = "WIM / Windows Imaging API / " + std::to_string(count) +
-              " image(s) / read-only";
+              " image(s) / " + std::to_string(parts.size()) + " part(s) / read-only";
     constexpr std::size_t max_items = 1'000'000;
     constexpr std::uint64_t max_path_bytes = 128u * 1024u * 1024u;
     std::uint64_t path_bytes = 0;
@@ -316,3 +327,4 @@ bool WimArchive::read(
 
 } // namespace iso_wcx
 #endif // _WIN32
+
