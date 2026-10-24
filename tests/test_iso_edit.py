@@ -53,7 +53,9 @@ def read_image(path, joliet=False):
             if not n:at=(at//B+1)*B;continue
             r=data[at:at+n];at+=n;name=r[33:33+r[32]]
             if name in (b'\0',b'\1'):continue
-            name=name.decode('utf-16-be' if joliet else 'ascii').removesuffix(';1')
+            name=name.decode('utf-16-be' if joliet else 'ascii')
+            if not (r[25]&2):
+                name=name.removesuffix(';1')
             name=prefix+name
             if r[25]&2:out[name+'/']=None;visit(r,name+'/')
             else:
@@ -132,7 +134,7 @@ def independent_read(path):
     return out
 
 
-def main(binary):
+def main(binary, reader=None):
     with tempfile.TemporaryDirectory() as temp:
         root=pathlib.Path(temp);image=root/'test.iso';source=root/'replacement';source.write_bytes(b'new content'*1000)
         def run(op,name,ok=True):
@@ -184,6 +186,9 @@ def main(binary):
         run('mkdir','directory;1')
         run('add','directory;1/name;1.txt')
         assert read_image(image,True)['directory;1/name;1.txt']==source.read_bytes()
+        if reader:
+            inspected=subprocess.run([reader,str(image)],capture_output=True,text=True,check=True)
+            assert 'directory;1/name;1.txt' in inspected.stdout,inspected.stdout
         validate_path_tables(image)
         run('delete',folder_b)
         assert folder_b+'/kernel.bin' not in read_image(image,True)
@@ -230,4 +235,4 @@ def main(binary):
             image.write_bytes(b);run('add','NEW.TXT',False)
     print('PASS: ISO replace/add/delete, nested paths, Joliet, independent reader, boot preservation, cancellation and refusal rollback')
 
-if __name__=='__main__':main(sys.argv[1])
+if __name__=='__main__':main(sys.argv[1],sys.argv[2] if len(sys.argv)>2 else None)
