@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -337,6 +338,7 @@ void ChdStream::load_hunk(std::uint64_t index) {
 
 std::vector<std::uint8_t> ChdStream::read(
         std::uint64_t start, std::size_t length) {
+    const std::lock_guard<std::mutex> guard(read_mutex_);
     require(length <= 32u * 1024u * 1024u &&
             start <= logical_size_ && length <= logical_size_ - start,
             "CHD optical read outside logical data track");
@@ -364,6 +366,7 @@ std::vector<std::uint8_t> ChdStream::read(
 
 std::vector<std::uint8_t> ChdStream::read_audio(
         std::uint32_t track_number, std::uint64_t start, std::size_t length) {
+    const std::lock_guard<std::mutex> guard(read_mutex_);
     require(unit_bytes_ == cd_frame,
             "only CD CHD frames contain Red Book PCM audio");
     const auto selected = std::find_if(audio_tracks_.begin(),audio_tracks_.end(),

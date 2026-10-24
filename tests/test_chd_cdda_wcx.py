@@ -88,7 +88,8 @@ def invoke(args: list[str]) -> str:
 
 
 def main(reader: pathlib.Path, plugin: pathlib.Path | None = None,
-         wcx_probe: pathlib.Path | None = None) -> None:
+         wcx_probe: pathlib.Path | None = None,
+         parallel_probe: pathlib.Path | None = None) -> None:
     if plugin is not None:
         assert wcx_probe is not None
         assert sys.platform == "win32"
@@ -125,6 +126,8 @@ def main(reader: pathlib.Path, plugin: pathlib.Path | None = None,
                     invoke([str(wcx_probe), str(plugin), str(src),
                             str(extraction), "CDDA\\" + track, str(expected)])
                     assert extraction.read_bytes() == wav
+            if parallel_probe is not None:
+                invoke([str(parallel_probe), str(src)])
             print("PASS synthetic CHD CDDA native extraction:", name)
         corrupted = bytearray(chd_cd([("AUDIO", ORIGINAL_AUDIO)]))
         tag = corrupted.find(b"FRAMES:37")
@@ -142,5 +145,8 @@ def main(reader: pathlib.Path, plugin: pathlib.Path | None = None,
 
 if __name__ == "__main__":
     supplied = [pathlib.Path(a).resolve() for a in sys.argv[1:]]
-    assert len(supplied) in (1, 3)
-    main(*supplied)
+    assert len(supplied) in (1, 2, 3, 4)
+    if len(supplied) == 2:
+        main(supplied[0], parallel_probe=supplied[1])
+    else:
+        main(*supplied)

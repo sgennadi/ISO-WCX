@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,9 @@ private:
     std::uint32_t unit_bytes_ = 0;      // 2048 (DVD) or 2448 (CD frame).
     std::uint32_t data_offset_ = 0;
     std::uint64_t leading_frames_ = 0; // Absolute CHD frame of selected data track, plus validated lead-in.
+    // Guard libchdr decoding and the shared decompressed-hunk buffer.
+    // Multiple Total Commander extraction threads may share one archive.
+    mutable std::mutex read_mutex_;
     std::uint64_t cached_hunk_ = ~std::uint64_t(0);
     std::vector<std::uint8_t> hunk_;
     std::vector<ChdAudioTrack> audio_tracks_;

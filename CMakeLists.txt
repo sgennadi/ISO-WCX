@@ -122,8 +122,9 @@ if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
   message(FATAL_ERROR "CTest requires ISO_WCX_BUILD_DEV_TOOLS=ON")
 endif()
 
+find_package(Threads REQUIRED)
 add_library(iso_disc STATIC src/archive_edit.cpp src/iso_edit.cpp src/udf_edit.cpp src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/mds_v2.cpp src/mds_v2_tracks.cpp src/cd_audio_wav.cpp third_party/tiny_aes/mds_aes.c src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
-target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET} chdr-static)
+target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET} chdr-static Threads::Threads)
 if(WIN32)
   target_sources(iso_disc PRIVATE src/wim_archive.cpp src/wim_edit.cpp)
   target_link_libraries(iso_disc PUBLIC advapi32 ole32 oleaut32 uuid)
@@ -281,6 +282,8 @@ if(WIN32)
 endif()
 
 if(BUILD_TESTING)
+  add_executable(chd_parallel_read_tests tests/chd_parallel_read.cpp)
+  target_link_libraries(chd_parallel_read_tests PRIVATE iso_disc Threads::Threads)
   add_executable(cd_audio_wav_tests tests/test_cd_audio_wav.cpp)
   target_link_libraries(cd_audio_wav_tests PRIVATE iso_disc)
   add_test(NAME native_chd_cdda_wav_and_rf64_headers COMMAND cd_audio_wav_tests)
@@ -345,11 +348,13 @@ if(BUILD_TESTING)
       add_test(NAME chd_cdda_wav_wcx_win32_win64
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chd_cdda_wcx.py"
                 "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:ISO-WCX>"
-                "$<TARGET_FILE:wcx_packed_smoke>")
+                "$<TARGET_FILE:wcx_packed_smoke>"
+                "$<TARGET_FILE:chd_parallel_read_tests>")
     else()
       add_test(NAME chd_cdda_wav_native_cdrom_geometry
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chd_cdda_wcx.py"
-                "$<TARGET_FILE:disc_inspect>")
+                "$<TARGET_FILE:disc_inspect>"
+                "$<TARGET_FILE:chd_parallel_read_tests>")
     endif()
     # Genuine MAME-produced compressed CD/DVD CHD fixtures, available in
     # the Linux preview CI job. chdman is test-only, never a WCX dependency.
