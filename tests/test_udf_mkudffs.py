@@ -278,7 +278,9 @@ def main(editor, inspector):
             check_real_directory_spill(editor,image,root)
             # No rename/delete/snapshot directory mutation is implied.
             # Failures leave the entire original image byte-for-byte intact.
-            source.write_bytes(b"R" * (8*1024*1024+1))
+            # Must exceed physical image/partition capacity, not the former
+            # 8 MiB Preview limit. The new allocator accepts >8 MiB files.
+            source.write_bytes(b"R" * (24*1024*1024+1))
             original = image.read_bytes()
             failure = command(editor, image, "add", "TOO-LARGE.BIN", source,
                               allowed=(1,))
@@ -306,7 +308,15 @@ def main(editor, inspector):
         command(editor, large_image, "add", "MULTI-BITMAP.BIN", source)
         command("udfinfo", large_image)
         independent_extract(large_image, root, "MULTI-BITMAP.BIN", content)
-        print("PASS UDF 1.02 multi-sector bitmap allocation, "
+        # Previously rejected (>8 MiB). Independent mkudffs metadata and 7z
+        # must read this complete payload after native bitmap allocation.
+        big_data = (b"UDF-LARGE-SHORTAD-" * 65536) * 12 + b"END"
+        assert len(big_data) > 8*1024*1024
+        source.write_bytes(big_data)
+        command(editor, large_image, "add", "LARGER-THAN-8MIB.BIN", source)
+        command("udfinfo", large_image)
+        independent_extract(large_image, root, "LARGER-THAN-8MIB.BIN", big_data)
+        print("PASS UDF 1.02 multi-sector bitmap, >8 MiB new file, "
               "udfinfo/7z independent checks", flush=True)
 
 
