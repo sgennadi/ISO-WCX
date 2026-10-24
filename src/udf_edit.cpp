@@ -1248,6 +1248,11 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
              "staged UDF file map was not updated");
         need( (strict.directories().count(key)!=0)==change.directory,
              "staged UDF directory map was not updated");
+        for(const auto& change:existing_changes) {
+            const auto key=edit_path(change.path);
+            need((strict.files().count(key)!=0)==!change.remove,
+                 "UDF mixed batch deletion/replacement namespace mismatch");
+        }
         strict.close();
         const Disc inspected(tx.output);
         need(inspected.format()=="UDF","staged UDF allocation unreadable");
@@ -1410,13 +1415,26 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     }
     std::vector<Prepared> prepared;
     prepared.reserve(changes.size());
+    std::vector<ArchiveChange> existing_changes;
+    existing_changes.reserve(changes.size());
+    std::set<std::string> changed_names;
     for(const auto& change:changes) {
-        need(!change.remove,"UDF create batch cannot remove files");
+        const auto key=edit_path(change.path);
+        need(changed_names.insert(fold(key)).second,
+             "UDF batch contains duplicate or case-colliding changes");
+        if(volume.files().count(key)) {
+            validate_udf_existing_change(volume,change);
+            existing_changes.push_back(change);
+            continue;
+        }
+        need(!change.remove,"UDF cannot delete a nonexistent file");
+        need(!volume.directories().count(key),
+             "UDF cannot replace or recreate an existing directory");
         Prepared p;
         p.change=change;
-        p.key=edit_path(change.path);
+        p.key=key;
         need(names.insert(fold(p.key)).second,
-             "UDF batch has an existing or duplicate case-insensitive path");
+             "UDF new name collides with an existing file or directory");
         const auto slash=p.key.rfind('/');
         p.parent=slash==std::string::npos?
                  std::string{}:p.key.substr(0,slash);
@@ -1589,6 +1607,46 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         children.push_back(std::move(child));
     }
 
+    // Apply logical deletes to the same in-memory directory payload used
+    // for FID appends and relocations. Never write a stale parent FE later:
+    // an embedded parent checksum must cover both mutations together.
+    for(const auto& change:existing_changes) {
+        if(!change.remove)continue;
+        edit_tick(progress);
+        const auto key=edit_path(change.path);
+        const auto& existing=volume.files().at(key);
+        const auto slash=key.rfind('/');
+        const auto parent_key=slash==std::string::npos?
+                              std::string{}:key.substr(0,slash);
+        auto at=parents.find(parent_key);
+        if(at==parents.end()) {
+            const auto old=volume.directories().find(parent_key);
+            need(old!=volume.directories().end(),
+                 "UDF deleted FID parent is missing");
+            ParentPlan plan;
+            plan.original=old->second;
+            plan.payload=volume.directory_payload(plan.original);
+            plan.preexisting=true;
+            at=parents.emplace(parent_key,std::move(plan)).first;
+        }
+        auto& parent=at->second;
+        need(parent.original.at==existing.parent_at &&
+             existing.fid_at>=parent.original.data_at,
+             "UDF deleted FID refers to the wrong parent");
+        const auto relative=existing.fid_at-parent.original.data_at;
+        need(relative<=parent.payload.size() &&
+             existing.fid_bytes<=parent.payload.size()-relative,
+             "UDF deleted FID lies outside directory payload");
+        const auto p=static_cast<std::size_t>(relative);
+        tag_check(parent.payload,p,257);
+        need(!(parent.payload[p+18]&0x0cu) &&
+             u32(parent.payload,p+24)==
+                 volume.logical_of(existing.fe.at),
+             "UDF deleted FID identity or state mismatch");
+        parent.payload[p+18]|=0x04u;
+        tag_update(parent.payload,p,existing.fid_bytes);
+    }
+
     // Allocate all destination parent runs before releasing old ones.
     // Thus a later child allocation can never reuse a block scheduled for
     // zeroing after an original directory is relocated.
@@ -1618,6 +1676,14 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         record_allocation(parent.new_blocks);
 
         parent.fe_write=fe.bytes;
+        if(!parent.external) {
+            need(fe.ad_offset<=block &&
+                 parent.payload.size()<=block-fe.ad_offset,
+                 "UDF embedded directory payload exceeds FE");
+            std::copy(parent.payload.begin(),parent.payload.end(),
+                      parent.fe_write.begin()+
+                      static_cast<std::ptrdiff_t>(fe.ad_offset));
+        }
         put64(parent.fe_write,56,length);
         const bool extended=u16(parent.fe_write,0)==266;
         if(extended)put64(parent.fe_write,64,length);
@@ -1730,6 +1796,13 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                  "UDF batch data source length changed during writing");
         }
     }
+    for(const auto& change:existing_changes) {
+        edit_tick(progress);
+        if(change.remove)continue; // FID was patched in its parent payload.
+        write_udf_existing_replacement(
+            out,volume.files().at(edit_path(change.path)),
+            change.source,progress);
+    }
     for(const auto& [key,parent]:parents) {
         (void)key;
         edit_tick(progress);
@@ -1769,6 +1842,24 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         for(std::size_t i=0;i<inspected.items().size();++i)
             need(by_path.emplace(inspected.items()[i].path,i).second,
                  "duplicate staged UDF batch name");
+        for(const auto& change:existing_changes) {
+            edit_tick(progress);
+            const auto key=edit_path(change.path);
+            const auto at=by_path.find(key);
+            if(change.remove) {
+                need(at==by_path.end(),
+                     "UDF mixed batch deleted file remains visible");
+            } else {
+                need(at!=by_path.end() &&
+                     !inspected.items()[at->second].directory &&
+                     inspected.items()[at->second].size==
+                         std::filesystem::file_size(change.source),
+                     "UDF mixed batch replacement size mismatch");
+                need(same_staged_item(tx.output,inspected.items()[at->second],
+                                      change.source,progress),
+                     "UDF mixed batch replacement content mismatch");
+            }
+        }
         for(const auto& child:children) {
             edit_tick(progress);
             const auto at=by_path.find(child.key);
