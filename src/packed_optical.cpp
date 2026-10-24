@@ -142,8 +142,9 @@ void PackedOptical::append_isz_region(const std::filesystem::path& path,
     // Refuse a short middle part: concatenating a truncated region with
     // the next one would shift the virtual stream and corrupt stored blocks.
     check(declared_end<=physical,"ISZ segment shorter than declared");
-    check(begin>=48 && begin<declared_end,
-          "ISZ segment contains no valid data area");
+    // An image consisting only of sparse-zero chunks has no stored data.
+    check(begin>=48 && begin<=declared_end,
+          "ISZ segment data area is outside the file");
     const auto length=declared_end-begin;
     check(isz_data_size_<=max_logical && length<=max_logical-isz_data_size_,
           "ISZ segment data stream exceeds size limit");
@@ -242,16 +243,20 @@ void PackedOptical::parse_isz() {
         }
         check(terminated && !segments.empty(),
               "ISZ segment table missing terminating entry");
+        const auto table_limit=ptr_offset?std::uint64_t(ptr_offset):
+                                         std::uint64_t(data_offset);
         check(std::uint64_t(segment_table)+
-                  std::uint64_t(segments.size()+1)*24<=ptr_offset,
-              "ISZ segment table overlaps the chunk table");
+                  std::uint64_t(segments.size()+1)*24<=table_limit,
+              "ISZ segment table overlaps the chunk table or data");
         std::uint64_t next_chunk=0;
         for(const auto& part:segments) {
             check(part.first==next_chunk,
                   "ISZ segment chunk ranges are not contiguous");
             next_chunk+=part.chunks;
         }
-        check(next_chunk==expected,"ISZ segment chunk ranges are incomplete");
+        if(ptr_offset!=0 || next_chunk!=0)
+            check(next_chunk==expected,
+                  "ISZ segment chunk ranges are incomplete");
     }
 
     if(segments.empty()) {
@@ -308,7 +313,6 @@ void PackedOptical::parse_isz() {
             append_isz_region(path,begin-left,seg.size);
         }
     }
-    check(isz_data_size_>0,"ISZ contains no payload data");
 
     if(ptr_offset==0) {
         // ISZ without a pointer table is an uncompressed virtual ISO stream.
