@@ -90,7 +90,8 @@ std::filesystem::path sibling(const std::filesystem::path& descriptor,
             "unsafe MDS v2 companion filename");
     for(unsigned char c:filename)
         ensure(c>=32,"MDS v2 companion filename contains control characters");
-    const auto relative=std::filesystem::u8path(filename);
+    const auto relative=std::filesystem::path(std::u8string(
+        reinterpret_cast<const char8_t*>(filename.data()),filename.size()));
     ensure(!relative.is_absolute() && !relative.has_parent_path() &&
             !relative.has_root_name(),
             "MDS v2 companion file must be in the descriptor directory");
