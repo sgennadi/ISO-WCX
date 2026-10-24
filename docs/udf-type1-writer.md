@@ -17,15 +17,16 @@ not universal UDF 1.02–2.60 editing.
   Supports nested paths and streamed verification.
 - Logically delete an existing regular file by setting its FID deleted bit,
   updating descriptor CRC/checksum. Deletion **does not reclaim blocks**.
-- Create **one new regular file per transaction** under a compatible
-  embedded or single-ShortAD parent directory. Its size is bounded by
+- Create **multiple regular files and empty subdirectories in one atomic
+  transaction** under compatible embedded or single-ShortAD parents. Its size is bounded by
   image/partition capacity, available bitmap blocks and the finite number of
   ShortAD slots in a File Entry. Files up to 1872 bytes use an embedded FE;
   larger files can use multiple **fragmented** ShortAD runs, each with a
   legal 30-bit extent length. The stream/verification logic uses bounded
   buffers instead of a second extracted multi-gigabyte file.
-- Create **one empty subdirectory per transaction** with an embedded FE.
-  Subsequent operations can create files and subdirectories under it.
+- Create several empty subdirectories, including nested parents, in the
+  same transaction. Child paths can appear before their parent mkdir changes;
+  planning orders them by depth and rejects missing parents.
 - Automatically relocate an embedded parent directory to a ShortAD run when
   its inline FIDs exceed FE capacity. Grow existing ShortAD directories to
   larger **contiguous** extents, up to the 8 MiB directory-data limit.
@@ -37,9 +38,12 @@ not universal UDF 1.02–2.60 editing.
   Update bitmap, LVID and FE LogicalBlocksRecorded atomically.
 - Encode newly created names with OSTA CS0 (BMP Unicode including Cyrillic and
   Hebrew; non-BMP names intentionally rejected in this write mode).
-- Update the parent directory FE, new child FE/FID, bitmap, closed LVID free
-  block count, next unique ID and file/directory counter in the same staged
-  transaction. Reparse the entire result and compare extracted file bytes.
+- For a batch of creations, plan all new FE/FIDs, file extents and parent
+  relocations together; update the bitmap and closed LVID **once** with
+  aggregate allocated/reclaimed sectors, unique IDs and file/directory
+  counters. Stage the image once, reparse it and verify **every** new file
+  before the final atomic replacement. Cancellation or any failed change
+  leaves the original image unchanged.
 
 ## Write preconditions
 
@@ -63,8 +67,9 @@ not universal UDF 1.02–2.60 editing.
 
 ## Explicitly unsupported
 
-Renaming, removing directories, editing ISO/UDF Bridge metadata, allocating
-multiple new files atomically, directory growth beyond 8 MiB, freeing blocks
+Renaming, removing directories, editing ISO/UDF Bridge metadata, mixing
+creation with replacement/deletion in one batch, directory growth beyond
+8 MiB, freeing blocks
 from deleted files, bitmap descriptors larger than 8 MiB, sparse/unrecorded
 file extents, chained AED writing, non-BMP new names and any
 VAT/Sparable/Metadata writer.
@@ -76,8 +81,9 @@ original image byte-for-byte unchanged.
 
 Synthetic fixtures check FE/EFE and multi-ShortAD replacement, final-ShortAD
 in-place growth, rejected over-allocation, FID deletion, fragmented file
-allocation, directory relocation, tag CRC, bitmap/LVID accounting, Unicode
-and atomic rollback. CI independently generates UDF 1.02 HD/DVD-RAM images
+allocation, multi-file/mkdir atomic batches with nested directories,
+directory relocation, tag CRC, bitmap/LVID accounting, Unicode and
+atomic rollback. CI independently generates UDF 1.02 HD/DVD-RAM images
 with `mkudffs` and validates changes via `udfinfo` and 7-Zip. A dedicated
 CI job creates, grows, rejects an overrun and replaces a file larger than
 4 GiB, checking complete independently decoded 7-Zip SHA-256 each time.
