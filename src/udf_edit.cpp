@@ -782,30 +782,61 @@ void copy(std::ifstream& in,std::fstream& out,std::uint64_t n,
         n-=count;
     }
 }
-bool same_file(const std::filesystem::path& left,
-               const std::filesystem::path& right,
-               const EditProgress& progress) {
-    std::ifstream a(left,std::ios::binary),b(right,std::ios::binary);
-    need(bool(a) && bool(b),"cannot open UDF verification file");
-    if(std::filesystem::file_size(left)!=std::filesystem::file_size(right))
-        return false;
+// Verify through the independently parsed Disc extent map. This avoids
+// extracting a second multi-gigabyte copy just to compare staged contents.
+bool same_staged_item(const std::filesystem::path& staged,const Item& item,
+                      const std::filesystem::path& source,
+                      const EditProgress& progress) {
+    if(item.directory || !item.direct_source.empty() ||
+       item.size!=std::filesystem::file_size(source))return false;
+    std::ifstream a(source,std::ios::binary),b(staged,std::ios::binary);
+    need(bool(a) && bool(b),"cannot open UDF staged verification sources");
+    const auto image_size=std::filesystem::file_size(staged);
     Bytes aa(1024*1024),bb(1024*1024);
-    auto n=std::filesystem::file_size(left);
-    while(n) {
-        edit_tick(progress);
-        const auto count=static_cast<std::size_t>(
-            std::min<std::uint64_t>(n,aa.size()));
-        a.read(reinterpret_cast<char*>(aa.data()),
-               static_cast<std::streamsize>(count));
-        b.read(reinterpret_cast<char*>(bb.data()),
-               static_cast<std::streamsize>(count));
-        need(bool(a) && bool(b),"UDF verification read truncated");
-        if(!std::equal(aa.begin(),aa.begin()+
-                       static_cast<std::ptrdiff_t>(count),bb.begin()))
-            return false;
-        n-=count;
+    std::uint64_t verified=0;
+    if(!item.inline_data.empty()) {
+        need(item.inline_data.size()==item.size,
+             "invalid UDF inline verification size");
+        while(verified<item.size) {
+            edit_tick(progress);
+            const auto n=static_cast<std::size_t>(
+                std::min<std::uint64_t>(item.size-verified,aa.size()));
+            a.read(reinterpret_cast<char*>(aa.data()),
+                   static_cast<std::streamsize>(n));
+            need(bool(a),"UDF verification source truncated");
+            if(!std::equal(aa.begin(),aa.begin()+
+                           static_cast<std::ptrdiff_t>(n),
+                           item.inline_data.begin()+
+                           static_cast<std::ptrdiff_t>(verified)))return false;
+            verified+=n;
+        }
+    } else {
+        for(const auto& extent:item.extents) {
+            if(extent.sparse || extent.length>item.size-verified ||
+               extent.offset>image_size ||
+               extent.length>image_size-extent.offset)return false;
+            b.clear();
+            b.seekg(static_cast<std::streamoff>(extent.offset));
+            need(bool(b),"cannot seek staged UDF readback run");
+            std::uint64_t remaining=extent.length;
+            while(remaining) {
+                edit_tick(progress);
+                const auto n=static_cast<std::size_t>(
+                    std::min<std::uint64_t>(remaining,aa.size()));
+                a.read(reinterpret_cast<char*>(aa.data()),
+                       static_cast<std::streamsize>(n));
+                b.read(reinterpret_cast<char*>(bb.data()),
+                       static_cast<std::streamsize>(n));
+                need(bool(a) && bool(b),"UDF staged readback was truncated");
+                if(!std::equal(aa.begin(),aa.begin()+
+                               static_cast<std::ptrdiff_t>(n),bb.begin()))
+                    return false;
+                verified+=n;
+                remaining-=n;
+            }
+        }
     }
-    return true;
+    return verified==item.size;
 }
 // Encode a path component as OSTA Compressed Unicode (CS0), never by
 // assuming arbitrary UTF-8 bytes are a UDF 8-bit filename. For UDF 1.02
@@ -951,20 +982,21 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     }
 
     constexpr std::size_t fe_header=176;
-    // Bounded Preview writer: one ShortAD extent, at most 8 MiB per file.
-    constexpr std::uint64_t max_new_file=8u*1024u*1024u;
+    // InformationLength is uint64; every ShortAD has a 30-bit length.
+    // The image/partition bounds and limited FE descriptor area are enforced.
     std::uint64_t length=0;
     if(!change.directory) {
         need(std::filesystem::is_regular_file(
                  std::filesystem::symlink_status(change.source)),
              "UDF create source must be a regular file, not symlink");
         length=std::filesystem::file_size(change.source);
-        need(length<=max_new_file,
-             "UDF new-file size exceeds validated Preview writer limit");
+        need(length<=volume.image_size(),
+             "new UDF file exceeds image physical size");
     }
     const bool embedded=length<=block-fe_header;
-    const auto data_blocks=embedded?0u:static_cast<std::uint32_t>(
-        (length+block-1u)/block);
+    const auto data_blocks=embedded?0ull:(length+block-1u)/block;
+    need(data_blocks<=std::numeric_limits<std::uint32_t>::max(),
+         "new UDF file exceeds partition allocation counters");
     const auto fid_id_size=encoded_name.size();
     const auto fid_size=(38u+fid_id_size+3u)&~std::size_t(3);
     need(fid_size<=255 && fid_size<=block,
@@ -986,7 +1018,9 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
          "UDF parent directory data size mismatch");
 
     const auto new_lba=volume.allocate_block();
-    const auto data_lba=data_blocks?volume.allocate_blocks(data_blocks):0u;
+    const auto data_runs=data_blocks?
+        volume.allocate_file_data(length,(block-fe_header)/8u):
+        std::vector<DataRun>{};
     const auto parent_data_lba=relocate_parent?
         volume.allocate_blocks(new_parent_blocks):
         (parent.storage==0?volume.logical_of(parent.data_at):0u);
@@ -1011,11 +1045,16 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     put32(child,108,1); // Checkpoint
     put64(child,160,volume.new_unique_id());
     put32(child,168,0); // ExtendedAttributes length
-    put32(child,172,embedded?static_cast<std::uint32_t>(length):8u);
+    const auto child_ad_bytes=static_cast<std::uint32_t>(8u*data_runs.size());
+    put32(child,172,embedded?static_cast<std::uint32_t>(length):child_ad_bytes);
     if(!embedded) {
-        // ECMA-167 ShortAD: recorded allocation length, logical start block.
-        put32(child,176,static_cast<std::uint32_t>(length));
-        put32(child,180,data_lba);
+        for(std::size_t i=0;i<data_runs.size();++i) {
+            const auto& run=data_runs[i];
+            need(run.recorded<=0x3fffffffull,
+                 "UDF ShortAD 30-bit length exceeded");
+            put32(child,176u+i*8u,static_cast<std::uint32_t>(run.recorded));
+            put32(child,180u+i*8u,run.logical);
+        }
     } else if(length) {
         std::ifstream input(change.source,std::ios::binary);
         need(bool(input),"cannot read new UDF embedded source");
@@ -1024,7 +1063,7 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
         need(bool(input),"new UDF embedded source shortened");
     }
     tag_update(child,0,embedded?fe_header+static_cast<std::size_t>(length):
-               fe_header+8u);
+               fe_header+child_ad_bytes);
 
     Bytes fid(fid_size,0);
     put16(fid,0,257); // File Identifier Descriptor
@@ -1110,18 +1149,20 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
 
     staged_write(out,new_offset,child);
     if(data_blocks) {
-        const auto data_at=volume.absolute(data_lba);
-        out.clear();
-        out.seekp(static_cast<std::streamoff>(data_at));
-        need(bool(out),"cannot seek new UDF data run");
         std::ifstream source(change.source,std::ios::binary);
         need(bool(source),"cannot open new UDF file content");
-        copy(source,out,length,progress);
-        // Clear any trailing bytes of the last allocated block.
-        const auto tail=std::uint64_t(data_blocks)*block-length;
-        if(tail)
-            staged_write(out,data_at+length,
-                         Bytes(static_cast<std::size_t>(tail),0));
+        std::uint64_t copied=0;
+        for(const auto& run:data_runs) {
+            out.clear();
+            out.seekp(static_cast<std::streamoff>(run.at));
+            need(bool(out),"cannot seek new UDF ShortAD run");
+            copy(source,out,run.recorded,progress);
+            copied+=run.recorded;
+            const auto tail=std::uint64_t(run.blocks)*block-run.recorded;
+            if(tail) staged_write(out,run.at+run.recorded,
+                                  Bytes(static_cast<std::size_t>(tail),0));
+        }
+        need(copied==length,"new UDF multi-extent write was incomplete");
     }
     if(old_parent_blocks)
         staged_write(out,parent.data_at,
@@ -1133,8 +1174,8 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     staged_write(out,bitmap_at,bitmap_data);
     const auto [integrity_at,integrity_data]=
         volume.updated_integrity(change.directory,
-                                 1u+data_blocks+new_parent_blocks-
-                                 old_parent_blocks);
+                                 1u+static_cast<std::uint32_t>(data_blocks)+
+                                 new_parent_blocks-old_parent_blocks);
     staged_write(out,integrity_at,integrity_data);
     out.flush();
     need(bool(out),"staged UDF allocation flush failed");
@@ -1158,11 +1199,7 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
         need(it!=inspected.items().end(),"new UDF entry not visible");
         if(!change.directory) {
             need(it->size==length,"new UDF file length mismatched");
-            const auto i=static_cast<std::size_t>(
-                std::distance(inspected.items().begin(),it));
-            const auto tmp=tx.workspace/"new-udf-file-check";
-            need(inspected.copy(i,tmp),"new UDF readback failed");
-            need(same_file(tmp,change.source,progress),
+            need(same_staged_item(tx.output,*it,change.source,progress),
                  "new UDF file content verification failed");
         }
     }
@@ -1203,10 +1240,11 @@ void edit_udf(const std::filesystem::path& image,
                      std::filesystem::symlink_status(change.source)),
                  "UDF replacement must be a regular file, not symlink");
             const auto len=std::filesystem::file_size(change.source);
-            need(len<=target.fe.capacity,
-                 "UDF replacement exceeds existing allocation capacity");
-            if(target.fe.storage!=3) {
-                const Location dest{target.fe.data_at,target.fe.capacity};
+            need(len<=target.fe.capacity &&
+                 (target.fe.runs.size()<=1 || len<=target.fe.recorded),
+                 "UDF replacement exceeds existing ShortAD allocation");
+            for(const auto& run:target.fe.runs) {
+                const Location dest{run.at,std::uint64_t(run.blocks)*block};
                 for(const auto& interval:volume.intervals())
                     if(interval.owner!=target.fe.at)
                         need(!intersects(dest,interval.range),
@@ -1271,22 +1309,32 @@ void edit_udf(const std::filesystem::path& image,
             tag_update(fe,0,target.fe.ad_offset+static_cast<std::size_t>(len));
             staged_write(out,target.fe.at,fe);
         } else {
-            out.clear();
-            out.seekp(static_cast<std::streamoff>(target.fe.data_at));
-            need(bool(out),"cannot seek UDF content extent");
             std::ifstream source(change.source,std::ios::binary);
             need(bool(source),"cannot open UDF replacement content");
-            copy(source,out,len,progress);
+            std::uint64_t remaining=len;
+            for(const auto& run:target.fe.runs) {
+                if(!remaining)break;
+                const auto count=target.fe.runs.size()==1?remaining:
+                                 std::min(remaining,run.recorded);
+                out.clear();
+                out.seekp(static_cast<std::streamoff>(run.at));
+                need(bool(out),"cannot seek UDF content ShortAD run");
+                copy(source,out,count,progress);
+                remaining-=count;
+            }
+            need(remaining==0,"UDF replacement ShortAD sequence incomplete");
             put64(fe,56,len);
             if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
-            // Maintain the old extent length on shrink, otherwise extend
-            // the short AD only within the already-allocated full blocks.
-            const auto current=u32(fe,target.fe.ad_offset)&0x3fffffffu;
-            if(len>current) {
-                need(len<=0x3fffffffull,
-                     "UDF short AD cannot describe this file size");
-                put32(fe,target.fe.ad_offset,
-                      static_cast<std::uint32_t>(len));
+            // Grow a single ShortAD within its already allocated blocks.
+            // Multi-extent replacement/shrink retains the AD reservations.
+            if(target.fe.runs.size()==1) {
+                const auto current=target.fe.runs.front().recorded;
+                if(len>current) {
+                    need(len<=0x3fffffffull,
+                         "UDF short AD cannot describe this file size");
+                    put32(fe,target.fe.ad_offset,
+                          static_cast<std::uint32_t>(len));
+                }
             }
             tag_update(fe,0,target.fe.ad_offset+target.fe.ads);
             staged_write(out,target.fe.at,fe);
@@ -1315,9 +1363,9 @@ void edit_udf(const std::filesystem::path& image,
                  checked.items()[it->second].size==
                      std::filesystem::file_size(changes[i].source),
                  "staged UDF file size mismatch");
-            const auto dest=tx.workspace/("udf-check-"+std::to_string(i));
-            need(checked.copy(it->second,dest),"staged UDF extraction cancelled");
-            need(same_file(dest,changes[i].source,progress),
+            need(same_staged_item(tx.output,
+                                  checked.items()[it->second],
+                                  changes[i].source,progress),
                  "UDF staged file differs from replacement source");
         }
     }
