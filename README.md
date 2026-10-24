@@ -1,16 +1,19 @@
 # ISO-WCX
 
-**ISO-WCX v0.15.0 Preview** — a self-contained modern C++20 Total Commander
-WCX plugin for optical images, WIM/ESD/SWM and virtual HDD filesystems.
-Browsing/extraction supports the listed formats; editing is restricted to
-validated plain ISO9660/Joliet and standard unsplit WIM files.
+**ISO-WCX v0.16.0 Stable Core** — a native C++20 Total Commander WCX
+plugin for optical ISO/UDF, WIM/ESD/SWM and virtual HDD images.
+Core browsing/extraction and packaging are verified in Windows x86/x64 and
+Linux CI. **Advanced readers and write modes explicitly marked experimental
+remain limited; this is not full NTFS/ext4/UDF compatibility.**
 
 ## Install into Total Commander
 
-1. Open [WCX preview builds](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml).
-2. Download the **ISO-WCX-Installable-Preview** ZIP artifact, unzip the artifact envelope if needed, and open **ISO-WCX-preview.zip** in Total Commander.
-3. Total Commander uses `pluginst.inf` to install `ISO-WCX.wcx` for 32-bit and `ISO-WCX.wcx64` for 64-bit. Keep both files together in the plugin folder.
+1. Open the [latest Stable release](https://github.com/sgennadi/ISO-WCX/releases/latest).
+2. Download **ISO-WCX-v0.16.0.zip** and open it in Total Commander.
+3. Let `pluginst.inf` install `ISO-WCX.wcx` (32-bit) and `ISO-WCX.wcx64` (64-bit).
 4. Restart Total Commander and open a supported image with Ctrl+PgDn.
+
+Development builds remain available through the [Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml).
 
 **No separate setup EXE, parser DLL, unpacker, PowerShell script or mounting
 service is needed.** Existing native helper CLIs are development/test programs,
@@ -22,10 +25,11 @@ remove only the obsolete `iso` association and add a new type pointing to
 the installed `ISO-WCX.wcx`. Restart TC. The plugin itself cannot repair an
 association that prevents its DLL from loading in the first place.
 
-For detailed instructions see [PREVIEW.md](PREVIEW.md),
-[INSTALL_EN.txt](INSTALL_EN.txt), and [INSTALL_RU.txt](INSTALL_RU.txt).
+For installation see [INSTALL_EN.txt](INSTALL_EN.txt) and
+[INSTALL_RU.txt](INSTALL_RU.txt); [PREVIEW.md](PREVIEW.md) describes
+experimental support. See [v0.16.0 release notes](RELEASE_NOTES.md).
 
-## Formats (preview)
+## Format coverage (experimental subsets identified separately)
 
 | Format/layout | Coverage |
 | --- | --- |

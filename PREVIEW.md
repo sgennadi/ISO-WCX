@@ -1,6 +1,6 @@
-# ISO-WCX v0.15.0 C++20 preview
+# ISO-WCX v0.16.0 — Stable Core with experimental format notes
 
-Modern Total Commander WCX plugin with restricted ISO/WIM editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
+Modern Total Commander WCX plugin with a Stable installation channel and explicitly restricted ISO/WIM/UDF editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
 ## If Total Commander says `File iso.wcx not found!`
 

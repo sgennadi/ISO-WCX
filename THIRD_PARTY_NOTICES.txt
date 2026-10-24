@@ -1,4 +1,4 @@
-ISO-WCX v0.14 preview — THIRD-PARTY SOFTWARE NOTICES
+ISO-WCX v0.16.0 Stable Core — THIRD-PARTY SOFTWARE NOTICES
 ===================================================
 
 The Total Commander WCX DLLs contain statically linked compression code.
