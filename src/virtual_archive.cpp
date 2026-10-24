@@ -3,6 +3,7 @@
 #include "iso_wcx/fat_volume.hpp"
 #include "iso_wcx/exfat_volume.hpp"
 #include "iso_wcx/ext_volume.hpp"
+#include "iso_wcx/ntfs_volume.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -87,7 +88,7 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
     const auto sector = disk_.logical_sector_size();
     const auto partitions = inspect_partition_table(disk_, sector);
     require(!partitions.empty(), "virtual disk has no partition table");
-    format_ = std::string(disk_name(disk_.format())) + " / FAT12/16/32/exFAT/ext2/3/4";
+    format_ = std::string(disk_name(disk_.format())) + " / FAT12/16/32/exFAT/ext2/3/4/NTFS";
     constexpr std::size_t max_items = 100000;
     for (std::size_t i = 0; i < partitions.size(); ++i) {
         const auto& partition = partitions[i];
@@ -111,8 +112,13 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
                     volume=std::make_unique<ExtVolume>(disk_,offset,length);
                     files=volume->list();
                 } catch(const std::exception&) {
-                    // Unrecognized/corrupt partitions remain invisible.
-                    continue;
+                    try {
+                        volume=std::make_unique<NtfsVolume>(disk_,offset,length);
+                        files=volume->list();
+                    } catch (const std::exception&) {
+                        // Unknown, corrupt and unsupported volumes are not guessed.
+                        continue;
+                    }
                 }
             }
         }
@@ -140,7 +146,7 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
         }
         volumes_.push_back(std::move(volume));
     }
-    require(!volumes_.empty(), "no supported FAT/exFAT/ext partition in virtual disk");
+    require(!volumes_.empty(), "no supported FAT/exFAT/ext/NTFS partition in virtual disk");
 }
 
 bool VirtualArchive::read(
