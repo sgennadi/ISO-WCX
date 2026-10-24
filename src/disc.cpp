@@ -1012,12 +1012,22 @@ class Udf {
                 auto item_name=udf_name(bytes,p+38+impl,n);
                 auto child_lba=u32(bytes,p+24);auto child_map=u16(bytes,p+28);
                 auto child=fe(child_lba,child_map);
-                Item item;item.path=prefix+item_name;item.directory=child.type==4;
-                item.attributes=item.directory?0x10u:0x20u;item.dos_time=child.dos_time;
-                item.size=item.directory?0:child.size;
-                item.extents=std::move(child.extents);item.inline_data=std::move(child.inline_bytes);
-                append(entries_,std::move(item));
-                if(child.type==4)walk(child_lba,child_map,prefix+item_name+"/",depth+1);
+                // ECMA-167 ICB file types 4 and 5 are directories and
+                // ordinary files. Never present symbolic links (type 12),
+                // devices, FIFOs or other special ICBs as ordinary bytes
+                // to the WCX extraction API. We do not materialize links.
+                if(child.type==4 || child.type==5) {
+                    Item item;item.path=prefix+item_name;
+                    item.directory=child.type==4;
+                    item.attributes=item.directory?0x10u:0x20u;
+                    item.dos_time=child.dos_time;
+                    item.size=item.directory?0:child.size;
+                    item.extents=std::move(child.extents);
+                    item.inline_data=std::move(child.inline_bytes);
+                    append(entries_,std::move(item));
+                    if(child.type==4)
+                        walk(child_lba,child_map,prefix+item_name+"/",depth+1);
+                }
             }
             p+=record_length;
         }
