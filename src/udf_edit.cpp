@@ -784,6 +784,47 @@ void copy(std::ifstream& in,std::fstream& out,std::uint64_t n,
 }
 // Verify through the independently parsed Disc extent map. This avoids
 // extracting a second multi-gigabyte copy just to compare staged contents.
+// Clone an image into the newly truncated transaction file without eagerly
+// writing every all-zero sector. This materially reduces disk consumption for
+// large sparse UDF test images; holes read back as zeros. Never use this for
+// replacement data in previously allocated blocks (which may contain stale
+// content). The explicit final byte preserves exact logical image length.
+void copy_image_sparse(std::ifstream& in,std::fstream& out,std::uint64_t n,
+                       const EditProgress& progress) {
+    need(n>0 && n<=static_cast<std::uint64_t>(
+        std::numeric_limits<std::streamoff>::max()),
+         "unsupported sparse UDF staging image size");
+    Bytes buffer(1024*1024);
+    const auto full_size=n;
+    std::uint64_t at=0;
+    std::uint8_t last=0;
+    while(n) {
+        edit_tick(progress);
+        const auto count=static_cast<std::size_t>(
+            std::min<std::uint64_t>(n,buffer.size()));
+        in.read(reinterpret_cast<char*>(buffer.data()),
+                static_cast<std::streamsize>(count));
+        need(bool(in),"UDF source image truncated during staging");
+        last=buffer[count-1u];
+        if(!std::all_of(buffer.begin(),
+                        buffer.begin()+static_cast<std::ptrdiff_t>(count),
+                        [](std::uint8_t value){return value==0;})) {
+            out.clear();
+            out.seekp(static_cast<std::streamoff>(at));
+            need(bool(out),"cannot seek staged sparse UDF image");
+            out.write(reinterpret_cast<const char*>(buffer.data()),
+                      static_cast<std::streamsize>(count));
+            need(bool(out),"cannot write staged sparse UDF image");
+        }
+        at+=count;
+        n-=count;
+    }
+    out.clear();
+    out.seekp(static_cast<std::streamoff>(full_size-1u));
+    need(bool(out),"cannot complete sparse UDF image length");
+    out.put(static_cast<char>(last));
+    need(bool(out),"cannot finalize sparse UDF staging image");
+}
 bool same_staged_item(const std::filesystem::path& staged,const Item& item,
                       const std::filesystem::path& source,
                       const EditProgress& progress) {
@@ -1143,7 +1184,7 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     need(bool(out),"cannot open staged UDF allocation image");
     std::ifstream original(image,std::ios::binary);
     need(bool(original),"cannot read original UDF for allocation");
-    copy(original,out,volume.image_size(),progress);
+    copy_image_sparse(original,out,volume.image_size(),progress);
     original.close();
     volume.close();
 
@@ -1259,7 +1300,7 @@ void edit_udf(const std::filesystem::path& image,
     need(bool(out),"cannot create staged UDF image");
     std::ifstream original(image,std::ios::binary);
     need(bool(original),"cannot open original UDF image");
-    copy(original,out,std::filesystem::file_size(image),progress);
+    copy_image_sparse(original,out,std::filesystem::file_size(image),progress);
     original.close();
     volume.close();
     for(const auto& change:changes) {
