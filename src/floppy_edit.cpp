@@ -116,12 +116,6 @@ std::array<std::uint8_t, 11> dos_encode(std::string_view name) {
     }
     return result;
 }
-std::uint8_t name_checksum(const std::vector<std::uint8_t>& v, std::size_t at) {
-    std::uint8_t s = 0;
-    for (unsigned i = 0; i < 11; ++i)
-        s = static_cast<std::uint8_t>(((s & 1u) << 7) + (s >> 1) + v[at + i]);
-    return s;
-}
 struct Node {
     std::size_t at;
     std::uint16_t first;
