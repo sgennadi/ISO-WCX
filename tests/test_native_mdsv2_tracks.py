@@ -81,7 +81,86 @@ def run(reader: pathlib.Path, image: pathlib.Path,
     )
 
 
-def main(reader: pathlib.Path) -> None:
+def wcx_extract(plugin: pathlib.Path, image: pathlib.Path,
+                output: pathlib.Path) -> list[bytes]:
+    """Load the *actual* Win32 or x64 WCX binary and verify its Unicode ABI."""
+    import ctypes
+    assert sys.platform == "win32"
+
+    class OpenW(ctypes.Structure):
+        _fields_ = [
+            ("ArcName", ctypes.c_wchar_p),
+            ("OpenMode", ctypes.c_int),
+            ("OpenResult", ctypes.c_int),
+            ("CmtBuf", ctypes.c_void_p),
+            ("CmtBufSize", ctypes.c_int),
+            ("CmtSize", ctypes.c_int),
+            ("CmtState", ctypes.c_int),
+        ]
+
+    class HeaderExW(ctypes.Structure):
+        _fields_ = [
+            ("ArcName", ctypes.c_wchar * 1024),
+            ("FileName", ctypes.c_wchar * 1024),
+            ("Flags", ctypes.c_int),
+            ("PackSize", ctypes.c_uint),
+            ("PackSizeHigh", ctypes.c_uint),
+            ("UnpSize", ctypes.c_uint),
+            ("UnpSizeHigh", ctypes.c_uint),
+            ("HostOS", ctypes.c_int),
+            ("FileCRC", ctypes.c_int),
+            ("FileTime", ctypes.c_int),
+            ("UnpVer", ctypes.c_int),
+            ("Method", ctypes.c_int),
+            ("FileAttr", ctypes.c_int),
+            ("CmtBuf", ctypes.c_void_p),
+            ("CmtBufSize", ctypes.c_int),
+            ("CmtSize", ctypes.c_int),
+            ("CmtState", ctypes.c_int),
+            ("Reserved", ctypes.c_char * 1024),
+        ]
+
+    api = ctypes.WinDLL(str(plugin))
+    api.OpenArchiveW.argtypes = [ctypes.POINTER(OpenW)]
+    api.OpenArchiveW.restype = ctypes.c_void_p
+    api.ReadHeaderExW.argtypes = [ctypes.c_void_p, ctypes.POINTER(HeaderExW)]
+    api.ReadHeaderExW.restype = ctypes.c_int
+    api.ProcessFileW.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p
+    ]
+    api.ProcessFileW.restype = ctypes.c_int
+    api.CloseArchive.argtypes = [ctypes.c_void_p]
+    api.CloseArchive.restype = ctypes.c_int
+
+    meta = OpenW()
+    meta.ArcName = str(image)
+    handle = api.OpenArchiveW(ctypes.byref(meta))
+    assert handle and meta.OpenResult == 0, (image, meta.OpenResult)
+    output.mkdir(exist_ok=True)
+    results: list[bytes] = []
+    try:
+        for _ in range(1000):
+            header = HeaderExW()
+            rc = api.ReadHeaderExW(handle, ctypes.byref(header))
+            if rc == 10:  # E_END_ARCHIVE
+                break
+            assert rc == 0, (image.name, rc)
+            name = header.FileName
+            assert name and "/" not in name and "\\" not in name and ".." not in name, name
+            dest = ctypes.create_unicode_buffer(str(output / name))
+            extracted = api.ProcessFileW(handle, 2, None, dest)
+            assert extracted == 0, (image.name, name, extracted)
+            data = (output / name).read_bytes()
+            assert len(data) == ((header.UnpSizeHigh << 32) | header.UnpSize), name
+            results.append(data)
+        else:
+            raise AssertionError("WCX never signalled end of archive")
+    finally:
+        assert api.CloseArchive(handle) == 0, image
+    return results
+
+
+def main(reader: pathlib.Path, plugin: pathlib.Path | None = None) -> None:
     with tempfile.TemporaryDirectory(prefix="iso-wcx-native-mdsv2-") as tmp:
         root = pathlib.Path(tmp)
         raw = {name: fetch(root, name) for name in SAMPLES}
@@ -99,6 +178,12 @@ def main(reader: pathlib.Path) -> None:
                 name, "filesystem extraction differs from independent ISO",
                 [(len(f), hashlib.sha256(f).hexdigest()) for f in files]
             )
+            if plugin is not None:
+                extracted = wcx_extract(plugin, root / name, root / (name + ".wcx"))
+                assert Counter(extracted) == expected, (
+                    name, "WCX Unicode extraction differs from original ISO"
+                )
+                print("PASS Windows WCX Unicode extraction:", name)
             print("PASS native MDSv2/MDX optical extraction:", name)
 
         # Password-protected AES-LRW track data is not silently exposed.
@@ -125,5 +210,6 @@ def main(reader: pathlib.Path) -> None:
 
 
 if __name__ == "__main__":
-    assert len(sys.argv) == 2
-    main(pathlib.Path(sys.argv[1]).resolve())
+    assert len(sys.argv) in (2, 3)
+    main(pathlib.Path(sys.argv[1]).resolve(),
+         pathlib.Path(sys.argv[2]).resolve() if len(sys.argv) == 3 else None)
