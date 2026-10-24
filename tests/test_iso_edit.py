@@ -55,6 +55,46 @@ def read_image(path, joliet=False):
     return out
 
 
+
+def validate_path_tables(path):
+    """Independently validate both byte orders and ISO/Joliet directory ordering."""
+    data = path.read_bytes()
+    descriptor_sectors = [16]
+    if data[17*B] == 2:
+        descriptor_sectors.append(17)
+
+    for descriptor in descriptor_sectors:
+        vd = data[descriptor*B:(descriptor+1)*B]
+        size = int.from_bytes(vd[132:136], 'little')
+        assert size == int.from_bytes(vd[136:140], 'big')
+        assert size > 0
+
+        def entries(lba, byteorder):
+            pos, rows = lba*B, []
+            end = pos + size
+            assert end <= len(data)
+            while pos < end:
+                count = data[pos]
+                entry_size = 8 + count + (count & 1)
+                assert count and pos + entry_size <= end
+                location = int.from_bytes(data[pos+2:pos+6], byteorder)
+                parent = int.from_bytes(data[pos+6:pos+8], byteorder)
+                identifier = bytes(data[pos+8:pos+8+count])
+                rows.append((parent, identifier, location))
+                assert location*B < len(data)
+                assert data[location*B+25] & 2, 'path table points outside a directory'
+                pos += entry_size
+            return rows
+
+        little = entries(int.from_bytes(vd[140:144], 'little'), 'little')
+        big = entries(int.from_bytes(vd[148:152], 'big'), 'big')
+        assert little == big, 'ISO little/big endian path tables disagree'
+        assert little[0][0] == 1 and little[0][1] == b'\\x00'
+        assert little == sorted(little, key=lambda item: (item[0], item[1])), 'unsorted ISO path table'
+        for index, (parent, _, _) in enumerate(little, start=1):
+            assert 1 <= parent <= index, 'invalid path-table parent index'
+
+
 def independent_read(path):
     lib=ctypes.util.find_library('archive')
     if not lib:return None
@@ -93,14 +133,16 @@ def main(binary):
             r=subprocess.run(args,capture_output=True,text=True)
             assert (r.returncode==0)==ok,(r.stdout,r.stderr,op,name)
             if not ok:assert image.read_bytes()==before,'original changed on failure'
-        image.write_bytes(fixture());run('add','HELLO.TXT');run('add','DOCS/NEW.TXT');run('mkdir','EMPTY')
-        expected={'HELLO.TXT':source.read_bytes(),'DOCS/':None,'DOCS/NEW.TXT':source.read_bytes(),'EMPTY/':None}
+        image.write_bytes(fixture());run('add','HELLO.TXT');run('add','DOCS/NEW.TXT');run('mkdir','EMPTY');run('mkdir','AAA');run('mkdir','DOCS/Z_CHILD');run('mkdir','DOCS/A_CHILD')
+        expected={'HELLO.TXT':source.read_bytes(),'DOCS/':None,'DOCS/NEW.TXT':source.read_bytes(),'EMPTY/':None,'AAA/':None,'DOCS/Z_CHILD/':None,'DOCS/A_CHILD/':None}
         assert read_image(image)==expected
+        validate_path_tables(image)
         independent=independent_read(image)
         if independent is not None:assert independent['DOCS/NEW.TXT']==source.read_bytes()
         run('cancel','OTHER.TXT',False);run('add','../escape',False)
         run('delete','DOCS');assert 'DOCS/NEW.TXT' not in read_image(image)
-        image.write_bytes(fixture(joliet=True));run('add','café.txt');run('add','NEW.TXT')
+        image.write_bytes(fixture(joliet=True));run('add','café.txt');run('add','NEW.TXT');run('mkdir','ZZZ');run('mkdir','AAA')
+        validate_path_tables(image)
         assert read_image(image,True)['café.txt']==source.read_bytes()
         assert read_image(image)['HELLO.TXT']==source.read_bytes()
         image.write_bytes(fixture(boot=True));old=image.read_bytes();run('add','NEW.TXT')
