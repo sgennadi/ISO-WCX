@@ -1336,7 +1336,8 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
     if(!virtual_archive_ && !wim_archive_ && entry.direct_source.empty() &&
        entry.chd_audio_track==0)
         source=std::make_unique<Source>(image_,track);
-    else if(!virtual_archive_ && !wim_archive_) {
+    else if(!virtual_archive_ && !wim_archive_ &&
+            !entry.direct_source.empty() && entry.chd_audio_track==0) {
         require(std::filesystem::is_regular_file(entry.direct_source) &&
                 !std::filesystem::is_symlink(entry.direct_source),
                 "unsafe raw CloneCD sidecar source");
