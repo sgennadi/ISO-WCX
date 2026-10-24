@@ -8,6 +8,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -31,7 +32,7 @@ void require(bool condition, const char* message) {
 int main(int argc, char** argv) {
     try {
         require(argc == 2, "Usage: chd_parallel_read_tests image.chd");
-        iso_wcx::ChdStream chd(std::filesystem::path(argv[1]));
+        iso_wcx::ChdStream chd{std::filesystem::path(argv[1])};
         require(!chd.audio_tracks().empty(), "fixture must contain CDDA");
 
         std::vector<Probe> probes;
