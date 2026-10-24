@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -159,6 +160,23 @@ struct Interval {
     Location range;
     std::uint64_t owner;
 };
+struct Bitmap {
+    Bytes bytes;
+    std::uint64_t at{};
+    std::uint32_t bits{},byte_count{},logical{};
+};
+// UDF 4/14.12: each set bit represents an unallocated logical block.
+// Only single-block Space Bitmap Descriptors are supported at this stage.
+bool bitmap_free(const Bitmap& bitmap,std::uint32_t logical) {
+    need(logical<bitmap.bits,"UDF bitmap logical address outside partition");
+    return (bitmap.bytes[24+logical/8]&(1u<<(logical%8)))!=0;
+}
+void bitmap_reserve(Bitmap& bitmap,std::uint32_t logical) {
+    need(bitmap_free(bitmap,logical),
+         "UDF bitmap claims requested block is already allocated");
+    bitmap.bytes[24+logical/8]&=
+        static_cast<std::uint8_t>(~(1u<<(logical%8)));
+}
 
 class Type1 {
 public:
@@ -208,6 +226,36 @@ public:
         need(partition_blocks_>2 && partition_<size_/block &&
              partition_blocks_<=size_/block-partition_,
              "UDF partition bounds outside image");
+        // Partition header: only a single unallocated-space bitmap can
+        // authorize allocation. Space tables, freed-space sets or multiple
+        // physical partition maps cannot be safely synthesized.
+        const auto bitmap_length=u32(pd,64);
+        const auto bitmap_logical=u32(pd,68);
+        const auto has_conflicting_allocator=
+            u32(pd,56)!=0 || u32(pd,72)!=0 || u32(pd,80)!=0 ||
+            u32(pd,88)!=0;
+        if(bitmap_length) {
+            need(!has_conflicting_allocator &&
+                 bitmap_length<=block && bitmap_length>=24 &&
+                 bitmap_logical<partition_blocks_,
+                 "unsupported UDF free-space allocation layout");
+            Bitmap bm;
+            bm.logical=bitmap_logical;
+            bm.at=physical(bitmap_logical);
+            bm.bytes=read(bm.at,block);
+            tag_check(bm.bytes,0,264);
+            need(u32(bm.bytes,12)==bitmap_logical,
+                 "incorrect UDF bitmap descriptor location");
+            bm.bits=u32(bm.bytes,16);
+            bm.byte_count=u32(bm.bytes,20);
+            need(bm.bits==partition_blocks_ &&
+                 bm.byte_count==(bm.bits+7u)/8u &&
+                 24ull+bm.byte_count<=bitmap_length &&
+                 24ull+bm.byte_count<=block,
+                 "invalid UDF bitmap size/count");
+            bitmap_=std::move(bm);
+            reserved_.push_back({{bitmap_->at,bitmap_length},0});
+        }
         const auto fsd_size=u32(lvd,248)&0x3fffffffu;
         need(fsd_size>=416 && fsd_size<=block && u16(lvd,256)==0,
              "unsupported UDF file-set mapping");
@@ -217,6 +265,24 @@ public:
         reserved_.push_back({{std::uint64_t(start)*block,len},0});
         reserved_.push_back({{physical(u32(lvd,252)),block},0});
         walk(u32(fsd,404),u16(fsd,408),"",0);
+        if(bitmap_) {
+            // A bitmap advertising an existing object or descriptor as
+            // free is contradictory: fail closed before any new writes.
+            for(const auto& occupied:reserved_) {
+                const auto first=occupied.range.at;
+                const auto last=first+occupied.range.bytes;
+                if(first>=std::uint64_t(partition_)*block &&
+                   last<=(std::uint64_t(partition_)+partition_blocks_)*block) {
+                    const auto logical=static_cast<std::uint32_t>(
+                        (first-std::uint64_t(partition_)*block)/block);
+                    const auto count=(occupied.range.bytes+block-1)/block;
+                    for(std::uint64_t i=0;i<count;++i)
+                        need(!bitmap_free(*bitmap_,logical+
+                             static_cast<std::uint32_t>(i)),
+                             "UDF free bitmap overlaps a referenced file or descriptor");
+                }
+            }
+        }
     }
 
     [[nodiscard]] const std::map<std::string,File>& files() const noexcept {
@@ -225,12 +291,47 @@ public:
     [[nodiscard]] const std::vector<Interval>& intervals() const noexcept {
         return reserved_;
     }
+    [[nodiscard]] const std::map<std::string,Fe>& directories() const noexcept {
+        return directory_files_;
+    }
+    [[nodiscard]] bool has_bitmap() const noexcept {return bitmap_.has_value();}
+    [[nodiscard]] std::uint64_t image_size() const noexcept {return size_;}
+    [[nodiscard]] std::uint32_t part_start() const noexcept {return partition_;}
+    // Allocated blocks are immediately removed from the in-memory bitmap
+    // so a second allocation in the same transaction cannot reuse them.
+    [[nodiscard]] std::uint32_t allocate_block() {
+        need(bitmap_.has_value(),
+             "UDF new-file allocation requires a valid Space Bitmap Descriptor");
+        auto& bitmap=*bitmap_;
+        for(std::uint32_t logical=0;logical<bitmap.bits;++logical) {
+            if(!bitmap_free(bitmap,logical))continue;
+            const Location candidate{(std::uint64_t(partition_)+logical)*block,
+                                     block};
+            bool collision=false;
+            for(const auto& object:reserved_)
+                if(intersects(candidate,object.range)){collision=true;break;}
+            need(!collision,
+                 "UDF bitmap marks an occupied or unknown extent as free");
+            bitmap_reserve(bitmap,logical);
+            reserved_.push_back({candidate,0});
+            return logical;
+        }
+        throw EditUnsupported("UDF partition bitmap has no free blocks");
+    }
+    [[nodiscard]] std::pair<std::uint64_t,Bytes> updated_bitmap() const {
+        need(bitmap_.has_value(),"UDF bitmap is absent");
+        auto b=bitmap_->bytes;
+        tag_update(b,0,24u+bitmap_->byte_count);
+        return {bitmap_->at,std::move(b)};
+    }
     void close() {file_.close();}
 private:
     std::ifstream file_;
     std::uint64_t size_{};
     std::uint32_t partition_{},partition_blocks_{};
     std::map<std::string,File> files_;
+    std::map<std::string,Fe> directory_files_;
+    std::optional<Bitmap> bitmap_;
     std::map<std::uint64_t,std::size_t> references_;
     std::set<std::uint32_t> directories_;
     std::vector<Interval> reserved_;
@@ -309,6 +410,8 @@ private:
              "UDF directory depth, alias or cycle unsupported");
         const auto directory=parse_fe(lba,map);
         need(directory.type==4,"UDF FID references a non-directory");
+        need(directory_files_.emplace(prefix,directory).second,
+             "duplicate UDF directory path");
         reserved_.push_back({{directory.at,block},directory.at});
         if(directory.storage!=3)
             reserved_.push_back({{directory.data_at,directory.capacity},
