@@ -3,6 +3,8 @@
 #include "iso_wcx/subq.hpp"
 #include "iso_wcx/compressed_image.hpp"
 #include "iso_wcx/packed_optical.hpp"
+#include "iso_wcx/chd_stream.hpp"
+#include "iso_wcx/cd_audio_wav.hpp"
 #include "iso_wcx/cue.hpp"
 #include "iso_wcx/image_tracks.hpp"
 #include "iso_wcx/mds_probe.hpp"
@@ -1127,6 +1129,35 @@ public:
     }
     std::vector<Item> take() {return std::move(entries_);}
 };
+
+void append_chd_audio_items(std::vector<Item>& entries, const ChdStream& chd) {
+    if(chd.audio_tracks().empty()) return;
+    // Keep generated paths separate from ISO/UDF content. Total Commander
+    // compares names case-insensitively on Windows: avoid ambiguous entries.
+    const auto clashes=std::any_of(entries.begin(),entries.end(),
+        [](const Item& item) {
+            std::string name=item.path;
+            std::transform(name.begin(),name.end(),name.begin(),
+                [](unsigned char c){return static_cast<char>(std::tolower(c));});
+            return name=="cdda" || name.rfind("cdda/",0)==0;
+        });
+    require(!clashes,"CDDA virtual folder collides with ISO/UDF entry");
+    Item directory;
+    directory.path="CDDA";
+    directory.directory=true;
+    directory.attributes=0x10u;
+    append(entries,std::move(directory));
+    for(const auto& track:chd.audio_tracks()) {
+        Item item;
+        item.path="CDDA/track";
+        if(track.number<10)item.path+="0";
+        item.path+=std::to_string(track.number)+".wav";
+        item.attributes=0x20u;
+        item.chd_audio_track=track.number;
+        item.size=cdda_wave_file_length(track.frames);
+        append(entries,std::move(item));
+    }
+}
 }
 
 Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
@@ -1252,6 +1283,17 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
         }
         return;
     }
+    if(extension==L".chd") {
+        auto chd=std::make_shared<ChdStream>(image_);
+        if(!chd->audio_tracks().empty()) chd_audio_=std::move(chd);
+        if(chd_audio_ && chd_audio_->size()==0) {
+            // Audio-only CHDs have no ISO descriptor and must not be passed to
+            // the filesystem parser (which deliberately requires a PVD/AVDP).
+            format_=chd_audio_->label();
+            append_chd_audio_items(entries_,*chd_audio_);
+            return;
+        }
+    }
     Source source(image_);
     Udf udf(source);
     if(udf.parse()) {entries_=udf.take();format_="UDF";}
@@ -1266,6 +1308,10 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
         }
     }
     if(!source.layout().empty())format_+=" / "+source.layout();
+    if(chd_audio_) {
+        append_chd_audio_items(entries_,*chd_audio_);
+        format_+=" / CDDA WAV tracks";
+    }
 }
 
 bool Disc::copy(std::size_t index, const std::filesystem::path& output,
@@ -1287,7 +1333,9 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
     if(entry.source_index!=0xffffffffu) track.emplace(entry.source_index);
     std::unique_ptr<Source> source;
     std::ifstream direct;
-    if(!virtual_archive_ && !wim_archive_ && entry.direct_source.empty())source=std::make_unique<Source>(image_,track);
+    if(!virtual_archive_ && !wim_archive_ && entry.direct_source.empty() &&
+       entry.chd_audio_track==0)
+        source=std::make_unique<Source>(image_,track);
     else if(!virtual_archive_ && !wim_archive_) {
         require(std::filesystem::is_regular_file(entry.direct_source) &&
                 !std::filesystem::is_symlink(entry.direct_source),
@@ -1355,6 +1403,26 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
 #else
         throw std::runtime_error("WIM/ESD is unsupported on this platform");
 #endif
+    } else if(entry.chd_audio_track!=0) {
+        require(bool(chd_audio_),"CHD CDDA source is unavailable");
+        const auto& tracks=chd_audio_->audio_tracks();
+        const auto selected=std::find_if(tracks.begin(),tracks.end(),
+            [&](const ChdAudioTrack& t){return t.number==entry.chd_audio_track;});
+        require(selected!=tracks.end(),"CHD audio track is missing");
+        require(selected->frames<=std::numeric_limits<std::uint64_t>::max()/2352u,
+                "CHD audio byte size overflow");
+        const auto pcm_bytes=selected->frames*2352u;
+        const auto header=cdda_wave_header(pcm_bytes);
+        require(entry.size==pcm_bytes+header.size(),
+                "CHD CDDA virtual WAV file size changed");
+        if(!deliver(header.data(),header.size()))return false;
+        for(std::uint64_t offset=0;offset<pcm_bytes;) {
+            const auto chunk=static_cast<std::size_t>(
+                std::min<std::uint64_t>(pcm_bytes-offset,1024u*1024u));
+            auto audio=chd_audio_->read_audio(entry.chd_audio_track,offset,chunk);
+            if(!deliver(audio.data(),audio.size()))return false;
+            offset+=chunk;
+        }
     } else if(!entry.inline_data.empty()) {
         require(entry.inline_data.size()==entry.size,"invalid inline data length");
         if(!deliver(entry.inline_data.data(),entry.inline_data.size()))return false;
