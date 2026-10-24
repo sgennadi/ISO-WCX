@@ -15,6 +15,7 @@ import time
 
 BLOCK = 2048
 DATA_SIZE = (4 * 1024**3) + (4 * 1024**2) + 4096
+INITIAL_SIZE = DATA_SIZE - 193  # Grow only into the final ShortAD sector tail.
 IMAGE_BLOCKS = 2_780_000  # approximately 5.3 GiB logical UDF image
 FILENAME = "UDF-OVER-4-GIB.BIN"
 
@@ -37,7 +38,7 @@ def checksum(file):
     return digest.hexdigest()
 
 
-def checksum_7zip(image):
+def checksum_7zip(image, expected_size):
     digest = hashlib.sha256()
     total = 0
     # Extraction to stdout verifies a fully independent UDF decoder without
@@ -57,9 +58,9 @@ def checksum_7zip(image):
         process.kill()
         process.wait()
         raise
-    if status or total != DATA_SIZE:
+    if status or total != expected_size:
         raise AssertionError(
-            f"7z streamed {total} expected {DATA_SIZE}; "
+            f"7z streamed {total} expected {expected_size}; "
             f"exit={status}; errors={stderr[-2000:]}")
     return digest.hexdigest()
 
@@ -68,8 +69,10 @@ def main(editor, inspector):
     with tempfile.TemporaryDirectory(prefix="iso-wcx-udf-over4g-") as temp:
         root = pathlib.Path(temp)
         free = shutil.disk_usage(root).free
-        if free < 6 * 1024**3:
-            raise RuntimeError(f">4 GiB test needs >=6 GiB free disk: {free}")
+        # Replacement temporarily keeps the original UDF image and its
+        # staged successor on the same volume. Plan for both allocations.
+        if free < 10 * 1024**3:
+            raise RuntimeError(f">4 GiB UDF editing needs >=10 GiB free: {free}")
         image = root / "over4g.udf"
         source = root / "source-over4g.bin"
         print("Formatting a sparse UDF 1.02 Type-1 image", flush=True)
@@ -82,34 +85,65 @@ def main(editor, inspector):
         # Sparse logical input, distinguishable markers before/after each GiB
         # and at the 32-bit file-size boundary, never a 4-GiB Python buffer.
         with source.open("wb") as file:
-            file.truncate(DATA_SIZE)
+            file.truncate(INITIAL_SIZE)
         with source.open("r+b") as file:
             positions = [0, 1, 1024**3-16, 1024**3,
                          2*1024**3, 3*1024**3,
                          4*1024**3-16, 4*1024**3,
-                         DATA_SIZE-32]
+                         INITIAL_SIZE-32]
             for offset in positions:
                 file.seek(offset)
                 file.write(f"ISO-WCX:{offset:016X}".encode("ascii"))
-        assert source.stat().st_size == DATA_SIZE
+        assert source.stat().st_size == INITIAL_SIZE
         expected = checksum(source)
 
-        print(f"Creating {DATA_SIZE}-byte file (>4 GiB)", flush=True)
+        print(f"Creating {INITIAL_SIZE}-byte file (>4 GiB)", flush=True)
         started = time.monotonic()
         command(editor, image, "add", FILENAME, source, timeout=1200)
         print(f"UDF writer completed in {time.monotonic()-started:.1f}s",
               flush=True)
         command("udfinfo", image)
         listing = command(inspector, image, timeout=180)
-        assert f"FILE {DATA_SIZE} {FILENAME}" in listing, listing[-2000:]
+        assert f"FILE {INITIAL_SIZE} {FILENAME}" in listing, listing[-2000:]
         independent_listing = command("7z", "l", image, timeout=180)
         assert FILENAME in independent_listing
         print("Independent 7z streaming >4-GiB extraction/hash", flush=True)
-        assert checksum_7zip(image) == expected
+        assert checksum_7zip(image, INITIAL_SIZE) == expected
 
-        # Existing-file replacement uses the same ShortAD array and does not
-        # allocate new bitmap sectors. Exercise the 64-bit replacement path,
-        # not just initial file creation.
+        # Grow the existing multi-ShortAD file by 193 bytes. The new size
+        # uses its already reserved final logical sector and must not allocate
+        # blocks, change earlier ShortAD entries or relocate existing data.
+        with source.open("r+b") as file:
+            file.truncate(DATA_SIZE)
+            file.seek(DATA_SIZE-32)
+            file.write(b"GROWTH-TO-FINAL-SECTOR-BOUNDARY")
+        grown_hash = checksum(source)
+        assert grown_hash != expected
+        print(f"Growing multi-ShortAD UDF {INITIAL_SIZE} -> {DATA_SIZE}",
+              flush=True)
+        command(editor, image, "add", FILENAME, source, timeout=1200)
+        command("udfinfo", image)
+        grown_listing = command(inspector, image, timeout=180)
+        assert f"FILE {DATA_SIZE} {FILENAME}" in grown_listing
+        assert checksum_7zip(image, DATA_SIZE) == grown_hash
+
+        # Another byte cannot be represented by the last ShortAD without
+        # allocating another sector. Reject it atomically, retaining data.
+        with source.open("r+b") as file:
+            file.truncate(DATA_SIZE+1)
+        rejected = subprocess.run(
+            [str(editor), str(image), "add", FILENAME, str(source)],
+            capture_output=True, timeout=180, check=False)
+        assert rejected.returncode != 0, (
+            "UDF accepted growth past the reserved final sector")
+        assert not list(root.glob(".iso-wcx-edit-*")), (
+            "aborted multi-ShortAD transaction left a staged file")
+        assert checksum_7zip(image, DATA_SIZE) == grown_hash, (
+            "rejected UDF growth modified the committed image")
+        with source.open("r+b") as file:
+            file.truncate(DATA_SIZE)
+
+        # Same-length multi-ShortAD replacement remains supported after growth.
         with source.open("r+b") as file:
             for offset in (0, 1024**3, 2*1024**3, 3*1024**3,
                            4*1024**3, DATA_SIZE-32):
@@ -122,9 +156,10 @@ def main(editor, inspector):
         command("udfinfo", image)
         replacement_listing = command(inspector, image, timeout=180)
         assert f"FILE {DATA_SIZE} {FILENAME}" in replacement_listing
-        assert checksum_7zip(image) == replacement_hash
-        print("PASS: >4 GiB UDF native create+replace, multiple ShortADs, "
-              "7z streaming SHA256 and independent readback", flush=True)
+        assert checksum_7zip(image, DATA_SIZE) == replacement_hash
+        print("PASS: >4 GiB UDF native create, last-ShortAD in-place grow, "
+              "overflow rollback and replace; independent 7z SHA256",
+              flush=True)
 
 
 if __name__ == "__main__":
