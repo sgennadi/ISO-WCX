@@ -256,11 +256,16 @@ public:
                  "incorrect UDF bitmap descriptor location");
             bm.bits=u32(bm.bytes,16);
             bm.byte_count=u32(bm.bytes,20);
+            // This preview supports one-block bitmaps only. Validate
+            // before indexing so a corrupt large bit count cannot overflow
+            // a 32-bit ceil-divide or escape the descriptor buffer.
             need(bm.bits==partition_blocks_ &&
-                 bm.byte_count==(bm.bits+7u)/8u &&
+                 bm.bits>0 &&
+                 std::uint64_t(bm.bits)<=8u*(block-24u) &&
+                 bm.byte_count==(std::uint64_t(bm.bits)+7u)/8u &&
                  24ull+bm.byte_count<=bitmap_length &&
                  24ull+bm.byte_count<=block,
-                 "invalid UDF bitmap size/count");
+                 "invalid or oversized UDF bitmap size/count");
             bitmap_=std::move(bm);
             reserved_.push_back({{bitmap_->at,block},0});
             const auto integrity_length=u32(lvd,432);
