@@ -105,6 +105,9 @@ if(BUILD_TESTING)
   add_test(NAME udf_bridge_same_length_edit
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_bridge_edit.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  add_test(NAME udf_type1_native_resize_delete
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_edit.py"
+      "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
   add_executable(wim_parts_tests tests/wim_parts.cpp)
   target_include_directories(wim_parts_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME wim_split_parts COMMAND wim_parts_tests)
@@ -116,7 +119,7 @@ if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
   message(FATAL_ERROR "CTest requires ISO_WCX_BUILD_DEV_TOOLS=ON")
 endif()
 
-add_library(iso_disc STATIC src/archive_edit.cpp src/iso_edit.cpp src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
+add_library(iso_disc STATIC src/archive_edit.cpp src/iso_edit.cpp src/udf_edit.cpp src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET} chdr-static)
 if(WIN32)
   target_sources(iso_disc PRIVATE src/wim_archive.cpp src/wim_edit.cpp)
