@@ -595,6 +595,179 @@ bool same_file(const std::filesystem::path& left,
     }
     return true;
 }
+// First allocator-backed writer stage: new small embedded regular files and
+// empty embedded directories in an existing embedded directory. We avoid
+// directory relocation, VAT, sparse files, extent chains and ISO/UDF bridges.
+void create_udf_type1(const std::filesystem::path& image,Type1& volume,
+                      const ArchiveChange& change,
+                      const EditProgress& progress) {
+    const auto key=edit_path(change.path);
+    need(volume.has_bitmap(),"UDF create requires a validated allocation bitmap");
+    need(!volume.files().count(key) &&
+         !volume.directories().count(key),"UDF destination already exists");
+
+    const auto separator=key.rfind('/');
+    const std::string parent_name=separator==std::string::npos?
+                                  std::string{}:key.substr(0,separator);
+    const auto component=separator==std::string::npos?
+                         key:key.substr(separator+1);
+    // Byte-preserving 8-bit OSTA CS0 for ASCII, no implicit conversion of
+    // arbitrary UTF-8 into the UDF CS0 character set.
+    need(!component.empty() && component.size()<=200,
+         "unsupported new UDF filename length");
+    for(const unsigned char c:component)
+        need(c>=32 && c<=126 && c!='/' && c!='\\',
+             "new UDF filename must use printable ASCII");
+    const auto parent_it=volume.directories().find(parent_name);
+    need(parent_it!=volume.directories().end(),
+         "UDF parent directory does not exist");
+    const auto& parent=parent_it->second;
+    need(parent.type==4 && parent.storage==3 &&
+         parent.size<=parent.ads && parent.ad_offset<=block &&
+         parent.capacity<=block-parent.ad_offset,
+         "new UDF entry requires an embedded parent directory");
+
+    // Do not shadow an existing name with different ASCII case.
+    std::string folded=key;
+    for(char& c:folded)
+        if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
+    for(const auto& [other,file]:volume.files()) {
+        (void)file;
+        std::string upper=other;
+        for(char& c:upper)
+            if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
+        need(upper!=folded,"UDF new name collides case-insensitively");
+    }
+    for(const auto& [other,dir]:volume.directories()) {
+        (void)dir;
+        std::string upper=other;
+        for(char& c:upper)
+            if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
+        need(upper!=folded,"UDF new directory collides case-insensitively");
+    }
+
+    constexpr std::size_t fe_header=176;
+    std::uint64_t length=0;
+    if(!change.directory) {
+        need(std::filesystem::is_regular_file(
+                 std::filesystem::symlink_status(change.source)),
+             "UDF create source must be a regular file, not symlink");
+        length=std::filesystem::file_size(change.source);
+        need(length<=block-fe_header,
+             "UDF allocator currently creates only embedded small files");
+    }
+    const auto fid_id_size=component.size()+1u; // CS0 compression 8
+    const auto fid_size=(38u+fid_id_size+3u)&~std::size_t(3);
+    need(fid_size<=255 && parent.size+fid_size<=parent.capacity,
+         "parent directory lacks embedded space for new UDF FID");
+    need(parent.size<=block-parent.ad_offset &&
+         fid_size<=block-parent.ad_offset-parent.size,
+         "new FID would cross UDF directory file-entry bounds");
+
+    const auto new_lba=volume.allocate_block();
+    const auto new_offset=volume.absolute(new_lba);
+    Bytes child(block,0);
+    put16(child,0,261); // ECMA-167 File Entry
+    put16(child,2,2);   // DescriptorVersion
+    put32(child,12,new_lba);
+    child[27]=change.directory?4u:5u; // Directory or ordinary file
+    put16(child,34,3u); // ICB allocation flags: embedded data
+    put32(child,36,0xffffffffu); // UID not supplied
+    put32(child,40,0xffffffffu); // GID not supplied
+    put32(child,44,change.directory?0x000001ffu:0x000001b6u);
+    put16(child,48,1); // Link count
+    put64(child,56,length);
+    put64(child,64,0); // No external data blocks
+    put32(child,108,1); // Checkpoint
+    put64(child,160,volume.new_unique_id());
+    put32(child,168,0); // ExtendedAttributes length
+    put32(child,172,static_cast<std::uint32_t>(length));
+    if(length) {
+        std::ifstream input(change.source,std::ios::binary);
+        need(bool(input),"cannot read new UDF embedded source");
+        input.read(reinterpret_cast<char*>(child.data()+fe_header),
+                   static_cast<std::streamsize>(length));
+        need(bool(input),"new UDF embedded source shortened");
+    }
+    tag_update(child,0,fe_header+static_cast<std::size_t>(length));
+
+    Bytes fid(fid_size,0);
+    put16(fid,0,257); // File Identifier Descriptor
+    put16(fid,2,2);
+    put32(fid,12,volume.logical_of(parent.at));
+    put16(fid,16,1); // FileVersionNumber
+    fid[18]=change.directory?2u:0u;
+    fid[19]=static_cast<std::uint8_t>(fid_id_size);
+    put32(fid,20,static_cast<std::uint32_t>(block));
+    put32(fid,24,new_lba);
+    put16(fid,28,0); // Physical partition map index
+    fid[38]=8; // 8-bit OSTA CS0 name encoding
+    std::copy(component.begin(),component.end(),fid.begin()+39);
+    tag_update(fid,0,fid.size());
+
+    auto parent_bytes=parent.bytes;
+    const auto old_size=static_cast<std::size_t>(parent.size);
+    const auto fid_at=parent.ad_offset+old_size;
+    std::copy(fid.begin(),fid.end(),
+              parent_bytes.begin()+static_cast<std::ptrdiff_t>(fid_at));
+    const auto new_dir_size=parent.size+fid_size;
+    put64(parent_bytes,56,new_dir_size);
+    if(u16(parent_bytes,0)==266)
+        put64(parent_bytes,64,new_dir_size); // EFE Object Size
+    put32(parent_bytes,u16(parent_bytes,0)==266?212u:172u,
+          static_cast<std::uint32_t>(new_dir_size));
+    tag_update(parent_bytes,0,parent.ad_offset+
+               static_cast<std::size_t>(new_dir_size));
+
+    EditTransaction tx(image);
+    std::fstream out(tx.output,std::ios::binary|std::ios::in|
+                     std::ios::out|std::ios::trunc);
+    need(bool(out),"cannot open staged UDF allocation image");
+    std::ifstream original(image,std::ios::binary);
+    need(bool(original),"cannot read original UDF for allocation");
+    copy(original,out,volume.image_size(),progress);
+    original.close();
+    volume.close();
+
+    staged_write(out,new_offset,child);
+    staged_write(out,parent.at,parent_bytes);
+    const auto [bitmap_at,bitmap_data]=volume.updated_bitmap();
+    staged_write(out,bitmap_at,bitmap_data);
+    const auto [integrity_at,integrity_data]=
+        volume.updated_integrity(change.directory);
+    staged_write(out,integrity_at,integrity_data);
+    out.flush();
+    need(bool(out),"staged UDF allocation flush failed");
+    out.close();
+
+    // Full strict structural parse plus independent extraction of changed
+    // file bytes. Newly allocated FEs must also be discoverable by name.
+    {
+        Type1 strict(tx.output);
+        need(strict.files().count(key)==(!change.directory),
+             "staged UDF file map was not updated");
+        need(strict.directories().count(key)==change.directory,
+             "staged UDF directory map was not updated");
+        strict.close();
+        const Disc inspected(tx.output);
+        need(inspected.format()=="UDF","staged UDF allocation unreadable");
+        auto it=std::find_if(inspected.items().begin(),inspected.items().end(),
+            [&](const Item& item) {
+                return item.path==key && item.directory==change.directory;
+            });
+        need(it!=inspected.items().end(),"new UDF entry not visible");
+        if(!change.directory) {
+            need(it->size==length,"new UDF file length mismatched");
+            const auto i=static_cast<std::size_t>(
+                std::distance(inspected.items().begin(),it));
+            const auto tmp=tx.workspace/"new-udf-file-check";
+            need(inspected.copy(i,tmp),"new UDF readback failed");
+            need(same_file(tmp,change.source,progress),
+                 "new UDF file content verification failed");
+        }
+    }
+    tx.commit(progress);
+}
 } // namespace
 
 void edit_udf(const std::filesystem::path& image,
@@ -605,6 +778,16 @@ void edit_udf(const std::filesystem::path& image,
     need(before.format()=="UDF","not a plain readable UDF volume");
     Type1 volume(image);
     need(!changes.empty(),"no UDF changes");
+    // Allocation is a separate one-file atomic transaction until multi-file
+    // directory/bitmap/LVID updates can be planned and verified together.
+    if(changes.size()==1 && !changes[0].remove) {
+        const auto path=edit_path(changes[0].path);
+        if(!volume.files().count(path) &&
+           !volume.directories().count(path)) {
+            create_udf_type1(image,volume,changes[0],progress);
+            return;
+        }
+    }
     std::set<std::string> distinct;
     for(const auto& change:changes) {
         const auto name=edit_path(change.path);
