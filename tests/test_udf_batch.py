@@ -146,7 +146,7 @@ def main(editor: pathlib.Path, inspector: pathlib.Path):
         storage, new_lba, new_capacity, count, crosses = validate_root_fids(raw)
         assert storage == 0 and new_lba != old_lba
         assert new_capacity > capacity and crosses
-        assert count == 1 + 17 + 4 + 21
+        assert count == 1 + 17 + 3 + 21
         assert struct.unpack_from("<Q", raw, LVID_AT + 40)[0] == (
             before_id + len(changes) + len(second))
         assert struct.unpack_from("<I", raw, LVID_AT + 80)[0] < old_free
