@@ -7,6 +7,7 @@ We deliberately fail (without silently skipping) on layout incompatibility.
 from __future__ import annotations
 import hashlib
 import pathlib
+import struct
 import shutil
 import subprocess
 import sys
@@ -50,11 +51,67 @@ def independent_extract(image, root, logical_name, expected):
     shutil.rmtree(destination)
 
 
+
+def portable_udf_image(root, block_size):
+    """UDF 2.01 whole-device image independently authored by mkudffs."""
+    image = root / f"portable-{block_size}.udf"
+    command("mkudffs", "--media-type=hd", f"--blocksize={block_size}",
+            "--udfrev=0x0201", "--ad=inicb", "--space=unallocbitmap",
+            "--label=WCX-PORTABLE", "--new-file", image, BLOCK_COUNT)
+    assert image.stat().st_size == BLOCK_COUNT * block_size
+    command("udfinfo", image)
+    return image
+
+
+def add_fake_mbr(image, block_size):
+    """Test-only zero-start whole-disk MBR, not a real FAT partition."""
+    raw = bytearray(image.read_bytes())
+    assert raw[:512] == bytes(512), "mkudffs unexpectedly used first sector"
+    # MBR type 0x0B is deliberately misleading: actual contents are UDF.
+    raw[446:462] = bytes((0, 0, 1, 0, 0x0B, 0xFE, 0xFF, 0xFF)) + (
+        struct.pack("<II", 0, len(raw) // block_size))
+    raw[510:512] = b"\x55\xaa"
+    image.write_bytes(raw)
+
+
+def verify_portable_udf_read(root, editor, inspector):
+    source = root / "portable-source.bin"
+    source.write_bytes(b"DO NOT MODIFY UDF 2.01")
+    for block_size in (512, 4096):
+        image = portable_udf_image(root, block_size)
+        listing = command(inspector, image).stdout.decode("utf-8")
+        assert listing.startswith("Format: UDF"), (block_size, listing)
+        original = image.read_bytes()
+        rejected = command(editor, image, "add", "UNSAFE.TXT", source,
+                           allowed=(1,))
+        assert rejected.returncode != 0
+        assert image.read_bytes() == original
+        add_fake_mbr(image, block_size)
+        command("udfinfo", image)
+        mbr_image = image.read_bytes()
+        for suffix in (".udf", ".iso", ".img", ".raw"):
+            candidate = root / f"portable-{block_size}-mbr{suffix}"
+            candidate.write_bytes(mbr_image)
+            listed = command(inspector, candidate).stdout.decode("utf-8")
+            assert listed.startswith("Format: UDF"), (
+                block_size, suffix, listed)
+            assert "partition1/" not in listed, (block_size, suffix, listed)
+            if suffix == ".udf":
+                refused = command(editor, candidate, "add", "UNSAFE.TXT",
+                                  source, allowed=(1,))
+                assert refused.returncode != 0
+                assert candidate.read_bytes() == mbr_image
+            candidate.unlink()
+        print(f"PASS read-only UDF 2.01 {block_size}-byte logical sectors, "
+              "whole-disk fake MBR and .raw/.img fallback", flush=True)
+
+
 def main(editor, inspector):
     for command_name in ("mkudffs", "udfinfo", "7z"):
         assert shutil.which(command_name), f"missing CI test-only tool {command_name}"
     with tempfile.TemporaryDirectory(prefix="iso-wcx-udftools-fixture-") as t:
         root = pathlib.Path(t)
+        verify_portable_udf_read(root, editor, inspector)
         for media in ("hd", "dvdram"):
             image = image_with_mkudffs(root, media, "real-" + media)
             before = image.read_bytes()

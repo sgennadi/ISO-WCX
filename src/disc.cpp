@@ -1122,13 +1122,16 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
         throw std::runtime_error("WIM/ESD browsing requires Windows WIMGAPI");
 #endif
     }
-    if(extension == L".vhd" || extension == L".vhdx" || extension == L".raw") {
+    if(extension == L".vhd" || extension == L".vhdx") {
         open_virtual();
         return;
     }
-    if(extension == L".img") {
+    if(extension == L".img" || extension == L".raw") {
+        // A .raw file can be a whole-disk UDF volume (even with a fake,
+        // zero-start MBR). First try real MBR/GPT filesystems, then require
+        // independently valid UDF/ISO descriptors before using optical mode.
         try {open_virtual(); return;}
-        catch(const std::exception&) { /* Fall back to optical parsing. */ }
+        catch(const std::exception&) { /* Try optical/UDF validation. */ }
     }
     if(cue || nrg || mds || ccd) {
         const std::size_t count=cue?cue_data_tracks(image_).size():
