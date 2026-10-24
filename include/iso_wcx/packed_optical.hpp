@@ -10,6 +10,7 @@
 
 namespace iso_wcx {
 class ChdStream;
+class MdsV2TrackStream;
 
 // Read-only, random-access optical payload stream. All codecs are in-process.
 // No mounting, external helper executable, third-party plugin DLL or
@@ -25,7 +26,7 @@ public:
     [[nodiscard]] std::vector<std::uint8_t> read(std::uint64_t offset,
                                                  std::size_t length);
 private:
-    enum class Type { isz, daa_v1, chd_v5 };
+    enum class Type { isz, daa_v1, chd_v5, mds_v2 };
     enum class Codec : std::uint8_t { zeros, stored, zlib, raw_deflate, bzip2 };
     struct Chunk {
         std::uint64_t offset = 0;
@@ -50,6 +51,7 @@ private:
     [[nodiscard]] std::vector<std::uint8_t> physical_read(
         std::uint64_t position, std::size_t length);
     std::unique_ptr<ChdStream> chd_;
+    std::unique_ptr<MdsV2TrackStream> mdsv2_;
     std::filesystem::path image_path_;
     std::ifstream file_;
     std::uint64_t physical_size_ = 0;
