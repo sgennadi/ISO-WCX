@@ -6,6 +6,16 @@ on:
       - 'include/iso_wcx/mds_probe.hpp'
       - 'src/mds_probe.cpp'
       - 'src/mds_v2.cpp'
+      - 'src/mds_v2_tracks.cpp'
+      - 'tests/test_nrg_mds.py'
+      - 'pluginst.inf'
+      - 'PREVIEW.md'
+      - 'README.md'
+      - 'include/iso_wcx/mds_v2_tracks.hpp'
+      - 'src/disc.cpp'
+      - 'src/packed_optical.cpp'
+      - 'include/iso_wcx/packed_optical.hpp'
+      - 'tests/test_native_mdsv2_tracks.py'
       - 'include/iso_wcx/mds_v2.hpp'
       - 'third_party/tiny_aes/**'
       - 'tests/mds_crypto_vectors.cpp'
@@ -29,6 +39,38 @@ jobs:
       - name: Configure native metadata inspector
         run: cmake -S . -B build-mds -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DISO_WCX_BUILD_DEV_TOOLS=ON
       - name: Build native descriptor probe
-        run: cmake --build build-mds --target mds_descriptor_inspect --parallel 2
+        run: cmake --build build-mds --target mds_descriptor_inspect disc_inspect --parallel 2
       - name: Decrypt and validate eight pinned encrypted MDSv2 / MDX fixtures
         run: python3 tests/test_mdsx_external_fixtures.py ./build-mds/mds_descriptor_inspect
+      - name: Extract ISO filesystem through native MDSv2/MDX plain and compressed tracks
+        run: python3 tests/test_native_mdsv2_tracks.py ./build-mds/disc_inspect
+
+  real-mdsv2-wcx-windows:
+    name: Native MDSv2 / MDX Windows ${{ matrix.arch }} WCX ABI
+    runs-on: windows-2022
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: Win32
+            suffix: .wcx
+          - arch: x64
+            suffix: .wcx64
+    steps:
+      - uses: actions/checkout@v4
+      # ctypes cannot load a Win32 WCX from the runner's default 64-bit Python.
+      # Match the Python process bitness to the WCX DLL for genuine ABI testing.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          architecture: ${{ matrix.arch == 'Win32' && 'x86' || 'x64' }}
+      - name: Configure fully static Windows native WCX
+        shell: pwsh
+        run: cmake -S . -B build-mdsv2 -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DBUILD_TESTING=OFF -DISO_WCX_BUILD_DEV_TOOLS=ON
+      - name: Build Windows inspector and WCX plugin
+        shell: pwsh
+        run: cmake --build build-mdsv2 --config Release --target disc_inspect ISO-WCX --parallel 2
+      - name: Extract real plain/compressed MDSv2 and MDX through Windows WCX ABI
+        shell: pwsh
+        run: python tests/test_native_mdsv2_tracks.py ./build-mdsv2/Release/disc_inspect.exe ./build-mdsv2/Release/ISO-WCX${{ matrix.suffix }}

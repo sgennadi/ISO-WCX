@@ -185,8 +185,8 @@ def main(executable):
         # Mixed-mode DAOX should skip CDDA/audio tracks.
         (root/'mixed.nrg').write_bytes(nrg_dao(raw=True,audio_first=True))
         run(executable,root,'mixed.nrg','NERODATA.TXT')
-        # Only MDS v1 is implemented. The previous synthetic loop misleadingly
-        # named a second copy "mds2" without changing header major version.
+        # Exercise legacy MDS v1 independently of native v2/MDX; an earlier
+        # synthetic fixture named "mds2" was still version 1.
         for sector in (2048,2352,2336,2448):
             descriptor,data=mds_layout(sector,mode2=(sector==2336))
             (root/'image.mdf').write_bytes(data)
@@ -209,8 +209,8 @@ def main(executable):
         # tests valid packed/encrypted v2 metadata pointers separately.
         assert v2_error.stderr
 
-        # A valid MDX header envelope must be recognized and deliberately
-        # refused by the WCX extraction path until decoding is implemented.
+        # A structurally plausible MDX envelope containing all-zero *encrypted*
+        # metadata must be rejected after native AES header authentication.
         mdx=bytearray(4096)
         mdx[:16]=b'MEDIA DESCRIPTOR'
         mdx[16]=2
@@ -221,7 +221,7 @@ def main(executable):
         run(executable,root,'unsupported_mdx.mdx',should_pass=False)
         mdx_error=subprocess.run([executable,str(root/'unsupported_mdx.mdx')],
                                   capture_output=True,text=True,timeout=10)
-        assert mdx_error.returncode==2 and 'MDX recognized' in mdx_error.stderr,mdx_error.stderr
+        assert mdx_error.returncode==2 and 'AES-256 encryption header is invalid' in mdx_error.stderr,mdx_error.stderr
         # Metadata must not let us overread into the NRG trailer.
         broken=bytearray(nrg_tao())
         broken[-8:]=b'NER5'+be32(0xffffffff)
@@ -253,7 +253,7 @@ def main(executable):
             (root/name).write_bytes(case)
             result=subprocess.run([executable,str(root/name)],capture_output=True,timeout=10)
             assert result.returncode in (0,2),(name,result.returncode)
-    print('PASS: NRG NERO/NER5 DAO/TAO, MDS v1/MDF raw modes, explicit MDS v2/MDX rejection, corrupt containers')
+    print('PASS: NRG NERO/NER5 DAO/TAO, MDS v1/MDF raw modes, malformed MDS v2/MDX crypto rejection, corrupt containers')
 
 if __name__=='__main__':
     main(sys.argv[1])

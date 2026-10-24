@@ -186,7 +186,9 @@ class Source {
     }
 public:
     explicit Source(const std::filesystem::path& p, std::optional<std::size_t> requested = std::nullopt) {
-        if(is_nrg_path(p) || is_mds_path(p) || is_ccd_path(p)) {
+        if(is_nrg_path(p) || (is_mds_path(p) &&
+            probe_mds_descriptor(p).kind==MdsDescriptorKind::alcohol_v1) ||
+            is_ccd_path(p)) {
             const auto tracks=is_nrg_path(p)?nrg_data_tracks(p):
                 (is_mds_path(p)?mds_data_tracks(p):ccd_data_tracks(p));
             // Prefer a later playable data track, never probe across track
@@ -1133,14 +1135,11 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
     // only CUE/MDS/NRG tables provide trusted track start/end boundaries.
     const bool cue=is_cue_path(image_);
     const bool nrg=is_nrg_path(image_);
-    const bool mds=is_mds_path(image_);
+    const bool mds=is_mds_path(image_) &&
+                   probe_mds_descriptor(image_).kind==MdsDescriptorKind::alcohol_v1;
     const bool ccd=is_ccd_path(image_);
-    if(is_mdx_path(image_)) {
-        (void)probe_mds_descriptor(image_);
-        throw std::runtime_error(
-            "MDX recognized; encrypted/packed MDSv2 metadata and "
-            "data-track extraction are not implemented in ISO-WCX");
-    }
+    // MDS v2 and monolithic MDX use the bounded in-process packed reader.
+    // Legacy MDS v1 still enumerates all descriptor-backed data sessions.
     // Virtual HDD formats are served directly by the in-process FAT backend.
     // Ambiguous .img files are handled by the optical reader first.
     auto extension = image_.extension().wstring();

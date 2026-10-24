@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.16.0 Stable Core + experimental UDF writer Preview (PR #33)** — a native C++20 Total Commander WCX
+**ISO-WCX v0.16.0 Stable Core + experimental UDF writer, native MDS v2/MDX and CHD multi-track Preview** — a native C++20 Total Commander WCX
 plugin for optical ISO/UDF, WIM/ESD/SWM and virtual HDD images.
 Core browsing/extraction and packaging are verified in Windows x86/x64 and
 Linux CI. **Advanced readers and write modes explicitly marked experimental
@@ -43,16 +43,16 @@ experimental support. See [v0.16.0 release notes](RELEASE_NOTES.md).
 | UDF Type 1 | Browse FE/EFE, OSTA CS0 Unicode, AED continuations and reserve VDS failover. Read-only whole-disk UDF 2.01 with 512–32768-byte power-of-two blocks and optional compatibility fake MBR (.iso/.udf/.img/.raw). **Write Preview (single physical 2048-byte UDF-only Type-1):** replace/resize regular files within prior allocations, logical FID deletion without file-block reclamation, create one regular file of any size fitting the image/partition and FE ShortAD slots (including fragmented, multi-gigabyte data), or one empty directory per transaction, and automatically expand/reallocate compatible parent directories via contiguous ShortAD extents with bitmap/LVID updates (directory size limit 8 MiB). ISO/UDF Bridge metadata, VAT and Metadata/Sparable partitions remain read-only. See [UDF writer](docs/udf-type1-writer.md) and [portability](docs/udf-cross-platform.md). |
 | UDF Metadata / VAT / Sparable | Experimental read-only partition-map support with synthetic fixtures, not comprehensive UDF 1.02–2.60. The UDF reader exposes regular files and directories; symlinks, block devices and other special ICB types are not materialized as ordinary files. |
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
-| Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352/2448 data sectors); synthetic-test coverage |
+| Alcohol MDS/MDF | MDS v1 session/track descriptors with sidecar MDF (2048/2336/2352/2448 data sectors). **Preview: MDS v2 / monolithic MDX**, native AES-decrypted/zlib-inflated descriptor, plain and compressed (stored/RLE/raw-DEFLATE groups) unencrypted data-track random access, extraction through WCX with real MDF/MDX ISO filesystem fixtures. Password-protected AES-LRW sectors, other optical variants and writing remain unsupported. |
 | El Torito | Exposes validated BIOS and EFI boot-load images and the boot catalog under `boot.images/`; EFI FAT BPB sizing when valid |
 | Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Native MBR/GPT filesystem browsing under `partitionN/`: FAT12/16/32, exFAT and **experimental** ext2/3/4 and NTFS. NTFS supports basic MFT/`$I30` directory parsing, resident/nonresident and sparse uncompressed files; rejects attribute lists, compressed/encrypted files and unsupported index layouts. Read-only, no mount/driver/external parser DLL. VHDX supports clean fixed/dynamic base images. |
 | Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
 | ISZ v1 (single-file and split; experimental) | Built-in 2048-byte optical streams; 48/64-byte headers, 2/3/4-byte chunk indexes or implicit stored data, zero/raw/zlib/bzip2; split `.isz` + `.i01/.i02` or `.part01.isz` + `.part02.isz` without intermediate ISO. Encryption, non-first segment as input, other sector geometry and uncommon vendor variants remain unsupported. |
 | DAA v1.00 | Built-in single-file raw DEFLATE chunks with header CRC32 and bounds checking; v1.10, encryption and multipart images rejected |
-| CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and **experimental multi-track** Mode 1/Mode 2 Form 1 CD frames (2448 bytes). MAME 4-frame track padding is mapped, audio tracks are skipped and the last ISO/UDF-bearing data track is selected after a validated filesystem anchor. No CDDA extraction, parent-chain resolution or full multisession mergings; `.chd` association is manual in Preview |
+| CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and **experimental multi-track** Mode 1/Mode 2 Form 1 CD frames (2448 bytes). MAME 4-frame track padding is mapped, audio tracks are skipped and the last ISO/UDF-bearing data track is selected after a validated filesystem anchor. No CDDA extraction, parent-chain resolution or full multisession merging; `.chd` association is manual in Preview |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
-| Other compressed/encrypted containers | Not implemented: encrypted ISZ, multipart DAA, DAA v1.10, CD-Audio/mixed/multi-track CHD, CHD parent chains, encrypted/compressed NRG, MDS v2 and MDX; only CRC-valid CloneCD Q positions are interpreted among raw CD subchannels |
+| Other compressed/encrypted containers | Not implemented: encrypted ISZ, multipart DAA, DAA v1.10, CD-Audio extraction, CHD parent chains, encrypted/compressed NRG, MDS v2/MDX with password-protected AES-LRW data tracks, unsupported vendor-specific MDF compression and full optical multisession merging; CloneCD Q decoding is limited to CRC-valid positions |
 
 ## Development
 
@@ -70,7 +70,7 @@ For a minimal Windows release build containing **only the WCX DLL**, use
 The standalone diagnostic/test EXEs are internal development targets, not
 WCX runtime dependencies or parts of the installable ZIP.
 
-This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG/MDS support is limited to verified uncompressed data-track layouts and has not been validated against a representative real-disc sample collection. Associations for `.nrg`, `.mds`, `.cso`, `.zso`, `.isz` and `.daa` are registered by the ZIP installer, while `.chd`, `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
+This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG and MDS v1 support remains limited to verified uncompressed data tracks; native MDS v2/MDX plain and compressed reads pass a pinned independent real-image corpus, but broader discs and Total Commander GUI operation still need manual validation. Associations for `.nrg`, `.mds`, `.cso`, `.zso`, `.isz` and `.daa` are registered by the ZIP installer, while `.chd`, `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
 
 ## What changed in v0.7.0
 
@@ -103,7 +103,7 @@ The following release notes describe the feature coverage **at each older versio
 - **Descriptor-driven multisession views:** enumerate more than one filesystem-bearing CUE, NRG or MDS track under `session1/`, `session2/` etc. Track indices are preserved for extraction, including earlier tracks. Does not replace a full TOC-based multisession implementation for raw `.iso`/`.bin` files.
 - **Metadata:** ISO 9660 and UDF timestamps and file attributes are passed through the WCX API. Xbox XDVDFS entries inherit the volume creation date when per-file timestamps are unavailable.
 - **Security and rollback:** preserves the v0.8 staging-file extraction and single Unicode progress callback behavior.
-- **Validation:** independent synthetic tests for El Torito BIOS/EFI, XDVDFS nested trees, multisession extraction and malformed descriptors; Linux tests and sanitizers. MDS v2, MDX, ISZ, CHD and DAA are **not supported**; indexed CSO v1/v2 and ZSO are already implemented and tested synthetically.
+- **Validation:** independent synthetic tests for El Torito BIOS/EFI, XDVDFS nested trees, multisession extraction and malformed descriptors; Linux tests and sanitizers. MDS v2, MDX, ISZ, CHD and DAA were **not supported at that point in the project history**; indexed CSO v1/v2 and ZSO are already implemented and tested synthetically.
 
 
 ## What changed in v0.10.0
@@ -126,7 +126,7 @@ The following release notes describe the feature coverage **at each older versio
 - **CloneCD `.sub`:** Preserve and extract an optional same-base raw P-W subchannel stream under `subchannels/disc.sub` after checking every 96-byte frame corresponds to one 2352-byte `.img` frame. A CRC-gated `subchannels/q-index.csv` report identifies valid Q track/index positions; CD-Text and copy-protection semantics are **not decoded**, and invalid Q frames never invalidate raw `.sub`.
 - **Regression tests:** Synthetic ISO extended-attribute and endian corruption tests, scrambled CCD round trips and byte-perfect `.sub` extraction.
 
-The remaining roadmap includes *MDS v2, MDX, broader ISZ/DAA/CHD variants, DMG, ECM, GZ/XZ and CD-Audio*. Partial ISZ/DAA/CHD support arrived in v0.14; formats supported by other projects are not automatically supported here.
+The remaining roadmap includes *MDS v2/MDX AES-LRW encrypted track data and unusual variants, broader ISZ/DAA/CHD support, DMG, ECM, GZ/XZ and CD-Audio extraction*. Partial ISZ/DAA/CHD support arrived in v0.14; formats supported by other projects are not automatically supported here.
 
 ## What changed in v0.12.1
 

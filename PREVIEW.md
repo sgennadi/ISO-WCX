@@ -27,7 +27,7 @@ empty directory per transaction; automatically expand compatible embedded/ShortA
 - RAW Mode 2 Form 2, CD-Audio extraction, CD-Text and full CloneCD multisession are not supported. CloneCD raw `.sub` is preserved and position-type Q frames are CRC-checked; damaged Q data is not treated as an ISO failure. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
 - UDF VAT historical chains, every version of Metadata/Sparable, UDF pseudo-overwrite behavior and fragmented descriptor edge cases are not yet exhaustively covered.
 - Rock Ridge PX read-only permissions and TF modification timestamps are implemented in the development branch, with CE mirrored-endian validation. Full POSIX permissions, symlink extraction and creation/access times are not exposed by the WCX API.
-- ISZ v1 zero/stored/zlib/bzip2 and DAA v1.00 unencrypted raw DEFLATE are supported in the current native reader. CHD v5 supports compressed 2048-byte optical payloads and **experimental** mixed/multi-track 2448-byte CD images, selecting an ISO/UDF-bearing Mode 1/Mode 2 Form 1 data track after validating its filesystem anchor. MAME four-frame alignment is respected; audio track contents are not extracted. Broader/encrypted variants, DMG and encrypted/compressed NRG/MDF remain unsupported. Indexed CSO/ZSO and uncompressed NRG/MDS v1 remain supported.
+- ISZ v1 zero/stored/zlib/bzip2 and DAA v1.00 unencrypted raw DEFLATE are supported in the current native reader. CHD v5 supports compressed 2048-byte optical payloads and **experimental** mixed/multi-track 2448-byte CD images, selecting an ISO/UDF-bearing Mode 1/Mode 2 Form 1 data track after validating its filesystem anchor. MAME four-frame alignment is respected; audio track contents are not extracted. Broader encrypted/proprietary variants and DMG/encrypted NRG remain unsupported; MDF v2 unencrypted payloads with bounded compression-group decoding are supported in Preview. Indexed CSO/ZSO and uncompressed NRG/MDS v1 remain supported.
 - Avoid extracting untrusted images into important directories; path checks cannot fully mitigate concurrent symlink races.
 - Unsigned binary; this is not an official release of the legacy ISO.WCX plugin.
 
@@ -59,22 +59,19 @@ CI builds both Windows WCX architectures, runs parser and extraction tests, and 
 
 The plugin opens partitioned raw HDD IMG/RAW, fixed VHD and clean fixed/dynamic base VHDX through native C++20 MBR/GPT and filesystem readers. Read-only FAT12/16/32, exFAT and experimental ext2/3/4 and NTFS subsets appear under partition1/, partition2/, etc. NTFS covers basic MFT and $I30 directory indexes, Unicode names and ordinary resident/fragmented/sparse uncompressed files, with deliberate feature refusals. Extraction uses the same staging, rollback and progress controls as ISO/UDF. Unsupported/unknown partitions are skipped. Dynamic/differencing VHD, VHDX parent/dirty-log images, complex NTFS attribute-list/compression/encryption layouts and journal recovery are not supported. No external tools, drivers or disk-parser DLLs are needed.
 
-## MDS v2 / MDX inspection research (not an archive handler)
+## Experimental native MDS v2 / MDX archive handler
 
 The developer-only `mds_descriptor_inspect` test utility detects MDS v1,
 encrypted MDS v2, and MDX metadata envelopes with strict offset checks.
-Using its optional `--decode` mode, it decrypts and inflates bounded MDS v2 /
-MDX **metadata only**, in-process (AES-256, RIPEMD160/PBKDF2 and zlib).
-It still does **not** extract disc data sectors or make those formats
-available in Total Commander. The installer does not associate .mdx. Read
-[the Aaru issue #256 compatibility notes](docs/mds-v2-mdx-research.md).
+Using its optional `--decode` mode, it decrypts and inflates bounded MDS v2 / MDX metadata in-process (AES-256, RIPEMD160/PBKDF2 and zlib). The same metadata backend is now used by the WCX archive reader.
+**Experimental extraction is enabled in Preview:** the WCX plugin opens ordinary and compressed MDS v2/MDF and single-file MDX images, selecting a validated ISO9660/UDF data track. Its in-process random-access decoder reads raw/stored/RLE/DEFLATE compression groups without creating a temporary ISO. Four pinned real MDS v2/MDX fixtures have passed filesystem content comparison against the reference ISO. The installer now associates `.mdx`. Password-protected AES-LRW data tracks, unsupported optical modes, image editing and full multisession merging remain unavailable. See [format limits and provenance](docs/mds-v2-mdx-research.md).
 
 ## NRG and MDS/MDF preview support
 
 - Nero `.nrg`: NERO (32-bit) and NER5 (64-bit) trailer, bounded chunk list, DAOI/DAOX (disc-at-once) and ETNF/ETN2 (track-at-once), selected latest ISO9660/UDF data track.
-- Alcohol `.mds`/`.mdf`: validated MDS v1 session/track/filename/index blocks; uncompressed Mode 1, Mode 2 Form 1 and cooked 2048/2336 data tracks. `.mdf` is a sidecar, not a general Microsoft SQL MDF reader.
-- Raw-image probing is still available for `.img`/`.bin`; installer associations include `.iso`, `.cue`, `.nrg`, `.mds` but **not** `.bin` or `.mdf`, avoiding conflicts.
-- Synthetic NRG/MDS regression tests and malformed-metadata mutation tests are run by CTest on Linux and Windows. Real Nero/Alcohol images and actual Total Commander interaction still require manual compatibility testing.
+- Alcohol `.mds`/`.mdf`: validated MDS v1 session/track/filename/index blocks with cooked 2048/2336 and raw Mode 1/Mode 2 Form 1 tracks. **Preview MDS v2/MDX:** encrypted metadata and on-demand unencrypted data-track decompression with bounded raw-DEFLATE, stored and repeated-byte groups. `.mdf` is a disk-image sidecar, not a Microsoft SQL database handler.
+- Raw-image probing is still available for `.img`/`.bin`; preview installer associations include `.iso`, `.cue`, `.nrg`, `.mds` and `.mdx` but **not** `.bin` or `.mdf`, avoiding conflicts.
+- Synthetic NRG/MDS and malformed-metadata regression tests run on Linux and Windows. An additional pinned real-image corpus independently verifies native MDS v2/MDX filesystem extraction and refuses password-protected tracks; broader Nero/Alcohol compatibility and real Total Commander GUI operation still require manual testing.
 
 ## v0.7.0 compatibility improvements and verification
 
