@@ -335,6 +335,34 @@ def check_real_mixed_batch(editor, inspector, root):
           flush=True)
 
 
+def check_real_reclaim_reuse(editor, inspector, root):
+    """Independent mkudffs/udfinfo/7z proof of delete+scrub+reuse."""
+    image = image_with_mkudffs(root, "hd", "real-reclaim")
+    former = root / "real-deleted-source.bin"
+    former.write_bytes(b"ORIGINAL UDF RECLAIM CONTENT\n" * 260)
+    new = root / "real-reallocated-source.bin"
+    new.write_bytes(b"NEW UDF REUSED CONTENT\n" * 341)
+    command(editor, image, "add", "RECLAIM-THIS.BIN", former)
+    initial = image.read_bytes()
+    command(editor, image, "delete", "RECLAIM-THIS.BIN")
+    after_delete = image.read_bytes()
+    assert after_delete != initial and len(after_delete) == len(initial)
+    command("udfinfo", image)
+    listing = command("7z", "l", image).stdout.decode("utf-8")
+    assert "RECLAIM-THIS.BIN" not in listing
+    assert not list(root.glob(".iso-wcx-edit-*"))
+    command(editor, image, "add", "REUSED-AFTER-DELETE.BIN", new)
+    command("udfinfo", image)
+    independent_extract(image, root, "REUSED-AFTER-DELETE.BIN",
+                        new.read_bytes())
+    current = command(inspector, image).stdout.decode("utf-8")
+    assert "REUSED-AFTER-DELETE.BIN" in current
+    assert "RECLAIM-THIS.BIN" not in current
+    print("PASS real mkudffs deleted-file free-space reclamation, "
+          "staged sector zeroing, udfinfo and independent 7-Zip readback",
+          flush=True)
+
+
 def main(editor, inspector):
     for command_name in ("mkudffs", "udfinfo", "7z"):
         assert shutil.which(command_name), f"missing CI test-only tool {command_name}"
@@ -343,6 +371,7 @@ def main(editor, inspector):
         verify_portable_udf_read(root, editor, inspector)
         check_real_atomic_batch(editor,inspector,root)
         check_real_mixed_batch(editor,inspector,root)
+        check_real_reclaim_reuse(editor,inspector,root)
         for media in ("hd", "dvdram"):
             image = image_with_mkudffs(root, media, "real-" + media)
             before = image.read_bytes()
