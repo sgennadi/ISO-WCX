@@ -1005,15 +1005,22 @@ class Udf {
 public:
     explicit Udf(Source& src) : src_(src) {}
     bool parse() {
-        constexpr std::array<std::uint32_t,4> candidates={2048,512,1024,4096};
+        // Read unusual large-block UDF images, and probe sector 512 as
+        // a last-resort, validated AVDP when ordinary anchors are absent.
+        constexpr std::array<std::uint32_t,7> candidates={
+            2048,512,1024,4096,8192,16384,32768};
         for(auto sector:candidates) {
             auto count=src_.size()/sector;
-            std::array<std::uint64_t,3> anchors={256,count>=256?count-256:0,count?count-1:0};
+            std::array<std::uint64_t,4> anchors={
+                256,count>=256?count-256:0,count?count-1:0,512};
             for(auto anchor:anchors) {
                 if(anchor>=count)continue;
                 try {
                     auto a=src_.read(anchor*sector,sector);
                     check_tag(a,0,2);
+                    if(anchor==512)
+                        require(u32(a,12)==512,
+                                "UDF sector-512 anchor location mismatch");
                     for(unsigned copy=0;copy<2;copy++) {
                         try {
                     auto length=u32(a,16+8*copy),start=u32(a,20+8*copy);
@@ -1031,7 +1038,9 @@ public:
                     }
                     require(!lvd.empty()&&!partitions_.empty(),"missing UDF volume descriptor");
                     block_=u32(lvd,212);
-                    require(block_==512||block_==1024||block_==2048||block_==4096,"unsupported UDF block size");
+                    require(block_>=512 && block_<=32768 &&
+                            (block_&(block_-1))==0,
+                            "unsupported UDF logical block size");
                     auto map_bytes=u32(lvd,264),map_count=u32(lvd,268);
                     require(map_count>0&&map_count<=64 && lvd.size()>=440 && map_bytes<=lvd.size()-440,"UDF partition maps too large");
                     std::size_t p=440;

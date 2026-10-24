@@ -112,6 +112,18 @@ def udf_with_reserve_vds(*, corrupt_main: bool = False, corrupt_both: bool = Fal
     return image
 
 
+def udf_anchor_at_512(*, corrupt: bool = False):
+    """Read UDF if only a tag-location-validated alternate AVDP remains."""
+    image = udf_image()
+    source = 256*B
+    target = 512*B
+    image[target:target+B] = image[source:source+B]
+    p32(image, target+12, 511 if corrupt else 512)
+    update_tag_checksum(image, 512)
+    image[source:source+B] = bytes(B)
+    return image
+
+
 def main(exe: str) -> None:
     image, expected = interleaved_image()
     run(exe, image, 'INTERLV.BIN', expected)
@@ -127,9 +139,11 @@ def main(exe: str) -> None:
     run(exe, udf_with_reserve_vds(), 'hello', b'world')
     run(exe, udf_with_reserve_vds(corrupt_main=True), 'hello', b'world')
     run(exe, udf_with_reserve_vds(corrupt_main=True, corrupt_both=True), None)
+    run(exe, udf_anchor_at_512(), 'hello', b'world')
+    run(exe, udf_anchor_at_512(corrupt=True), None)
     run(exe, udf_unicode_image('unused', invalid_name=b'\x10\xd8\x3d'), None)
     run(exe, udf_unicode_image('unused', invalid_name=b'\x10\xdc\x80\x00\x61'), None)
-    print('PASS: 12 ISO/Joliet/UDF v0.7 conformance and corruption cases')
+    print('PASS: 14 ISO/Joliet/UDF conformance, backup-anchor and corruption cases')
 
 
 if __name__ == '__main__':
