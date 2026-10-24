@@ -121,6 +121,85 @@ def verify_portable_udf_read(root, editor, inspector):
               "fake MBR and .raw/.img fallback", flush=True)
 
 
+
+def root_directory_storage(image):
+    """Locate UDF root FE using standard AVDP -> PD/LVD -> FSD -> ICB."""
+    raw = image.read_bytes()
+    sector = 2048
+    vds = struct.unpack_from("<I", raw, 256*sector+20)[0]
+    pd = lvd = None
+    for i in range(vds, vds+16):
+        tag = struct.unpack_from("<H", raw, i*sector)[0]
+        if tag == 5:
+            pd = i*sector
+        elif tag == 6:
+            lvd = i*sector
+        elif tag == 8:
+            break
+    assert pd is not None and lvd is not None
+    part = struct.unpack_from("<I", raw, pd+188)[0]
+    fsd_logical = struct.unpack_from("<I", raw, lvd+252)[0]
+    fsd = (part+fsd_logical)*sector
+    root_logical = struct.unpack_from("<I", raw, fsd+404)[0]
+    fe = (part+root_logical)*sector
+    tag = struct.unpack_from("<H", raw, fe)[0]
+    assert tag in (261,266), (tag,part,root_logical)
+    allocation = struct.unpack_from("<H", raw, fe+34)[0]&7
+    size = struct.unpack_from("<Q", raw, fe+56)[0]
+    ad = (176 if tag==261 else 216) + struct.unpack_from(
+        "<I",raw,fe+(168 if tag==261 else 208))[0]
+    if allocation == 3:
+        capacity = sector-ad
+    else:
+        assert allocation == 0
+        length = struct.unpack_from("<I", raw, fe+ad)[0] & 0x3fffffff
+        capacity = ((length+sector-1)//sector)*sector
+    return allocation,size,capacity
+
+
+def check_real_directory_spill(editor, image, root):
+    """Real mkudffs parent FID capacity transition, verified via 7z."""
+    source = root / "spill-payload.dat"
+    did_spill = False
+    old_files = []
+    for i in range(30):
+        layout, size, capacity = root_directory_storage(image)
+        if layout == 0:
+            did_spill = True
+            break
+        assert layout == 3 and size<=capacity
+        # FID around 120 bytes: even crossing embedded FE capacity cannot
+        # cross the one-sector limit (at least 176 extra bytes remain).
+        name = f"SPILL-{i:02d}-" + "Q"*70 + ".BIN"
+        contents = f"UDF REAL SPILL {i}".encode("ascii")
+        source.write_bytes(contents)
+        command(editor, image, "add", name, source)
+        old_files.append((name,contents))
+        command("udfinfo", image)
+        if root_directory_storage(image)[0]==0:
+            did_spill=True
+            break
+    assert did_spill and old_files, (
+        "real UDF directory did not relocate to a ShortAD sector")
+    # Continue appending to an external directory without reallocating
+    # another directory sector.
+    source.write_bytes(b"POST SPILL")
+    command(editor,image,"add","x.txt",source)
+    independent_extract(image,root,"x.txt",b"POST SPILL")
+    command("udfinfo", image)
+    independent_extract(image,root,old_files[0][0],old_files[0][1])
+    # A full-size next FID must fail once it exceeds a single sector.
+    before = image.read_bytes()
+    source.write_bytes(b"SHOULD NOT BE ADDED")
+    refused = command(editor,image,"add",
+                      "NO-ROOM-"+"K"*184+".TXT",source,allowed=(1,))
+    assert refused.returncode!=0
+    assert image.read_bytes()==before
+    assert not list(root.glob(".iso-wcx-edit-*"))
+    print("PASS real mkudffs Type-1 embedded-to-ShortAD directory spill, "
+          "external append and rollback",flush=True)
+
+
 def main(editor, inspector):
     for command_name in ("mkudffs", "udfinfo", "7z"):
         assert shutil.which(command_name), f"missing CI test-only tool {command_name}"
@@ -182,6 +261,7 @@ def main(editor, inspector):
             command("udfinfo", image)
             independent_extract(image, root, nested_name,
                                 b"NESTED REAL UDF CONTENT")
+            check_real_directory_spill(editor,image,root)
             # No rename/delete/snapshot directory mutation is implied.
             # Failures leave the entire original image byte-for-byte intact.
             source.write_bytes(b"R" * (8*1024*1024+1))

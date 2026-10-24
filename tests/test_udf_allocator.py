@@ -81,9 +81,82 @@ def run(exe,*args,success=True):
         r.stderr.decode(errors='replace'),args)
     return r.stdout
 
+def external_directory_spill(editor,inspector,root):
+    """Embedded FID directory -> one ShortAD sector, then append and rollback."""
+    image=root/'spill.udf'
+    source=root/'spill-content.bin'
+    image.write_bytes(bitmap_image())
+    original=image.read_bytes()
+    before_free=struct.unpack_from('<I', original, INTEGRITY_LBA*B+80)[0]
+    names=[]
+    # One 204-byte FID per entry: the ninth addition crosses the root FE's
+    # 1872-byte embedded capacity but remains within one 2048-byte sector.
+    for index in range(9):
+        name=f'L{index:02d}-'+'q'*154+'.txt'
+        assert len(name)==162
+        source.write_bytes(f'DIR SPILL {index}'.encode('ascii'))
+        run(editor,image,'add',name,source)
+        names.append(name)
+        current=image.read_bytes()
+        root_fe=301*B
+        kind=struct.unpack_from('<H',current,root_fe+34)[0]&7
+        assert kind==(0 if index==8 else 3), (
+            'unexpected parent storage before/after directory spill',index,kind)
+    updated=image.read_bytes()
+    root_fe=301*B
+    parent_bytes=struct.unpack_from('<Q',updated,root_fe+56)[0]
+    assert parent_bytes==44+9*204,(parent_bytes,44+9*204)
+    assert struct.unpack_from('<I',updated,root_fe+172)[0]==8
+    assert struct.unpack_from('<Q',updated,root_fe+64)[0]==1
+    dir_lba=struct.unpack_from('<I',updated,root_fe+180)[0]
+    assert dir_lba<PARTITION_BLOCKS
+    assert not (updated[(PARTITION+BITMAP_LOGICAL)*B+24+dir_lba//8]
+                &(1<<(dir_lba%8))), 'external parent directory block is free'
+    # Validate all existing FIDs were moved and retagged; each FID's
+    # descriptor Location is relative to the new ShortAD data sector.
+    at=(PARTITION+dir_lba)*B
+    p=0
+    while p<parent_bytes:
+        record=updated[at+p:at+parent_bytes]
+        assert struct.unpack_from('<H',record)[0]==257
+        crc_len=struct.unpack_from('<H',record,10)[0]
+        assert crc16(record[16:16+crc_len])==struct.unpack_from('<H',record,8)[0]
+        assert struct.unpack_from('<I',record,12)[0]==dir_lba
+        n=record[19]
+        impl=struct.unpack_from('<H',record,36)[0]
+        step=(38+impl+n+3)&~3
+        assert step>=40 and p+step<=parent_bytes
+        p+=step
+    assert p==parent_bytes
+    # New entries can still append to an already external parent.
+    source.write_bytes(b'SHORT AFTER SPILL')
+    run(editor,image,'add','short.txt',source)
+    names.append('short.txt')
+    updated=image.read_bytes()
+    assert struct.unpack_from('<H',updated,root_fe+34)[0]&7==0
+    assert struct.unpack_from('<I',updated,root_fe+180)[0]==dir_lba
+    after_free=struct.unpack_from('<I',updated,INTEGRITY_LBA*B+80)[0]
+    assert before_free-after_free==11,(before_free,after_free)
+    folder=root/'spill-extract'
+    run(inspector,image,'--extract',folder)
+    assert (folder/'hello').read_bytes()==b'world'
+    for i,name in enumerate(names):
+        value=b'SHORT AFTER SPILL' if i==9 else f'DIR SPILL {i}'.encode('ascii')
+        assert (folder/name).read_bytes()==value,(i,name)
+    # A second full-size FID would exceed the one-block ShortAD directory
+    # limit: operation must refuse and leave the image byte-for-byte intact.
+    baseline=image.read_bytes()
+    run(editor,image,'add','NO-SPACE-'+'X'*150+'.BIN',source,success=False)
+    assert image.read_bytes()==baseline
+    assert not list(root.glob('.iso-wcx-edit-*'))
+    print('PASS native UDF embedded-directory relocation to ShortAD, '
+          'FID TagLocation/CRC, follow-up append, bitmap/LVID and rollback')
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-allocator-') as temp:
         root=pathlib.Path(temp)
+        external_directory_spill(editor,inspector,root)
         image=root/'test.udf'
         source=root/'new.dat'
         cases=[

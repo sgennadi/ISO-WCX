@@ -381,6 +381,9 @@ public:
     [[nodiscard]] const std::map<std::string,Fe>& directories() const noexcept {
         return directory_files_;
     }
+    [[nodiscard]] Bytes directory_payload(const Fe& directory) {
+        return directory_data(directory);
+    }
     [[nodiscard]] bool has_bitmap() const noexcept {return bitmap_.has_value();}
     [[nodiscard]] std::uint64_t image_size() const noexcept {return size_;}
     [[nodiscard]] std::uint32_t part_start() const noexcept {return partition_;}
@@ -712,9 +715,32 @@ Bytes encode_udf_cs0(std::string_view component) {
     need(pos==result.size(),"UDF CS0 length encoding mismatch");
     return result;
 }
-// Allocate one FE and optionally a contiguous ShortAD data run for new regular
-// files. Parent FIDs must fit an existing embedded directory. We still avoid
-// directory relocation, VAT, sparse files, extent chains and ISO/UDF bridges.
+// Retag every existing FID before relocating an embedded directory to a
+// standalone ShortAD sector. A FID's TagLocation refers to the sector holding
+// that FID, not the directory's (now different) File Entry block.
+void retag_directory_fids(Bytes& bytes,std::uint32_t logical) {
+    for(std::size_t p=0;p<bytes.size();) {
+        need(bytes.size()-p>=38,"truncated UDF FID during directory relocation");
+        tag_check(bytes,p,257);
+        const auto name_bytes=std::size_t(bytes[p+19]);
+        const auto implementation=std::size_t(u16(bytes,p+36));
+        need(implementation<=bytes.size()-p-38 &&
+             name_bytes<=bytes.size()-p-38-implementation,
+             "UDF relocated FID identifier exceeds directory");
+        const auto record=(38u+implementation+name_bytes+3u)&~std::size_t(3);
+        need(record>=40 && record<=bytes.size()-p,
+             "UDF relocation would split an existing FID");
+        const auto crc_bytes=16u+u16(bytes,p+10);
+        need(crc_bytes<=record,"UDF FID CRC would exceed record");
+        put32(bytes,p+12,logical);
+        tag_update(bytes,p,crc_bytes);
+        p+=record;
+    }
+}
+// Allocate one FE and optionally a contiguous ShortAD data run for a new
+// file. An embedded parent directory may be relocated into one new sector;
+// already external one-sector ShortAD directories can accept further FIDs.
+// More complex multi-extent directory growth remains unsupported.
 void create_udf_type1(const std::filesystem::path& image,Type1& volume,
                       const ArchiveChange& change,
                       const EditProgress& progress) {
@@ -736,10 +762,11 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     need(parent_it!=volume.directories().end(),
          "UDF parent directory does not exist");
     const auto& parent=parent_it->second;
-    need(parent.type==4 && parent.storage==3 &&
-         parent.size<=parent.ads && parent.ad_offset<=block &&
-         parent.capacity<=block-parent.ad_offset,
-         "new UDF entry requires an embedded parent directory");
+    need(parent.type==4 && (parent.storage==3 || parent.storage==0) &&
+         parent.size<=max_dir && parent.size<=parent.capacity &&
+         parent.ad_offset<=block && parent.ads<=block-parent.ad_offset &&
+         (parent.storage!=3 || parent.size<=parent.ads),
+         "UDF parent directory has unsupported allocation layout");
 
     // Do not shadow an existing name with different ASCII case.
     std::string folded=key;
@@ -777,16 +804,28 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
         (length+block-1u)/block);
     const auto fid_id_size=encoded_name.size();
     const auto fid_size=(38u+fid_id_size+3u)&~std::size_t(3);
-    need(fid_size<=255 && parent.size+fid_size<=parent.capacity,
-         "parent directory lacks embedded space for new UDF FID");
-    need(parent.size<=block-parent.ad_offset &&
-         fid_size<=block-parent.ad_offset-parent.size,
-         "new FID would cross UDF directory file-entry bounds");
+    const auto new_dir_size=parent.size+fid_size;
+    const bool spill_parent=parent.storage==3 &&
+                            new_dir_size>parent.capacity;
+    const bool external_parent=spill_parent || parent.storage==0;
+    // Stage 1: one sector of directory data. Do not let an FID straddle
+    // sectors; multi-block parent data is a separate, later milestone.
+    need(fid_size<=255 && new_dir_size<=block,
+         "UDF parent needs unsupported multi-sector directory expansion");
+    need(external_parent || new_dir_size<=parent.capacity,
+         "new UDF FID exceeds embedded parent directory capacity");
+    need(parent.storage!=0 || new_dir_size<=parent.capacity,
+         "new UDF FID exceeds existing ShortAD parent allocation");
+    const auto old_directory=volume.directory_payload(parent);
+    need(old_directory.size()==parent.size,
+         "UDF parent directory data size mismatch");
 
     const auto new_lba=volume.allocate_block();
     // Embedded files need no data extents. ShortAD files consume one
     // additional contiguous run of data blocks, after the new FE block.
     const auto data_lba=data_blocks?volume.allocate_blocks(data_blocks):0u;
+    const auto parent_data_lba=spill_parent?volume.allocate_block():
+        (parent.storage==0?volume.logical_of(parent.data_at):0u);
     const auto new_offset=volume.absolute(new_lba);
     Bytes child(block,0);
     put16(child,0,261); // ECMA-167 File Entry
@@ -821,7 +860,8 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     Bytes fid(fid_size,0);
     put16(fid,0,257); // File Identifier Descriptor
     put16(fid,2,2);
-    put32(fid,12,volume.logical_of(parent.at));
+    put32(fid,12,external_parent?parent_data_lba:
+                           volume.logical_of(parent.at));
     put16(fid,16,1); // FileVersionNumber
     fid[18]=change.directory?2u:0u;
     fid[19]=static_cast<std::uint8_t>(fid_id_size);
@@ -835,18 +875,54 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     tag_update(fid,0,fid.size());
 
     auto parent_bytes=parent.bytes;
-    const auto old_size=static_cast<std::size_t>(parent.size);
-    const auto fid_at=parent.ad_offset+old_size;
-    std::copy(fid.begin(),fid.end(),
-              parent_bytes.begin()+static_cast<std::ptrdiff_t>(fid_at));
-    const auto new_dir_size=parent.size+fid_size;
+    Bytes directory_sector;
+    const bool extended=u16(parent_bytes,0)==266;
+    const auto ad_length_field=extended?212u:172u;
     put64(parent_bytes,56,new_dir_size);
-    if(u16(parent_bytes,0)==266)
+    if(extended)
         put64(parent_bytes,64,new_dir_size); // EFE Object Size
-    put32(parent_bytes,u16(parent_bytes,0)==266?212u:172u,
-          static_cast<std::uint32_t>(new_dir_size));
-    tag_update(parent_bytes,0,parent.ad_offset+
-               static_cast<std::size_t>(new_dir_size));
+    if(!external_parent) {
+        const auto fid_at=parent.ad_offset+
+                          static_cast<std::size_t>(parent.size);
+        std::copy(fid.begin(),fid.end(),
+                  parent_bytes.begin()+static_cast<std::ptrdiff_t>(fid_at));
+        put32(parent_bytes,ad_length_field,
+              static_cast<std::uint32_t>(new_dir_size));
+        tag_update(parent_bytes,0,parent.ad_offset+
+                   static_cast<std::size_t>(new_dir_size));
+    } else {
+        // The parent FE now describes one ShortAD extent, not embedded
+        // FIDs. Move all existing records if this is its first spill.
+        directory_sector=old_directory;
+        if(spill_parent)
+            retag_directory_fids(directory_sector,parent_data_lba);
+        // Retagging sees only logical FIDs; newly allocated trailing bytes
+        // remain zero so future additions never expose stale disk content.
+        directory_sector.resize(block,0);
+        std::copy(fid.begin(),fid.end(),
+                  directory_sector.begin()+
+                  static_cast<std::ptrdiff_t>(parent.size));
+        if(spill_parent) {
+            need(parent.ad_offset+8<=block,
+                 "UDF parent cannot store a ShortAD");
+            std::fill(parent_bytes.begin()+
+                      static_cast<std::ptrdiff_t>(parent.ad_offset),
+                      parent_bytes.end(),0);
+            put16(parent_bytes,34,
+                  static_cast<std::uint16_t>(u16(parent_bytes,34)&~7u));
+            put32(parent_bytes,ad_length_field,8u);
+            put32(parent_bytes,parent.ad_offset,
+                  static_cast<std::uint32_t>(new_dir_size));
+            put32(parent_bytes,parent.ad_offset+4,parent_data_lba);
+            // FE LogicalBlocksRecorded / EFE LogicalBlocksRecorded.
+            put64(parent_bytes,extended?72u:64u,1u);
+        } else {
+            // Grow the recorded length inside an already allocated block.
+            put32(parent_bytes,parent.ad_offset,
+                  static_cast<std::uint32_t>(new_dir_size));
+        }
+        tag_update(parent_bytes,0,parent.ad_offset+8u);
+    }
 
     EditTransaction tx(image);
     std::fstream out(tx.output,std::ios::binary|std::ios::in|
@@ -873,11 +949,14 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
             staged_write(out,data_at+length,
                          Bytes(static_cast<std::size_t>(tail),0));
     }
+    if(external_parent)
+        staged_write(out,volume.absolute(parent_data_lba),directory_sector);
     staged_write(out,parent.at,parent_bytes);
     const auto [bitmap_at,bitmap_data]=volume.updated_bitmap();
     staged_write(out,bitmap_at,bitmap_data);
     const auto [integrity_at,integrity_data]=
-        volume.updated_integrity(change.directory,1u+data_blocks);
+        volume.updated_integrity(change.directory,
+                                 1u+data_blocks+(spill_parent?1u:0u));
     staged_write(out,integrity_at,integrity_data);
     out.flush();
     need(bool(out),"staged UDF allocation flush failed");
