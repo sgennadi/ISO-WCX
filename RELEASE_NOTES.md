@@ -1,46 +1,70 @@
-# ISO-WCX v0.16.0 — Stable Core
+# ISO-WCX v0.17.0 — Stable Core + Transactional UDF Preview
 
-Stable installation channel for verified core functionality; advanced parsers
-and editing modes remain strictly limited or experimental. The runtime includes
-only the Total Commander WCX DLLs ISO-WCX.wcx (Win32) and ISO-WCX.wcx64 (x64),
-plus documentation. No separate unpacker, mount driver or third-party parser
-DLL is bundled.
+ISO-WCX is a native C++20 Total Commander WCX plugin for Windows x86/x64.
+The installable ZIP contains two self-contained WCX binaries, installer
+metadata and documentation, without external unpackers, disk drivers or
+parser DLLs. The verified core is distributed as Stable; advanced UDF writing
+and some optical/virtual-disk decoding remain explicitly experimental.
 
-## Core capabilities
+## Highlights since v0.16.0
 
-- ISO9660/Joliet browsing and extraction, and transactional editing of validated
-  plain 2048-byte images; ISO Long(221), Joliet Long(110), Unicode/surrogate
-  pairs and El Torito BIOS/UEFI data protection.
-- Native UDF Type-1 browsing. Experimental editing of existing files without
-  new block allocation, bounded resize, and logical FID deletion.
-- ISO/UDF Bridge: only same-size content replacement when both namespaces map
-  an identical single extent in a nonbootable image.
-- MBR/GPT RAW/IMG, fixed VHD and clean base VHDX browsing; FAT12/16/32, exFAT,
-  plus restricted experimental ext2/3/4 and NTFS reading.
-- WIM/ESD and complete split SWM browsing/extraction using Windows WIMGAPI.
-  Restricted standard unsplit WIM editing requires elevated privileges.
-- Documented optical formats including CUE/BIN, CCD, NRG, MDSv1, ISZ/DAA and CHD
-  under their listed limitations.
+- **UDF Type-1 transactional writes (Preview):** create files and empty
+  subdirectories, including nested paths, in one batch; mix creation, bounded
+  in-place replacement and logical deletion; update FE/EFE, ShortAD, FID,
+  bitmap and LVID consistently and commit the entire operation atomically.
+- **UDF reclaimed space (Preview):** scrub and release exclusively owned
+  deleted-file FE and recorded ShortAD sectors, reject stale/aliased references,
+  and reuse that space on a later transaction. Reuse safe deleted FID slots
+  to prevent unbounded directory growth across repeated add/delete cycles.
+- **UDF files larger than 4 GiB:** multi-ShortAD data allocation and
+  independent 7-Zip streaming SHA-256 readback; bounded extension into the
+  final already allocated ShortAD sector with strict overflow rejection.
+- **Faster UDF staging:** optional same-filesystem COW reflink on Linux and
+  aligned native block cloning on supported Windows filesystems. Unsupported
+  filesystems automatically fall back to the existing sparse buffered copy.
+  All paths retain full staged verification and atomic replacement. Benchmark
+  results are environment-dependent; no guaranteed speedup is claimed.
+- **CHD v5 native CDDA extraction:** audio-only and mixed-mode CHD tracks
+  available as WAV (RIFF) or RF64 for audio beyond 4 GiB, decoded within
+  the plugin. Parallel CHD hunk reads are synchronized. Full >4-GiB RF64
+  output was checked with an independent streaming SHA-256 test.
+- **MDS v2 / MDX Preview:** native metadata decode and supported plain or
+  compressed data-track extraction, with real-image interoperability tests.
 
-## Installation
+## Validation
 
-Open ISO-WCX-v0.16.0.zip directly in Total Commander and accept the WCX
-installer prompt. Keep ISO-WCX.wcx and ISO-WCX.wcx64 together. SHA256SUMS.txt
-verifies the ZIP's integrity.
+Release gates cover Visual Studio 2022 Win32 and x64 WCX loading/extraction
+and CTest, Linux C++20 CTest, Clang ASan/UBSan, independent mkudffs/udfinfo/
+7-Zip UDF interoperability, >4-GiB UDF write and complete streaming readback,
+and SHA256-verified installable ZIP packaging. Dedicated Preview CI adds
+C++26 compiler compatibility, CHD RF64, VHDX/QEMU and MDS/MDX interop.
 
-## Unsupported or experimental
+## Install
 
-This is NOT a general-purpose NTFS/ext4/UDF editor. Arbitrary UDF file/dir
-creation or disk-block reclamation, metadata/VAT/sparable UDF write operations,
-ISO/UDF Bridge rebuilding, encrypted/compressed NTFS, advanced ext4 features,
-VHD(X) parent chains, ESD/SWM writes and complex optical protections remain
-unsupported. Real-media and Total Commander GUI coverage remains incomplete.
-Edit copies of valuable boot/install images, never originals.
+Download **ISO-WCX-v0.17.0.zip** from this release and open it directly in
+Total Commander. Accept the plugin installation prompt. Keep
+`ISO-WCX.wcx` and `ISO-WCX.wcx64` together and check `SHA256SUMS.txt`
+when verifying a downloaded ZIP.
 
-UDF bitmap allocation development is separate in PR #33 and is NOT included
-in this stable release.
+If an old missing `iso.wcx` registration persists, remove only that obsolete
+association in Total Commander packer configuration and associate the new
+`ISO-WCX.wcx`. Installation instructions are included in English/Russian.
 
-## Quality gates
+## Write safety and limitations
 
-Publication follows successful Windows x86/x64, Linux C++20, Clang ASan/UBSan,
-WCX DLL load/extract tests and SHA256-verified installer packaging.
+UDF writing is still **experimental**, not a universal UDF editor. It applies
+only to validated nonhybrid UDF-only images using writable physical Type-1
+2048-byte partitions. Unsupported: ISO/UDF Bridge rebuilding; metadata,
+VAT and sparable partition writes; unrecorded/sparse AED chain creation;
+arbitrary hard links, symlinks and directory deletion; rebuilding bootable
+media; mixed delete-and-recreate of the same path. Directory/FID allocation
+and known extents are bounded; an unsupported image is refused rather than
+modified. Disk space is required for a sibling staging file when a COW clone
+is unavailable.
+
+WIM/ESD/SWM, optical formats and NTFS/ext4 remain subject to the documented
+read/write limits; password-protected optical image data tracks remain
+unsupported. GUI tests in Total Commander and broader real optical media
+coverage remain outstanding. Edit backup copies of important images.
+
+The v0.16.0 tag and published assets are preserved unchanged.
