@@ -182,8 +182,8 @@ def main(binary):
         # The payload of a boot image may be embedded in a file extent
         # whose first LBA is NOT the catalog or the image's first LBA.
         b=fixture(boot=True)
-        first_dir_record=iso_record(20,B,2,b'\\x00')
-        second_dir_record=iso_record(20,B,2,b'\\x01')
+        first_dir_record=iso_record(20,B,2,bytes([0]))
+        second_dir_record=iso_record(20,B,2,bytes([1]))
         file_record=20*B+len(first_dir_record)+len(second_dir_record)
         both(b,file_record+2,23)
         both(b,file_record+10,3*B)
