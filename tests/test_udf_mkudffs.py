@@ -214,12 +214,68 @@ def check_real_directory_spill(editor, image, root):
           "relocation, sector-bound FIDs and atomic rollback",flush=True)
 
 
+
+def check_real_atomic_batch(editor, inspector, root):
+    """One real mkudffs image, one multi-FE/FID/bitmap/LVID transaction."""
+    image = image_with_mkudffs(root, "hd", "real-multi-batch")
+    source = root / "batch-source.dat"
+    source.write_bytes(b"Independent 7-Zip UDF batch verification\n" * 222)
+    payload = source.read_bytes()
+    small = root / "small-batch-source.dat"
+    small.write_bytes(b"REAL MULTI BATCH CONTENT")
+    operations = [
+        ("add", "RealBatch/Inner/level2.bin", source),
+        ("mkdir", "RealBatch/Inner", None),
+        ("add", "RealBatch/first.bin", small),
+        ("mkdir", "RealBatch", None),
+        ("add", "RootBatch.bin", small),
+    ]
+    for i in range(18):
+        name = f"BATCH-REAL-{i:02d}-" + "X" * 61 + ".TXT"
+        operations.append(("add", name, small))
+    arguments = []
+    for kind, name, src in operations:
+        arguments.extend((kind, name))
+        if kind == "add":
+            arguments.append(src)
+    initial = image.read_bytes()
+    command(editor, image, "batch", *arguments)
+    updated = image.read_bytes()
+    assert updated != initial and len(updated) == len(initial)
+    assert updated[:16*2048] == initial[:16*2048]
+    command("udfinfo", image)
+    native = command(inspector, image).stdout.decode("utf-8")
+    listed = command("7z", "l", image).stdout.decode("utf-8")
+    for name in ("RootBatch.bin", "RealBatch/Inner/level2.bin",
+                 "RealBatch/first.bin", operations[-1][1]):
+        assert name in native, name
+        assert name.split("/")[-1] in listed, name
+    independent_extract(image, root, "RealBatch/Inner/level2.bin", payload)
+    independent_extract(image, root, "RootBatch.bin", small.read_bytes())
+    independent_extract(image, root, operations[-1][1], small.read_bytes())
+
+    # Fail a second batch whose later entry has no parent. Neither file
+    # insertion nor directory reallocation may leak into the original.
+    original = image.read_bytes()
+    refused = command(editor, image, "batch",
+                      "add", "NEVER-COMMIT.TXT", small,
+                      "add", "NotCreated/Sub/invalid.txt", small,
+                      allowed=(1,))
+    assert refused.returncode == 1
+    assert image.read_bytes() == original
+    assert not list(root.glob(".iso-wcx-edit-*"))
+    print("PASS real mkudffs atomic multi-create with nested directories, "
+          "independent 7z full extraction and failed-batch rollback",
+          flush=True)
+
+
 def main(editor, inspector):
     for command_name in ("mkudffs", "udfinfo", "7z"):
         assert shutil.which(command_name), f"missing CI test-only tool {command_name}"
     with tempfile.TemporaryDirectory(prefix="iso-wcx-udftools-fixture-") as t:
         root = pathlib.Path(t)
         verify_portable_udf_read(root, editor, inspector)
+        check_real_atomic_batch(editor,inspector,root)
         for media in ("hd", "dvdram"):
             image = image_with_mkudffs(root, media, "real-" + media)
             before = image.read_bytes()
