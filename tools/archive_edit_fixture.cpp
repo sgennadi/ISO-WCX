@@ -56,7 +56,7 @@ static int invoke_batch(const std::filesystem::path& image,
         iso_wcx::edit_optical(image,changes,[&] {
             return !cancel || ++ticks<=25;
         });
-        return cancel ? 1 : 0; // A cancellation probe must not succeed.
+        return 0; // Cancellation probes must fail by actually cancelling.
     } catch (const iso_wcx::EditCancelled&) {
         return cancel ? 1 : 2;
     } catch (const std::exception& error) {
