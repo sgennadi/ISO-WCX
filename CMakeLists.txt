@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.16.0 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.17.0 LANGUAGES C CXX)
 
 # Keep the released WCX ABI on its tested C++20 toolchain. The C++26 lane
 # exercises *exactly the same sources and tests*, without changing artifacts.
