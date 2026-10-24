@@ -781,9 +781,10 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     put32(fid,24,new_lba);
     put16(fid,28,0); // Physical partition map index
     std::copy(encoded_name.begin(),encoded_name.end(),fid.begin()+38);
-    // CRC includes the meaningful FID descriptor, not the four-byte
-    // alignment padding after its OSTA CS0 identifier.
-    tag_update(fid,0,38u+fid_id_size);
+    // UDF FID CRC covers the complete four-byte-aligned descriptor,
+    // including its required padding. Independent 7-Zip validation
+    // rejects a shortened CRC span on these Type-1 images.
+    tag_update(fid,0,fid.size());
 
     auto parent_bytes=parent.bytes;
     const auto old_size=static_cast<std::size_t>(parent.size);
