@@ -87,7 +87,20 @@ def main(editor, inspector):
             command("udfinfo", image)
             entries = command(inspector, image).stdout.decode("utf-8")
             assert folder in entries
-            command("7z", "l", image)
+            independent_listing = command("7z", "l", image).stdout.decode(
+                "utf-8", errors="strict")
+            assert folder in independent_listing, (
+                "new directory not visible to independent 7-Zip decoder",
+                independent_listing)
+            # A newly allocated child directory must itself permit a
+            # further insertion; this exercises the follow-up transaction's
+            # bitmap, FE, parent-FID and LVID bookkeeping.
+            nested_name = folder + "/child.txt"
+            source.write_bytes(b"NESTED REAL UDF CONTENT")
+            command(editor, image, "add", nested_name, source)
+            command("udfinfo", image)
+            independent_extract(image, root, nested_name,
+                                b"NESTED REAL UDF CONTENT")
             # No rename/delete/snapshot directory mutation is implied.
             # Failures leave the entire original image byte-for-byte intact.
             source.write_bytes(b"R" * 5000)
