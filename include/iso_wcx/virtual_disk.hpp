@@ -13,7 +13,7 @@ class VhdxReader;
 
 // Native read-only virtual HDD byte stream. Optical CD sector parsing
 // remains separate. No external disk libraries or runtime plugin DLLs.
-enum class VirtualDiskFormat : std::uint8_t { raw_image, fixed_vhd, vhdx };
+enum class VirtualDiskFormat : std::uint8_t { raw_image, compressed_floppy, fixed_vhd, vhdx };
 
 class VirtualDiskReader {
 public:
@@ -33,6 +33,8 @@ public:
 
 private:
     std::ifstream input_;
+    // IMZ is a bounded, CRC-verified in-memory raw floppy.
+    std::vector<std::uint8_t> imz_bytes_;
     std::unique_ptr<VhdxReader> vhdx_;
     std::uint64_t capacity_ = 0;
     VirtualDiskFormat format_ = VirtualDiskFormat::raw_image;
