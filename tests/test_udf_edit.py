@@ -77,7 +77,7 @@ def base_image(*, layout='embedded', nested=False, efe=False, overlap=False):
     if nested:
         root = fid(302,'hello') + fid(304,'docs',directory=True)
         fe(image,301,root,directory=True)
-        fe(image,304,fid(305,'inner'))
+        fe(image,304,fid(305,'inner'),directory=True)
         fe(image,305,b'NESTED',efe=efe)
     return image
 
