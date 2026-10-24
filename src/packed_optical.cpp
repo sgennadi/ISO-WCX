@@ -139,11 +139,12 @@ void PackedOptical::append_isz_region(const std::filesystem::path& path,
     auto input=std::make_unique<std::ifstream>(path,std::ios::binary|std::ios::ate);
     check(bool(*input) && input->tellg()>=0,"cannot open ISZ segment");
     const auto physical=static_cast<std::uint64_t>(input->tellg());
-    // A truncated file may be shorter than the size in the segment table.
-    // Reading its declared chunks will then fail at the virtual-data bounds.
-    const auto usable=std::min(physical,declared_end);
-    check(begin>=48 && begin<usable,"ISZ segment contains no valid data area");
-    const auto length=usable-begin;
+    // Refuse a short middle part: concatenating a truncated region with
+    // the next one would shift the virtual stream and corrupt stored blocks.
+    check(declared_end<=physical,"ISZ segment shorter than declared");
+    check(begin>=48 && begin<declared_end,
+          "ISZ segment contains no valid data area");
+    const auto length=declared_end-begin;
     check(isz_data_size_<=max_logical && length<=max_logical-isz_data_size_,
           "ISZ segment data stream exceeds size limit");
     isz_regions_.push_back({std::move(input),begin,isz_data_size_,length});
@@ -241,6 +242,16 @@ void PackedOptical::parse_isz() {
         }
         check(terminated && !segments.empty(),
               "ISZ segment table missing terminating entry");
+        check(std::uint64_t(segment_table)+
+                  std::uint64_t(segments.size()+1)*24<=ptr_offset,
+              "ISZ segment table overlaps the chunk table");
+        std::uint64_t next_chunk=0;
+        for(const auto& part:segments) {
+            check(part.first==next_chunk,
+                  "ISZ segment chunk ranges are not contiguous");
+            next_chunk+=part.chunks;
+        }
+        check(next_chunk==expected,"ISZ segment chunk ranges are incomplete");
     }
 
     if(segments.empty()) {
