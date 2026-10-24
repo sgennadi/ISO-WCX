@@ -628,6 +628,55 @@ bool same_file(const std::filesystem::path& left,
     }
     return true;
 }
+// Encode a path component as OSTA Compressed Unicode (CS0), never by
+// assuming arbitrary UTF-8 bytes are a UDF 8-bit filename. For UDF 1.02
+// keep newly created names in the portable BMP subset (UCS-2); rejecting
+// supplementary characters is safer than emitting unsupported surrogates.
+Bytes encode_udf_cs0(std::string_view component) {
+    std::vector<std::uint16_t> scalars;
+    scalars.reserve(component.size());
+    bool needs_16bit=false;
+    for(std::size_t i=0;i<component.size();) {
+        const auto lead=static_cast<unsigned char>(component[i++]);
+        std::uint32_t cp=0;
+        unsigned trailing=0;
+        if(lead<0x80)cp=lead;
+        else if(lead>=0xc2 && lead<=0xdf) {
+            cp=lead&0x1fu;trailing=1;
+        } else if(lead>=0xe0 && lead<=0xef) {
+            cp=lead&0x0fu;trailing=2;
+        } else {
+            throw EditUnsupported(
+                "UDF Type-1 writer accepts BMP Unicode, not non-BMP names");
+        }
+        need(trailing<=component.size()-i,
+             "truncated UTF-8 UDF filename");
+        for(unsigned j=0;j<trailing;++j) {
+            const auto b=static_cast<unsigned char>(component[i++]);
+            need((b&0xc0u)==0x80u,
+                 "invalid UTF-8 UDF continuation");
+            cp=(cp<<6)|(b&0x3fu);
+        }
+        need((trailing!=1 || cp>=128) &&
+             (trailing!=2 || cp>=2048) &&
+             cp>=32 && cp!=127 && cp!=0xfeff && cp!=0xfffe &&
+             !(cp>=0xd800 && cp<=0xdfff),
+             "invalid UDF CS0 Unicode scalar");
+        needs_16bit=needs_16bit || cp>255;
+        scalars.push_back(static_cast<std::uint16_t>(cp));
+    }
+    need(!scalars.empty(),"empty UDF filename");
+    const auto encoded_bytes=1u+scalars.size()*(needs_16bit?2u:1u);
+    need(encoded_bytes<=255,"UDF CS0 filename exceeds 255 bytes");
+    Bytes result;
+    result.reserve(encoded_bytes);
+    result.push_back(needs_16bit?16u:8u);
+    for(const auto cp:scalars) {
+        if(needs_16bit)result.push_back(static_cast<std::uint8_t>(cp>>8));
+        result.push_back(static_cast<std::uint8_t>(cp));
+    }
+    return result;
+}
 // First allocator-backed writer stage: new small embedded regular files and
 // empty embedded directories in an existing embedded directory. We avoid
 // directory relocation, VAT, sparse files, extent chains and ISO/UDF bridges.
@@ -644,13 +693,10 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
                                   std::string{}:key.substr(0,separator);
     const auto component=separator==std::string::npos?
                          key:key.substr(separator+1);
-    // Byte-preserving 8-bit OSTA CS0 for ASCII, no implicit conversion of
-    // arbitrary UTF-8 into the UDF CS0 character set.
-    need(!component.empty() && component.size()<=200,
-         "unsupported new UDF filename length");
-    for(const unsigned char c:component)
-        need(c>=32 && c<=126 && c!='/' && c!='\\',
-             "new UDF filename must use printable ASCII");
+    const Bytes encoded_name=encode_udf_cs0(component);
+    need(component.find('\\')==std::string::npos &&
+         component.find('/')==std::string::npos,
+         "invalid UDF path separator");
     const auto parent_it=volume.directories().find(parent_name);
     need(parent_it!=volume.directories().end(),
          "UDF parent directory does not exist");
@@ -689,7 +735,7 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
         need(length<=block-fe_header,
              "UDF allocator currently creates only embedded small files");
     }
-    const auto fid_id_size=component.size()+1u; // CS0 compression 8
+    const auto fid_id_size=encoded_name.size();
     const auto fid_size=(38u+fid_id_size+3u)&~std::size_t(3);
     need(fid_size<=255 && parent.size+fid_size<=parent.capacity,
          "parent directory lacks embedded space for new UDF FID");
@@ -734,9 +780,10 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     put32(fid,20,static_cast<std::uint32_t>(block));
     put32(fid,24,new_lba);
     put16(fid,28,0); // Physical partition map index
-    fid[38]=8; // 8-bit OSTA CS0 name encoding
-    std::copy(component.begin(),component.end(),fid.begin()+39);
-    tag_update(fid,0,fid.size());
+    std::copy(encoded_name.begin(),encoded_name.end(),fid.begin()+38);
+    // CRC includes the meaningful FID descriptor, not the four-byte
+    // alignment padding after its OSTA CS0 identifier.
+    tag_update(fid,0,38u+fid_id_size);
 
     auto parent_bytes=parent.bytes;
     const auto old_size=static_cast<std::size_t>(parent.size);
