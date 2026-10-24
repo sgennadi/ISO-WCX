@@ -145,6 +145,38 @@ def main(binary):
         validate_path_tables(image)
         assert read_image(image,True)['café.txt']==source.read_bytes()
         assert read_image(image)['HELLO.TXT']==source.read_bytes()
+        # ISO9660 Long(221): 219-byte ASCII name plus the ;1 version suffix.
+        longest_iso='A'*219
+        image.write_bytes(fixture())
+        run('add',longest_iso)
+        assert read_image(image)[longest_iso]==source.read_bytes()
+        validate_path_tables(image)
+        # Anything that cannot fit the physical 255-byte ISO directory
+        # record must fail without replacing the original image.
+        run('add','B'*220,False)
+        # Joliet Long(110) is measured in UTF-16 code units, not Python
+        # characters. Non-BMP emoji consumes two UTF-16 code units.
+        image.write_bytes(fixture(joliet=True))
+        longest_joliet='Ж'*106+'📦'  # 108 UTF-16 units + ;1 = 110.
+        run('add',longest_joliet)
+        assert read_image(image,True)[longest_joliet]==source.read_bytes()
+        validate_path_tables(image)
+        run('add','Ж'*109,False)
+        # Deterministic 8.3-compatible ISO aliases should remain stable
+        # when several Unicode-only Joliet subdirectories share sizes.
+        image.write_bytes(fixture(joliet=True))
+        folder_a='Инсталляция 📦'
+        folder_b='Инсталляция 🔧'
+        run('mkdir',folder_a)
+        run('mkdir',folder_b)
+        run('add',folder_a+'/kernel.bin')
+        run('add',folder_b+'/kernel.bin')
+        assert read_image(image,True)[folder_a+'/kernel.bin']==source.read_bytes()
+        assert read_image(image,True)[folder_b+'/kernel.bin']==source.read_bytes()
+        validate_path_tables(image)
+        run('delete',folder_b)
+        assert folder_b+'/kernel.bin' not in read_image(image,True)
+        # Use independent ISO reader for portable long-primary names.
         image.write_bytes(fixture(boot=True));old=image.read_bytes();run('add','NEW.TXT')
         assert image.read_bytes()[24*B:26*B]==old[24*B:26*B],'boot catalog/image changed'
         for mode in ('hybrid','udf','rockridge','bad_extent'):
