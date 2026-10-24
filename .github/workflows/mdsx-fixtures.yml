@@ -59,6 +59,12 @@ jobs:
             suffix: .wcx64
     steps:
       - uses: actions/checkout@v4
+      # ctypes cannot load a Win32 WCX from the runner's default 64-bit Python.
+      # Match the Python process bitness to the WCX DLL for genuine ABI testing.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          architecture: ${{ matrix.arch == 'Win32' && 'x86' || 'x64' }}
       - name: Configure fully static Windows native WCX
         shell: pwsh
         run: cmake -S . -B build-mdsv2 -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DBUILD_TESTING=OFF -DISO_WCX_BUILD_DEV_TOOLS=ON
