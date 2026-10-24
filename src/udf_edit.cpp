@@ -539,27 +539,45 @@ public:
         tag_update(b,0,16u+u16(b,10));
         return {bitmap_->at,std::move(b)};
     }
+    // Commit the entire batch to one LVID update. IDs and both object
+    // counters must reflect *all* creations; subtract only directory blocks
+    // that have passed the allocator's unique-ownership release check.
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
-    updated_integrity(bool directory,std::uint32_t reserved_blocks=1) const {
+    updated_integrity_batch(std::uint32_t files,std::uint32_t dirs,
+                            std::uint32_t allocated_blocks) const {
         need(integrity_.has_value(),"UDF LVID is absent");
         auto b=integrity_->bytes;
+        const auto entries=std::uint64_t(files)+dirs;
+        need(entries>0 && entries<=
+                 std::numeric_limits<std::uint64_t>::max()-integrity_->next_id,
+             "UDF batch unique-ID sequence overflow");
         const auto old_free=u32(b,80);
-        need(reserved_blocks>0 && old_free>=reserved_blocks,
+        need(allocated_blocks>0 && old_free>=allocated_blocks,
              "UDF LVID reports insufficient free blocks");
-        put32(b,80,old_free-reserved_blocks);
-        put64(b,40,integrity_->next_id+1);
+        put32(b,80,old_free-allocated_blocks);
+        put64(b,40,integrity_->next_id+entries);
         if(integrity_->impl_bytes>=40) {
-            const auto counter=88u+32u+(directory?4u:0u);
-            const auto n=u32(b,counter);
-            need(n!=0xffffffffu,"UDF LVID file/directory count overflow");
-            put32(b,counter,n+1);
+            for(const auto [counter,change] :
+                {std::pair{120u,files},std::pair{124u,dirs}}) {
+                const auto previous=u32(b,counter);
+                need(change<=std::numeric_limits<std::uint32_t>::max()-previous,
+                     "UDF LVID file/directory count overflow");
+                put32(b,counter,previous+change);
+            }
         }
         tag_update(b,0,88u+integrity_->impl_bytes);
         return {integrity_->at,std::move(b)};
     }
-    [[nodiscard]] std::uint64_t new_unique_id() const {
-        need(integrity_.has_value(),"UDF integrity descriptor missing");
-        return integrity_->next_id;
+    [[nodiscard]] std::pair<std::uint64_t,Bytes>
+    updated_integrity(bool directory,std::uint32_t reserved_blocks=1) const {
+        return updated_integrity_batch(directory?0u:1u,
+                                       directory?1u:0u,reserved_blocks);
+    }
+    [[nodiscard]] std::uint64_t new_unique_id(std::uint64_t index=0) const {
+        need(integrity_.has_value() &&
+             index<std::numeric_limits<std::uint64_t>::max()-integrity_->next_id,
+             "UDF integrity unique-ID overflow");
+        return integrity_->next_id+index;
     }
     [[nodiscard]] std::uint64_t absolute(std::uint32_t logical) const {
         return physical(logical);
