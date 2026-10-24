@@ -265,14 +265,44 @@ public:
             reserved_.push_back({{bitmap_->at,block},0});
             const auto integrity_length=u32(lvd,432);
             const auto integrity_location=u32(lvd,436);
-            need(integrity_length==block &&
-                 integrity_location<size_/block,
-                 "UDF allocator requires one valid LVID sector");
+            // UDF integrity *sequence* can contain an LVID plus a
+            // Terminating Descriptor and unused sectors. A real mkudffs
+            // Type-1 image commonly allocates more than one block here.
+            need(integrity_length>=block &&
+                 integrity_length<=16u*1024u*1024u &&
+                 integrity_length%block==0 &&
+                 integrity_location<size_/block &&
+                 integrity_length<=size_-std::uint64_t(integrity_location)*block,
+                 "UDF LVID sequence outside optical image");
+            const auto integrity_count=integrity_length/block;
             Integrity integrity;
-            integrity.at=std::uint64_t(integrity_location)*block;
-            integrity.bytes=read(integrity.at,block);
-            tag_check(integrity.bytes,0,9);
-            need(u32(integrity.bytes,12)==integrity_location &&
+            bool found_lvid=false;
+            bool terminated=false;
+            for(std::uint64_t i=0;i<integrity_count;++i) {
+                const auto lba=std::uint64_t(integrity_location)+i;
+                auto descriptor=read(lba*block,block);
+                const auto type=u16(descriptor,0);
+                if(type==0) {
+                    // Padding may appear only after an LVID or terminator.
+                    need(found_lvid,
+                         "empty UDF integrity sequence before LVID");
+                    break;
+                }
+                need(!terminated,"UDF descriptor follows integrity terminator");
+                tag_check(descriptor,0,type);
+                need(u32(descriptor,12)==lba,
+                     "UDF integrity descriptor tag-location mismatch");
+                if(type==8) {
+                    terminated=true;
+                    break;
+                }
+                need(type==9 && !found_lvid,
+                     "unsupported chained/multiple UDF integrity descriptors");
+                integrity.at=lba*block;
+                integrity.bytes=std::move(descriptor);
+                found_lvid=true;
+            }
+            need(found_lvid &&
                  u32(integrity.bytes,28)==1 &&
                  u32(integrity.bytes,72)==1,
                  "UDF allocator requires a closed single-partition LVID");
@@ -286,7 +316,10 @@ public:
                  integrity.next_id<std::numeric_limits<std::uint64_t>::max(),
                  "unsupported UDF LVID unique-ID sequence");
             integrity_=std::move(integrity);
-            reserved_.push_back({{integrity_->at,block},0});
+            // Every integrity-sequence sector remains reserved even when
+            // only the first descriptor is modified.
+            reserved_.push_back({{std::uint64_t(integrity_location)*block,
+                                   integrity_length},0});
         }
         const auto fsd_size=u32(lvd,248)&0x3fffffffu;
         need(fsd_size>=416 && fsd_size<=block && u16(lvd,256)==0,
