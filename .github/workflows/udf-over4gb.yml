@@ -1,16 +1,38 @@
 name: UDF over-4-GiB native write and independent readback
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - feature/udf-bitmap-allocator
+  pull_request:
+    branches: [main]
     paths:
+      - 'src/udf_edit.cpp'
+      - 'src/disc.cpp'
+      - 'src/archive_edit.cpp'
+      - 'include/iso_wcx/**'
+      - 'tests/test_udf_allocator.py'
       - 'tests/test_udf_over4gb.py'
+      - 'tools/archive_edit_fixture.cpp'
+      - 'CMakeLists.txt'
       - '.github/workflows/udf-over4gb.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/udf_edit.cpp'
+      - 'src/disc.cpp'
+      - 'src/archive_edit.cpp'
+      - 'include/iso_wcx/**'
+      - 'tests/test_udf_allocator.py'
+      - 'tests/test_udf_over4gb.py'
+      - 'tools/archive_edit_fixture.cpp'
+      - 'CMakeLists.txt'
+      - '.github/workflows/udf-over4gb.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   udf-over-4gib:
@@ -25,9 +47,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends udftools p7zip-full
+          command -v mkudffs
+          command -v udfinfo
+          command -v 7z
       - name: Build editor and UDF inspector
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --target archive_edit_fixture disc_inspect --parallel 2
-      - name: "Over 4 GiB UDF create, parse and 7z streaming hash"
+      - name: "Over 4 GiB UDF create, grow, reject overflow, replace and 7z SHA256"
         run: python3 tests/test_udf_over4gb.py build/archive_edit_fixture build/disc_inspect

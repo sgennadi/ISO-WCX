@@ -2,23 +2,37 @@ name: Real UDF Type-1 mkudffs interoperability
 
 on:
   pull_request:
+    branches: [main]
     paths:
       - 'src/udf_edit.cpp'
       - 'src/disc.cpp'
+      - 'src/archive_edit.cpp'
+      - 'include/iso_wcx/**'
+      - 'tests/test_udf_allocator.py'
       - 'tests/test_udf_mkudffs.py'
+      - 'tools/archive_edit_fixture.cpp'
+      - 'CMakeLists.txt'
       - '.github/workflows/udf-real-media.yml'
   push:
-    branches:
-      - feature/udf-bitmap-allocator
+    branches: [main]
     paths:
       - 'src/udf_edit.cpp'
       - 'src/disc.cpp'
+      - 'src/archive_edit.cpp'
+      - 'include/iso_wcx/**'
+      - 'tests/test_udf_allocator.py'
       - 'tests/test_udf_mkudffs.py'
+      - 'tools/archive_edit_fixture.cpp'
+      - 'CMakeLists.txt'
       - '.github/workflows/udf-real-media.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   independent-udf-media:
