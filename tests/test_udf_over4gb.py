@@ -106,8 +106,25 @@ def main(editor, inspector):
         assert FILENAME in independent_listing
         print("Independent 7z streaming >4-GiB extraction/hash", flush=True)
         assert checksum_7zip(image) == expected
-        print("PASS: UDF >4 GiB, multiple ShortADs, streamed write, "
-              "native/7z readback and SHA256", flush=True)
+
+        # Existing-file replacement uses the same ShortAD array and does not
+        # allocate new bitmap sectors. Exercise the 64-bit replacement path,
+        # not just initial file creation.
+        with source.open("r+b") as file:
+            for offset in (0, 1024**3, 2*1024**3, 3*1024**3,
+                           4*1024**3, DATA_SIZE-32):
+                file.seek(offset)
+                file.write(f"UPDATED-{offset:016X}".encode("ascii"))
+        replacement_hash = checksum(source)
+        assert replacement_hash != expected
+        print("Replacing the same >4-GiB UDF file", flush=True)
+        command(editor, image, "add", FILENAME, source, timeout=1200)
+        command("udfinfo", image)
+        replacement_listing = command(inspector, image, timeout=180)
+        assert f"FILE {DATA_SIZE} {FILENAME}" in replacement_listing
+        assert checksum_7zip(image) == replacement_hash
+        print("PASS: >4 GiB UDF native create+replace, multiple ShortADs, "
+              "7z streaming SHA256 and independent readback", flush=True)
 
 
 if __name__ == "__main__":
