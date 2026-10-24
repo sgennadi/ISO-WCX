@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.14.0 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.15.0 LANGUAGES C CXX)
 
 # Keep the released WCX ABI on its tested C++20 toolchain. The C++26 lane
 # exercises *exactly the same sources and tests*, without changing artifacts.
@@ -97,6 +97,15 @@ FetchContent_Declare(iso_wcx_chdr
 FetchContent_MakeAvailable(iso_wcx_chdr)
 
 include(CTest)
+if(BUILD_TESTING)
+  add_executable(archive_edit_fixture tools/archive_edit_fixture.cpp src/archive_edit.cpp src/iso_edit.cpp)
+  target_include_directories(archive_edit_fixture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME iso_transactional_edit COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iso_edit.py" "$<TARGET_FILE:archive_edit_fixture>")
+  add_executable(wim_parts_tests tests/wim_parts.cpp)
+  target_include_directories(wim_parts_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME wim_split_parts COMMAND wim_parts_tests)
+endif()
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
 # runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
 option(ISO_WCX_BUILD_DEV_TOOLS "Build internal inspection and test EXEs" ${BUILD_TESTING})
@@ -104,8 +113,12 @@ if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
   message(FATAL_ERROR "CTest requires ISO_WCX_BUILD_DEV_TOOLS=ON")
 endif()
 
-add_library(iso_disc STATIC src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
+add_library(iso_disc STATIC src/archive_edit.cpp src/iso_edit.cpp src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET} chdr-static)
+if(WIN32)
+  target_sources(iso_disc PRIVATE src/wim_archive.cpp src/wim_edit.cpp)
+  target_link_libraries(iso_disc PUBLIC advapi32 ole32 oleaut32 uuid)
+endif()
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(iso_disc PUBLIC cxx_std_20)
 if(MSVC)
@@ -232,6 +245,10 @@ if(WIN32)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
+    add_executable(wcx_wim_smoke tests/wcx_wim_smoke.cpp)
+    add_test(NAME wcx_wim_multi_image_lzx_esd
+      COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>")
+    set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 240)
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()
 endif()
@@ -315,3 +332,4 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/binary_reader_tes
   target_include_directories(binary_reader_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME binary_reader_tests COMMAND binary_reader_tests)
 endif()
+

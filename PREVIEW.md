@@ -1,6 +1,6 @@
-# ISO-WCX v0.14.0 C++20 preview
+# ISO-WCX v0.15.0 C++20 preview
 
-Modern, read-only Total Commander WCX plugin. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
+Modern Total Commander WCX plugin with restricted ISO/WIM editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
 ## If Total Commander says `File iso.wcx not found!`
 
@@ -15,7 +15,7 @@ This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.
 - Some images with 150-sector lead-in (relative and absolute session LBA conventions), but **not full multisession TOC/CUE parsing**.
 - UDF Type-1 physical partition mapping, File Entry/Extended File Entry, embedded/short/long allocation descriptors, AED continuations, OSTA CS0 UTF-16 names (surrogate pairs), and reserve VDS recovery.
 - **Experimental** UDF Metadata, Virtual (VAT) and Sparable partition-map reading, including mirror metadata fallback and packet redirects.
-- Read-only WCX operations (list/test/extract), streamed file data, 64-bit file sizes, bounded parsing and safety checks.
+- WCX list/test/extract for supported images, streamed file data and 64-bit sizes. Restricted PackFiles/DeleteFiles support is limited to validated plain ISO9660/Joliet images and standard unsplit WIM on Windows.
 
 ## Limits and cautions
 
@@ -156,3 +156,26 @@ password-protected/multipart DAA, CHD audio, multi-track/mixed-mode,
 parent chains and unusual sector layouts, plus MDS v2/MDX metadata decryption.
 These deliberately fail closed.
 Authentic vendor samples and GUI testing are still required for stable.
+
+## WIM/ESD in v0.15 Preview
+
+The plugin can browse `boot.wim`, `install.wim`, and WIM-structured `.esd`
+directly in Total Commander. WIM indexes appear as `image1/`, `image2/`,
+etc. It uses system WIMGAPI from System32. No mount, additional DLL,
+third-party EXE or conversion to ISO is required. The OS WIM API may store
+temporary image metadata in the normal Windows temporary directory.
+See [WIM architecture](docs/wim-integration.md).
+
+Complete split SWM sets can be read and extracted from any part; all parts
+must be present in the same directory. ESD and SWM remain read-only.
+
+Existing plain ISO9660/Joliet and non-solid, unsplit standard WIM support
+restricted add/replace/delete through the WCX API. Hybrid, UDF-bridge,
+Rock Ridge and multi-extent ISO editing is not supported. WIM edits require
+an NTFS staging workspace and elevated Windows backup/restore/security
+privileges; new indexes, SWM edits and ESD writes are unsupported.
+
+Changes rebuild and verify a staged image before replacing the original.
+WCX file-by-file extraction does not restore NTFS alternate streams or
+reparse points. Total Commander GUI editing has not yet been manually
+validated; edit copies of important installation media.

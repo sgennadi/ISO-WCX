@@ -15,3 +15,8 @@ EXPORTS
     GetPackerCaps=_GetPackerCaps@0
     CanYouHandleThisFile=_CanYouHandleThisFile@4
     CanYouHandleThisFileW=_CanYouHandleThisFileW@4
+
+    PackFiles=_PackFiles@20
+    PackFilesW=_PackFilesW@20
+    DeleteFiles=_DeleteFiles@8
+    DeleteFilesW=_DeleteFilesW@8
