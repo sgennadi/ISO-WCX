@@ -29,7 +29,7 @@ int main() {
             actual.push_back(hex[b>>4]);actual.push_back(hex[b&15]);
         }
         if(actual!=v.hash)
-            throw std::runtime_error("RIPEMD-160 known vector mismatch");
+            throw std::runtime_error("RIPEMD-160 vector mismatch for " + std::string(v.text) + ": expected " + std::string(v.hash) + ", got " + actual);
     }
     std::cout<<"PASS: standard RIPEMD-160 digest vectors\n";
 }
