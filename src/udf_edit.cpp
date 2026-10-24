@@ -392,6 +392,10 @@ public:
         return directory_data(directory);
     }
     [[nodiscard]] bool has_bitmap() const noexcept {return bitmap_.has_value();}
+    [[nodiscard]] bool is_free(std::uint32_t logical) const {
+        need(bitmap_.has_value(),"UDF no bitmap for free-space verification");
+        return bitmap_free(*bitmap_,logical);
+    }
     [[nodiscard]] std::uint64_t image_size() const noexcept {return size_;}
     [[nodiscard]] std::uint32_t part_start() const noexcept {return partition_;}
     // A single ShortAD requires one contiguous allocation. Reserve a
@@ -601,34 +605,48 @@ public:
         tag_update(b,0,16u+u16(b,10));
         return {bitmap_->at,std::move(b)};
     }
-    // Commit the entire batch to one LVID update. IDs and both object
-    // counters must reflect *all* creations; subtract only directory blocks
-    // that have passed the allocator's unique-ownership release check.
+    // The closed LVID is changed once for the entire transaction.
+    // Free space is signed: deletions can reclaim more blocks than creations
+    // reserve. NextUniqueID is never decremented or recycled.
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
-    updated_integrity_batch(std::uint32_t files,std::uint32_t dirs,
-                            std::uint32_t allocated_blocks) const {
+    updated_integrity_delta(std::uint32_t files,std::uint32_t dirs,
+                            std::uint32_t deleted_files,
+                            std::uint64_t allocated,
+                            std::uint64_t reclaimed) const {
         need(integrity_.has_value(),"UDF LVID is absent");
         auto b=integrity_->bytes;
         const auto entries=std::uint64_t(files)+dirs;
-        need(entries>0 && entries<=
+        need(entries<=
                  std::numeric_limits<std::uint64_t>::max()-integrity_->next_id,
-             "UDF batch unique-ID sequence overflow");
-        const auto old_free=u32(b,80);
-        need(allocated_blocks>0 && old_free>=allocated_blocks,
-             "UDF LVID reports insufficient free blocks");
-        put32(b,80,old_free-allocated_blocks);
+             "UDF unique-ID sequence overflow");
+        const auto previous_free=std::uint64_t(u32(b,80));
+        need(allocated<=previous_free &&
+             reclaimed<=std::numeric_limits<std::uint32_t>::max() &&
+             reclaimed<=std::numeric_limits<std::uint32_t>::max()-
+                 (previous_free-allocated),
+             "UDF LVID free-space delta is invalid");
+        put32(b,80,static_cast<std::uint32_t>(
+            previous_free-allocated+reclaimed));
         put64(b,40,integrity_->next_id+entries);
         if(integrity_->impl_bytes>=40) {
-            for(const auto& [counter,change] :
-                {std::pair{120u,files},std::pair{124u,dirs}}) {
-                const auto previous=u32(b,counter);
-                need(change<=std::numeric_limits<std::uint32_t>::max()-previous,
-                     "UDF LVID file/directory count overflow");
-                put32(b,counter,previous+change);
-            }
+            const auto old_files=u32(b,120);
+            const auto old_dirs=u32(b,124);
+            need(deleted_files<=old_files &&
+                 std::uint64_t(old_files-deleted_files)+files<=
+                     std::numeric_limits<std::uint32_t>::max() &&
+                 std::uint64_t(old_dirs)+dirs<=
+                     std::numeric_limits<std::uint32_t>::max(),
+                 "UDF LVID file/directory count would overflow or underflow");
+            put32(b,120,old_files-deleted_files+files);
+            put32(b,124,old_dirs+dirs);
         }
         tag_update(b,0,88u+integrity_->impl_bytes);
         return {integrity_->at,std::move(b)};
+    }
+    [[nodiscard]] std::pair<std::uint64_t,Bytes>
+    updated_integrity_batch(std::uint32_t files,std::uint32_t dirs,
+                            std::uint32_t allocated_blocks) const {
+        return updated_integrity_delta(files,dirs,0u,allocated_blocks,0u);
     }
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
     updated_integrity(bool directory,std::uint32_t reserved_blocks=1) const {
