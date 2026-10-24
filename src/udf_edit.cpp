@@ -1104,7 +1104,8 @@ void retag_directory_fids(Bytes& bytes,std::uint32_t logical) {
 struct FreeFidSlot {
     std::size_t offset=0,span=0;
 };
-std::vector<FreeFidSlot> collect_free_fid_slots(const Bytes& payload) {
+std::vector<FreeFidSlot> collect_free_fid_slots(
+        const Bytes& payload,std::uint32_t first_logical) {
     std::vector<FreeFidSlot> slots;
     for(std::size_t p=0;p<payload.size();) {
         const auto remaining=payload.size()-p;
@@ -1142,7 +1143,8 @@ std::vector<FreeFidSlot> collect_free_fid_slots(const Bytes& payload) {
                         payload.begin()+static_cast<std::ptrdiff_t>(p+36),
                         [](std::uint8_t value){return value==0;});
         if(is_file_tombstone && cleared_icb && span<=4096u &&
-           u16(payload,p+10)+16u<=span)
+           u16(payload,p+10)+16u<=span &&
+           u32(payload,p+12)==first_logical+static_cast<std::uint32_t>(p/block))
             slots.push_back({p,span});
         p+=span;
     }
@@ -1262,7 +1264,10 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     // A normal single-file addition uses the shared batch planner only if
     // an existing, safely cleared tombstone can hold this FID. This keeps
     // legacy single-add behavior unchanged when no reusable slot exists.
-    if(choose_reused_fid(collect_free_fid_slots(old_directory),
+    if(choose_reused_fid(collect_free_fid_slots(
+                         old_directory,parent.storage==3?
+                             volume.logical_of(parent.at):
+                             volume.logical_of(parent.data_at)),
                          encoded_name.size(),std::set<std::size_t>{})) {
         create_udf_type1_batch(image,volume,{change},progress);
         return;
@@ -1659,11 +1664,14 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         Bytes name;
         std::uint32_t child_lba=0;
         bool directory=false;
+        std::optional<ReusedFid> reused;
     };
     struct ParentPlan {
         Fe original;
         Bytes payload;
         std::vector<FidPlan> children;
+        std::vector<FreeFidSlot> free_slots;
+        std::set<std::size_t> reused_offsets;
         bool preexisting=false;
         std::uint32_t final_lba=0;
         std::uint32_t old_blocks=0;
@@ -1701,6 +1709,10 @@ void create_udf_type1_batch(const std::filesystem::path& image,
             ParentPlan state;
             state.original=original->second;
             state.payload=volume.directory_payload(state.original);
+            state.free_slots=collect_free_fid_slots(
+                state.payload,state.original.storage==3?
+                    volume.logical_of(state.original.at):
+                    volume.logical_of(state.original.data_at));
             state.preexisting=true;
             parent_it=parents.emplace(p.parent,std::move(state)).first;
         }
@@ -1772,7 +1784,13 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         }
         tag_update(child.fe,0,fe_header+(embedded?
                    static_cast<std::size_t>(p.length):ad_bytes));
-        parent.children.push_back({p.name,child.lba,p.change.directory});
+        const auto reused=choose_reused_fid(
+            parent.free_slots,p.name.size(),parent.reused_offsets);
+        if(reused)
+            need(parent.reused_offsets.insert(reused->offset).second,
+                 "UDF free FID slot allocated twice in one transaction");
+        parent.children.push_back({
+            p.name,child.lba,p.change.directory,reused});
         if(p.change.directory) {
             ParentPlan nested;
             nested.original.bytes=child.fe;
@@ -1850,6 +1868,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         const auto& fe=parent.original;
         std::uint64_t length=parent.payload.size();
         for(const auto& fid:parent.children) {
+            if(fid.reused)continue;
             const auto bytes=(38u+fid.name.size()+3u)&~std::size_t(3);
             need(bytes<=max_dir-length,
                  "UDF batch directory exceeds 8-MiB limit");
@@ -1894,12 +1913,21 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         }
         std::size_t at=parent.payload.size();
         for(const auto& item:parent.children) {
-            const auto bytes=(38u+item.name.size()+3u)&~std::size_t(3);
+            const auto fid_at=item.reused?item.reused->offset:at;
+            const auto bytes=item.reused?
+                item.reused->span:
+                (38u+item.name.size()+3u)&~std::size_t(3);
+            const auto implementation=item.reused?
+                item.reused->implementation:0u;
+            need(fid_at<=length && bytes<=length-fid_at &&
+                 implementation<=bytes-38u-item.name.size() &&
+                 implementation<=65535u,
+                 "UDF reused FID exceeds its original byte span");
             Bytes fid(bytes,0);
             put16(fid,0,257);
             put16(fid,2,2);
             put32(fid,12,parent.external?
-                  parent.final_lba+static_cast<std::uint32_t>(at/block):
+                  parent.final_lba+static_cast<std::uint32_t>(fid_at/block):
                   volume.logical_of(fe.at));
             put16(fid,16,1);
             fid[18]=item.directory?2u:0u;
@@ -1907,17 +1935,28 @@ void create_udf_type1_batch(const std::filesystem::path& image,
             put32(fid,20,static_cast<std::uint32_t>(block));
             put32(fid,24,item.child_lba);
             put16(fid,28,0);
-            std::copy(item.name.begin(),item.name.end(),fid.begin()+38);
+            if(implementation) {
+                // A nonempty FID ImplementationUse starts with a regid
+                // EntityID (32 bytes). The remaining bytes are all zero.
+                need(implementation>=32u,
+                     "UDF FID ImplementationUse cannot omit the EntityID");
+                const std::string_view identifier="*ISO-WCX";
+                std::copy(identifier.begin(),identifier.end(),fid.begin()+39);
+            }
+            put16(fid,36,static_cast<std::uint16_t>(implementation));
+            std::copy(item.name.begin(),item.name.end(),
+                      fid.begin()+static_cast<std::ptrdiff_t>(
+                          38u+implementation));
             tag_update(fid,0,fid.size());
             if(parent.external)
                 std::copy(fid.begin(),fid.end(),
                           parent.content_write.begin()+
-                          static_cast<std::ptrdiff_t>(at));
+                          static_cast<std::ptrdiff_t>(fid_at));
             else
                 std::copy(fid.begin(),fid.end(),
                           parent.fe_write.begin()+
-                          static_cast<std::ptrdiff_t>(fe.ad_offset+at));
-            at+=fid.size();
+                          static_cast<std::ptrdiff_t>(fe.ad_offset+fid_at));
+            if(!item.reused)at+=fid.size();
         }
         need(at==length,"UDF batch FID payload length mismatch");
         if(relocate) {
