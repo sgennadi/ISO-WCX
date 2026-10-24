@@ -188,16 +188,30 @@ def check_real_directory_spill(editor, image, root):
     independent_extract(image,root,"x.txt",b"POST SPILL")
     command("udfinfo", image)
     independent_extract(image,root,old_files[0][0],old_files[0][1])
-    # A full-size next FID must fail once it exceeds a single sector.
+    # Append an FID too large for the remainder of the first sector.
+    # A second contiguous directory extent must be allocated, while the
+    # old directory block is reclaimed (net LVID and bitmap changes).
+    source.write_bytes(b"SECOND UDF DIRECTORY SECTOR")
+    second_name = "SECTOR2-" + "K"*184 + ".TXT"
+    previous = root_directory_storage(image)
+    assert previous[0]==0 and previous[2]==2048
+    command(editor,image,"add",second_name,source)
+    after = root_directory_storage(image)
+    assert after[0]==0 and after[1]>2048 and after[2]==4096, (
+        "UDF parent did not expand to two sectors",previous,after)
+    command("udfinfo",image)
+    independent_extract(image,root,second_name,b"SECOND UDF DIRECTORY SECTOR")
+    independent_extract(image,root,old_files[0][0],old_files[0][1])
+    # Failed and cancelled edits must leave the image unchanged.
     before = image.read_bytes()
-    source.write_bytes(b"SHOULD NOT BE ADDED")
-    refused = command(editor,image,"add",
-                      "NO-ROOM-"+"K"*184+".TXT",source,allowed=(1,))
+    source.write_bytes(b"CANCELLED CONTENT")
+    refused = command(editor,image,"cancel",
+                      "NOT-CREATED.TXT",source,allowed=(1,))
     assert refused.returncode!=0
     assert image.read_bytes()==before
     assert not list(root.glob(".iso-wcx-edit-*"))
-    print("PASS real mkudffs Type-1 embedded-to-ShortAD directory spill, "
-          "external append and rollback",flush=True)
+    print("PASS real mkudffs Type-1 embedded/ShortAD and 2-sector directory "
+          "relocation, sector-bound FIDs and atomic rollback",flush=True)
 
 
 def main(editor, inspector):

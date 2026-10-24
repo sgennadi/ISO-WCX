@@ -145,14 +145,62 @@ def external_directory_spill(editor,inspector,root):
     for i,name in enumerate(names):
         value=b'SHORT AFTER SPILL' if i==17 else f'DIR SPILL {i}'.encode('ascii')
         assert (folder/name).read_bytes()==value,(i,name)
-    # A second full-size FID would exceed the one-block ShortAD directory
-    # limit: operation must refuse and leave the image byte-for-byte intact.
+    # Cross the first ShortAD sector boundary. The writer allocates two new
+    # directory blocks, migrates all FIDs, and reclaims the old directory block.
+    source.write_bytes(b'RELOCATED TWO-SECTOR UDF DIRECTORY')
+    previous=image.read_bytes()
+    old_free=struct.unpack_from('<I',previous,INTEGRITY_LBA*B+80)[0]
+    grow_name='sector2-'+'r'*34+'.bin'
+    run(editor,image,'add',grow_name,source)
+    names.append(grow_name)
+    updated=image.read_bytes()
+    assert struct.unpack_from('<H',updated,root_fe+34)[0]&7==0
+    assert struct.unpack_from('<Q',updated,root_fe+64)[0]==2
+    new_lba=struct.unpack_from('<I',updated,root_fe+180)[0]
+    assert new_lba!=dir_lba
+    assert struct.unpack_from('<I',updated,root_fe+172)[0]==8
+    assert struct.unpack_from('<I',updated,root_fe+176)[0]>B
+    bitmap_at=(PARTITION+BITMAP_LOGICAL)*B+24
+    assert updated[bitmap_at+dir_lba//8]&(1<<(dir_lba%8)), (
+        'superseded external-directory block was not reclaimed')
+    for logical in (new_lba,new_lba+1):
+        assert not (updated[bitmap_at+logical//8]&(1<<(logical%8))), (
+            'new two-sector directory block was not reserved',logical)
+    new_free=struct.unpack_from('<I',updated,INTEGRITY_LBA*B+80)[0]
+    assert old_free-new_free==2,(old_free,new_free)
+    # Directory scanner must skip zero padding to the next sector.
+    logical_length=struct.unpack_from('<Q',updated,root_fe+56)[0]
+    at=(PARTITION+new_lba)*B
+    p=0
+    while p<logical_length:
+        available=min(B-p%B,logical_length-p)
+        record=updated[at+p:at+p+available]
+        if available<38 or record[:16]==bytes(16):
+            assert record==bytes(available)
+            p+=available
+            continue
+        assert struct.unpack_from('<H',record)[0]==257
+        tag_length=struct.unpack_from('<H',record,10)[0]
+        assert crc16(record[16:16+tag_length])==struct.unpack_from(
+            '<H',record,8)[0]
+        assert struct.unpack_from('<I',record,12)[0]==new_lba+p//B
+        filename_bytes=record[19]
+        impl_bytes=struct.unpack_from('<H',record,36)[0]
+        count=(38+impl_bytes+filename_bytes+3)&~3
+        assert count>=40 and count<=available
+        p+=count
+    assert p==logical_length
+    folder2=root/'spill-extract-2'
+    run(inspector,image,'--extract',folder2)
+    assert (folder2/grow_name).read_bytes()==b'RELOCATED TWO-SECTOR UDF DIRECTORY'
+    assert (folder2/names[0]).read_bytes()==b'DIR SPILL 0'
+    assert (folder2/'hello').read_bytes()==b'world'
     baseline=image.read_bytes()
-    run(editor,image,'add','NO-SPACE-'+'X'*150+'.BIN',source,success=False)
+    run(editor,image,'cancel','cancelled-new.txt',source,success=False)
     assert image.read_bytes()==baseline
     assert not list(root.glob('.iso-wcx-edit-*'))
-    print('PASS native UDF embedded-directory relocation to ShortAD, '
-          'FID TagLocation/CRC, follow-up append, bitmap/LVID and rollback')
+    print('PASS native UDF embedded-to-ShortAD and multi-sector relocation, '
+          'FID sector offsets/CRC, free-block reclamation, LVID and rollback')
 
 
 def main(editor,inspector):
