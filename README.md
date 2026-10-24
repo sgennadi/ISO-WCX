@@ -41,7 +41,7 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
 | Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352/2448 data sectors); synthetic-test coverage |
 | El Torito | Exposes validated BIOS and EFI boot-load images and the boot catalog under `boot.images/`; EFI FAT BPB sizing when valid |
-| Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Built-in native MBR/GPT + FAT12/16/32 browsing and extraction under `partitionN/`; VHDX fixed/dynamic sparse payloads with 512/4096 logical sectors; no mount or external DLL |
+| Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Native MBR/GPT + FAT12/16/32 and exFAT readers; **experimental** ext2/3 and ext4 extent/indirect-file browsing under `partitionN/`. No disk writes or mount. Unsupported ext4 features are rejected. VHDX fixed/dynamic base images with 512/4096 logical sectors; no external DLL |
 | Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
 | ISZ v1 (single-file) | Built-in indexed 2048-byte optical sectors with stored/zero/zlib/bzip2 chunks; encrypted, segmented, multi-volume and other ISZ variants rejected |
@@ -143,8 +143,9 @@ primary GPT using an independently valid backup header and table. For example:
 
 The native virtual-disk partition and FAT readers are now linked directly into WCX for supported images. A separate,
 read-only `virtual_fat_inspect` CLI now lists and extracts FAT12/16/32
-files from discovered raw IMG or fixed VHD partitions. NTFS/exFAT/ext
-are not implemented. The optical ISO/BIN `.img` path is unchanged. See
+files from discovered raw IMG or fixed VHD partitions. This paragraph
+records the older v0.12 state; exFAT and a limited ext2/3/4 reader arrived
+in subsequent preview development. NTFS remains unimplemented. The optical ISO/BIN `.img` path is unchanged. See
 [virtual disk architecture](docs/virtual-disks.md), informed by
 [TalAloni/DiskAccessLibrary](https://github.com/TalAloni/DiskAccessLibrary)
 (LGPL-3.0-or-later; no source copied or linked).
@@ -216,7 +217,7 @@ RRIP PX (mode), TF (7/17-byte modification time), and mirrored CE pointers now h
 - The install ZIP now contains only WCX binaries, TC installation metadata
   and text documentation. No setup EXE or repair scripts are required.
 
-**Unsupported:** NTFS, exFAT, ext2/3/4, VMDK, dynamic/differencing VHD,
+**Unsupported at the time of v0.13:** NTFS, exFAT, ext2/3/4, VMDK, dynamic/differencing VHD,
 differencing/dirty VHDX, MDS v2 and MDX extraction, encrypted/segmented ISZ,
 DAA v1.10 or encrypted DAA, audio/multitrack CHD and CHD parent chains.
 Real-world media/Total Commander GUI validation is pending.
@@ -265,3 +266,14 @@ See [bounded optical container design](docs/packed-optical.md).
   reparse points. Unsupported ESD compression remains excluded.
 - See [WIM design notes](docs/wim-integration.md).
 
+
+## Preview filesystem expansion (post v0.15)
+
+Native exFAT 1.0 browsing/extraction was added in PR #27. The next
+experimental ext2/3/4 module supports direct/indirect legacy block maps,
+ext4 extent trees, sparse files and nested directories in partitioned
+IMG/VHD/VHDX. It deliberately refuses unsupported features such as journal
+replay, inline data and encrypted inodes. This is a **partial, read-only**
+ext implementation, not full modern ext4 compatibility. NTFS is still
+not implemented. See [exFAT design](docs/exfat-integration.md) and
+[ext reader design](docs/ext-integration.md).
