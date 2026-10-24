@@ -198,7 +198,7 @@ int wmain(int argc,wchar_t** argv) {
         // Names do not determine membership or order.
         const auto renamed=swm.parent_path()/L"renamed.SWM";
         fs::rename(later,renamed);
-        if(!verify(renamed))return 19;
+        if(!verify(renamed)||!verify(swm.parent_path()/L"RENAMED.swm"))return 19;
         // Malformed files must not be reported as a valid WIM archive.
         const auto bad=root/L"corrupt.wim";
         write(bad,"NOT A WIM");

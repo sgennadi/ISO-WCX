@@ -50,11 +50,12 @@ inline std::vector<std::filesystem::path> resolve_wim_parts(const std::filesyste
     std::size_t inspected = 0;
     for (const auto& entry : fs::directory_iterator(image.parent_path())) {
         if (++inspected > 10000) throw std::runtime_error("SWM directory exceeds search limit");
-        if (entry.path() == image) continue;
         auto extension = entry.path().extension().wstring();
         std::transform(extension.begin(),extension.end(),extension.begin(),
                        [](wchar_t c){ return c >= L'A' && c <= L'Z' ? c + (L'a'-L'A') : c; });
         if (extension != L".swm" || !fs::is_regular_file(entry.symlink_status())) continue;
+        // Windows paths may use a different case from the directory entry.
+        if (fs::equivalent(entry.path(), image)) continue;
         Header candidate;
         if (!read_header(entry.path(),candidate)) continue;
         if (!std::equal(selected.bytes.begin()+24,selected.bytes.begin()+40,
