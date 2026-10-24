@@ -175,12 +175,32 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     std::vector<Node*> all{image.root.get()},dirs{image.root.get()};
     for(std::size_t i=0;i<all.size();++i){for(auto& c:all[i]->children){all.push_back(c.get());if(c->directory)dirs.push_back(c.get());}need(all.size()<=200000&&dirs.size()<=65535,"ISO edit tree too large");}
     for(auto* n:all)if(!n->source.empty()){need(next+(std::uint64_t(n->size)+block-1)/block<0xffffffffu,"ISO size limit");n->lba=static_cast<std::uint32_t>(next);std::ifstream source(n->source,std::ios::binary);copy_bytes(source,out,n->size,progress);auto pad=(block-n->size%block)%block;write(out,Bytes(pad));next+=(std::uint64_t(n->size)+block-1)/block;}
-    std::map<Node*,unsigned> numbers;for(std::size_t i=0;i<dirs.size();++i)numbers[dirs[i]]=static_cast<unsigned>(i+1);
     for(unsigned view=0;view<(image.joliet?2u:1u);++view){
         for(auto* d:dirs){d->new_size[view]=static_cast<std::uint32_t>(directory_data(*d,view).size());need(next+d->new_size[view]/block<0xffffffffu,"ISO size limit");d->new_lba[view]=static_cast<std::uint32_t>(next);next+=d->new_size[view]/block;}
         for(auto* d:dirs){edit_tick(progress);write(out,directory_data(*d,view));}
+        // ISO 9660 path-table numbering must be breadth-first and sorted
+        // by the directory identifier within each parent. Primary and
+        // Joliet namespaces can have different identifier orders.
+        std::vector<Node*> path_dirs{image.root.get()};
+        for(std::size_t parent=0;parent<path_dirs.size();++parent){
+            std::vector<Node*> child_dirs;
+            for(const auto& child:path_dirs[parent]->children)
+                if(child->directory)child_dirs.push_back(child.get());
+            std::sort(child_dirs.begin(),child_dirs.end(),[&](const Node* a,const Node* b){
+                const Bytes& lhs=view?a->joliet_identifier:a->identifier;
+                const Bytes& rhs=view?b->joliet_identifier:b->identifier;
+                const auto count=std::min(lhs.size(),rhs.size());
+                for(std::size_t i=0;i<count;++i)if(lhs[i]!=rhs[i])return lhs[i]<rhs[i];
+                return lhs.size()<rhs.size();
+            });
+            path_dirs.insert(path_dirs.end(),child_dirs.begin(),child_dirs.end());
+        }
+        need(path_dirs.size()==dirs.size(),"inconsistent ISO path table directory count");
+        std::map<Node*,unsigned> numbers;
+        for(std::size_t i=0;i<path_dirs.size();++i)
+            numbers[path_dirs[i]]=static_cast<unsigned>(i+1);
         std::array<std::uint32_t,2> table_lba{};std::uint32_t table_size=0;
-        for(unsigned big=0;big<2;++big){Bytes table;for(auto* d:dirs){Bytes id=d==image.root.get()?Bytes{0}:(view?d->joliet_identifier:d->identifier);const auto at=table.size();table.resize(at+8+id.size()+(id.size()%2));table[at]=static_cast<unsigned char>(id.size());put(table,at+2,d->new_lba[view],4,big!=0);put(table,at+6,numbers[d->parent?d->parent:d],2,big!=0);std::copy(id.begin(),id.end(),table.begin()+static_cast<std::ptrdiff_t>(at+8));}
+        for(unsigned big=0;big<2;++big){Bytes table;for(auto* d:path_dirs){Bytes id=d==image.root.get()?Bytes{0}:(view?d->joliet_identifier:d->identifier);const auto at=table.size();table.resize(at+8+id.size()+(id.size()%2));table[at]=static_cast<unsigned char>(id.size());put(table,at+2,d->new_lba[view],4,big!=0);put(table,at+6,numbers[d->parent?d->parent:d],2,big!=0);std::copy(id.begin(),id.end(),table.begin()+static_cast<std::ptrdiff_t>(at+8));}
             table_size=static_cast<std::uint32_t>(table.size());table_lba[big]=static_cast<std::uint32_t>(next);table.resize((table.size()+block-1)/block*block);next+=table.size()/block;need(next<0xffffffffu,"ISO size limit");write(out,table);}
         for(auto& [lba,vd]:image.descriptors)if((vd[0]==2)==(view==1)){both(vd,132,table_size);put(vd,140,table_lba[0]);put(vd,144,0);put(vd,148,table_lba[1],4,true);put(vd,152,0);auto r=record(*image.root,Bytes{0},view);std::copy(r.begin(),r.end(),vd.begin()+156);(void)lba;}
     }
