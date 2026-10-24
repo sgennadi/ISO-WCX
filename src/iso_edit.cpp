@@ -59,7 +59,7 @@ std::u16string utf16(const std::string& text) {
     }
     return out;
 }
-std::string decode(const Bytes& name,bool joliet) {
+std::string decode(const Bytes& name,bool joliet,bool directory) {
     std::string s;
     if(!joliet) s.assign(name.begin(),name.end());
     else {
@@ -90,7 +90,7 @@ std::string decode(const Bytes& name,bool joliet) {
             }
         }
     }
-    if(s.ends_with(";1"))s.resize(s.size()-2);
+    if(!directory && s.ends_with(";1"))s.resize(s.size()-2);
     return edit_path(s);
 }
 struct Node {
@@ -165,7 +165,7 @@ public:
         const std::size_t idlen=r[32],base=33+idlen+(idlen%2==0?1:0);need(idlen&&base<=r.size(),"bad ISO identifier");
         need(std::all_of(r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),[](auto c){return c==0;}),"Rock Ridge/system-use ISO editing is not supported");
         n->identifier.assign(r.begin()+33,r.begin()+33+static_cast<std::ptrdiff_t>(idlen));
-        if(parent)n->name=n->logical=decode(n->identifier,j);
+        if(parent)n->name=n->logical=decode(n->identifier,j,n->directory);
         need(++items<=200000&&depth<=64,"ISO edit tree limit exceeded");
         if(n->directory){need(seen.insert(n->lba).second&&n->size<=64*1024*1024,"cyclic or oversized ISO directory");auto data=read(std::uint64_t(n->lba)*block,n->size);std::set<std::string> names;
             for(std::size_t at=0;at<data.size();){unsigned len=data[at];if(!len){at=(at/block+1)*block;continue;}need(len>=34&&len<=data.size()-at&&at%block+len<=block,"bad ISO directory record");Bytes child(data.begin()+static_cast<std::ptrdiff_t>(at),data.begin()+static_cast<std::ptrdiff_t>(at+len));at+=len;
@@ -221,12 +221,16 @@ Bytes identifier(const std::string& name,bool j,bool dir) {
         }
     } else {
         auto text=upper(name);
-        if(!dir) text+=";1";
-        need(text.size()<=221,"ISO identifier exceeds directory-record limit");
+        // The semicolon is reserved for the generated ISO file-version
+        // field. A literal semicolon in a Joliet name needs an ISO alias,
+        // otherwise a directory like "folder;1" loses part of its name
+        // when an ISO reader interprets it as a version suffix.
         for(const unsigned char c:text)
             need((c>='A'&&c<='Z')||(c>='0'&&c<='9')||
-                 c=='_'||c=='.'||c==';',
+                 c=='_'||c=='.',
                  "primary ISO identifier contains nonportable characters");
+        if(!dir)text+=";1";
+        need(text.size()<=221,"ISO identifier exceeds directory-record limit");
         b.assign(text.begin(),text.end());
     }
     need(!b.empty() && (33+b.size()+(b.size()%2==0?1u:0))<=255,
