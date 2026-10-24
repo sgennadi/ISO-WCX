@@ -401,7 +401,10 @@ void NtfsVolume::walk(std::uint64_t file_number,std::uint16_t sequence,
     std::vector<Child> children;
     directory_entries(r,[&](std::uint64_t id,std::uint16_t seq,
                             const std::string& name,bool directory) {
-        need(id>=16 && files_.size()<kMaxFiles &&
+        // Windows roots legitimately list $MFT, $LogFile, $Boot, etc.
+        // NTFS reserves records 0..15 for filesystem internals.
+        if(id<16)return;
+        need(files_.size()<kMaxFiles &&
              prefix.size()+name.size()+1<=1000,
              "invalid or excessive NTFS directory entries");
         const auto path=prefix.empty()?name:prefix+"/"+name;

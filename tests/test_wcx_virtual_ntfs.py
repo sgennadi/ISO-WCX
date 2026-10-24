@@ -25,7 +25,7 @@ def main(disc_inspect,wcx=None,wcx_smoke=None):
         mbr[446+4]=0x07
         mbr[446+8:446+12]=LBA.to_bytes(4,"little")
         mbr[446+12:446+16]=SECTORS.to_bytes(4,"little")
-        mbr[510:512]=b"\\x55\\xaa"
+        mbr[510:512]=bytes([0x55,0xaa])
         with image.open("wb") as out:
             out.truncate((LBA+SECTORS+8)*SECTOR)
             out.seek(0);out.write(mbr)
