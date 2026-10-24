@@ -21,19 +21,19 @@ permissions:
   contents: read
 
 concurrency:
-  group: \${{ github.workflow }}-\${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   benchmark:
-    name: UDF 512-MiB stage auto vs sparse (\${{ matrix.os }})
+    name: UDF 512-MiB stage auto vs sparse (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
           - os: windows-2022
-    runs-on: \${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
