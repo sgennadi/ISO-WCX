@@ -6,6 +6,7 @@
 #include "iso_wcx/virtual_disk.hpp"
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -209,12 +210,14 @@ public:
         }
         // Check the actual result, including mirrored FATs, all reachable
         // cluster chains, and browseability before replacing the original.
-        Editor audit(stage);
-        (void)audit;
-        VirtualDiskReader virtual_disk(stage);
-        FatVolume filesystem(virtual_disk, 0, virtual_disk.size());
-        check(filesystem.kind() == FatKind::fat12, "written FAT12 staging image invalid");
-        (void)filesystem.list();
+        {
+            Editor audit(stage);
+            (void)audit;
+            VirtualDiskReader virtual_disk(stage);
+            FatVolume filesystem(virtual_disk, 0, virtual_disk.size());
+            check(filesystem.kind() == FatKind::fat12, "written FAT12 staging image invalid");
+            (void)filesystem.list();
+        } // Close read handles before the Windows atomic replacement.
         if (progress && !progress()) throw EditCancelled();
 #ifdef _WIN32
         if (!MoveFileExW(stage.c_str(), image.c_str(),
@@ -449,17 +452,19 @@ void edit_fat12(const std::filesystem::path& image,
     const auto ext = upper(image.extension().string());
     check(ext == ".IMA" || ext == ".IMG" || ext == ".BIF" ||
           ext == ".VFD" || ext == ".FLP", "unsupported floppy image extension");
-    VirtualDiskReader disk(image);
-    check(disk.format() == VirtualDiskFormat::raw_image,
-          "FAT12 editor only accepts raw floppy images");
-    try {
-        const auto partitions = inspect_partition_table(disk, disk.logical_sector_size());
-        check(partitions.empty(), "partitioned HDD is not editable as a floppy");
-    } catch (const EditUnsupported&) { throw; }
-      catch (const std::exception&) { /* A floppy is not an MBR. */ }
-    FatVolume reader(disk, 0, disk.size());
-    check(reader.kind() == FatKind::fat12, "FAT12 write mode refuses FAT16/32");
-    (void)reader.list();
+    {
+        VirtualDiskReader disk(image);
+        check(disk.format() == VirtualDiskFormat::raw_image,
+              "FAT12 editor only accepts raw floppy images");
+        try {
+            const auto partitions = inspect_partition_table(disk, disk.logical_sector_size());
+            check(partitions.empty(), "partitioned HDD is not editable as a floppy");
+        } catch (const EditUnsupported&) { throw; }
+          catch (const std::exception&) { /* A floppy is not an MBR. */ }
+        FatVolume reader(disk, 0, disk.size());
+        check(reader.kind() == FatKind::fat12, "FAT12 write mode refuses FAT16/32");
+        (void)reader.list();
+    } // The original must not be held open during an atomic replacement.
     Editor editor(image);
     std::vector<ArchiveChange> ordered = changes;
     std::stable_sort(ordered.begin(), ordered.end(),
