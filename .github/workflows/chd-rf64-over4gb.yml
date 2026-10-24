@@ -1,0 +1,35 @@
+name: CHD RF64 over-4-GiB streaming interoperability
+
+on:
+  pull_request:
+    paths:
+      - 'src/chd_stream.cpp'
+      - 'src/cd_audio_wav.cpp'
+      - 'src/disc.cpp'
+      - 'include/iso_wcx/chd_stream.hpp'
+      - 'include/iso_wcx/cd_audio_wav.hpp'
+      - 'include/iso_wcx/disc.hpp'
+      - 'tests/test_chd_rf64_sparse.py'
+      - 'tests/chd_rf64_gate.cpp'
+      - 'CMakeLists.txt'
+      - '.github/workflows/chd-rf64-over4gb.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rf64-large-stream:
+    name: Full >4-GiB CHD to RF64, 64-bit readback, rollback
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check available disk space
+        run: df -h .
+      - name: Configure C++20 native reader
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build only the native CHD reader and RF64 test gate
+        run: cmake --build build --target disc_inspect chd_rf64_gate --parallel 2
+      - name: Stream full 4-GiB-plus RF64 and verify exact offsets
+        run: python3 tests/test_chd_rf64_sparse.py build/disc_inspect build/chd_rf64_gate --full
