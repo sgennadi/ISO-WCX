@@ -113,7 +113,9 @@ def verify_large_output(path: pathlib.Path) -> None:
           "cross-4-GiB and last-sector PCM byte samples", flush=True)
 
 
-def main(inspector: pathlib.Path, probe: pathlib.Path, full: bool) -> None:
+def main(inspector: pathlib.Path, probe: pathlib.Path, full: bool,
+         plugin: pathlib.Path | None = None,
+         wcx_probe: pathlib.Path | None = None) -> None:
     with tempfile.TemporaryDirectory(prefix="iso-wcx-chd-rf64-") as folder:
         root = pathlib.Path(folder)
         image = root / "rf64-just-over4g.chd"
@@ -121,6 +123,11 @@ def main(inspector: pathlib.Path, probe: pathlib.Path, full: bool) -> None:
         listing = run(inspector, image)
         assert f"FILE {RF64_BYTES} CDDA/track01.wav" in listing, listing
         run(probe, "--probe", image)
+        if plugin is not None:
+            assert wcx_probe is not None and sys.platform == "win32"
+            run(wcx_probe, plugin, image, r"CDDA\track01.wav", str(RF64_BYTES))
+            print("PASS: Win32/Win64 WCX ReadHeaderExW RF64 64-bit size "
+                  "and PK_SKIP", flush=True)
 
         # A smaller synthetic CHD lets the ordinary CI test verify atomic
         # cancellation and read-error handling without using 4-GiB disk.
@@ -165,8 +172,12 @@ def main(inspector: pathlib.Path, probe: pathlib.Path, full: bool) -> None:
 
 
 if __name__ == "__main__":
-    assert len(sys.argv) in (3, 4), (
-        "Usage: test_chd_rf64_sparse.py disc_inspect chd_rf64_gate [--full]")
-    assert len(sys.argv) == 3 or sys.argv[3] == "--full"
+    remaining = sys.argv[3:]
+    full = "--full" in remaining
+    extra = [argument for argument in remaining if argument != "--full"]
+    assert len(sys.argv) >= 3 and len(extra) in (0, 2), (
+        "Usage: test_chd_rf64_sparse.py inspector gate "
+        "[plugin.wcx[64] wcx_packed_smoke] [--full]")
     main(pathlib.Path(sys.argv[1]).resolve(),
-         pathlib.Path(sys.argv[2]).resolve(), len(sys.argv) == 4)
+         pathlib.Path(sys.argv[2]).resolve(), full,
+         *(pathlib.Path(arg).resolve() for arg in extra))
