@@ -177,8 +177,8 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
   target_link_libraries(virtual_partition_inspect PRIVATE iso_virtual_partitions)
 endif()
 
-# Built-in native FAT12/16/32 filesystem reader, linked into ISO-WCX.
-add_library(iso_virtual_fat STATIC src/fat_volume.cpp)
+# Built-in native FAT12/16/32 and exFAT readers, linked directly into WCX.
+add_library(iso_virtual_fat STATIC src/fat_volume.cpp src/exfat_volume.cpp)
 target_include_directories(iso_virtual_fat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(iso_virtual_fat PUBLIC iso_virtual_partitions)
 target_compile_features(iso_virtual_fat PUBLIC cxx_std_20)
@@ -191,12 +191,17 @@ target_link_libraries(iso_disc PRIVATE iso_virtual_fat)
 if(ISO_WCX_BUILD_DEV_TOOLS)
   add_executable(virtual_fat_inspect tools/virtual_fat_inspect.cpp)
   target_link_libraries(virtual_fat_inspect PRIVATE iso_virtual_fat)
+  add_executable(exfat_inspect src/exfat_inspect_tool.cpp)
+  target_link_libraries(exfat_inspect PRIVATE iso_virtual_fat)
 endif()
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME fat12_fat16_fat32_virtual_disk_filesystems
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_virtual_fat.py"
             "$<TARGET_FILE:virtual_fat_inspect>")
+  add_test(NAME exfat_native_volume_read_and_corruption
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_exfat.py"
+            "$<TARGET_FILE:exfat_inspect>")
 endif()
 
 if(ISO_WCX_BUILD_DEV_TOOLS)
@@ -312,12 +317,20 @@ if(BUILD_TESTING)
     add_test(NAME integrated_virtual_disk_fat_wcx
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_fat.py" "$<TARGET_FILE:disc_inspect>")
     set_tests_properties(integrated_virtual_disk_fat_wcx PROPERTIES TIMEOUT 180)
+    add_test(NAME integrated_virtual_disk_exfat_wcx
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_exfat.py" "$<TARGET_FILE:disc_inspect>")
+    set_tests_properties(integrated_virtual_disk_exfat_wcx PROPERTIES TIMEOUT 180)
     if(WIN32)
       add_test(NAME integrated_virtual_disk_fat_wcx_exports
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_fat.py"
           "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:ISO-WCX>"
           "$<TARGET_FILE:wcx_virtual_fat_smoke>")
       set_tests_properties(integrated_virtual_disk_fat_wcx_exports PROPERTIES TIMEOUT 180)
+      add_executable(wcx_virtual_exfat_smoke tests/wcx_virtual_exfat_smoke.cpp)
+      add_test(NAME integrated_virtual_disk_exfat_wcx_exports
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_exfat.py"
+          "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:ISO-WCX>" "$<TARGET_FILE:wcx_virtual_exfat_smoke>")
+      set_tests_properties(integrated_virtual_disk_exfat_wcx_exports PROPERTIES TIMEOUT 180)
     endif()
     add_test(NAME iso_udf_image_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_images.py" "$<TARGET_FILE:disc_inspect>")

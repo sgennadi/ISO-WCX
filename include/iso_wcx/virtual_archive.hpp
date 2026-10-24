@@ -1,7 +1,7 @@
 #pragma once
 
 #include "iso_wcx/disc.hpp"
-#include "iso_wcx/fat_volume.hpp"
+#include "iso_wcx/volume_reader.hpp"
 #include "iso_wcx/virtual_disk.hpp"
 
 #include <cstddef>
@@ -35,7 +35,7 @@ private:
         std::string relative_path;
     };
     VirtualDiskReader disk_;
-    std::vector<std::unique_ptr<FatVolume>> volumes_;
+    std::vector<std::unique_ptr<VolumeReader>> volumes_;
     std::vector<Item> items_;
     std::vector<FileLocation> files_;
     std::string format_;
