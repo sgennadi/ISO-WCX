@@ -89,23 +89,25 @@ def external_directory_spill(editor,inspector,root):
     original=image.read_bytes()
     before_free=struct.unpack_from('<I', original, INTEGRITY_LBA*B+80)[0]
     names=[]
-    # One 204-byte FID per entry: the ninth addition crosses the root FE's
-    # 1872-byte embedded capacity but remains within one 2048-byte sector.
-    for index in range(9):
-        name=f'L{index:02d}-'+'q'*154+'.txt'
-        assert len(name)==162
+    # Seventeen 112-byte FIDs cross the root FE's 1872-byte embedded
+    # capacity but stay within one 2048-byte external directory sector.
+    # Names are kept short enough for extraction on Windows without relying
+    # on the optional Win32 long-path policy.
+    for index in range(17):
+        name=f'L{index:02d}-'+'q'*65+'.txt'
+        assert len(name)==73
         source.write_bytes(f'DIR SPILL {index}'.encode('ascii'))
         run(editor,image,'add',name,source)
         names.append(name)
         current=image.read_bytes()
         root_fe=301*B
         kind=struct.unpack_from('<H',current,root_fe+34)[0]&7
-        assert kind==(0 if index==8 else 3), (
+        assert kind==(0 if index==16 else 3), (
             'unexpected parent storage before/after directory spill',index,kind)
     updated=image.read_bytes()
     root_fe=301*B
     parent_bytes=struct.unpack_from('<Q',updated,root_fe+56)[0]
-    assert parent_bytes==44+9*204,(parent_bytes,44+9*204)
+    assert parent_bytes==44+17*112,(parent_bytes,44+17*112)
     assert struct.unpack_from('<I',updated,root_fe+172)[0]==8
     assert struct.unpack_from('<Q',updated,root_fe+64)[0]==1
     dir_lba=struct.unpack_from('<I',updated,root_fe+180)[0]
@@ -136,12 +138,12 @@ def external_directory_spill(editor,inspector,root):
     assert struct.unpack_from('<H',updated,root_fe+34)[0]&7==0
     assert struct.unpack_from('<I',updated,root_fe+180)[0]==dir_lba
     after_free=struct.unpack_from('<I',updated,INTEGRITY_LBA*B+80)[0]
-    assert before_free-after_free==11,(before_free,after_free)
+    assert before_free-after_free==19,(before_free,after_free)
     folder=root/'spill-extract'
     run(inspector,image,'--extract',folder)
     assert (folder/'hello').read_bytes()==b'world'
     for i,name in enumerate(names):
-        value=b'SHORT AFTER SPILL' if i==9 else f'DIR SPILL {i}'.encode('ascii')
+        value=b'SHORT AFTER SPILL' if i==17 else f'DIR SPILL {i}'.encode('ascii')
         assert (folder/name).read_bytes()==value,(i,name)
     # A second full-size FID would exceed the one-block ShortAD directory
     # limit: operation must refuse and leave the image byte-for-byte intact.

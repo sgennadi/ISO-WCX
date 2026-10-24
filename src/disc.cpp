@@ -1067,9 +1067,11 @@ public:
                                 sp.partition=u16(lvd,p+38);
                                 sp.packet=u16(lvd,p+40);
                                 sp.table_size=u32(lvd,p+44);
-                                const auto count=lvd[p+42];
-                                require(count>=1&&count<=4,"invalid number of sparing tables");
-                                for(unsigned t=0;t<count;t++)sp.locations.push_back(u32(lvd,p+48+t*4));
+                                const auto sparing_table_count=lvd[p+42];
+                                require(sparing_table_count>=1&&sparing_table_count<=4,
+                                        "invalid number of sparing tables");
+                                for(unsigned t=0;t<sparing_table_count;t++)
+                                    sp.locations.push_back(u32(lvd,p+48+t*4));
                             } else mapping_.push_back(-1);
                         } else mapping_.push_back(-1);
                         p+=n;

@@ -907,7 +907,7 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
                  "UDF parent cannot store a ShortAD");
             std::fill(parent_bytes.begin()+
                       static_cast<std::ptrdiff_t>(parent.ad_offset),
-                      parent_bytes.end(),0);
+                      parent_bytes.end(),std::uint8_t{0});
             put16(parent_bytes,34,
                   static_cast<std::uint16_t>(u16(parent_bytes,34)&~7u));
             put32(parent_bytes,ad_length_field,8u);
@@ -966,9 +966,9 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     // file bytes. Newly allocated FEs must also be discoverable by name.
     {
         Type1 strict(tx.output);
-        need(strict.files().count(key)==(!change.directory),
+        need( (strict.files().count(key)!=0)==(!change.directory),
              "staged UDF file map was not updated");
-        need(strict.directories().count(key)==change.directory,
+        need( (strict.directories().count(key)!=0)==change.directory,
              "staged UDF directory map was not updated");
         strict.close();
         const Disc inspected(tx.output);
