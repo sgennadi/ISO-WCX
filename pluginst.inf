@@ -1,8 +1,8 @@
 [plugininstall]
-description=ISO-WCX v0.16.0 Stable Core - ISO/UDF, WIM/ESD/SWM, ISZ/DAA, virtual disks
+description=ISO-WCX v0.16.0 Stable Core + Preview - ISO/UDF, WIM/ESD/SWM, CHD, ISZ, MDFv2/MDX, virtual disks
 version=0.16.0
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX
-defaultextension=iso,udf,cue,ccd,nrg,mds,cso,zso,isz,daa,img,raw,vhd,vhdx,wim,esd,swm
+defaultextension=iso,udf,cue,ccd,nrg,mds,mdx,cso,zso,isz,daa,img,raw,vhd,vhdx,wim,esd,swm
 
