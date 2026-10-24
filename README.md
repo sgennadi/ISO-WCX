@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.16.0 Stable Core + experimental UDF writer, native MDS v2/MDX and CDDA-capable CHD Preview** — a native C++20 Total Commander WCX
+**ISO-WCX v0.17.0 Stable Core + transactional UDF writer Preview, native MDS v2/MDX and CHD CDDA/RF64** — a native C++20 Total Commander WCX
 plugin for optical ISO/UDF, WIM/ESD/SWM and virtual HDD images.
 Core browsing/extraction and packaging are verified in Windows x86/x64 and
 Linux CI. **Advanced readers and write modes explicitly marked experimental
@@ -9,7 +9,7 @@ remain limited; this is not full NTFS/ext4/UDF compatibility.**
 ## Install into Total Commander
 
 1. Open the [latest Stable release](https://github.com/sgennadi/ISO-WCX/releases/latest).
-2. Download **ISO-WCX-v0.16.0.zip** and open it in Total Commander.
+2. Download **ISO-WCX-v0.17.0.zip** and open it in Total Commander.
 3. Let `pluginst.inf` install `ISO-WCX.wcx` (32-bit) and `ISO-WCX.wcx64` (64-bit).
 4. Restart Total Commander and open a supported image with Ctrl+PgDn.
 
@@ -27,7 +27,7 @@ association that prevents its DLL from loading in the first place.
 
 For installation see [INSTALL_EN.txt](INSTALL_EN.txt) and
 [INSTALL_RU.txt](INSTALL_RU.txt); [PREVIEW.md](PREVIEW.md) describes
-experimental support. See [v0.16.0 release notes](RELEASE_NOTES.md).
+experimental support. See [v0.17.0 release notes](RELEASE_NOTES.md).
 
 ## Format coverage (experimental subsets identified separately)
 
@@ -40,7 +40,7 @@ experimental support. See [v0.16.0 release notes](RELEASE_NOTES.md).
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
 | CloneCD CCD/IMG | `.ccd` version 3 + matching `.img` (2352-byte sectors), single-session Mode 1 / Mode 2 Form 1 data tracks, including ECMA-130 scrambled sectors. Optional `.sub` sidecar exposed byte-for-byte under `subchannels/disc.sub`; CD-Audio and CD-Text decoding not implemented; CRC-valid Q track/index frames summarized in `subchannels/q-index.csv`. |
 | 150-sector prefix | Relative and some absolute-LBA cases (not full multisession parsing) |
-| UDF Type 1 | Browse FE/EFE, OSTA CS0 Unicode, AED continuations and reserve VDS failover. Read-only whole-disk UDF 2.01 with 512–32768-byte power-of-two blocks and optional compatibility fake MBR (.iso/.udf/.img/.raw). **Write Preview (single physical 2048-byte UDF-only Type-1):** replace/resize regular files within prior allocations, logical FID deletion without file-block reclamation, create one regular file of any size fitting the image/partition and FE ShortAD slots (including fragmented, multi-gigabyte data), or one empty directory per transaction, and automatically expand/reallocate compatible parent directories via contiguous ShortAD extents with bitmap/LVID updates (directory size limit 8 MiB). ISO/UDF Bridge metadata, VAT and Metadata/Sparable partitions remain read-only. See [UDF writer](docs/udf-type1-writer.md) and [portability](docs/udf-cross-platform.md). |
+| UDF Type 1 | Browse FE/EFE, OSTA CS0 Unicode, AED continuations and reserve VDS failover. Read-only whole-disk UDF 2.01 with 512–32768-byte power-of-two blocks. **Write Preview (validated, nonhybrid UDF-only 2048-byte physical Type-1):** atomic multi-file and nested directory creation; mixed create/replace/logical-delete; bounded FE/ShortAD resize; multiple extents and files over 4 GiB; safe exclusive-ownership deleted FE/ShortAD reclamation and next-transaction block reuse; reuse of verified deleted FID slots to prevent directory growth. Atomic staged verification with optional CoW reflink/block clone and sparse fallback. **Not** a general UDF writer: ISO/UDF Bridge rewriting, VAT/metadata/sparable writes, symlinks, hard links and AED chain creation remain unsupported. See [UDF writer](docs/udf-type1-writer.md) and [portability](docs/udf-cross-platform.md). |
 | UDF Metadata / VAT / Sparable | Experimental read-only partition-map support with synthetic fixtures, not comprehensive UDF 1.02–2.60. The UDF reader exposes regular files and directories; symlinks, block devices and other special ICB types are not materialized as ordinary files. |
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
 | Alcohol MDS/MDF | MDS v1 session/track descriptors with sidecar MDF (2048/2336/2352/2448 data sectors). **Preview: MDS v2 / monolithic MDX**, native AES-decrypted/zlib-inflated descriptor, plain and compressed (stored/RLE/raw-DEFLATE groups) unencrypted data-track random access, extraction through WCX with real MDF/MDX ISO filesystem fixtures. Password-protected AES-LRW sectors, other optical variants and writing remain unsupported. |
