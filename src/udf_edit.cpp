@@ -165,6 +165,12 @@ struct Bitmap {
     std::uint64_t at{};
     std::uint32_t bits{},byte_count{},logical{};
 };
+struct Integrity {
+    Bytes bytes;
+    std::uint64_t at{};
+    std::uint32_t impl_bytes{};
+    std::uint64_t next_id{};
+};
 // UDF 4/14.12: each set bit represents an unallocated logical block.
 // Only single-block Space Bitmap Descriptors are supported at this stage.
 bool bitmap_free(const Bitmap& bitmap,std::uint32_t logical) {
@@ -235,6 +241,8 @@ public:
             u32(pd,56)!=0 || u32(pd,72)!=0 || u32(pd,80)!=0 ||
             u32(pd,88)!=0;
         if(bitmap_length) {
+            need((u32(pd,184)==3 || u32(pd,184)==4),
+                 "UDF partition is not declared rewritable/overwritable");
             need(!has_conflicting_allocator &&
                  bitmap_length<=block && bitmap_length>=24 &&
                  bitmap_logical<partition_blocks_,
@@ -254,7 +262,31 @@ public:
                  24ull+bm.byte_count<=block,
                  "invalid UDF bitmap size/count");
             bitmap_=std::move(bm);
-            reserved_.push_back({{bitmap_->at,bitmap_length},0});
+            reserved_.push_back({{bitmap_->at,block},0});
+            const auto integrity_length=u32(lvd,432);
+            const auto integrity_location=u32(lvd,436);
+            need(integrity_length==block &&
+                 integrity_location<size_/block,
+                 "UDF allocator requires one valid LVID sector");
+            Integrity integrity;
+            integrity.at=std::uint64_t(integrity_location)*block;
+            integrity.bytes=read(integrity.at,block);
+            tag_check(integrity.bytes,0,9);
+            need(u32(integrity.bytes,12)==integrity_location &&
+                 u32(integrity.bytes,28)==1 &&
+                 u32(integrity.bytes,72)==1,
+                 "UDF allocator requires a closed single-partition LVID");
+            integrity.impl_bytes=u32(integrity.bytes,76);
+            need((integrity.impl_bytes==0 || integrity.impl_bytes>=40) &&
+                 88ull+integrity.impl_bytes<=block &&
+                 u32(integrity.bytes,84)==partition_blocks_,
+                 "invalid UDF LVID partition/integrity counters");
+            integrity.next_id=u64(integrity.bytes,40);
+            need(integrity.next_id>=16 &&
+                 integrity.next_id<std::numeric_limits<std::uint64_t>::max(),
+                 "unsupported UDF LVID unique-ID sequence");
+            integrity_=std::move(integrity);
+            reserved_.push_back({{integrity_->at,block},0});
         }
         const auto fsd_size=u32(lvd,248)&0x3fffffffu;
         need(fsd_size>=416 && fsd_size<=block && u16(lvd,256)==0,
@@ -266,6 +298,12 @@ public:
         reserved_.push_back({{physical(u32(lvd,252)),block},0});
         walk(u32(fsd,404),u16(fsd,408),"",0);
         if(bitmap_) {
+            std::uint64_t free_bits=0;
+            for(std::uint32_t i=0;i<bitmap_->bits;++i)
+                if(bitmap_free(*bitmap_,i))++free_bits;
+            need(integrity_ &&
+                 u32(integrity_->bytes,80)==free_bits,
+                 "UDF bitmap and LVID free-block counters disagree");
             // A bitmap advertising an existing object or descriptor as
             // free is contradictory: fail closed before any new writes.
             for(const auto& occupied:reserved_) {
@@ -324,6 +362,38 @@ public:
         tag_update(b,0,24u+bitmap_->byte_count);
         return {bitmap_->at,std::move(b)};
     }
+    [[nodiscard]] std::pair<std::uint64_t,Bytes>
+    updated_integrity(bool directory) const {
+        need(integrity_.has_value(),"UDF LVID is absent");
+        auto b=integrity_->bytes;
+        const auto old_free=u32(b,80);
+        need(old_free>0,"UDF LVID reports no free blocks");
+        put32(b,80,old_free-1);
+        put64(b,40,integrity_->next_id+1);
+        if(integrity_->impl_bytes>=40) {
+            const auto counter=88u+32u+(directory?4u:0u);
+            const auto n=u32(b,counter);
+            need(n!=0xffffffffu,"UDF LVID file/directory count overflow");
+            put32(b,counter,n+1);
+        }
+        tag_update(b,0,88u+integrity_->impl_bytes);
+        return {integrity_->at,std::move(b)};
+    }
+    [[nodiscard]] std::uint64_t new_unique_id() const {
+        need(integrity_.has_value(),"UDF integrity descriptor missing");
+        return integrity_->next_id;
+    }
+    [[nodiscard]] std::uint64_t absolute(std::uint32_t logical) const {
+        return physical(logical);
+    }
+    [[nodiscard]] std::uint32_t logical_of(std::uint64_t at) const {
+        need(at>=std::uint64_t(partition_)*block &&
+             (at-std::uint64_t(partition_)*block)%block==0 &&
+             (at-std::uint64_t(partition_)*block)/block<partition_blocks_,
+             "UDF object not in Type-1 partition");
+        return static_cast<std::uint32_t>(
+            (at-std::uint64_t(partition_)*block)/block);
+    }
     void close() {file_.close();}
 private:
     std::ifstream file_;
@@ -332,6 +402,7 @@ private:
     std::map<std::string,File> files_;
     std::map<std::string,Fe> directory_files_;
     std::optional<Bitmap> bitmap_;
+    std::optional<Integrity> integrity_;
     std::map<std::uint64_t,std::size_t> references_;
     std::set<std::uint32_t> directories_;
     std::vector<Interval> reserved_;
