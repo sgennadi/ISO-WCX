@@ -193,7 +193,9 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 for(std::size_t i=0;i<count;++i)if(lhs[i]!=rhs[i])return lhs[i]<rhs[i];
                 return lhs.size()<rhs.size();
             });
-            path_dirs.insert(path_dirs.end(),child_dirs.begin(),child_dirs.end());
+            // Adding individually also avoids GCC 14's erroneous optimized
+            // vector range-insert -Wstringop-overflow under -Werror.
+            for(auto* child:child_dirs)path_dirs.push_back(child);
         }
         need(path_dirs.size()==dirs.size(),"inconsistent ISO path table directory count");
         std::map<Node*,unsigned> numbers;

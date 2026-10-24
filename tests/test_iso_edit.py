@@ -89,7 +89,7 @@ def validate_path_tables(path):
         little = entries(int.from_bytes(vd[140:144], 'little'), 'little')
         big = entries(int.from_bytes(vd[148:152], 'big'), 'big')
         assert little == big, 'ISO little/big endian path tables disagree'
-        assert little[0][0] == 1 and little[0][1] == b'\\x00'
+        assert little[0][0] == 1 and little[0][1] == bytes([0])
         assert little == sorted(little, key=lambda item: (item[0], item[1])), 'unsorted ISO path table'
         for index, (parent, _, _) in enumerate(little, start=1):
             assert 1 <= parent <= index, 'invalid path-table parent index'
