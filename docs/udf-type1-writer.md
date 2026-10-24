@@ -30,10 +30,12 @@ not universal UDF 1.02–2.60 editing.
   bootable/hybrid system-area rewriting.
 - 2048-byte logical sectors, one physical Type-1 partition map, validated AVDP,
   File Set Descriptor, LVID and descriptor tag CRC16/checksums.
-- New allocations require a **single-sector** consistent Unallocated Space
-  Bitmap Descriptor and a closed LVID. A contiguous free run must exist for
-  the new FE and file content. Existing embedded directories must have enough
-  bytes remaining for their new FID.
+- New allocations require a consistent Unallocated Space Bitmap Descriptor
+  up to 8 MiB (including descriptors spanning multiple 2048-byte sectors)
+  and a closed LVID. The original descriptor CRC coverage is preserved; a
+  legal header-only CRC is not enlarged to cover the entire bitmap.
+  A contiguous free run must exist for each file's FE and ShortAD content.
+  An existing embedded directory must have room for the new FID.
 - No VAT, Metadata Partition, Sparable partition, hard-link, sparse-file,
   multi-extent or conflicting allocator edits; no symlink source files.
 - An entire copy of the source image must fit in a sibling temporary workspace.
@@ -42,8 +44,8 @@ not universal UDF 1.02–2.60 editing.
 
 Renaming, removing directories, editing ISO/UDF Bridge metadata, allocating
 multiple new files atomically, growing directory data beyond embedded capacity,
-freeing blocks from deleted files, multi-sector bitmap descriptors, fragmented
-new files, non-BMP new names and any VAT/Sparable/Metadata writer.
+freeing blocks from deleted files, bitmap descriptors larger than 8 MiB,
+fragmented new files, non-BMP new names and any VAT/Sparable/Metadata writer.
 
 A rejected mutation, validation failure or cancellation must leave the
 original image byte-for-byte unchanged.
@@ -51,9 +53,17 @@ original image byte-for-byte unchanged.
 ## Validation
 
 Synthetic fixtures check FE/EFE replacement, ShortAD growth, FID deletion,
-embedded and multi-block file creation, bitmap overlap/counter consistency,
-Unicode, no-space conditions and rollback. CI independently generates real
+embedded and multi-block file creation, multi-sector bitmap media,
+bitmap overlap/counter consistency, Unicode, no-space conditions and rollback. CI independently generates real
 UDF 1.02 HD/DVD-RAM images with `mkudffs` and validates edits via
 `udfinfo` and 7-Zip. Those three programs are CI-only test utilities and are
 **not** runtime dependencies. Manual Total Commander GUI coverage and broader
 real-disc interoperability remain necessary before stable write support.
+
+## Source provenance
+
+UDF bitmap conventions, allocation strategies and large-media edge cases
+were reviewed against [pali/udftools](https://github.com/pali/udftools).
+Its GPL-licensed implementation code has not been copied or linked; the
+ISO-WCX writer remains a separate C++20 implementation. Independent
+`mkudffs` / `udfinfo` / 7-Zip programs remain CI-only.
