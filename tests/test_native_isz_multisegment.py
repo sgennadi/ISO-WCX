@@ -174,7 +174,7 @@ def inspect(reader: pathlib.Path, source: pathlib.Path, *,
 
 def main(reader: pathlib.Path, plugin: pathlib.Path | None = None,
          probe: pathlib.Path | None = None) -> None:
-    raw = test_images.iso_image()
+    raw = bytes(test_images.iso_image())
     assert len(raw) >= SECTOR * 19
     with tempfile.TemporaryDirectory(prefix="iso-wcx-native-isz-split-") as td:
         root = pathlib.Path(td)
@@ -230,7 +230,7 @@ def main(reader: pathlib.Path, plugin: pathlib.Path | None = None,
         inspect(reader, source, success=False)
 
         # UDF uses the identical native block layer, not an ISO-only path.
-        udf_raw = test_images.udf_image()
+        udf_raw = bytes(test_images.udf_image())
         path = root / "udf-split"
         path.mkdir()
         files = isz_split(udf_raw, 3, 64, part_style=False)
