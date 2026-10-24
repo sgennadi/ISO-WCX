@@ -125,11 +125,10 @@ def main(reader: pathlib.Path) -> None:
             expected_files = [f"track{number:02d}.wav" for number in track_numbers]
             assert files == expected_files, (directory, files, expected_files)
             original = audio.read_bytes()
-            # Raw CUE/BINARY CDDA sectors use big-endian 16-bit sample words.
-            # PCM WAV 16-bit audio has little-endian words, so byte pairs swap.
-            expected_pcm = bytearray(original)
-            expected_pcm[::2] = original[1::2]
-            expected_pcm[1::2] = original[::2]
+            # MAME chdman byte-swaps CUE AUDIO when storing its CHD CD
+            # frames. Our native WAV decoder reverses that swap, yielding
+            # the same little-endian PCM samples as the original BINARY.
+            expected_pcm = original
             for number in track_numbers:
                 path = folder / f"track{number:02d}.wav"
                 with wave.open(str(path), "rb") as wav:
