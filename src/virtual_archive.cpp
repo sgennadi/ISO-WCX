@@ -76,6 +76,7 @@ void check_path(std::string_view path) {
 const char* disk_name(VirtualDiskFormat type) {
     switch (type) {
     case VirtualDiskFormat::raw_image: return "Raw HDD";
+    case VirtualDiskFormat::compressed_floppy: return "IMZ compressed floppy";
     case VirtualDiskFormat::fixed_vhd: return "Fixed VHD";
     case VirtualDiskFormat::vhdx: return "VHDX";
     }
@@ -97,7 +98,8 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
     }
     constexpr std::size_t max_items = 100000;
     if (partitions.empty()) {
-        require(disk_.format() == VirtualDiskFormat::raw_image,
+        require(disk_.format() == VirtualDiskFormat::raw_image ||
+                disk_.format() == VirtualDiskFormat::compressed_floppy,
                 "virtual disk has no valid partition table");
         auto volume = std::make_unique<FatVolume>(disk_, 0, disk_.size());
         auto files = volume->list();
@@ -115,9 +117,12 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
             items_.push_back(std::move(item));
             files_.push_back({0, file.path});
         }
-        format_ = volume->kind() == FatKind::fat12 ? "Raw FAT12 floppy" :
-                  volume->kind() == FatKind::fat16 ? "Raw FAT16 superfloppy" :
-                                                     "Raw FAT32 superfloppy";
+        const auto prefix = disk_.format() == VirtualDiskFormat::compressed_floppy ?
+                                    "IMZ / " : "Raw ";
+        format_ = std::string(prefix) +
+                  (volume->kind() == FatKind::fat12 ? "FAT12 floppy" :
+                   volume->kind() == FatKind::fat16 ? "FAT16 superfloppy" :
+                                                     "FAT32 superfloppy");
         volumes_.push_back(std::move(volume));
         return;
     }
