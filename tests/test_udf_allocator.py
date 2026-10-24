@@ -168,18 +168,16 @@ def external_directory_spill(editor,inspector,root):
             'new two-sector directory block was not reserved',logical)
     new_free=struct.unpack_from('<I',updated,INTEGRITY_LBA*B+80)[0]
     assert old_free-new_free==2,(old_free,new_free)
-    # Directory scanner must skip zero padding to the next sector.
+    # Independent descriptor scan: FIDs are tightly packed and the final
+    # descriptor crosses the first sector boundary without zero padding.
     logical_length=struct.unpack_from('<Q',updated,root_fe+56)[0]
     at=(PARTITION+new_lba)*B
     p=0
+    crossed=False
     while p<logical_length:
-        available=min(B-p%B,logical_length-p)
-        record=updated[at+p:at+p+available]
-        if available<38 or record[:16]==bytes(16):
-            assert record==bytes(available)
-            p+=available
-            continue
-        assert struct.unpack_from('<H',record)[0]==257
+        remaining=logical_length-p
+        record=updated[at+p:at+p+remaining]
+        assert remaining>=38 and struct.unpack_from('<H',record)[0]==257
         tag_length=struct.unpack_from('<H',record,10)[0]
         assert crc16(record[16:16+tag_length])==struct.unpack_from(
             '<H',record,8)[0]
@@ -187,9 +185,10 @@ def external_directory_spill(editor,inspector,root):
         filename_bytes=record[19]
         impl_bytes=struct.unpack_from('<H',record,36)[0]
         count=(38+impl_bytes+filename_bytes+3)&~3
-        assert count>=40 and count<=available
+        assert count>=40 and count<=remaining
+        crossed=crossed or (p%B)+count>B
         p+=count
-    assert p==logical_length
+    assert crossed and p==logical_length
     folder2=root/'spill-extract-2'
     run(inspector,image,'--extract',folder2)
     assert (folder2/grow_name).read_bytes()==b'RELOCATED TWO-SECTOR UDF DIRECTORY'

@@ -590,18 +590,24 @@ private:
                                  directory.at});
         const auto data=directory_data(directory);
         for(std::size_t p=0;p<data.size();) {
-            const auto sector_left=static_cast<std::size_t>(block)-p%block;
-            const auto available=std::min(sector_left,data.size()-p);
-            if(available<38 ||
-               std::all_of(data.begin()+static_cast<std::ptrdiff_t>(p),
+            const auto remaining=data.size()-p;
+            if(remaining<38) {
+                need(std::all_of(data.begin()+static_cast<std::ptrdiff_t>(p),
+                                 data.end(),
+                                 [](std::uint8_t n){return n==0;}),
+                     "trailing incomplete UDF FID");
+                break;
+            }
+            if(std::all_of(data.begin()+static_cast<std::ptrdiff_t>(p),
                            data.begin()+static_cast<std::ptrdiff_t>(p+16),
                            [](std::uint8_t n){return n==0;})) {
-                need(std::all_of(
-                    data.begin()+static_cast<std::ptrdiff_t>(p),
-                    data.begin()+static_cast<std::ptrdiff_t>(p+available),
-                    [](std::uint8_t n){return n==0;}),
-                    "invalid UDF FID sector padding");
-                p+=available;
+                const auto padding=std::min<std::size_t>(
+                    block-p%block,remaining);
+                need(std::all_of(data.begin()+static_cast<std::ptrdiff_t>(p),
+                                 data.begin()+static_cast<std::ptrdiff_t>(p+padding),
+                                 [](std::uint8_t n){return n==0;}),
+                     "invalid UDF sector padding");
+                p+=padding;
                 continue;
             }
             tag_check(data,p,257);
@@ -610,8 +616,10 @@ private:
             need(impl<=data.size()-p-38 && n<=data.size()-p-38-impl,
                  "UDF directory FID name out of bounds");
             const auto len=(38+impl+n+3u)&~std::size_t(3);
-            need(len>=40 && len<=available,
-                 "UDF FID straddles directory sector");
+            // A FID may cross a sector boundary; its tag location is the
+            // logical sector containing the start of the descriptor.
+            need(len>=40 && len<=remaining,
+                 "UDF FID exceeds directory logical length");
             const auto characteristics=data[p+18];
             const auto child_lba=u32(data,p+24);
             const auto child_map=u16(data,p+28);
@@ -765,28 +773,34 @@ Bytes encode_udf_cs0(std::string_view component) {
 // that FID, not the directory's (now different) File Entry block.
 void retag_directory_fids(Bytes& bytes,std::uint32_t logical) {
     for(std::size_t p=0;p<bytes.size();) {
-        const auto sector_left=static_cast<std::size_t>(block)-p%block;
-        const auto available=std::min(sector_left,bytes.size()-p);
-        if(available<38 ||
-           std::all_of(bytes.begin()+static_cast<std::ptrdiff_t>(p),
+        const auto remaining=bytes.size()-p;
+        if(remaining<38) {
+            need(std::all_of(bytes.begin()+static_cast<std::ptrdiff_t>(p),
+                             bytes.end(),[](std::uint8_t v){return v==0;}),
+                 "trailing incomplete UDF FID during relocation");
+            break;
+        }
+        if(std::all_of(bytes.begin()+static_cast<std::ptrdiff_t>(p),
                        bytes.begin()+static_cast<std::ptrdiff_t>(p+16),
                        [](std::uint8_t v){return v==0;})) {
+            const auto padding=std::min<std::size_t>(
+                block-p%block,remaining);
             need(std::all_of(bytes.begin()+static_cast<std::ptrdiff_t>(p),
-                             bytes.begin()+static_cast<std::ptrdiff_t>(p+available),
+                             bytes.begin()+static_cast<std::ptrdiff_t>(p+padding),
                              [](std::uint8_t v){return v==0;}),
                  "invalid UDF directory relocation padding");
-            p+=available;
+            p+=padding;
             continue;
         }
         tag_check(bytes,p,257);
         const auto name_bytes=std::size_t(bytes[p+19]);
         const auto implementation=std::size_t(u16(bytes,p+36));
-        need(implementation<=available-38 &&
-             name_bytes<=available-38-implementation,
-             "UDF relocated FID identifier exceeds sector");
+        need(implementation<=remaining-38 &&
+             name_bytes<=remaining-38-implementation,
+             "UDF relocated FID identifier exceeds directory length");
         const auto record=(38u+implementation+name_bytes+3u)&~std::size_t(3);
-        need(record>=40 && record<=available,
-             "UDF relocation would split an existing FID");
+        need(record>=40 && record<=remaining,
+             "UDF relocation would truncate an existing FID");
         const auto crc_bytes=16u+u16(bytes,p+10);
         need(crc_bytes<=record,"UDF FID CRC would exceed record");
         put32(bytes,p+12,logical+static_cast<std::uint32_t>(p/block));
@@ -795,9 +809,9 @@ void retag_directory_fids(Bytes& bytes,std::uint32_t logical) {
     }
 }
 // Allocate one FE and optionally a contiguous ShortAD run for file data.
-// Embedded or existing external parent directories may grow to a larger
-// contiguous ShortAD allocation. A FID never crosses a sector boundary,
-// and no VAT, multi-extent map or ISO/UDF bridge is rewritten.
+// Embedded or external parent directories may grow to a larger contiguous
+// ShortAD run. FIDs are tightly packed (and may straddle sector boundaries)
+// for compatibility with independent readers including 7-Zip.
 void create_udf_type1(const std::filesystem::path& image,Type1& volume,
                       const ArchiveChange& change,
                       const EditProgress& progress) {
@@ -863,11 +877,9 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     const auto fid_size=(38u+fid_id_size+3u)&~std::size_t(3);
     need(fid_size<=255 && fid_size<=block,
          "new UDF FID exceeds maximum supported descriptor size");
-    // Never split a FID across logical blocks: pad the remainder of the
-    // current directory sector and start the next FID in a new sector.
-    const auto space_left=block-parent.size%block;
-    const auto fid_start=parent.size+
-        (fid_size>space_left?space_left:0u);
+    // UDF FIDs are four-byte aligned and tightly packed. Inserting sector
+    // padding here makes valid-looking images unreadable by 7-Zip.
+    const auto fid_start=parent.size;
     const auto new_dir_size=fid_start+fid_size;
     need(new_dir_size<=max_dir,
          "new UDF FID exceeds bounded directory size");

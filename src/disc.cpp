@@ -981,28 +981,33 @@ class Udf {
         auto directory=fe(lba,map);require(directory.type==4,"UDF ICB is not a directory");
         auto bytes=directory_bytes(directory);
         for(std::size_t p=0;p<bytes.size();) {
-            const auto sector_left=static_cast<std::size_t>(block_)-p%block_;
-            const auto available=std::min(sector_left,bytes.size()-p);
-            // UDF directories may pad the remainder of a logical block
-            // with zero bytes before starting the next sector's FIDs.
-            if(available<38 ||
-               std::all_of(bytes.begin()+static_cast<std::ptrdiff_t>(p),
-                           bytes.begin()+static_cast<std::ptrdiff_t>(p+16),
-                           [](std::uint8_t v){return v==0;})) {
+            const auto remaining=bytes.size()-p;
+            if(remaining<38) {
                 require(std::all_of(
                     bytes.begin()+static_cast<std::ptrdiff_t>(p),
-                    bytes.begin()+static_cast<std::ptrdiff_t>(p+available),
+                    bytes.end(),[](std::uint8_t v){return v==0;}),
+                    "trailing incomplete UDF directory identifier");
+                break;
+            }
+            if(std::all_of(bytes.begin()+static_cast<std::ptrdiff_t>(p),
+                           bytes.begin()+static_cast<std::ptrdiff_t>(p+16),
+                           [](std::uint8_t v){return v==0;})) {
+                const auto padding=std::min<std::size_t>(
+                    block_-p%block_,remaining);
+                require(std::all_of(
+                    bytes.begin()+static_cast<std::ptrdiff_t>(p),
+                    bytes.begin()+static_cast<std::ptrdiff_t>(p+padding),
                     [](std::uint8_t v){return v==0;}),
-                    "nonzero bytes in UDF directory sector padding");
-                p+=available;
+                    "invalid UDF sector padding");
+                p+=padding;
                 continue;
             }
             check_tag(bytes,p,257);
             auto n=bytes[p+19];auto impl=u16(bytes,p+36);
             require(impl<=bytes.size()-p-38 && n<=bytes.size()-p-38-impl,"invalid UDF FID length");
             auto record_length=(std::size_t(38)+impl+n+3u)&~std::size_t(3);
-            require(record_length<=available && record_length>0,
-                    "UDF FID crosses logical sector boundary");
+            require(record_length<=remaining && record_length>0,
+                    "UDF FID exceeds logical directory length");
             if(!(bytes[p+18]&0x0cu) && n) {
                 auto item_name=udf_name(bytes,p+38+impl,n);
                 auto child_lba=u32(bytes,p+24);auto child_map=u16(bytes,p+28);

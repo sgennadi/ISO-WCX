@@ -125,31 +125,35 @@ def udf_anchor_at_512(*, corrupt: bool = False):
 
 
 def udf_multisector_directory(*, dirty_padding: bool = False):
-    """One ShortAD directory extent containing two sectors of FIDs."""
+    """Tightly packed FIDs; the last record crosses the sector boundary."""
     image = udf_image()
     root = 301*B
-    first = bytearray(image[root+176:root+220])
-    p16(first, 2, 2)
-    p32(first, 12, 20)  # The first external sector is logical 20.
-    first[4] = sum(first[i] for i in range(16) if i != 4) & 255
-    image[320*B:320*B+len(first)] = first
-    second = bytearray(44)
-    p16(second, 0, 257)
-    p16(second, 2, 2)
-    p32(second, 12, 21)
-    second[19] = 6
-    p32(second, 20, B)
-    p32(second, 24, 2)
-    second[38:44] = b'\x08extra'
-    second[4] = sum(second[i] for i in range(16) if i != 4) & 255
-    image[321*B:321*B+len(second)] = second
+    directory = bytearray()
+    for i in range(47):
+        identifier = 'hello' if i == 0 else (
+            'extra' if i == 46 else f'q{i:04d}')
+        encoded = b'\x08' + identifier.encode('ascii')
+        assert len(encoded) == 6
+        fid = bytearray(44)
+        p16(fid, 0, 257)
+        p16(fid, 2, 2)
+        p32(fid, 12, 20+len(directory)//B)
+        fid[19] = len(encoded)
+        p32(fid, 20, B)
+        p32(fid, 24, 2)
+        fid[38:44] = encoded
+        fid[4] = sum(fid[j] for j in range(16) if j != 4) & 255
+        directory.extend(fid)
+    assert len(directory)==47*44 and 46*44<B<len(directory)
+    image[320*B:320*B+len(directory)] = directory
     if dirty_padding:
-        image[320*B+100] = 0x55
-    p16(image, root+34, 0)  # ShortAD directory
-    p64(image, root+56, B+len(second))
-    p64(image, root+64, 2)  # LogicalBlocksRecorded
+        # This changes a real FID header, not permitted sector padding.
+        image[321*B+2] ^= 0x20
+    p16(image, root+34, 0)  # One ShortAD directory extent
+    p64(image, root+56, len(directory))
+    p64(image, root+64, 2)
     p32(image, root+172, 8)
-    p32(image, root+176, B+len(second))
+    p32(image, root+176, len(directory))
     p32(image, root+180, 20)
     update_tag_checksum(image, 301)
     return image
