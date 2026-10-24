@@ -179,6 +179,18 @@ def main(binary):
         # Use independent ISO reader for portable long-primary names.
         image.write_bytes(fixture(boot=True));old=image.read_bytes();run('add','NEW.TXT')
         assert image.read_bytes()[24*B:26*B]==old[24*B:26*B],'boot catalog/image changed'
+        # The payload of a boot image may be embedded in a file extent
+        # whose first LBA is NOT the catalog or the image's first LBA.
+        b=fixture(boot=True)
+        first_dir_record=iso_record(20,B,2,b'\\x00')
+        second_dir_record=iso_record(20,B,2,b'\\x01')
+        file_record=20*B+len(first_dir_record)+len(second_dir_record)
+        both(b,file_record+2,23)
+        both(b,file_record+10,3*B)
+        image.write_bytes(b)
+        run('delete','HELLO.TXT',False)
+        run('add','HELLO.TXT',False)
+
         for mode in ('hybrid','udf','rockridge','bad_extent'):
             b=fixture()
             if mode=='hybrid':b[0]=1
