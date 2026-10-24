@@ -38,12 +38,21 @@ not universal UDF 1.02–2.60 editing.
   Update bitmap, LVID and FE LogicalBlocksRecorded atomically.
 - Encode newly created names with OSTA CS0 (BMP Unicode including Cyrillic and
   Hebrew; non-BMP names intentionally rejected in this write mode).
-- For a batch of creations, plan all new FE/FIDs, file extents and parent
-  relocations together; update the bitmap and closed LVID **once** with
-  aggregate allocated/reclaimed sectors, unique IDs and file/directory
-  counters. Stage the image once, reparse it and verify **every** new file
-  before the final atomic replacement. Cancellation or any failed change
-  leaves the original image unchanged.
+- In one **mixed atomic batch**, create new files/directories, replace
+  existing regular files within their already reserved FE/ShortAD capacity,
+  and logically delete existing regular files. Apply deleted FIDs to the
+  same parent payload that receives appended FIDs (including embedded FE
+  parents and relocated external directories); update CRC/TagLocation
+  together. All new FE/FIDs, data extents and parent relocations are planned
+  together; update the bitmap and closed LVID **once** with aggregate
+  allocated/reclaimed sectors, unique IDs and file/directory counters.
+  Deleted files remain allocated; no freed blocks are reused in this batch.
+  Stage the image once, reparse it and verify **every** new/replaced file
+  and every logical deletion before atomic replacement. Cancellation or any
+  failed change leaves the original image unchanged.
+- If a single path occurs more than once in a mixed batch (including delete
+  then recreate at that same path, or case-only collisions), reject the
+  entire transaction rather than depending on operation ordering.
 
 ## Write preconditions
 
@@ -67,10 +76,10 @@ not universal UDF 1.02–2.60 editing.
 
 ## Explicitly unsupported
 
-Renaming, removing directories, editing ISO/UDF Bridge metadata, mixing
-creation with replacement/deletion in one batch, directory growth beyond
-8 MiB, freeing blocks
-from deleted files, bitmap descriptors larger than 8 MiB, sparse/unrecorded
+Renaming, removing directories, editing ISO/UDF Bridge metadata,
+delete-and-recreate of the same path in one batch, directory growth beyond
+8 MiB, freeing blocks from deleted files, bitmap descriptors larger than
+8 MiB, sparse/unrecorded
 file extents, chained AED writing, non-BMP new names and any
 VAT/Sparable/Metadata writer.
 
@@ -81,9 +90,9 @@ original image byte-for-byte unchanged.
 
 Synthetic fixtures check FE/EFE and multi-ShortAD replacement, final-ShortAD
 in-place growth, rejected over-allocation, FID deletion, fragmented file
-allocation, multi-file/mkdir atomic batches with nested directories,
-directory relocation, tag CRC, bitmap/LVID accounting, Unicode and
-atomic rollback. CI independently generates UDF 1.02 HD/DVD-RAM images
+allocation, mixed atomic create/replace/delete batches with nested
+directories, embedded/external FID relocation, tag CRC, bitmap/LVID
+accounting, Unicode and atomic rollback. CI independently generates UDF 1.02 HD/DVD-RAM images
 with `mkudffs` and validates changes via `udfinfo` and 7-Zip. A dedicated
 CI job creates, grows, rejects an overrun and replaces a file larger than
 4 GiB, checking complete independently decoded 7-Zip SHA-256 each time.
