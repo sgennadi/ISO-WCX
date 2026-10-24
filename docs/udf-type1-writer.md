@@ -8,8 +8,12 @@ not universal UDF 1.02–2.60 editing.
 ## Supported writes
 
 - Replace existing regular files and grow/shrink within their previously
-  reserved FE/EFE embedded capacity or recorded ShortAD runs; existing
-  multi-ShortAD replacement stays within the sum of already recorded data.
+  reserved FE/EFE embedded capacity or recorded ShortAD runs. For a file
+  containing multiple ShortADs, replacement may additionally extend the
+  **final recorded ShortAD** into its already allocated final sector (up to
+  the 30-bit ShortAD length limit), without modifying preceding extents or
+  reserving bitmap blocks. Expanding an earlier extent, allocating more
+  blocks during replacement or changing the ShortAD count is unsupported.
   Supports nested paths and streamed verification.
 - Logically delete an existing regular file by setting its FID deleted bit,
   updating descriptor CRC/checksum. Deletion **does not reclaim blocks**.
@@ -70,11 +74,15 @@ original image byte-for-byte unchanged.
 
 ## Validation
 
-Synthetic fixtures check FE/EFE and multi-ShortAD replacement, ShortAD growth,
-FID deletion, fragmented file allocation, single- and multi-sector
-parent-directory relocation, tag locations/CRC, bitmap reclamation,
-LVID accounting, Unicode, no-space cases and rollback. CI independently generates UDF 1.02 HD/DVD-RAM
-images with `mkudffs` and validates edits via `udfinfo` and 7-Zip. Those three programs are CI-only test utilities and are
+Synthetic fixtures check FE/EFE and multi-ShortAD replacement, final-ShortAD
+in-place growth, rejected over-allocation, FID deletion, fragmented file
+allocation, directory relocation, tag CRC, bitmap/LVID accounting, Unicode
+and atomic rollback. CI independently generates UDF 1.02 HD/DVD-RAM images
+with `mkudffs` and validates changes via `udfinfo` and 7-Zip. A dedicated
+CI job creates, grows, rejects an overrun and replaces a file larger than
+4 GiB, checking complete independently decoded 7-Zip SHA-256 each time.
+Both UDF interoperability workflows run on matching PRs and pushes to main,
+with a manual dispatch option. These external programs are CI-only and are
 **not** runtime dependencies. Manual Total Commander GUI coverage and broader
 real-disc interoperability remain necessary before stable write support.
 
@@ -98,6 +106,8 @@ unlimited capacity: the physical image, UDF partition size, number of FE
 descriptor slots and free bitmap runs all impose hard bounds. The writer
 streams source content and compares it with independently reparsed staged
 extents in fixed-size buffers; it does not extract another multi-gigabyte
-temporary file for validation. CI includes fragmented small fixtures and
-a real independently formatted file larger than 8 MiB. Exhaustive
+temporary file for validation. CI includes fragmented small fixtures, a
+real independently formatted file larger than 8 MiB and an over-4-GiB
+create/grow/replace test with independently streamed content verification.
+This does not imply that all rewritable UDF types are supported: broad
 Windows/optical interoperability for files over 4 GiB remains pending.
