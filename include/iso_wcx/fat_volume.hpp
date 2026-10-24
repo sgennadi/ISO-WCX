@@ -1,6 +1,7 @@
 #pragma once
 
 #include "iso_wcx/virtual_disk.hpp"
+#include "iso_wcx/volume_reader.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -17,16 +18,9 @@ namespace iso_wcx {
 // implicit extraction destinations are involved.
 enum class FatKind : std::uint8_t { fat12, fat16, fat32 };
 
-struct FatFile {
-    std::string path;          // validated UTF-8, relative to partition root
-    std::uint64_t size = 0;
-    std::uint32_t first_cluster = 0;
-    bool directory = false;
-    std::uint32_t dos_time = 0; // FAT last-write date/time in WCX layout.
-    std::uint32_t attributes = 0; // DOS file attribute flags.
-};
+using FatFile = VolumeFile;
 
-class FatVolume {
+class FatVolume final : public VolumeReader {
 public:
     // Offset and extent are logical container bytes, not physical file bytes.
     FatVolume(VirtualDiskReader& disk, std::uint64_t partition_offset,
@@ -39,12 +33,12 @@ public:
 
     // Validates directory trees, FAT chains reached during discovery,
     // untrusted VFAT names, recursion depth and total number of items.
-    [[nodiscard]] std::vector<FatFile> list();
+    [[nodiscard]] std::vector<FatFile> list() override;
 
     // Only an already-listed relative path can be extracted.
     // Streams binary bytes to the caller; this function never opens paths.
     // A cyclic, short, bad or excessive cluster chain fails with an error.
-    void extract(std::string_view path, std::ostream& output);
+    void extract(std::string_view path, std::ostream& output) override;
 
 private:
     [[nodiscard]] std::vector<std::uint8_t> volume_read(std::uint64_t offset,

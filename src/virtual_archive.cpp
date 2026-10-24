@@ -1,5 +1,7 @@
 #include "iso_wcx/virtual_archive.hpp"
 #include "iso_wcx/partition_map.hpp"
+#include "iso_wcx/fat_volume.hpp"
+#include "iso_wcx/exfat_volume.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -44,7 +46,7 @@ private:
 };
 
 void check_path(std::string_view path) {
-    require(!path.empty() && path.size() <= 1000, "invalid FAT path length");
+    require(!path.empty() && path.size() <= 1000, "invalid virtual volume path length");
     std::size_t start = 0;
     while (start < path.size()) {
         const auto slash = path.find('/', start);
@@ -84,27 +86,33 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
     const auto sector = disk_.logical_sector_size();
     const auto partitions = inspect_partition_table(disk_, sector);
     require(!partitions.empty(), "virtual disk has no partition table");
-    format_ = std::string(disk_name(disk_.format())) + " / FAT12/16/32";
+    format_ = std::string(disk_name(disk_.format())) + " / FAT12/16/32/exFAT";
     constexpr std::size_t max_items = 100000;
     for (std::size_t i = 0; i < partitions.size(); ++i) {
         const auto& partition = partitions[i];
         require(partition.first_lba <= disk_.size() / sector &&
                 partition.sector_count <= disk_.size() / sector - partition.first_lba,
                 "partition outside virtual disk");
-        std::unique_ptr<FatVolume> volume;
-        std::vector<FatFile> files;
+        std::unique_ptr<VolumeReader> volume;
+        std::vector<VolumeFile> files;
+        const auto offset = partition.first_lba * sector;
+        const auto length = partition.sector_count * sector;
         try {
-            volume = std::make_unique<FatVolume>(
-                disk_, partition.first_lba * sector,
-                partition.sector_count * sector);
+            volume = std::make_unique<FatVolume>(disk_,offset,length);
             files = volume->list();
         } catch (const std::exception&) {
-            // Non-FAT partitions are not listed as though they were FAT.
-            continue;
+            // exFAT is independent of FAT12/16/32 and has a different BPB.
+            try {
+                volume = std::make_unique<ExfatVolume>(disk_,offset,length);
+                files = volume->list();
+            } catch (const std::exception&) {
+                // Never interpret corrupt or unknown partition bytes as files.
+                continue;
+            }
         }
         for (const auto& file : files) check_path(file.path);
         require(files.size() < max_items && items_.size() < max_items - files.size(),
-                "too many FAT directory entries");
+                "too many virtual volume directory entries");
         const auto volume_index = volumes_.size();
         const auto prefix = "partition" + std::to_string(i + 1);
         Item folder;
@@ -126,7 +134,7 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
         }
         volumes_.push_back(std::move(volume));
     }
-    require(!volumes_.empty(), "no FAT12/16/32 partition in virtual disk");
+    require(!volumes_.empty(), "no supported FAT/exFAT partition in virtual disk");
 }
 
 bool VirtualArchive::read(
@@ -135,7 +143,7 @@ bool VirtualArchive::read(
     require(index < items_.size() && !items_[index].directory,
             "invalid virtual archive item index");
     const auto& loc = files_[index];
-    require(loc.volume_index < volumes_.size(), "invalid FAT partition index");
+    require(loc.volume_index < volumes_.size(), "invalid virtual volume partition index");
     std::lock_guard<std::mutex> guard(read_mutex_);
     ProgressBuffer buffer(accept);
     std::ostream stream(&buffer);
