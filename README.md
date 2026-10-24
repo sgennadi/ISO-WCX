@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.16.0 Stable Core + experimental UDF writer, native MDS v2/MDX and CHD multi-track Preview** — a native C++20 Total Commander WCX
+**ISO-WCX v0.16.0 Stable Core + experimental UDF writer, native MDS v2/MDX and CDDA-capable CHD Preview** — a native C++20 Total Commander WCX
 plugin for optical ISO/UDF, WIM/ESD/SWM and virtual HDD images.
 Core browsing/extraction and packaging are verified in Windows x86/x64 and
 Linux CI. **Advanced readers and write modes explicitly marked experimental
@@ -50,9 +50,9 @@ experimental support. See [v0.16.0 release notes](RELEASE_NOTES.md).
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
 | ISZ v1 (single-file and split; experimental) | Built-in 2048-byte optical streams; 48/64-byte headers, 2/3/4-byte chunk indexes or implicit stored data, zero/raw/zlib/bzip2; split `.isz` + `.i01/.i02` or `.part01.isz` + `.part02.isz` without intermediate ISO. Encryption, non-first segment as input, other sector geometry and uncommon vendor variants remain unsupported. |
 | DAA v1.00 | Built-in single-file raw DEFLATE chunks with header CRC32 and bounds checking; v1.10, encryption and multipart images rejected |
-| CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and **experimental multi-track** Mode 1/Mode 2 Form 1 CD frames (2448 bytes). MAME 4-frame track padding is mapped, audio tracks are skipped and the last ISO/UDF-bearing data track is selected after a validated filesystem anchor. No CDDA extraction, parent-chain resolution or full multisession merging; `.chd` association is manual in Preview |
+| CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and **experimental multi-track** Mode 1/Mode 2 Form 1 CD frames (2448 bytes). MAME 4-frame track padding is mapped, the last ISO/UDF-bearing data track is selected after filesystem validation, and **audio-only/mixed CHDs expose `CDDA/trackNN.wav`** (16-bit stereo PCM at 44.1 kHz, RIFF or RF64 for large tracks). No CD-Text, CD+G graphics, parent-chain resolution, CHD writing or full multisession merging; `.chd` association remains manual in Preview |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
-| Other compressed/encrypted containers | Not implemented: encrypted ISZ, multipart DAA, DAA v1.10, CD-Audio extraction, CHD parent chains, encrypted/compressed NRG, MDS v2/MDX with password-protected AES-LRW data tracks, unsupported vendor-specific MDF compression and full optical multisession merging; CloneCD Q decoding is limited to CRC-valid positions |
+| Other compressed/encrypted containers | Not implemented: encrypted ISZ, multipart DAA, DAA v1.10, CD-Audio extraction from non-CHD CUE/CCD/NRG containers, CHD parent chains, encrypted/compressed NRG, MDS v2/MDX with password-protected AES-LRW data tracks, unsupported vendor-specific MDF compression and full optical multisession merging; CloneCD Q decoding is limited to CRC-valid positions |
 
 ## Development
 
@@ -70,7 +70,7 @@ For a minimal Windows release build containing **only the WCX DLL**, use
 The standalone diagnostic/test EXEs are internal development targets, not
 WCX runtime dependencies or parts of the installable ZIP.
 
-This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Audio decoding and full multisession TOC interpretation are not supported. NRG and MDS v1 support remains limited to verified uncompressed data tracks; native MDS v2/MDX plain and compressed reads pass a pinned independent real-image corpus, but broader discs and Total Commander GUI operation still need manual validation. Associations for `.nrg`, `.mds`, `.cso`, `.zso`, `.isz` and `.daa` are registered by the ZIP installer, while `.chd`, `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
+This is an independent modern reimplementation; original ISO.WCX 1.7.6 source code is **not** included. See [PROVENANCE.md](PROVENANCE.md) and [tracking issue #1](https://github.com/sgennadi/ISO-WCX/issues/1). CUE references are restricted to image files inside the CUE directory tree (including resolved symlinks). Full multisession TOC interpretation and CD-Audio outside the experimental CHD reader are not supported. NRG and MDS v1 support remains limited to verified uncompressed data tracks; native MDS v2/MDX plain and compressed reads pass a pinned independent real-image corpus, but broader discs and Total Commander GUI operation still need manual validation. Associations for `.nrg`, `.mds`, `.cso`, `.zso`, `.isz` and `.daa` are registered by the ZIP installer, while `.chd`, `.bin` and `.mdf` remain unassociated. Preview images were synthetically constructed; tests in the Total Commander GUI and against a diverse real-disc collection remain outstanding.
 
 ## What changed in v0.7.0
 
@@ -126,7 +126,7 @@ The following release notes describe the feature coverage **at each older versio
 - **CloneCD `.sub`:** Preserve and extract an optional same-base raw P-W subchannel stream under `subchannels/disc.sub` after checking every 96-byte frame corresponds to one 2352-byte `.img` frame. A CRC-gated `subchannels/q-index.csv` report identifies valid Q track/index positions; CD-Text and copy-protection semantics are **not decoded**, and invalid Q frames never invalidate raw `.sub`.
 - **Regression tests:** Synthetic ISO extended-attribute and endian corruption tests, scrambled CCD round trips and byte-perfect `.sub` extraction.
 
-The remaining roadmap includes *MDS v2/MDX AES-LRW encrypted track data and unusual variants, broader ISZ/DAA/CHD support, DMG, ECM, GZ/XZ and CD-Audio extraction*. Partial ISZ/DAA/CHD support arrived in v0.14; formats supported by other projects are not automatically supported here.
+The remaining roadmap includes *MDS v2/MDX AES-LRW encrypted track data and unusual variants, broader ISZ/DAA/CHD support, DMG, ECM, GZ/XZ, CDDA from CUE/NRG/CCD and CD-Text*. Partial ISZ/DAA/CHD support arrived in v0.14; formats supported by other projects are not automatically supported here.
 
 ## What changed in v0.12.1
 
@@ -243,8 +243,8 @@ Real-world media/Total Commander GUI validation is pending.
 - Linux and Windows x86/x64 tests exercise synthetic ISO/UDF data, byte
   extraction and corrupt-container rejection. Windows tests use the actual
   WCX export functions, not an external extractor.
-- No automatic `.chd` association yet: CD-Audio extraction and some mixed-mode CHDs
-  are not decoded, so registering every CHD globally would be misleading.
+- No automatic `.chd` association yet: unsupported CHD parent chains, sector
+  layouts and other image classes still make blanket CHD registration misleading.
   MDS v2/MDX and protected ISZ/DAA remain **unsupported**.
 
 See [bounded optical container design](docs/packed-optical.md).

@@ -15,6 +15,12 @@ typedef struct _chd_file chd_file;
 
 namespace iso_wcx {
 
+struct ChdAudioTrack {
+    std::uint32_t number = 0;   // Physical one-based CHD CD track.
+    std::uint64_t first_frame = 0; // Absolute 2448-byte CHD frame.
+    std::uint64_t frames = 0;      // Only real sectors; excludes MAME padding.
+};
+
 class ChdStream final {
 public:
     explicit ChdStream(const std::filesystem::path& path);
@@ -24,6 +30,13 @@ public:
 
     [[nodiscard]] std::uint64_t size() const noexcept { return logical_size_; }
     [[nodiscard]] const std::string& label() const noexcept { return label_; }
+    [[nodiscard]] const std::vector<ChdAudioTrack>& audio_tracks() const noexcept {
+        return audio_tracks_;
+    }
+    // PCM is 2352 bytes/frame, 16-bit big-endian in standard CD CHD storage.
+    // Convert samples to little-endian for WAVE; no raw subcode is emitted.
+    [[nodiscard]] std::vector<std::uint8_t> read_audio(std::uint32_t track,
+        std::uint64_t pcm_offset, std::size_t pcm_length);
     [[nodiscard]] std::vector<std::uint8_t> read(std::uint64_t start,
                                                  std::size_t length);
 private:
@@ -44,6 +57,7 @@ private:
     std::uint64_t leading_frames_ = 0; // Absolute CHD frame of selected data track, plus validated lead-in.
     std::uint64_t cached_hunk_ = ~std::uint64_t(0);
     std::vector<std::uint8_t> hunk_;
+    std::vector<ChdAudioTrack> audio_tracks_;
     std::string label_;
 };
 

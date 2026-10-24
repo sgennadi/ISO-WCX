@@ -54,15 +54,17 @@ Supported compressed optical subsets:
 single-file ISZ v1 (zero/raw/zlib/bzip2) and DAA 1.00 (raw DEFLATE).
 CHD v5 supports compressed optical 2048-byte ISO/UDF and experimental
 multi-track CD Mode 1/Mode 2 Form 1 using statically linked libchdr.
-MAME four-frame track padding is handled, and audio tracks are skipped;
-CHD is still not registered by default because CDDA extraction, CHD
-parent chains and other optical layouts are not supported.
+MAME four-frame track padding is handled; audio-only and mixed-disc CHDs
+expose standard CDDA/trackNN.wav audio at 44.1-kHz stereo/16-bit PCM.
+Tracks over the RIFF 4-GiB limit use RF64. CHD remains unassociated by
+default because CHD parent chains, exotic CD modes, and other CHD classes
+are not fully supported.
 Preview: MDS v2/MDF and single-file MDX with encrypted metadata,
 unencrypted plain/compressed data tracks, and validated ISO/UDF extraction.
 Password-encrypted AES-LRW tracks are deliberately rejected. The preview
 installer associates .mdx; external helper executables are not needed.
 Not supported: encrypted/multipart ISZ or DAA, DAA 1.10,
-CHD audio extraction/parent chains, dynamic/differencing VHD,
+CHD parent chains, CD-Text/CD+G, dynamic/differencing VHD,
 differencing/dirty VHDX, advanced unsupported ext4 features, NTFS compressed/
 encrypted files, attribute-list continuations and journal replay.
 

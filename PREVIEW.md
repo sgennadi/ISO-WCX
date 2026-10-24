@@ -24,10 +24,10 @@ empty directory per transaction; automatically expand compatible embedded/ShortA
 ## Limits and cautions
 
 - This is a **preview** tested primarily with deterministic synthetic image fixtures. Real DVD/BD/UDF compatibility is not yet guaranteed, especially rewritable/packet-written and damaged media.
-- RAW Mode 2 Form 2, CD-Audio extraction, CD-Text and full CloneCD multisession are not supported. CloneCD raw `.sub` is preserved and position-type Q frames are CRC-checked; damaged Q data is not treated as an ISO failure. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
+- RAW Mode 2 Form 2, CD-Audio extraction from CUE/NRG/CCD (CHD CDDA is supported), CD-Text and full CloneCD multisession are not supported. CloneCD raw `.sub` is preserved and position-type Q frames are CRC-checked; damaged Q data is not treated as an ISO failure. NRG and MDS select the latest recognized data track, but this is not full multisession filesystem merging.
 - UDF VAT historical chains, every version of Metadata/Sparable, UDF pseudo-overwrite behavior and fragmented descriptor edge cases are not yet exhaustively covered.
 - Rock Ridge PX read-only permissions and TF modification timestamps are implemented in the development branch, with CE mirrored-endian validation. Full POSIX permissions, symlink extraction and creation/access times are not exposed by the WCX API.
-- ISZ v1 zero/stored/zlib/bzip2 and DAA v1.00 unencrypted raw DEFLATE are supported in the current native reader. CHD v5 supports compressed 2048-byte optical payloads and **experimental** mixed/multi-track 2448-byte CD images, selecting an ISO/UDF-bearing Mode 1/Mode 2 Form 1 data track after validating its filesystem anchor. MAME four-frame alignment is respected; audio track contents are not extracted. Broader encrypted/proprietary variants and DMG/encrypted NRG remain unsupported; MDF v2 unencrypted payloads with bounded compression-group decoding are supported in Preview. Indexed CSO/ZSO and uncompressed NRG/MDS v1 remain supported.
+- ISZ v1 zero/stored/zlib/bzip2 and DAA v1.00 unencrypted raw DEFLATE are supported in the current native reader. CHD v5 supports compressed 2048-byte optical payloads and **experimental** mixed/multi-track 2448-byte CD images, selecting an ISO/UDF-bearing Mode 1/Mode 2 Form 1 data track after validating its filesystem anchor. MAME four-frame alignment is respected; **Red Book CDDA tracks are exposed as `CDDA/trackNN.wav`** on audio-only and mixed CHDs. The decoder generates RIFF PCM 16-bit stereo 44.1 kHz, or RF64 above the WAV 4-GiB limit, with 1-MiB bounded reads and no additional codec or helper. Broader encrypted/proprietary variants and DMG/encrypted NRG remain unsupported; MDF v2 unencrypted payloads with bounded compression-group decoding are supported in Preview. Indexed CSO/ZSO and uncompressed NRG/MDS v1 remain supported.
 - Avoid extracting untrusted images into important directories; path checks cannot fully mitigate concurrent symlink races.
 - Unsigned binary; this is not an official release of the legacy ISO.WCX plugin.
 
@@ -130,7 +130,7 @@ Support statements below describe their respective releases; see **v0.14** at th
 
 - `subchannels/q-index.csv` summarizes only CRC-verified Q ADR=1 position frames. Malformed Q frames do not invalidate the disc or erase raw `.sub` data.
 - Handles normal CloneCD deinterleaved P12/Q12, with CRC-gated fallback for packed/interleaved P-W variants.
-- No R-W CD-Text, Q ADR=2/3 EAN/ISRC, proprietary protection semantics or CD-Audio in this update.
+- No R-W CD-Text, Q ADR=2/3 EAN/ISRC or proprietary protection semantics in the earlier CloneCD update; the newer experimental CHD reader extracts standard CDDA WAV.
 - The report scans in constant memory with a one-million-sector limit; new WCX artifacts require successful Windows CI before release.
 
 ## v0.14: integrated ISZ, DAA and limited CHD support
@@ -152,10 +152,11 @@ https://sourceware.org/bzip2/downloads.html for official source and license.
 The format logic itself is independently authored; no GPL image decoder
 code was copied.
 
-**Not supported yet:** multi-volume ISZ, ISZ passwords/encryption, DAA 1.10,
-password-protected/multipart DAA, CHD audio, multi-track/mixed-mode,
-parent chains and unusual sector layouts, plus MDS v2/MDX metadata decryption.
-These deliberately fail closed.
+**Not supported in this historical v0.14 implementation:** ISZ passwords/encryption,
+DAA 1.10 and multipart DAA, CHD audio/multitrack/parent chains, and MDS v2/MDX
+metadata decryption. The current development preview now supports split ISZ,
+CHD multitrack/CDDA WAV and MDS v2/MDX data reads in specific tested layouts;
+unsupported proprietary variants still fail closed.
 Authentic vendor samples and GUI testing are still required for stable.
 
 ## WIM/ESD in v0.15 Preview

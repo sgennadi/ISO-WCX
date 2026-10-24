@@ -1,4 +1,4 @@
-# Native optical container readers in ISO-WCX v0.14 Preview
+# Native optical container readers in ISO-WCX Preview (post-v0.16)
 
 These are read-only, random-access block decoders compiled into the same
 Total Commander WCX binary as the ISO9660, Rock Ridge, Joliet and UDF parser.
@@ -8,7 +8,7 @@ No external DLL, mount, virtual drive, unpacker or intermediate ISO is used.
 | --- | --- | --- |
 | ISZ v1 | 2048-byte sectors, 48/64-byte headers; 2/3/4-byte XOR pointer indexes or implicit raw; sparse zero, raw, zlib and bzip2; 2/3-part synthetic split tests across `.i01` and `.part02.isz` parts with native random access | Encryption/passwords, opening a non-first part directly, unsupported geometry or unknown vendor variants |
 | DAA 1.00 | 76-byte header with CRC32, 3-byte size table, raw-DEFLATE compressed hunks | DAA 1.10, encryption, other chunk types and multipart headers |
-| CHD v5 | Statically linked libchdr compressed maps, zlib/LZMA/Zstd/FLAC/CD codecs; cooked 2048-byte ISO/UDF plus single-track 2448-byte Mode 1/2 Form 1 CD data (experimental) | Audio, mixed/multi-track layouts, parents, unrecognized sector and metadata formats |
+| CHD v5 | Statically linked libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; cooked 2048-byte ISO/UDF, validated mixed/multi-track 2448-byte Mode 1/2 Form 1 CD data, and virtual `CDDA/trackNN.wav` from audio-only or mixed CHDs (16-bit stereo PCM, RIFF/RF64). | CD-Text, CD+G graphics, parent CHDs, unsupported sector layouts, full multisession merging or editing. |
 
 All formats have bounded logical size, bounded chunk sizes and counts, checked
 64-bit offsets before seeking, a single decoded-block cache and the existing
@@ -32,11 +32,13 @@ licensed and statically compiled into the WCX binaries at build time.
 CHD v5 decoding uses the BSD-3-Clause `libchdr` implementation pinned at
 `47d794151b2b64f6aba60304e6480f4f5a2bc24b` and built entirely into the
 WCX DLL. Its miniz, Zstandard, LZMA and dr_flac dependencies are also static.
-The adapter deliberately exposes only ISO/UDF-bearing CD/DVD data tracks,
-with strict CHD map/CRC and logical-geometry validation.
+The adapter exposes ISO/UDF-bearing CD/DVD data tracks and CDDA audio tracks
+as generated WAV/RF64 files, with strict CHD map/CRC, four-frame padding and
+logical-geometry validation.
 
 MAME `chdman` is used **only inside development CI** to produce independent
-zlib/LZMA DVD ISO/UDF and CD images. No end user installs or runs it. The
+zlib/LZMA DVD ISO/UDF and mixed CD/CDDA images. Independent fixtures compare
+all WAV PCM sample bytes and CD filesystem extraction. No end user installs or runs it. The
 WCX installer contains no libchdr DLL, mounted disk, helper or ISO staging file.
 
 Compressed CD support is currently experimental until verified against a wider
