@@ -223,7 +223,7 @@ def test_relocation_and_rollback(editor, inspector, root):
     run(editor, cancelling, "add", "REPLACE-ME.bin", short)
     cancel_before = cancelling.read_bytes()
     cancel_replacement = root / "cancel-replacement.dat"
-    cancel_replacement.write_bytes(b"SMALL REPLACEMENT")
+    cancel_replacement.write_bytes(b"REPLACE ME")
     planned = [
         ("delete", "hello", None),
         ("add", "REPLACE-ME.bin", cancel_replacement),
