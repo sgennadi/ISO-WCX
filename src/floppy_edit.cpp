@@ -386,21 +386,99 @@ private:
         }
         return result;
     }
-    std::size_t entry_slot(std::uint16_t folder) {
-        const auto list = slots(folder);
-        for (const auto at : list) if (bytes_[at] == 0) return at;
-        for (std::size_t i = 0; i < list.size(); ++i) {
-            if (bytes_[list[i]] == 0xe5 &&
-                (i == 0 || bytes_[list[i - 1] + 11] != 0x0f))
-                return list[i];
+    // Reserve adjacent logical directory records, including entries across
+    // non-contiguous data clusters. Long-name entries must immediately precede
+    // their short-name entry in the directory stream.
+    std::vector<std::size_t> reserve_slots(std::uint16_t folder, std::size_t count) {
+        check(count >= 1 && count <= 21, "invalid VFAT directory reservation");
+        for (;;) {
+            const auto positions = slots(folder);
+            std::vector<std::size_t> available;
+            for (const auto at : positions) {
+                if (bytes_[at] == 0 || bytes_[at] == 0xe5) {
+                    available.push_back(at);
+                    if (available.size() == count) return available;
+                } else available.clear();
+            }
+            check(folder != 0, "FAT12 root directory has no contiguous LFN slots");
+            const auto old = chain(folder);
+            const auto next = allocate(1).front();
+            set(old.back(), next);
+            const auto at = offset(next);
+            std::fill_n(bytes_.begin() + static_cast<std::ptrdiff_t>(at),
+                        cluster_bytes_, 0);
         }
-        check(folder != 0, "FAT12 root directory is full");
-        const auto old = chain(folder);
-        const auto new_cluster = allocate(1).front();
-        set(old.back(), new_cluster);
-        const auto at = offset(new_cluster);
-        std::fill_n(bytes_.begin() + static_cast<std::ptrdiff_t>(at), cluster_bytes_, 0);
-        return at;
+    }
+    // Resolve an explicit long name or its genuine 8.3 alias at every path
+    // level. The alias map never determines a new file's identity.
+    std::string resolve_path(std::string_view raw) const {
+        if (raw.empty()) return {};
+        std::string resolved;
+        std::size_t at = 0;
+        while (at < raw.size()) {
+            const auto slash = raw.find('/', at);
+            const auto end = slash == std::string_view::npos ? raw.size() : slash;
+            check(end > at, "empty FAT12 path segment");
+            const auto segment = fold_name(raw.substr(at, end-at));
+            const auto proposed = join(resolved, segment);
+            const auto match = aliases_.find(proposed);
+            resolved = match == aliases_.end() ? proposed : match->second;
+            at = end+1;
+        }
+        return resolved;
+    }
+    struct NamePlan {
+        std::array<std::uint8_t,11> alias{};
+        std::size_t lfn_count = 0;
+    };
+    NamePlan new_name(const std::string& parent, std::string_view name,
+                      bool replacing) const {
+        if (replacing) return {};
+        validate_vfat_component(name);
+        const auto count = vfat::required_slots(name);
+        check(count >= 1 && count <= 20, "VFAT filename is too long");
+        const auto unused = [&](const std::array<std::uint8_t,11>& entry) {
+            const auto key = join(parent, alias_name(entry));
+            return !aliases_.contains(key) && !nodes_.contains(key);
+        };
+        // Preserve a DOS short name when possible, but store LFN entries
+        // when spelling/case does not exactly match the uppercase alias.
+        try {
+            const auto direct = dos_encode(name);
+            if (unused(direct))
+                return {direct, name == alias_name(direct) ? 0u : count};
+        } catch (const EditUnsupported&) {
+            // DOS alias generation below handles spaces, Unicode, and >8.3.
+        }
+        const auto dot = name.find_last_of('.');
+        const auto source_base = dot == std::string_view::npos ? name : name.substr(0,dot);
+        const auto source_ext = dot == std::string_view::npos ?
+                                    std::string_view{} : name.substr(dot+1);
+        const auto sanitized = [](std::string_view part) {
+            std::string out;
+            for (const unsigned char c : part) {
+                const auto up = c >= 'a' && c <= 'z' ?
+                                    static_cast<unsigned char>(c-32) : c;
+                if ((up >= 'A' && up <= 'Z') || (up >= '0' && up <= '9') ||
+                    up == '_' || up == '$')
+                    out.push_back(static_cast<char>(up));
+            }
+            return out;
+        };
+        auto base = sanitized(source_base);
+        if (base.empty()) base = "FILE";
+        const auto extension = sanitized(source_ext).substr(0,3);
+        for (std::uint32_t number=1; number<=999999; ++number) {
+            const auto tail = "~" + std::to_string(number);
+            const auto prefix = base.substr(0, 8-tail.size());
+            auto stem = prefix + tail;
+            std::array<std::uint8_t,11> result{};
+            result.fill(' ');
+            std::copy(stem.begin(), stem.end(), result.begin());
+            std::copy(extension.begin(), extension.end(), result.begin()+8);
+            if (unused(result)) return {result,count};
+        }
+        throw EditUnsupported("FAT12 short-name namespace exhausted");
     }
     void write_entry(std::size_t at, const std::array<std::uint8_t,11>& name,
                      std::uint8_t attrs, std::uint16_t first, std::uint32_t size) {
