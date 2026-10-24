@@ -4,6 +4,7 @@
 #include "iso_wcx/fat_volume.hpp"
 #include "iso_wcx/partition_map.hpp"
 #include "iso_wcx/virtual_disk.hpp"
+#include "iso_wcx/vfat_name.hpp"
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -11,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -48,6 +50,41 @@ std::string upper(std::string name) {
     for (auto& c : name) if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A');
     return name;
 }
+// Stable, locale-independent simple folding for common Latin, Cyrillic,
+// and Greek letters. Other Unicode scalars remain exact.
+std::string fold_name(std::string_view value) {
+    const auto units = vfat::utf16(value);
+    std::string out;
+    for (const char16_t unit : units) {
+        auto cp = static_cast<std::uint32_t>(unit);
+        if (cp >= 0x61 && cp <= 0x7a) cp -= 0x20;
+        else if (cp >= 0xe0 && cp <= 0xf6) cp -= 0x20;
+        else if (cp >= 0xf8 && cp <= 0xfe) cp -= 0x20;
+        else if (cp >= 0x430 && cp <= 0x44f) cp -= 0x20;
+        else if (cp >= 0x450 && cp <= 0x45f) cp -= 0x50;
+        else if (cp >= 0x3b1 && cp <= 0x3cb && cp != 0x3c2) cp -= 0x20;
+        else if (cp == 0x3c2) cp = 0x3a3;
+        vfat::put_scalar(out, cp);
+    }
+    return out;
+}
+std::string join(const std::string& dir, const std::string& name) {
+    return dir.empty() ? name : dir + "/" + name;
+}
+void validate_vfat_component(std::string_view base) {
+    check(!base.empty() && base != "." && base != ".." &&
+          base.back() != '.' && base.back() != ' ',
+          "invalid VFAT path component");
+    (void)vfat::utf16(base);
+}
+std::string alias_name(const std::array<std::uint8_t,11>& alias) {
+    std::string base(reinterpret_cast<const char*>(alias.data()), 8);
+    std::string ext(reinterpret_cast<const char*>(alias.data()+8), 3);
+    while (!base.empty() && base.back() == ' ') base.pop_back();
+    while (!ext.empty() && ext.back() == ' ') ext.pop_back();
+    return base + (ext.empty() ? "" : "." + ext);
+}
+
 std::string dos_name(const std::vector<std::uint8_t>& v, std::size_t at) {
     std::string base(reinterpret_cast<const char*>(v.data() + at), 8);
     std::string ext(reinterpret_cast<const char*>(v.data() + at + 8), 3);
@@ -92,6 +129,7 @@ struct Node {
     std::uint32_t size;
     std::uint8_t attrs;
     std::vector<std::size_t> long_name_slots;
+    std::string dos_path;
     bool directory() const { return (attrs & 0x10u) != 0; }
 };
 
@@ -236,6 +274,7 @@ private:
     std::uint32_t clusters_{}, fats_{};
     std::map<std::string, Node> nodes_;
     std::map<std::string, std::uint16_t> dirs_{{"", 0}};
+    std::map<std::string, std::string> aliases_;
     std::unordered_set<std::uint32_t> claimed_;
 
     void setup() {
