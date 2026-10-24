@@ -90,6 +90,8 @@ def main(editor,inspector):
             (False,'new_file.bin',b'HELLO UDF ALLOCATOR',False),
             (True,'docs/new_file.bin',b'NESTED NEW FILE',False),
             (False,'EMPTYDIR',b'',True),
+            (False,'Привет.txt',b'UNICODE CYRILLIC UDF',False),
+            (False,'שלום.txt',b'UNICODE HEBREW UDF',False),
         ]
         for i,(nested,target,payload,directory) in enumerate(cases):
             image.write_bytes(bitmap_image(nested=nested))
@@ -130,12 +132,12 @@ def main(editor,inspector):
         baseline=image.read_bytes()
         source.write_bytes(b'Z'*(B-176+1))
         run(editor,image,'add','too_big.bin',source,success=False)
-        run(editor,image,'add','не-ascii.txt',source,success=False)
+        run(editor,image,'add','📦.txt',source,success=False)
         run(editor,image,'mkdir','hello',success=False)
         run(editor,image,'cancel','new_file.bin',source,success=False)
         assert image.read_bytes()==baseline,'rejection changed original'
         print('PASS UDF bitmap/LVID small-file allocation, directory creation, '
-              'nested entries, readback, free-space consistency and rollback')
+              'nested entries, OSTA CS0 BMP Unicode, readback, free-space consistency and rollback')
 
 if __name__=='__main__':
     main(sys.argv[1],sys.argv[2])

@@ -70,6 +70,16 @@ def main(editor, inspector):
             entries = command(inspector, image).stdout.decode("utf-8")
             assert path in entries
             independent_extract(image, root, path, PAYLOAD)
+            # Verify non-ASCII OSTA CS0 identifiers against a second decoder,
+            # not only the native ISO-WCX parser.
+            for utf8_name in ("Привет.txt", "שלום.txt"):
+                content = ("UDF:" + utf8_name).encode("utf-8")
+                source.write_bytes(content)
+                command(editor, image, "add", utf8_name, source)
+                entries = command(inspector, image).stdout.decode("utf-8")
+                assert utf8_name in entries
+                command("udfinfo", image)
+                independent_extract(image, root, utf8_name, content)
             # Creating a second entry inside an already modified directory
             # verifies the bitmap, LVID and FID append logic is persistent.
             folder = "NewFolder"
