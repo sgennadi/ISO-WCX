@@ -48,11 +48,11 @@ experimental support. See [v0.16.0 release notes](RELEASE_NOTES.md).
 | Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Native MBR/GPT filesystem browsing under `partitionN/`: FAT12/16/32, exFAT and **experimental** ext2/3/4 and NTFS. NTFS supports basic MFT/`$I30` directory parsing, resident/nonresident and sparse uncompressed files; rejects attribute lists, compressed/encrypted files and unsupported index layouts. Read-only, no mount/driver/external parser DLL. VHDX supports clean fixed/dynamic base images. |
 | Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
-| ISZ v1 (single-file) | Built-in indexed 2048-byte optical sectors with stored/zero/zlib/bzip2 chunks; encrypted, segmented, multi-volume and other ISZ variants rejected |
+| ISZ v1 (single-file and split; experimental) | Built-in 2048-byte optical streams; 48/64-byte headers, 2/3/4-byte chunk indexes or implicit stored data, zero/raw/zlib/bzip2; split `.isz` + `.i01/.i02` or `.part01.isz` + `.part02.isz` without intermediate ISO. Encryption, non-first segment as input, other sector geometry and uncommon vendor variants remain unsupported. |
 | DAA v1.00 | Built-in single-file raw DEFLATE chunks with header CRC32 and bounds checking; v1.10, encryption and multipart images rejected |
 | CHD v5 (optical) | Native static libchdr compressed maps and zlib/LZMA/Zstd/FLAC/CD codecs; 2048-byte cooked ISO/UDF and experimental single-track Mode 1/Mode 2 Form 1 CD frames (2448 bytes); no CDDA, multiple tracks, parents or mixed modes; `.chd` association is manual in Preview |
 | CSO v1/v2 / ZSO | Indexed random-access ISO reads; raw DEFLATE / LZ4 and stored blocks, including CSO v2 mixed-codec images; no intermediate ISO |
-| Other compressed/encrypted containers | Not implemented: encrypted/multipart ISZ/DAA, DAA v1.10, CD-Audio/mixed/multi-track CHD, CHD parent chains, encrypted/compressed NRG, MDS v2 and MDX; only CRC-valid CloneCD Q positions are interpreted among raw CD subchannels |
+| Other compressed/encrypted containers | Not implemented: encrypted ISZ, multipart DAA, DAA v1.10, CD-Audio/mixed/multi-track CHD, CHD parent chains, encrypted/compressed NRG, MDS v2 and MDX; only CRC-valid CloneCD Q positions are interpreted among raw CD subchannels |
 
 ## Development
 

@@ -32,19 +32,33 @@ private:
         std::uint32_t encoded_size = 0;
         Codec codec = Codec::zeros;
     };
+    // Non-owning virtual offsets into securely checked, opened ISZ parts.
+    struct IszRegion {
+        std::unique_ptr<std::ifstream> input;
+        std::uint64_t file_offset = 0;
+        std::uint64_t logical_offset = 0;
+        std::uint64_t length = 0;
+    };
 
+    void append_isz_region(const std::filesystem::path& path,
+                           std::uint64_t begin, std::uint64_t declared_end);
+    [[nodiscard]] std::vector<std::uint8_t> read_isz_data(
+        std::uint64_t position, std::size_t length);
     void parse_isz();
     void parse_daa();
     void decode(std::size_t index);
     [[nodiscard]] std::vector<std::uint8_t> physical_read(
         std::uint64_t position, std::size_t length);
     std::unique_ptr<ChdStream> chd_;
+    std::filesystem::path image_path_;
     std::ifstream file_;
     std::uint64_t physical_size_ = 0;
     std::uint64_t logical_size_ = 0;
     std::uint32_t block_bytes_ = 0;
     Type type_ = Type::isz;
     std::vector<Chunk> chunks_;
+    std::vector<IszRegion> isz_regions_;
+    std::uint64_t isz_data_size_ = 0;
     std::size_t cached_chunk_ = std::numeric_limits<std::size_t>::max();
     std::vector<std::uint8_t> cached_bytes_;
 };

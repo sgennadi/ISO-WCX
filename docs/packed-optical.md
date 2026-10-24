@@ -6,7 +6,7 @@ No external DLL, mount, virtual drive, unpacker or intermediate ISO is used.
 
 | Format | Currently implemented | Explicitly rejected |
 | --- | --- | --- |
-| ISZ v1 | 2048-byte sectors; one file; 3-byte XOR pointer index; sparse zero, raw, zlib and bzip2 chunks | Encryption/passwords, non-first segment, multiple segments, other geometry |
+| ISZ v1 | 2048-byte sectors, 48/64-byte headers; 2/3/4-byte XOR pointer indexes or implicit raw; sparse zero, raw, zlib and bzip2; 2/3-part synthetic split tests across `.i01` and `.part02.isz` parts with native random access | Encryption/passwords, opening a non-first part directly, unsupported geometry or unknown vendor variants |
 | DAA 1.00 | 76-byte header with CRC32, 3-byte size table, raw-DEFLATE compressed hunks | DAA 1.10, encryption, other chunk types and multipart headers |
 | CHD v5 | Statically linked libchdr compressed maps, zlib/LZMA/Zstd/FLAC/CD codecs; cooked 2048-byte ISO/UDF plus single-track 2448-byte Mode 1/2 Form 1 CD data (experimental) | Audio, mixed/multi-track layouts, parents, unrecognized sector and metadata formats |
 
@@ -41,3 +41,21 @@ WCX installer contains no libchdr DLL, mounted disk, helper or ISO staging file.
 
 Compressed CD support is currently experimental until verified against a wider
 collection of authentic multi-session and vendor CHD images.
+
+## Multi-segment ISZ preview (after v0.16 stable)
+
+The native decoder now maps successive ISZ part-file payload regions onto
+one 64-bit virtual byte stream, then decompresses only the requested chunks.
+It never creates a full temporary ISO or loads the entire image into memory.
+The first file must be `.isz`; companion parts use `.i01/.i02` or
+`.part01.isz/.part02.isz` naming. All parts must remain in the same folder.
+Header signature, volume serial, part number, segment extents, compressed-block
+boundaries and pointer lengths are validated before data access. Linked part
+files and missing or inconsistent parts are rejected.
+
+The test suite generates synthetic 48-byte/64-byte ISZ headers, pointer
+widths 2/3/4, no-table uncompressed payloads, 2- and 3-part images splitting
+inside compressed chunks, ISO9660 and UDF, malformed parts and Windows WCX
+native ABI extraction. These tests are compatibility evidence for those
+specific layouts only. No commercial or vendor-image corpus validation is
+claimed. Encrypted ISZ remains unsupported.
