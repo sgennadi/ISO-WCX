@@ -14,7 +14,7 @@ def both(b, at, value, n=4):
     b[at+n:at+2*n] = value.to_bytes(n, 'big')
 
 
-def fixture(joliet=False, boot=False):
+def fixture(joliet=False, boot=False, boot_efi=False):
     b=iso_image(joliet=joliet)
     for sector in (16,17) if joliet else (16,):
         at=sector*B
@@ -31,6 +31,14 @@ def fixture(joliet=False, boot=False):
         struct.pack_into('<H',b,24*B+28,(-sum(struct.unpack('<16H',b[24*B:24*B+32])))&65535)
         b[24*B+32]=0x88;struct.pack_into('<I',b,24*B+40,25)
         b[25*B:26*B]=b'B'*B
+        if boot_efi:
+            # El Torito final section header, EFI platform ID, one image.
+            b[24*B+64]=0x91
+            b[24*B+65]=0xef
+            struct.pack_into('<H',b,24*B+66,1)
+            b[24*B+96]=0x88
+            struct.pack_into('<I',b,24*B+104,26)
+            b[26*B:27*B]=b'E'*B
     return b
 
 
@@ -179,6 +187,11 @@ def main(binary):
         # Use independent ISO reader for portable long-primary names.
         image.write_bytes(fixture(boot=True));old=image.read_bytes();run('add','NEW.TXT')
         assert image.read_bytes()[24*B:26*B]==old[24*B:26*B],'boot catalog/image changed'
+        image.write_bytes(fixture(boot=True,boot_efi=True))
+        before=image.read_bytes()
+        run('add','EFI_DATA.TXT')
+        assert image.read_bytes()[17*B:18*B]==before[17*B:18*B], 'El Torito boot descriptor changed'
+        assert image.read_bytes()[24*B:27*B]==before[24*B:27*B], 'BIOS/EFI boot data changed'
         # The payload of a boot image may be embedded in a file extent
         # whose first LBA is NOT the catalog or the image's first LBA.
         b=fixture(boot=True)
