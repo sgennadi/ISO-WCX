@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Opt-in smoke test using public mdsx real MDSv2/MDX fixture envelopes.
+"""Opt-in interoperability tests using pinned public real MDSv2/MDX images.
 
 Pinned SHA-1 Git blob IDs verify contents. Binary fixture files are downloaded
-during CI, NOT copied into this repository. This checks metadata recognition
-only; no encrypted track/ISO extraction is attempted.
+during CI, NOT copied into this repository. This checks real encrypted metadata decryption and its salt-derived key.
+Data sectors are not decoded or extracted here.
 """
 from __future__ import annotations
 
@@ -27,9 +27,13 @@ SAMPLES = {
 }
 
 
-def run(executable: pathlib.Path, file: pathlib.Path) -> subprocess.CompletedProcess[str]:
+def run(executable: pathlib.Path, file: pathlib.Path,
+        decode: bool = False) -> subprocess.CompletedProcess[str]:
+    args = [str(executable), str(file)]
+    if decode:
+        args.append("--decode")
     return subprocess.run(
-        [str(executable), str(file)], capture_output=True,
+        args, capture_output=True,
         text=True, encoding="utf-8", errors="replace",
         timeout=12, check=False
     )
@@ -60,7 +64,26 @@ def main(executable: pathlib.Path):
             assert "not implemented" in result.stdout, (
                 name, "metadata recognition is not full decryption"
             )
+            # No test can pass on envelope recognition alone: this decrypts
+            # the 512-byte AES header, validates its CRC, decrypts the packed
+            # descriptor and inflates the real zlib metadata through ISO-WCX.
+            decoded = run(executable, image, decode=True)
+            assert decoded.returncode == 0 and "Decoded metadata bytes:" in decoded.stdout, (
+                name, decoded.returncode, decoded.stdout, decoded.stderr
+            )
+            assert "Sessions: 1" in decoded.stdout, (name, decoded.stdout)
             print("PASS", name, result.stdout.splitlines()[0])
+
+        # An encrypted-header mutation keeps the MDS signature and every
+        # structural offset valid but must fail after key/CRC validation.
+        damaged_header = bytearray((root / "test_compress.mds").read_bytes())
+        enc_header = int.from_bytes(damaged_header[0x2c:0x30], "little")
+        assert enc_header + 512 <= len(damaged_header)
+        damaged_header[enc_header + 80] ^= 0x40
+        bad_crypto_path = root / "bad-crypto.mds"
+        bad_crypto_path.write_bytes(damaged_header)
+        bad_crypto = run(executable, bad_crypto_path, decode=True)
+        assert bad_crypto.returncode != 0, "damaged MDS AES ciphertext was accepted"
 
         corrupted = root / "corrupt.mdx"
         invalid = bytearray((root / "test_compress.mdx").read_bytes())
@@ -69,7 +92,7 @@ def main(executable: pathlib.Path):
         bad = run(executable, corrupted)
         assert bad.returncode != 0, "corrupt real MDX fixture was accepted"
 
-    print("PASS: real MDSv2 / MDX header envelopes (research only), all Git blobs pinned")
+    print("PASS: real MDSv2 / MDX AES/PBKDF2/zlib encrypted metadata, known hashes and malicious ciphertext")
 
 
 if __name__ == "__main__":
