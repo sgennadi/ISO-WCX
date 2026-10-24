@@ -53,7 +53,7 @@ CI builds both Windows WCX architectures, runs parser and extraction tests, and 
 
 ## Native HDD images inside WCX (v0.13 preview)
 
-The plugin opens partitioned raw HDD IMG/RAW, fixed VHD and clean fixed/dynamic base VHDX through native C++20 MBR/GPT and filesystem readers. Read-only FAT12/16/32, exFAT and experimental ext2/3/4 subsets appear under partition1/, partition2/, etc. Extraction uses the same staging, rollback and progress controls as ISO/UDF. Unsupported/unknown partitions are skipped. Dynamic/differencing VHD, VHDX parent/dirty-log images and NTFS are not supported. No external tools, drivers or disk-parser DLLs are needed.
+The plugin opens partitioned raw HDD IMG/RAW, fixed VHD and clean fixed/dynamic base VHDX through native C++20 MBR/GPT and filesystem readers. Read-only FAT12/16/32, exFAT and experimental ext2/3/4 and NTFS subsets appear under partition1/, partition2/, etc. NTFS covers basic MFT and $I30 directory indexes, Unicode names and ordinary resident/fragmented/sparse uncompressed files, with deliberate feature refusals. Extraction uses the same staging, rollback and progress controls as ISO/UDF. Unsupported/unknown partitions are skipped. Dynamic/differencing VHD, VHDX parent/dirty-log images, complex NTFS attribute-list/compression/encryption layouts and journal recovery are not supported. No external tools, drivers or disk-parser DLLs are needed.
 
 ## MDS v2 / MDX inspection research (not an archive handler)
 

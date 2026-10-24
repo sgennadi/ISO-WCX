@@ -77,9 +77,10 @@ format handler code.
 3. FAT12/16/32 is available both in WCX and a developer-only bounded reader
    (`virtual_fat_inspect` list/cat) over IMG, fixed VHD and clean base VHDX.
    Broader real-image and GUI validation remains required. exFAT is
-   implemented as a separate bounded reader, while ext2/3/4 remains an
-   experimental subset. NTFS sparse runs, compression, reparse points
-   and alternate streams require separate design and integrity tests.
+   implemented as a separate bounded reader, ext2/3/4 is an experimental
+   subset, and native NTFS preview reads basic MFT/index/resident/data runs.
+   NTFS compression, reparse restoration, attribute-list continuations,
+   alternate streams and journal replay remain unsupported.
 4. Expand the real VHD/VHDX/VMDK/NTFS corpus. Native Windows Win32/x64 WCX
    smoke tests now exercise in-process FAT extraction for supported images.
 
@@ -119,11 +120,14 @@ fork of, or endorsement by Tal Aloni. The architecture also draws on the
 
 Partition mapping selects each MBR/GPT extent and probes distinct in-process
 readers via a common VolumeReader interface: FAT12/16/32, exFAT 1.0 and
-experimental ext2/3/4. File names are validated and mapped beneath
+experimental ext2/3/4, and restricted NTFS. File names are validated and mapped beneath
 `partitionN/`. The existing WCX transactional staging and cancellation
 mechanism is reused for extraction. No mount or external disk DLL is loaded.
 
 The ext2/3/4 reader is intentionally limited to supported superblocks,
 block maps, ext4 extents, regular files and directories; modern ext4 features
-such as journal replay, encryption and inline data are refused. Real-media
-validation is outstanding; these readers are preview, read-only.
+such as journal replay, encryption and inline data are refused. NTFS reads
+MFT/INDX records with USA validation, directories and ordinary resident and
+nonresident data runs, but rejects complex attribute lists and NTFS compressed
+and encrypted streams. Real-media validation is outstanding; these readers
+are preview, read-only.

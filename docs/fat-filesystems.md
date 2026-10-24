@@ -51,9 +51,10 @@ files under partition1/, etc. Extraction participates in the WCX progress,
 cancellation and rollback transaction. The standalone CLI is developer-only.
 
 This document describes the original FAT12/16/32 backend. Separate
-native readers now add exFAT and a deliberately limited ext2/3/4 subset
-inside WCX. NTFS, APFS, encrypted filesystems, physical disk access,
-snapshot parents, and FAT timestamps/extended attributes remain unsupported.
+native readers now add exFAT plus deliberately limited ext2/3/4 and NTFS
+subsets inside WCX. NTFS remains read-only and rejects compression, encrypted
+files, attribute lists and reparse restoration. APFS, physical disk access,
+snapshot parents and FAT timestamps/extended attributes remain unsupported.
 
 The regression suite uses independently constructed synthetic FAT12,
 FAT16 and FAT32 partitioned images and fixed-size VHD plus malformed

@@ -41,7 +41,7 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
 | Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352/2448 data sectors); synthetic-test coverage |
 | El Torito | Exposes validated BIOS and EFI boot-load images and the boot catalog under `boot.images/`; EFI FAT BPB sizing when valid |
-| Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Native MBR/GPT + FAT12/16/32 and exFAT readers; **experimental** ext2/3 and ext4 extent/indirect-file browsing under `partitionN/`. No disk writes or mount. Unsupported ext4 features are rejected. VHDX fixed/dynamic base images with 512/4096 logical sectors; no external DLL |
+| Partitioned HDD IMG/RAW, fixed VHD, clean base VHDX | Native MBR/GPT filesystem browsing under `partitionN/`: FAT12/16/32, exFAT and **experimental** ext2/3/4 and NTFS. NTFS supports basic MFT/`$I30` directory parsing, resident/nonresident and sparse uncompressed files; rejects attribute lists, compressed/encrypted files and unsupported index layouts. Read-only, no mount/driver/external parser DLL. VHDX supports clean fixed/dynamic base images. |
 | Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
 | ISZ v1 (single-file) | Built-in indexed 2048-byte optical sectors with stored/zero/zlib/bzip2 chunks; encrypted, segmented, multi-volume and other ISZ variants rejected |
@@ -144,8 +144,8 @@ primary GPT using an independently valid backup header and table. For example:
 The native virtual-disk partition and FAT readers are now linked directly into WCX for supported images. A separate,
 read-only `virtual_fat_inspect` CLI now lists and extracts FAT12/16/32
 files from discovered raw IMG or fixed VHD partitions. This paragraph
-records the older v0.12 state; exFAT and a limited ext2/3/4 reader arrived
-in subsequent preview development. NTFS remains unimplemented. The optical ISO/BIN `.img` path is unchanged. See
+records the older v0.12 state; exFAT and limited ext2/3/4 and NTFS readers
+arrived in subsequent preview development. The optical ISO/BIN `.img` path is unchanged. See
 [virtual disk architecture](docs/virtual-disks.md), informed by
 [TalAloni/DiskAccessLibrary](https://github.com/TalAloni/DiskAccessLibrary)
 (LGPL-3.0-or-later; no source copied or linked).
@@ -274,6 +274,9 @@ experimental ext2/3/4 module supports direct/indirect legacy block maps,
 ext4 extent trees, sparse files and nested directories in partitioned
 IMG/VHD/VHDX. It deliberately refuses unsupported features such as journal
 replay, inline data and encrypted inodes. This is a **partial, read-only**
-ext implementation, not full modern ext4 compatibility. NTFS is still
-not implemented. See [exFAT design](docs/exfat-integration.md) and
-[ext reader design](docs/ext-integration.md).
+ext implementation, not full modern ext4 compatibility. Experimental NTFS
+read-only support (PR #29) parses basic MFT records, `$I30` indexes,
+UTF-16 filenames, resident and fragmented/sparse nonresident files.
+It rejects attribute-list continuations, encrypted/compressed data,
+reparse reconstruction and journal recovery. See [exFAT design](docs/exfat-integration.md),
+[ext reader design](docs/ext-integration.md) and [NTFS preview](docs/ntfs-integration.md).
