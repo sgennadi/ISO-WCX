@@ -1,6 +1,8 @@
 #include "iso_wcx/cd_audio_wav.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
