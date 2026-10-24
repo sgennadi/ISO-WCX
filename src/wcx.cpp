@@ -1,6 +1,10 @@
 // Public Total Commander WCX ABI adapter. Modern parsers live in iso_disc.
 #ifdef _WIN32
 #include "iso_wcx/disc.hpp"
+#include "iso_wcx/archive_edit.hpp"
+#include <mutex>
+#include <type_traits>
+#include <cwctype>
 #include <windows.h>
 #include <algorithm>
 #include <cstdint>
@@ -17,6 +21,7 @@ namespace {
 constexpr int E_END_ARCHIVE=10,E_BAD_ARCHIVE=13,E_UNKNOWN_FORMAT=14,E_ECREATE=16,E_EABORTED=21,E_SMALL_BUF=20;
 constexpr int PK_SKIP=0,PK_TEST=1,PK_EXTRACT=2;
 constexpr int PK_CAPS_BY_CONTENT=64,PK_CAPS_SEARCHTEXT=128;
+constexpr int E_NOT_SUPPORTED=24;
 constexpr int ATTR_DIR=0x10,ATTR_ARCHIVE=0x20;
 
 struct OpenA {char* ArcName;int OpenMode,OpenResult;char* CmtBuf;int CmtBufSize,CmtSize,CmtState;};
@@ -26,6 +31,9 @@ struct HeaderExA {char ArcName[1024],FileName[1024];int Flags;unsigned int PackS
 struct HeaderExW {wchar_t ArcName[1024],FileName[1024];int Flags;unsigned int PackSize,PackSizeHigh,UnpSize,UnpSizeHigh;int HostOS,FileCRC,FileTime,UnpVer,Method,FileAttr;char* CmtBuf;int CmtBufSize,CmtSize,CmtState;char Reserved[1024];};
 using ProgressA=int (__stdcall*)(char*,int);
 using ProgressW=int (__stdcall*)(wchar_t*,int);
+thread_local ProgressA pack_progress_a=nullptr;
+thread_local ProgressW pack_progress_w=nullptr;
+std::mutex edit_mutex;
 using ChangeA=int (__stdcall*)(char*,int);
 using ChangeW=int (__stdcall*)(wchar_t*,int);
 struct State {
@@ -185,18 +193,82 @@ WCX_EXPORT int __stdcall CloseArchive(HANDLE handle) {
     delete reinterpret_cast<State*>(handle);return 0;
 }
 WCX_EXPORT void __stdcall SetProcessDataProcW(HANDLE handle,ProgressW proc) {
+    if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_w=proc;return;}
     if(auto* state=reinterpret_cast<State*>(handle))state->progress_w=proc;
 }
 WCX_EXPORT void __stdcall SetProcessDataProc(HANDLE handle,ProgressA proc) {
+    if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_a=proc;return;}
     if(auto* state=reinterpret_cast<State*>(handle))state->progress_a=proc;
 }
 WCX_EXPORT void __stdcall SetChangeVolProcW(HANDLE handle,ChangeW proc) {
+    if(handle==INVALID_HANDLE_VALUE||!handle)return;
     if(auto* state=reinterpret_cast<State*>(handle))state->change_w=proc;
 }
 WCX_EXPORT void __stdcall SetChangeVolProc(HANDLE handle,ChangeA proc) {
+    if(handle==INVALID_HANDLE_VALUE||!handle)return;
     if(auto* state=reinterpret_cast<State*>(handle))state->change_a=proc;
 }
-WCX_EXPORT int __stdcall GetPackerCaps() {return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT;}
+namespace {
+std::string edit_utf8(const std::wstring& text) {
+    if(text.empty())return {};
+    int n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),nullptr,0,nullptr,nullptr);
+    if(n<=0)throw iso_wcx::EditUnsupported("invalid Unicode edit path");
+    std::string out(static_cast<std::size_t>(n),'\0');
+    if(!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),out.data(),n,nullptr,nullptr))throw iso_wcx::EditUnsupported("invalid Unicode edit path");
+    return out;
+}
+template<class Char> std::vector<std::wstring> edit_list(const Char* list) {
+    if(!list)throw iso_wcx::EditUnsupported("missing edit list");
+    std::vector<std::wstring> out;std::size_t consumed=0;
+    while(*list){std::size_t n=0;while(list[n]){if(++n>2048)throw iso_wcx::EditUnsupported("edit path too long");}
+        if(out.size()>=100000 || (consumed+=n+1)>16*1024*1024)throw iso_wcx::EditUnsupported("edit list too large");
+        if constexpr(std::is_same_v<Char,wchar_t>)out.emplace_back(list,n);else out.push_back(from_bytes(list,CP_ACP));list+=n+1;
+    }return out;
+}
+int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::wstring& source,
+            const std::vector<std::wstring>& names,bool remove,int flags) {
+    try {
+        // No move packing: source files are never removed by this plugin.
+        if(flags&1)return E_NOT_SUPPORTED;
+        std::lock_guard lock(edit_mutex);
+        std::filesystem::path image(archive);auto ext=image.extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return std::towlower(c);});
+        if(ext!=L".iso"&&ext!=L".wim")return E_NOT_SUPPORTED;
+        if(!std::filesystem::exists(image))return E_NOT_SUPPORTED;
+        std::vector<iso_wcx::ArchiveChange> changes;
+        for(auto name:names){
+            if(remove && (name.ends_with(L"\\*")||name.ends_with(L"/*")))name.resize(name.size()-2);
+            auto relative=iso_wcx::edit_path(edit_utf8(name));
+            iso_wcx::ArchiveChange c;c.path=subpath.empty()?relative:iso_wcx::edit_path(iso_wcx::edit_path(edit_utf8(subpath))+"/"+relative);c.remove=remove;
+            if(!remove){c.source=std::filesystem::path(source)/std::filesystem::u8path(relative);auto status=std::filesystem::symlink_status(c.source);
+                if(!std::filesystem::is_regular_file(status)&&!std::filesystem::is_directory(status))return E_NOT_SUPPORTED;
+                const DWORD attributes=GetFileAttributesW(c.source.c_str());if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))return E_NOT_SUPPORTED;
+                c.directory=std::filesystem::is_directory(status);
+            }changes.push_back(std::move(c));
+        }
+        if(changes.empty())return 0;
+        auto wide=archive;auto ansi=to_ansi(archive);const auto pw=pack_progress_w;const auto pa=pack_progress_a;
+        const auto progress=[&]{if(pw)return pw(wide.data(),0)!=0;if(pa)return pa(ansi.data(),0)!=0;return true;};
+        if(ext==L".iso")iso_wcx::edit_iso(image,changes,progress);else iso_wcx::edit_wim(image,changes,progress);
+        return 0;
+    }catch(const iso_wcx::EditCancelled&){return E_EABORTED;}
+     catch(const iso_wcx::EditUnsupported&){return E_NOT_SUPPORTED;}
+     catch(const std::filesystem::filesystem_error&){return E_ECREATE;}
+     catch(...){return E_BAD_ARCHIVE;}
+}
+}
+WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
+    try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(archive,sub?sub:L"",source,edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
+}
+WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* list,int flags) {
+    try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),from_bytes(sub,CP_ACP),from_bytes(source,CP_ACP),edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
+}
+WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
+    try{if(!archive)return E_NOT_SUPPORTED;return do_edit(archive,L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
+}
+WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
+    try{if(!archive)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
+}
+WCX_EXPORT int __stdcall GetPackerCaps() {return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT|2|4|8;}
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
     if(!path)return 0;
     try{iso_wcx::Disc test{std::filesystem::path(path)};return 1;}catch(...){return 0;}
@@ -208,3 +280,4 @@ WCX_EXPORT int __stdcall CanYouHandleThisFile(char* path) {
 #else
 #error "WCX adapter must be compiled for Windows"
 #endif
+

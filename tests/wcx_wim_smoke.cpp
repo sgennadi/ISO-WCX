@@ -33,6 +33,8 @@ struct HeaderExW {
     int CmtBufSize,CmtSize,CmtState;
     char Reserved[1024];
 };
+using PackFn=int(__stdcall*)(wchar_t*,wchar_t*,wchar_t*,wchar_t*,int);
+using DeleteFn=int(__stdcall*)(wchar_t*,wchar_t*);
 using OpenFn=HANDLE(__stdcall*)(OpenW*);
 using ReadFn=int(__stdcall*)(HANDLE,HeaderExW*);
 using ProcessFn=int(__stdcall*)(HANDLE,int,wchar_t*,wchar_t*);
@@ -199,6 +201,32 @@ int wmain(int argc,wchar_t** argv) {
         const auto renamed=swm.parent_path()/L"renamed.SWM";
         fs::rename(later,renamed);
         if(!verify(renamed)||!verify(swm.parent_path()/L"RENAMED.swm"))return 19;
+        // Transactional WIM changes through the real WCX ABI.
+        auto pack=bind<PackFn>(dll,"PackFilesW");auto erase=bind<DeleteFn>(dll,"DeleteFilesW");
+        if(!pack||!erase)return 20;
+        const auto incoming=root/L"incoming";
+        write(incoming/L"HELLO.TXT","replacement");write(incoming/L"ADDED.TXT","new-file");
+        std::wstring packed=original.wstring(),src=incoming.wstring(),sub=L"image1";
+        wchar_t add_list[]=L"HELLO.TXT\0ADDED.TXT\0\0";
+        const auto packed_result=pack(packed.data(),sub.data(),src.data(),add_list,0);
+        if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";return 21;}
+        auto content=[&](const std::wstring& wanted,std::string& data){
+            OpenW a{};a.ArcName=packed.data();HANDLE h=open(&a);if(!h)return false;
+            for(;;){HeaderExW head{};const int r=read(h,&head);if(r==10){close(h);return false;}if(r){close(h);return false;}
+                if(wanted==head.FileName){auto target=(root/L"readback.bin").wstring();const auto result=process(h,2,nullptr,target.data());close(h);if(result)return false;data=load(target);return true;}
+                if(process(h,0,nullptr,nullptr)){close(h);return false;}}
+        };
+        std::string data;
+        if(!content(L"image1\\HELLO.TXT",data)||data!="replacement"||
+           !content(L"image1\\ADDED.TXT",data)||data!="new-file"||
+           !content(L"image2\\HELLO.TXT",data)||data!="hello-two")return 22;
+        wchar_t delete_list[]=L"image1\\ADDED.TXT\0\0";
+        if(erase(packed.data(),delete_list)||content(L"image1\\ADDED.TXT",data))return 23;
+        // A rejected traversal must not change one byte of the original.
+        const auto original_bytes=load(original);wchar_t bad_list[]=L"..\\escape\0\0";
+        if(pack(packed.data(),sub.data(),src.data(),bad_list,0)==0||load(original)!=original_bytes)return 24;
+        wchar_t delete_index[]=L"image1\0\0";
+        if(erase(packed.data(),delete_index)||!content(L"image1\\HELLO.TXT",data)||data!="hello-two"||content(L"image2\\HELLO.TXT",data))return 25;
         // Malformed files must not be reported as a valid WIM archive.
         const auto bad=root/L"corrupt.wim";
         write(bad,"NOT A WIM");
