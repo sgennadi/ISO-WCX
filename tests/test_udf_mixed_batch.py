@@ -120,8 +120,23 @@ def test_mixed_embedded(editor, inspector, root):
     assert (output / "New/child.txt").read_bytes() == short.read_bytes()
     assert (output / "payload.bin").read_bytes() == data.read_bytes()
     no_temp(root)
+
+    # The deleted FID's parent may have NO appended entries at all. It must
+    # still be written and its embedded File Entry checksum recomputed.
+    sibling = root / "different-parent.udf"
+    sibling.write_bytes(bitmap_image(nested=True))
+    run(editor, sibling, "batch",
+        "delete", "docs/inner",
+        "add", "root-added.bin", short)
+    independent = root / "different-parent-output"
+    run(inspector, sibling, "--extract", independent)
+    assert (independent / "hello").read_bytes() == b"world"
+    assert not (independent / "docs/inner").exists()
+    assert (independent / "root-added.bin").read_bytes() == short.read_bytes()
+    no_temp(root)
     print("PASS mixed embedded parent: delete+new FIDs, nested replacement, "
-          "new directory and LVID counters", flush=True)
+          "deletion-only secondary parent, new directory and LVID counters",
+          flush=True)
 
 
 def test_relocation_and_rollback(editor, inspector, root):
