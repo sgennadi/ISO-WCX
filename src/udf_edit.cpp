@@ -1265,6 +1265,74 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     tx.commit(progress);
 }
 
+// A single bounded replacement engine serves standalone edits and mixed
+// transactions. Callers preflight FE/ShortAD capacity and ownership before
+// allocating or writing the transaction's temporary image.
+void write_udf_existing_replacement(std::fstream& out,const File& target,
+                                    const std::filesystem::path& source_path,
+                                    const EditProgress& progress) {
+        const auto len=std::filesystem::file_size(source_path);
+        auto fe=staged_read(out,target.fe.at,block);
+        tag_check(fe,0,u16(fe,0));
+        if(target.fe.storage==3) {
+            Bytes data(static_cast<std::size_t>(len));
+            std::ifstream input(source_path,std::ios::binary);
+            need(bool(input),"cannot open UDF replacement");
+            input.read(reinterpret_cast<char*>(data.data()),
+                       static_cast<std::streamsize>(data.size()));
+            need(bool(input) || data.empty(),"UDF source shortened");
+            const auto at=target.fe.ad_offset;
+            std::fill(fe.begin()+static_cast<std::ptrdiff_t>(at),
+                      fe.begin()+static_cast<std::ptrdiff_t>(
+                          at+std::max<std::uint64_t>(len,target.fe.size)),0);
+            std::copy(data.begin(),data.end(),
+                      fe.begin()+static_cast<std::ptrdiff_t>(at));
+            // For Extended File Entry this is at 212; regular File
+            // Entries keep the allocation-descriptor length at 172.
+            put32(fe,u16(fe,0)==266?212u:172u,
+                  static_cast<std::uint32_t>(len));
+            put64(fe,56,len);
+            if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
+            tag_update(fe,0,target.fe.ad_offset+static_cast<std::size_t>(len));
+            staged_write(out,target.fe.at,fe);
+        } else {
+            std::ifstream source(source_path,std::ios::binary);
+            need(bool(source),"cannot open UDF replacement content");
+            std::uint64_t remaining=len;
+            for(std::size_t i=0;i<target.fe.runs.size();++i) {
+                if(!remaining)break;
+                const auto& run=target.fe.runs[i];
+                const bool last=i+1==target.fe.runs.size();
+                // The final run is allowed to consume its sector tail.
+                const auto run_limit=last?
+                    std::uint64_t(run.blocks)*block:run.recorded;
+                const auto count=std::min(remaining,run_limit);
+                out.clear();
+                out.seekp(static_cast<std::streamoff>(run.at));
+                need(bool(out),"cannot seek UDF content ShortAD run");
+                copy(source,out,count,progress);
+                remaining-=count;
+            }
+            need(remaining==0,"UDF replacement ShortAD sequence incomplete");
+            put64(fe,56,len);
+            if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
+            if(len>target.fe.recorded) {
+                // Preserve every preceding ShortAD and extend only the
+                // last recorded length, not its logical LBA or allocation.
+                const auto& last=target.fe.runs.back();
+                const auto grown=last.recorded+(len-target.fe.recorded);
+                need(grown<=0x3fffffffull &&
+                     grown<=std::uint64_t(last.blocks)*block,
+                     "UDF final ShortAD cannot accommodate growth");
+                put32(fe,target.fe.ad_offset+
+                      (target.fe.runs.size()-1u)*8u,
+                      static_cast<std::uint32_t>(grown));
+            }
+            tag_update(fe,0,target.fe.ad_offset+target.fe.ads);
+            staged_write(out,target.fe.at,fe);
+        }
+}
+
 // Plan every new child FE, file run and parent FID before editing a single
 // byte of the source. Each modified parent is relocated at most once.
 // The staged image is copied once, validated once and atomically committed
@@ -1780,66 +1848,7 @@ void edit_udf(const std::filesystem::path& image,
             }
             continue;
         }
-        const auto len=std::filesystem::file_size(change.source);
-        auto fe=staged_read(out,target.fe.at,block);
-        tag_check(fe,0,u16(fe,0));
-        if(target.fe.storage==3) {
-            Bytes data(static_cast<std::size_t>(len));
-            std::ifstream input(change.source,std::ios::binary);
-            need(bool(input),"cannot open UDF replacement");
-            input.read(reinterpret_cast<char*>(data.data()),
-                       static_cast<std::streamsize>(data.size()));
-            need(bool(input) || data.empty(),"UDF source shortened");
-            const auto at=target.fe.ad_offset;
-            std::fill(fe.begin()+static_cast<std::ptrdiff_t>(at),
-                      fe.begin()+static_cast<std::ptrdiff_t>(
-                          at+std::max<std::uint64_t>(len,target.fe.size)),0);
-            std::copy(data.begin(),data.end(),
-                      fe.begin()+static_cast<std::ptrdiff_t>(at));
-            // For Extended File Entry this is at 212; regular File
-            // Entries keep the allocation-descriptor length at 172.
-            put32(fe,u16(fe,0)==266?212u:172u,
-                  static_cast<std::uint32_t>(len));
-            put64(fe,56,len);
-            if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
-            tag_update(fe,0,target.fe.ad_offset+static_cast<std::size_t>(len));
-            staged_write(out,target.fe.at,fe);
-        } else {
-            std::ifstream source(change.source,std::ios::binary);
-            need(bool(source),"cannot open UDF replacement content");
-            std::uint64_t remaining=len;
-            for(std::size_t i=0;i<target.fe.runs.size();++i) {
-                if(!remaining)break;
-                const auto& run=target.fe.runs[i];
-                const bool last=i+1==target.fe.runs.size();
-                // The final run is allowed to consume its sector tail.
-                const auto run_limit=last?
-                    std::uint64_t(run.blocks)*block:run.recorded;
-                const auto count=std::min(remaining,run_limit);
-                out.clear();
-                out.seekp(static_cast<std::streamoff>(run.at));
-                need(bool(out),"cannot seek UDF content ShortAD run");
-                copy(source,out,count,progress);
-                remaining-=count;
-            }
-            need(remaining==0,"UDF replacement ShortAD sequence incomplete");
-            put64(fe,56,len);
-            if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
-            if(len>target.fe.recorded) {
-                // Preserve every preceding ShortAD and extend only the
-                // last recorded length, not its logical LBA or allocation.
-                const auto& last=target.fe.runs.back();
-                const auto grown=last.recorded+(len-target.fe.recorded);
-                need(grown<=0x3fffffffull &&
-                     grown<=std::uint64_t(last.blocks)*block,
-                     "UDF final ShortAD cannot accommodate growth");
-                put32(fe,target.fe.ad_offset+
-                      (target.fe.runs.size()-1u)*8u,
-                      static_cast<std::uint32_t>(grown));
-            }
-            tag_update(fe,0,target.fe.ad_offset+target.fe.ads);
-            staged_write(out,target.fe.at,fe);
-        }
+        write_udf_existing_replacement(out,target,change.source,progress);
     }
     out.flush();
     need(bool(out),"staged UDF flush failed");
