@@ -9,6 +9,7 @@ No chdman or other helper is used at plugin runtime.
 """
 from __future__ import annotations
 
+import hashlib
 import pathlib
 import shutil
 import struct
@@ -109,8 +110,27 @@ def verify_large_output(path: pathlib.Path) -> None:
             data = stream.read(min(64, PCM_BYTES - at))
             assert data and all(v == expected_pcm_byte(at + j)
                                 for j, v in enumerate(data)), at
-    print("PASS: >4-GiB RF64 extraction, ds64 64-bit sizes, "
-          "cross-4-GiB and last-sector PCM byte samples", flush=True)
+    # Verify every decoded audio byte, not only sampled offsets. The
+    # expected digest is built independently from the fixture PCM pattern
+    # using one small repeating frame group; no multi-GiB Python buffer.
+    pattern = b"".join(
+        bytes(((0x52 + i * 19) & 255, (0x0D + i * 37) & 255))
+        * (PCM_SECTOR // 2)
+        for i in range(HUNK_FRAMES)
+    )
+    expected = hashlib.sha256()
+    expected.update(header)
+    for _ in range(FRAMES // HUNK_FRAMES):
+        expected.update(pattern)
+    expected.update(pattern[:(FRAMES % HUNK_FRAMES) * PCM_SECTOR])
+    observed = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(4 * 1024**2):
+            observed.update(chunk)
+    assert expected.digest() == observed.digest(), (
+        "full RF64 payload SHA-256 mismatch")
+    print("PASS: complete >4-GiB RF64 streaming SHA-256, "
+          "ds64 64-bit sizes and 4-GiB/last-sector PCM samples", flush=True)
 
 
 def main(inspector: pathlib.Path, probe: pathlib.Path, full: bool,
