@@ -29,14 +29,14 @@ def command(*args, allowed=(0,)):
     return result
 
 
-def image_with_mkudffs(root, media, label):
+def image_with_mkudffs(root, media, label, *, blocks=BLOCK_COUNT):
     path = root / f"{label}.udf"
     # Use UDF 1.02 Type-1 (not the UDF 2.50 metadata partition or a VAT).
     # --media-type must precede --udfrev; --blocksize always explicit.
     command("mkudffs", f"--media-type={media}", "--blocksize=2048",
             "--udfrev=0x0102", "--space=unallocbitmap", "--ad=inicb",
-            "--label=WCX-UDF-REAL", "--new-file", path, BLOCK_COUNT)
-    assert path.stat().st_size == BLOCK_COUNT * 2048
+            "--label=WCX-UDF-REAL", "--new-file", path, blocks)
+    assert path.stat().st_size == blocks * 2048
     command("udfinfo", path)
     command("7z", "l", path)
     return path
@@ -52,13 +52,17 @@ def independent_extract(image, root, logical_name, expected):
 
 
 
-def portable_udf_image(root, block_size):
+def portable_udf_image(root, block_size, *, use_native_mbr=False):
     """UDF 2.01 whole-device image independently authored by mkudffs."""
-    image = root / f"portable-{block_size}.udf"
-    command("mkudffs", "--media-type=hd", f"--blocksize={block_size}",
-            "--udfrev=0x0201", "--ad=inicb", "--space=unallocbitmap",
-            "--label=WCX-PORTABLE", "--new-file", image, BLOCK_COUNT)
-    assert image.stat().st_size == BLOCK_COUNT * block_size
+    suffix = "native-mbr" if use_native_mbr else "plain"
+    image = root / f"portable-{block_size}-{suffix}.udf"
+    blocks = max(1024, (16*1024*1024)//block_size)
+    args = ["mkudffs", "--media-type=hd", f"--blocksize={block_size}",
+            "--udfrev=0x0201", "--ad=inicb", "--space=unallocbitmap"]
+    if use_native_mbr:
+        args.append("--bootarea=mbr")
+    command(*args, "--label=WCX-PORTABLE", "--new-file", image, blocks)
+    assert image.stat().st_size == blocks * block_size
     command("udfinfo", image)
     return image
 
@@ -77,7 +81,7 @@ def add_fake_mbr(image, block_size):
 def verify_portable_udf_read(root, editor, inspector):
     source = root / "portable-source.bin"
     source.write_bytes(b"DO NOT MODIFY UDF 2.01")
-    for block_size in (512, 4096):
+    for block_size in (512, 4096, 8192, 16384, 32768):
         image = portable_udf_image(root, block_size)
         listing = command(inspector, image).stdout.decode("utf-8")
         assert listing.startswith("Format: UDF"), (block_size, listing)
@@ -102,8 +106,19 @@ def verify_portable_udf_read(root, editor, inspector):
                 assert refused.returncode != 0
                 assert candidate.read_bytes() == mbr_image
             candidate.unlink()
-        print(f"PASS read-only UDF 2.01 {block_size}-byte logical sectors, "
-              "whole-disk fake MBR and .raw/.img fallback", flush=True)
+        native_mbr = portable_udf_image(root, block_size, use_native_mbr=True)
+        native = native_mbr.read_bytes()
+        assert native[510:512] == b"\x55\xaa", "mkudffs MBR missing"
+        assert struct.unpack_from("<I", native, 454)[0] == 0
+        for suffix in (".udf", ".raw"):
+            candidate = root / f"native-mbr-{block_size}{suffix}"
+            candidate.write_bytes(native)
+            listed = command(inspector, candidate).stdout.decode("utf-8")
+            assert listed.startswith("Format: UDF"), (
+                block_size, suffix, listed)
+            candidate.unlink()
+        print(f"PASS UDF 2.01 {block_size}-byte blocks, synthetic/native "
+              "fake MBR and .raw/.img fallback", flush=True)
 
 
 def main(editor, inspector):
@@ -177,6 +192,28 @@ def main(editor, inspector):
             assert image.read_bytes() == original
             assert not list(root.glob(".iso-wcx-edit-*"))
             print(f"PASS mkudffs/{media} + ISO-WCX + udfinfo/7z", flush=True)
+        # A 128-MiB independently formatted image has a multi-sector
+        # unallocated bitmap. Verify writing it via udfinfo and 7-Zip.
+        large_image = image_with_mkudffs(
+            root, "hd", "real-multisector", blocks=65536)
+        raw = large_image.read_bytes()
+        vds = struct.unpack_from("<I", raw, 256*2048+20)[0]
+        bitmap_length = None
+        for sector in range(vds, vds+16):
+            if struct.unpack_from("<H", raw, sector*2048)[0] == 5:
+                bitmap_length = struct.unpack_from(
+                    "<I", raw, sector*2048+64)[0]
+                break
+        assert bitmap_length is not None and bitmap_length > 2048, (
+            "mkudffs bitmap fixture was not multi-sector", bitmap_length)
+        source = root / "multi-bitmap-data.bin"
+        content = b"MULTI_SECTOR_UDF_BITMAP_TEST\n"*4096
+        source.write_bytes(content)
+        command(editor, large_image, "add", "MULTI-BITMAP.BIN", source)
+        command("udfinfo", large_image)
+        independent_extract(large_image, root, "MULTI-BITMAP.BIN", content)
+        print("PASS UDF 1.02 multi-sector bitmap allocation, "
+              "udfinfo/7z independent checks", flush=True)
 
 
 if __name__ == "__main__":

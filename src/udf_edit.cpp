@@ -237,37 +237,48 @@ public:
         // physical partition maps cannot be safely synthesized.
         const auto bitmap_length=u32(pd,64);
         const auto bitmap_logical=u32(pd,68);
+        const auto bitmap_span=
+            (std::uint64_t(bitmap_length)+block-1u)/block*block;
         const auto has_conflicting_allocator=
             u32(pd,56)!=0 || u32(pd,72)!=0 || u32(pd,80)!=0 ||
             u32(pd,88)!=0;
         if(bitmap_length) {
             need((u32(pd,184)==3 || u32(pd,184)==4),
                  "UDF partition is not declared rewritable/overwritable");
-            need(!has_conflicting_allocator &&
-                 bitmap_length<=block && bitmap_length>=24 &&
-                 bitmap_logical<partition_blocks_,
+            need(!has_conflicting_allocator && bitmap_length>=24 &&
+                 bitmap_span<=max_dir &&
+                 bitmap_logical<partition_blocks_ &&
+                 bitmap_span/block<=partition_blocks_-bitmap_logical,
                  "unsupported UDF free-space allocation layout");
             Bitmap bm;
             bm.logical=bitmap_logical;
             bm.at=physical(bitmap_logical);
-            bm.bytes=read(bm.at,block);
+            bm.bytes=read(bm.at,static_cast<std::size_t>(bitmap_span));
             tag_check(bm.bytes,0,264);
             need(u32(bm.bytes,12)==bitmap_logical,
                  "incorrect UDF bitmap descriptor location");
             bm.bits=u32(bm.bytes,16);
             bm.byte_count=u32(bm.bytes,20);
-            // This preview supports one-block bitmaps only. Validate
-            // before indexing so a corrupt large bit count cannot overflow
-            // a 32-bit ceil-divide or escape the descriptor buffer.
-            need(bm.bits==partition_blocks_ &&
-                 bm.bits>0 &&
-                 std::uint64_t(bm.bits)<=8u*(block-24u) &&
+            // A UDF bitmap can span many sectors; the PD extent bounds
+            // the buffer while numOfBits must match the partition length.
+            need(bm.bits==partition_blocks_ && bm.bits>0 &&
                  bm.byte_count==(std::uint64_t(bm.bits)+7u)/8u &&
                  24ull+bm.byte_count<=bitmap_length &&
-                 24ull+bm.byte_count<=block,
+                 24ull+bm.byte_count<=bitmap_span,
                  "invalid or oversized UDF bitmap size/count");
+            if(bm.bits%8u) {
+                const auto forbidden=static_cast<std::uint8_t>(
+                    0xffu << (bm.bits%8u));
+                need((bm.bytes[24u+bm.byte_count-1u]&forbidden)==0,
+                     "UDF bitmap has free bits beyond partition end");
+            }
+            // mkudffs can protect only the 8-byte bitmap header in its
+            // tag CRC; changing its declared length would be incorrect.
+            const auto tagged=16u+u16(bm.bytes,10);
+            need(tagged>=24u && tagged<=24ull+bm.byte_count,
+                 "UDF bitmap has unsupported descriptor CRC coverage");
             bitmap_=std::move(bm);
-            reserved_.push_back({{bitmap_->at,block},0});
+            reserved_.push_back({{bitmap_->at,bitmap_span},0});
             const auto integrity_length=u32(lvd,432);
             const auto integrity_location=u32(lvd,436);
             // UDF integrity *sequence* can contain an LVID plus a
@@ -409,7 +420,9 @@ public:
     [[nodiscard]] std::pair<std::uint64_t,Bytes> updated_bitmap() const {
         need(bitmap_.has_value(),"UDF bitmap is absent");
         auto b=bitmap_->bytes;
-        tag_update(b,0,24u+bitmap_->byte_count);
+        // Preserve original bitmap tag's CRC coverage. The bitmap's data
+        // bit changes may lie outside that descriptor CRC by design.
+        tag_update(b,0,16u+u16(b,10));
         return {bitmap_->at,std::move(b)};
     }
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
