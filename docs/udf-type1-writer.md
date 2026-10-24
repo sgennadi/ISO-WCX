@@ -95,7 +95,15 @@ not universal UDF 1.02–2.60 editing.
 - No VAT, Metadata Partition, Sparable partition, hard links, unrecorded or
   sparse extents, AED-continuation allocation, conflicting allocator edits,
   or symlink source files.
-- An entire copy of the source image must fit in a sibling temporary workspace.
+- A sibling temporary workspace on the **same filesystem** is mandatory.
+  The writer first tries filesystem-level copy-on-write staging (Linux
+  `FICLONE` or Windows `FSCTL_DUPLICATE_EXTENTS_TO_FILE`, only for aligned
+  supported filesystems); if unavailable, it falls back to the existing
+  sparse buffered copy, requiring sufficient free disk space. Never use
+  a hardlink or modify the original image in place. Set
+  `ISO_WCX_UDF_FORCE_SPARSE_STAGE=1` to force the slower fallback for
+  diagnostics or interoperability troubleshooting. This only changes
+  performance, not transactional safety or supported file formats.
 
 ## Explicitly unsupported
 
@@ -108,6 +116,23 @@ VAT/Sparable/Metadata writer.
 
 A rejected mutation, validation failure or cancellation must leave the
 original image byte-for-byte unchanged.
+
+## Staging performance
+
+All UDF edits still use a private sibling staging file and final atomic
+rename. When the backing filesystem supports reflinks or aligned block
+cloning, the original file data is shared copy-on-write until modified,
+avoiding a complete sequential copy of large image data. Cloning may not be
+supported by the filesystem, Windows build or image alignment: in that case,
+the prior sparse streaming copy is used automatically.
+
+The cross-platform `udf_stage_clone_sparse_parity` test compares every byte
+of final images produced by automatic and forced sparse staging, checks that
+an independent hardlink observer of the original inode is untouched, tests
+rollback and extraction, and checks cleanup of temporary workspaces. A
+separate non-gating 512-MiB benchmark reports wall-clock times on Linux and
+Windows without asserting unreliable absolute speed improvements. The full
+UDF >4-GiB independent 7-Zip SHA-256 check remains mandatory.
 
 ## Validation
 
