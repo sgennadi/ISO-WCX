@@ -64,16 +64,14 @@ The plugin opens partitioned raw HDD IMG/RAW, fixed VHD and clean fixed/dynamic 
 The developer-only `mds_descriptor_inspect` test utility detects MDS v1,
 encrypted MDS v2, and MDX metadata envelopes with strict offset checks.
 Using its optional `--decode` mode, it decrypts and inflates bounded MDS v2 / MDX metadata in-process (AES-256, RIPEMD160/PBKDF2 and zlib). The same metadata backend is now used by the WCX archive reader.
-It still does **not** extract disc data sectors or make those formats
-available in Total Commander. The installer does not associate .mdx. Read
-[the Aaru issue #256 compatibility notes](docs/mds-v2-mdx-research.md).
+**Experimental extraction is enabled in Preview:** the WCX plugin opens ordinary and compressed MDS v2/MDF and single-file MDX images, selecting a validated ISO9660/UDF data track. Its in-process random-access decoder reads raw/stored/RLE/DEFLATE compression groups without creating a temporary ISO. Four pinned real MDS v2/MDX fixtures have passed filesystem content comparison against the reference ISO. The installer now associates `.mdx`. Password-protected AES-LRW data tracks, unsupported optical modes, image editing and full multisession merging remain unavailable. See [format limits and provenance](docs/mds-v2-mdx-research.md).
 
 ## NRG and MDS/MDF preview support
 
 - Nero `.nrg`: NERO (32-bit) and NER5 (64-bit) trailer, bounded chunk list, DAOI/DAOX (disc-at-once) and ETNF/ETN2 (track-at-once), selected latest ISO9660/UDF data track.
-- Alcohol `.mds`/`.mdf`: validated MDS v1 session/track/filename/index blocks; uncompressed Mode 1, Mode 2 Form 1 and cooked 2048/2336 data tracks. `.mdf` is a sidecar, not a general Microsoft SQL MDF reader.
+- Alcohol `.mds`/`.mdf`: validated MDS v1 session/track/filename/index blocks with cooked 2048/2336 and raw Mode 1/Mode 2 Form 1 tracks. **Preview MDS v2/MDX:** encrypted metadata and on-demand unencrypted data-track decompression with bounded raw-DEFLATE, stored and repeated-byte groups. `.mdf` is a disk-image sidecar, not a Microsoft SQL database handler.
 - Raw-image probing is still available for `.img`/`.bin`; preview installer associations include `.iso`, `.cue`, `.nrg`, `.mds` and `.mdx` but **not** `.bin` or `.mdf`, avoiding conflicts.
-- Synthetic NRG/MDS regression tests and malformed-metadata mutation tests are run by CTest on Linux and Windows. Real Nero/Alcohol images and actual Total Commander interaction still require manual compatibility testing.
+- Synthetic NRG/MDS and malformed-metadata regression tests run on Linux and Windows. An additional pinned real-image corpus independently verifies native MDS v2/MDX filesystem extraction and refuses password-protected tracks; broader Nero/Alcohol compatibility and real Total Commander GUI operation still require manual testing.
 
 ## v0.7.0 compatibility improvements and verification
 
