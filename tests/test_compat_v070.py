@@ -124,6 +124,51 @@ def udf_anchor_at_512(*, corrupt: bool = False):
     return image
 
 
+def udf_multisector_directory(*, dirty_padding: bool = False):
+    """One ShortAD directory extent containing two sectors of FIDs."""
+    image = udf_image()
+    root = 301*B
+    first = bytearray(image[root+176:root+220])
+    p16(first, 2, 2)
+    p32(first, 12, 20)  # The first external sector is logical 20.
+    first[4] = sum(first[i] for i in range(16) if i != 4) & 255
+    image[320*B:320*B+len(first)] = first
+    second = bytearray(44)
+    p16(second, 0, 257)
+    p16(second, 2, 2)
+    p32(second, 12, 21)
+    second[19] = 6
+    p32(second, 20, B)
+    p32(second, 24, 2)
+    second[38:44] = b'\x08extra'
+    second[4] = sum(second[i] for i in range(16) if i != 4) & 255
+    image[321*B:321*B+len(second)] = second
+    if dirty_padding:
+        image[320*B+100] = 0x55
+    p16(image, root+34, 0)  # ShortAD directory
+    p64(image, root+56, B+len(second))
+    p64(image, root+64, 2)  # LogicalBlocksRecorded
+    p32(image, root+172, 8)
+    p32(image, root+176, B+len(second))
+    p32(image, root+180, 20)
+    update_tag_checksum(image, 301)
+    return image
+
+
+def udf_multisector_check(exe: str) -> None:
+    image=udf_multisector_directory()
+    with tempfile.TemporaryDirectory() as temporary:
+        source=pathlib.Path(temporary)/'two-blocks.udf'
+        output=pathlib.Path(temporary)/'extracted'
+        source.write_bytes(image)
+        result=subprocess.run([exe,str(source),'--extract',str(output)],
+                              capture_output=True,text=True,
+                              encoding='utf-8',timeout=10)
+        assert result.returncode==0,(result.stdout,result.stderr)
+        assert (output/'hello').read_bytes()==b'world'
+        assert (output/'extra').read_bytes()==b'world'
+
+
 def main(exe: str) -> None:
     image, expected = interleaved_image()
     run(exe, image, 'INTERLV.BIN', expected)
@@ -141,9 +186,11 @@ def main(exe: str) -> None:
     run(exe, udf_with_reserve_vds(corrupt_main=True, corrupt_both=True), None)
     run(exe, udf_anchor_at_512(), 'hello', b'world')
     run(exe, udf_anchor_at_512(corrupt=True), None)
+    udf_multisector_check(exe)
+    run(exe, udf_multisector_directory(dirty_padding=True), None)
     run(exe, udf_unicode_image('unused', invalid_name=b'\x10\xd8\x3d'), None)
     run(exe, udf_unicode_image('unused', invalid_name=b'\x10\xdc\x80\x00\x61'), None)
-    print('PASS: 14 ISO/Joliet/UDF conformance, backup-anchor and corruption cases')
+    print('PASS: 16 ISO/Joliet/UDF conformance, multi-sector FIDs and corruption cases')
 
 
 if __name__ == '__main__':

@@ -555,18 +555,29 @@ private:
             reserved_.push_back({{directory.data_at,directory.capacity},
                                  directory.at});
         const auto data=directory_data(directory);
-        for(std::size_t p=0;p+38<=data.size();) {
-            if(std::all_of(data.begin()+static_cast<std::ptrdiff_t>(p),
+        for(std::size_t p=0;p<data.size();) {
+            const auto sector_left=static_cast<std::size_t>(block)-p%block;
+            const auto available=std::min(sector_left,data.size()-p);
+            if(available<38 ||
+               std::all_of(data.begin()+static_cast<std::ptrdiff_t>(p),
                            data.begin()+static_cast<std::ptrdiff_t>(p+16),
-                           [](std::uint8_t n){return n==0;}))break;
+                           [](std::uint8_t n){return n==0;})) {
+                need(std::all_of(
+                    data.begin()+static_cast<std::ptrdiff_t>(p),
+                    data.begin()+static_cast<std::ptrdiff_t>(p+available),
+                    [](std::uint8_t n){return n==0;}),
+                    "invalid UDF FID sector padding");
+                p+=available;
+                continue;
+            }
             tag_check(data,p,257);
             const auto n=std::size_t(data[p+19]);
             const auto impl=std::size_t(u16(data,p+36));
             need(impl<=data.size()-p-38 && n<=data.size()-p-38-impl,
                  "UDF directory FID name out of bounds");
             const auto len=(38+impl+n+3u)&~std::size_t(3);
-            need(len>=40 && len<=data.size()-p,
-                 "truncated UDF FID");
+            need(len>=40 && len<=available,
+                 "UDF FID straddles directory sector");
             const auto characteristics=data[p+18];
             const auto child_lba=u32(data,p+24);
             const auto child_map=u16(data,p+28);
