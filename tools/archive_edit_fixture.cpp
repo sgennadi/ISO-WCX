@@ -37,7 +37,7 @@ static int invoke(const std::filesystem::path& image,
             if (!has_source) return 2;
             change.source = source;
         }
-        iso_wcx::edit_iso(image, {change}, [&] { return operation != "cancel"; });
+        iso_wcx::edit_optical(image, {change}, [&] { return operation != "cancel"; });
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -1,5 +1,7 @@
 #include "iso_wcx/archive_edit.hpp"
 #include <algorithm>
+#include <array>
+#include <fstream>
 namespace iso_wcx {
 std::string edit_path(std::string p) {
     std::replace(p.begin(),p.end(),'\\','/');
@@ -21,5 +23,27 @@ std::string edit_path(std::string p) {
         at=end+1;
     }
     return p;
+}
+void edit_optical(const std::filesystem::path& image,
+                  const std::vector<ArchiveChange>& changes,
+                  const EditProgress& progress) {
+    std::ifstream in(image,std::ios::binary);
+    if(!in) throw EditUnsupported("cannot open optical archive for editing");
+    bool has_iso9660=false;
+    for(std::uint64_t lba=16;lba<64;++lba) {
+        std::array<char,7> header{};
+        in.clear();
+        in.seekg(static_cast<std::streamoff>(lba*2048));
+        if(!in.read(header.data(),static_cast<std::streamsize>(header.size())))
+            break;
+        if(header[1]=='C' && header[2]=='D' && header[3]=='0' &&
+           header[4]=='0' && header[5]=='1' && header[6]==1) {
+            has_iso9660=true;
+            break;
+        }
+    }
+    in.close();
+    if(has_iso9660) edit_iso(image,changes,progress);
+    else edit_udf(image,changes,progress);
 }
 }
