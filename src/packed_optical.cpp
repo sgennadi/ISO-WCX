@@ -1,5 +1,6 @@
 #include "iso_wcx/packed_optical.hpp"
 #include "iso_wcx/chd_stream.hpp"
+#include "iso_wcx/mds_v2_tracks.hpp"
 
 #include <zlib.h>
 #include <bzlib.h>
@@ -61,7 +62,8 @@ void inflate_exact(const std::vector<std::uint8_t>& encoded,
 
 bool is_packed_optical_path(const std::filesystem::path& path) {
     const auto extension = lowercase_extension(path);
-    return extension == ".isz" || extension == ".daa" || extension == ".chd";
+    return extension == ".isz" || extension == ".daa" || extension == ".chd" ||
+           extension == ".mds" || extension == ".mdx";
 }
 
 PackedOptical::PackedOptical(const std::filesystem::path& path)
@@ -85,6 +87,11 @@ PackedOptical::PackedOptical(const std::filesystem::path& path)
         chd_ = std::make_unique<ChdStream>(path);
         logical_size_ = chd_->size();
         block_bytes_ = 2048;
+    } else if (extension == ".mds" || extension == ".mdx") {
+        type_ = Type::mds_v2;
+        mdsv2_ = std::make_unique<MdsV2TrackStream>(path);
+        logical_size_ = mdsv2_->size();
+        block_bytes_ = 2048;
     } else {
         throw std::runtime_error("unsupported packed optical extension");
     }
@@ -92,7 +99,7 @@ PackedOptical::PackedOptical(const std::filesystem::path& path)
           block_bytes_ >= 2048 && block_bytes_ <= max_block &&
           block_bytes_ % 2048 == 0,
           "packed optical geometry is invalid");
-    if (!chd_) {
+    if (!chd_ && !mdsv2_) {
         const auto expected = (logical_size_ - 1) / block_bytes_ + 1;
         check(expected == chunks_.size(),
               "packed optical chunk count disagrees with logical size");
@@ -108,6 +115,7 @@ std::string PackedOptical::label() const {
         : "ISZ v1 / native stored-zlib-bzip2";
     case Type::daa_v1: return "DAA v1 / native raw DEFLATE";
     case Type::chd_v5: return chd_->label();
+    case Type::mds_v2: return mdsv2_->label();
     }
     return "packed optical";
 }
@@ -488,6 +496,7 @@ void PackedOptical::decode(std::size_t index) {
 
 std::vector<std::uint8_t> PackedOptical::read(std::uint64_t offset,std::size_t length) {
     if (chd_) return chd_->read(offset,length);
+    if (mdsv2_) return mdsv2_->read(offset,length);
     check(length <= 32u*1024u*1024u && offset <= logical_size_ &&
           length <= logical_size_-offset,
           "packed optical logical extent outside image");
