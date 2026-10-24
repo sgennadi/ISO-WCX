@@ -19,10 +19,6 @@ void check(bool condition, const char* why) {
 std::uint16_t le16(const std::uint8_t* p) {
     return std::uint16_t(p[0]) | std::uint16_t(std::uint16_t(p[1]) << 8);
 }
-std::uint32_t le24(const std::uint8_t* p) {
-    return std::uint32_t(p[0]) | (std::uint32_t(p[1]) << 8) |
-           (std::uint32_t(p[2]) << 16);
-}
 std::uint32_t le32(const std::uint8_t* p) {
     return le16(p) | (std::uint32_t(le16(p + 2)) << 16);
 }
@@ -69,7 +65,7 @@ bool is_packed_optical_path(const std::filesystem::path& path) {
 }
 
 PackedOptical::PackedOptical(const std::filesystem::path& path)
-    : file_(path, std::ios::binary | std::ios::ate) {
+    : image_path_(path), file_(path, std::ios::binary | std::ios::ate) {
     check(std::filesystem::is_regular_file(path) &&
           !std::filesystem::is_symlink(path),
           "packed ISO must be a regular non-symlink file");
@@ -107,7 +103,9 @@ PackedOptical::~PackedOptical() = default;
 
 std::string PackedOptical::label() const {
     switch (type_) {
-    case Type::isz: return "ISZ v1 / native stored-zlib-bzip2";
+    case Type::isz: return isz_regions_.size() > 1
+        ? "ISZ v1 / native stored-zlib-bzip2 / split"
+        : "ISZ v1 / native stored-zlib-bzip2";
     case Type::daa_v1: return "DAA v1 / native raw DEFLATE";
     case Type::chd_v5: return chd_->label();
     }
@@ -132,98 +130,247 @@ std::vector<std::uint8_t> PackedOptical::physical_read(
     return result;
 }
 
+void PackedOptical::append_isz_region(const std::filesystem::path& path,
+                                       std::uint64_t begin,
+                                       std::uint64_t declared_end) {
+    check(std::filesystem::is_regular_file(path) &&
+          !std::filesystem::is_symlink(path),
+          "ISZ segment must be a regular non-symlink file");
+    auto input=std::make_unique<std::ifstream>(path,std::ios::binary|std::ios::ate);
+    check(bool(*input) && input->tellg()>=0,"cannot open ISZ segment");
+    const auto physical=static_cast<std::uint64_t>(input->tellg());
+    // A truncated file may be shorter than the size in the segment table.
+    // Reading its declared chunks will then fail at the virtual-data bounds.
+    const auto usable=std::min(physical,declared_end);
+    check(begin>=48 && begin<usable,"ISZ segment contains no valid data area");
+    const auto length=usable-begin;
+    check(isz_data_size_<=max_logical && length<=max_logical-isz_data_size_,
+          "ISZ segment data stream exceeds size limit");
+    isz_regions_.push_back({std::move(input),begin,isz_data_size_,length});
+    isz_data_size_+=length;
+}
+
+std::vector<std::uint8_t> PackedOptical::read_isz_data(
+        std::uint64_t position,std::size_t length) {
+    check(length<=16u*1024u*1024u && position<=isz_data_size_ &&
+          length<=isz_data_size_-position,
+          "ISZ chunk references missing or truncated segment data");
+    std::vector<std::uint8_t> result(length);
+    std::size_t done=0;
+    for(auto& region:isz_regions_) {
+        if(done==length)break;
+        const auto at=position+done;
+        if(at>=region.logical_offset+region.length)continue;
+        check(at>=region.logical_offset,"ISZ region map overlaps");
+        const auto inside=at-region.logical_offset;
+        const auto amount=static_cast<std::size_t>(
+            std::min<std::uint64_t>(length-done,region.length-inside));
+        auto& stream=*region.input;
+        check(region.file_offset<=
+                  static_cast<std::uint64_t>((std::numeric_limits<std::streamoff>::max)())-inside,
+              "ISZ region seek overflow");
+        stream.clear();
+        stream.seekg(static_cast<std::streamoff>(region.file_offset+inside));
+        check(bool(stream) &&
+              (amount==0 || bool(stream.read(
+                  reinterpret_cast<char*>(result.data()+done),
+                  static_cast<std::streamsize>(amount)))),
+              "ISZ segment ended unexpectedly");
+        done+=amount;
+    }
+    check(done==length,"ISZ segment data is incomplete");
+    return result;
+}
+
 void PackedOptical::parse_isz() {
-    check(physical_size_ >= 64, "truncated ISZ header");
-    const auto h = physical_read(0, 64);
-    check(std::memcmp(h.data(), "IsZ!", 4) == 0 &&
-          h[4] == 64 && h[5] == 1,
+    check(physical_size_>=48,"truncated ISZ header");
+    const auto h=physical_read(0,static_cast<std::size_t>(
+        std::min<std::uint64_t>(physical_size_,64)));
+    const auto header_size=h[4];
+    check(std::memcmp(h.data(),"IsZ!",4)==0 &&
+          (header_size==48 || header_size==64) &&
+          h[5]==1 && physical_size_>=header_size,
           "unsupported ISZ signature, header or version");
-    check(h[16] == 0 && h[34] == 0,
+    check(h[16]==0 && h[34]==0,
           "encrypted or non-first-segment ISZ is unsupported");
-    const auto sector = le16(h.data() + 10);
-    const auto sectors = le32(h.data() + 12);
-    check(sector == 2048 && sectors > 0, "ISZ is not a 2048-byte optical stream");
-    logical_size_ = std::uint64_t(sector) * sectors;
-    block_bytes_ = le32(h.data() + 29);
-    check(block_bytes_ >= 2048 && block_bytes_ <= max_block &&
-          block_bytes_ % 2048 == 0, "invalid ISZ block size");
-    const auto count = le32(h.data() + 25);
-    const auto ptr_offset = le32(h.data() + 35);
-    const auto segment_table = le32(h.data() + 39);
-    const auto data_offset = le32(h.data() + 43);
-    check(segment_table == 0,
-          "multi-segment ISZ is not supported by native decoder");
-    check(count > 0 && count <= max_chunks &&
-          count == (logical_size_ - 1)/block_bytes_ + 1,
-          "invalid ISZ block count");
-    check(data_offset >= 64 && data_offset <= physical_size_,
+    const auto sector=le16(h.data()+10);
+    const auto sectors=le32(h.data()+12);
+    check(sector==2048 && sectors>0,"ISZ is not a 2048-byte optical stream");
+    logical_size_=std::uint64_t(sector)*sectors;
+    block_bytes_=le32(h.data()+29);
+    check(block_bytes_>=2048 && block_bytes_<=max_block &&
+          block_bytes_%2048==0,"invalid ISZ block size");
+    const auto expected=(logical_size_-1)/block_bytes_+1;
+    check(expected<=max_chunks,"ISZ chunk count exceeds supported limit");
+    const auto count=le32(h.data()+25);
+    const auto pointer_width=h[33];
+    const auto ptr_offset=le32(h.data()+35);
+    const auto segment_table=le32(h.data()+39);
+    const auto data_offset=le32(h.data()+43);
+    check(data_offset>=header_size && data_offset<=physical_size_,
           "ISZ data offset outside image");
-    chunks_.reserve(count);
-    if (ptr_offset == 0) {
-        check(count == 1 && logical_size_ <= block_bytes_ &&
-              le32(h.data() + 52) == logical_size_,
-              "unsupported ISZ implicit single-block layout");
-        chunks_.push_back({data_offset, static_cast<std::uint32_t>(logical_size_),
-                           Codec::stored});
-        check(logical_size_ <= physical_size_ - data_offset,
-              "truncated ISZ implicit block");
+
+    struct Segment {
+        std::uint64_t size;
+        std::uint32_t chunks,first,offset,left;
+    };
+    std::vector<Segment> segments;
+    constexpr std::array<std::uint8_t,4> key{0xb6,0x8c,0xa5,0xde};
+    if(segment_table!=0) {
+        check(segment_table>=header_size && segment_table<=physical_size_,
+              "ISZ segment table outside first file");
+        bool terminated=false;
+        for(std::size_t i=0;i<=99;i++) {
+            const auto pos=std::uint64_t(segment_table)+i*24u;
+            check(pos<=physical_size_ && 24<=physical_size_-pos,
+                  "ISZ segment table truncated");
+            auto s=physical_read(pos,24);
+            for(std::size_t j=0;j<s.size();j++)s[j]^=key[j%4];
+            const auto size=le64(s.data());
+            if(size==0){terminated=true;break;}
+            check(i<99 && size>=48 && size<=max_logical,
+                  "ISZ segment declares invalid length");
+            const auto chunk_count=le32(s.data()+8);
+            const auto first=le32(s.data()+12);
+            const auto chunk_offset=le32(s.data()+16);
+            const auto left=le32(s.data()+20);
+            check(first<=expected && chunk_count<=expected-first &&
+                  chunk_offset<=size && left<=block_bytes_+65536u,
+                  "ISZ segment table has invalid chunk spans");
+            segments.push_back({size,chunk_count,first,chunk_offset,left});
+        }
+        check(terminated && !segments.empty(),
+              "ISZ segment table missing terminating entry");
+    }
+
+    if(segments.empty()) {
+        append_isz_region(image_path_,data_offset,physical_size_);
+    } else {
+        // UltraISO supports .isz + .i01/.i02 and .part01.isz + .part02.isz.
+        // An explicitly named part must not follow links outside the folder.
+        const auto base=image_path_.stem().wstring();
+        const auto part_pos=base.rfind(L".part");
+        unsigned part_digits=0;
+        if(part_pos!=std::wstring::npos) {
+            const auto suffix=base.substr(part_pos+5);
+            if((suffix.size()==2 || suffix.size()==3) &&
+               std::all_of(suffix.begin(),suffix.end(),
+                   [](wchar_t ch){return ch>=L'0' && ch<=L'9';}) &&
+               std::stoul(suffix)==1)
+                part_digits=static_cast<unsigned>(suffix.size());
+        }
+        for(std::size_t i=0;i<segments.size();++i) {
+            auto path=image_path_;
+            if(i!=0) {
+                std::wstring name;
+                if(part_digits!=0) {
+                    auto number=std::to_wstring(i+1);
+                    check(number.size()<=part_digits,"ISZ part number overflow");
+                    name=base.substr(0,part_pos)+L".part"+
+                        std::wstring(part_digits-number.size(),L'0')+number+L".isz";
+                } else {
+                    auto number=std::to_wstring(i);
+                    if(number.size()<2)number=L"0"+number;
+                    name=base+L".i"+number;
+                }
+                path=image_path_.parent_path()/name;
+                check(std::filesystem::is_regular_file(path) &&
+                      !std::filesystem::is_symlink(path),
+                      "missing or unsafe ISZ companion segment");
+                std::ifstream input(path,std::ios::binary);
+                std::array<std::uint8_t,48> header{};
+                check(bool(input.read(reinterpret_cast<char*>(header.data()),48)) &&
+                      std::memcmp(header.data(),"IsZ!",4)==0 &&
+                      (header[4]==48 || header[4]==64) && header[5]==1 &&
+                      header[16]==0 &&
+                      le32(header.data()+6)==le32(h.data()+6) &&
+                      header[34]==i,
+                      "ISZ companion segment signature, serial or index mismatch");
+            }
+            const auto& seg=segments[i];
+            const auto begin=i==0
+                ? std::uint64_t(seg.offset?seg.offset:data_offset)
+                : std::uint64_t(seg.offset);
+            const auto left=i==0?0u:segments[i-1].left;
+            check(begin>=left && begin-left>=(i==0?header_size:48),
+                  "ISZ segment continuation points inside header");
+            append_isz_region(path,begin-left,seg.size);
+        }
+    }
+    check(isz_data_size_>0,"ISZ contains no payload data");
+
+    if(ptr_offset==0) {
+        // ISZ without a pointer table is an uncompressed virtual ISO stream.
+        check(count==0 || count==expected,
+              "ISZ implicit chunk count disagrees with image size");
+        check(logical_size_<=isz_data_size_,
+              "ISZ implicit stored image is truncated");
+        chunks_.reserve(static_cast<std::size_t>(expected));
+        for(std::uint64_t i=0;i<expected;i++) {
+            const auto length=static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(block_bytes_,
+                                        logical_size_-i*block_bytes_));
+            chunks_.push_back({i*block_bytes_,length,Codec::stored});
+        }
         return;
     }
-    check(h[33] == 3 && ptr_offset >= 64 &&
-          ptr_offset <= physical_size_ &&
-          std::uint64_t(count) * 3 <= physical_size_ - ptr_offset &&
-          (std::uint64_t(count) * 3 <= data_offset - std::min<std::uint64_t>(data_offset,ptr_offset)),
-          "invalid ISZ obfuscated chunk table");
-    std::vector<std::uint8_t> pointers;
-    // Avoid unbounded allocations when parsing malformed chunk counts.
-    for (std::uint64_t at = 0; at < std::uint64_t(count)*3; ) {
-        const auto part = static_cast<std::size_t>(
-            std::min<std::uint64_t>(std::uint64_t(count)*3-at, 1u<<20));
-        auto bytes = physical_read(std::uint64_t(ptr_offset) + at, part);
-        pointers.insert(pointers.end(), bytes.begin(), bytes.end());
-        at += part;
+    check(count==expected && count<=max_chunks &&
+          pointer_width>=1 && pointer_width<=4 &&
+          ptr_offset>=header_size && ptr_offset<=physical_size_ &&
+          std::uint64_t(count)*pointer_width<=physical_size_-ptr_offset &&
+          ptr_offset<=data_offset &&
+          std::uint64_t(count)*pointer_width<=data_offset-ptr_offset,
+          "ISZ chunk table is invalid or overlaps data");
+    const auto table_size=std::uint64_t(count)*pointer_width;
+    std::vector<std::uint8_t> table;
+    table.reserve(static_cast<std::size_t>(table_size));
+    for(std::uint64_t at=0;at<table_size;) {
+        const auto part=static_cast<std::size_t>(
+            std::min<std::uint64_t>(table_size-at,1u<<20));
+        auto bytes=physical_read(std::uint64_t(ptr_offset)+at,part);
+        for(std::size_t j=0;j<part;j++)bytes[j]^=key[(at+j)%4];
+        table.insert(table.end(),bytes.begin(),bytes.end());
+        at+=part;
     }
-    constexpr std::array<std::uint8_t,4> key{0xb6,0x8c,0xa5,0xde};
-    std::uint64_t physical = data_offset;
-    for (std::size_t i = 0; i < count; ++i) {
-        const auto at = i*3;
-        for (std::size_t j = 0; j < 3; ++j)
-            pointers[at+j] ^= key[(at+j)%4];
-        const auto pointer = le24(pointers.data() + at);
-        const auto kind = pointer >> 22;
-        const auto length = pointer & 0x3fffffu;
-        const auto expected = static_cast<std::uint32_t>(
+    const auto shift=static_cast<unsigned>(8*pointer_width-2);
+    const auto mask=(std::uint64_t(1)<<shift)-1;
+    std::uint64_t stored_at=0;
+    chunks_.reserve(static_cast<std::size_t>(count));
+    for(std::uint64_t i=0;i<count;i++) {
+        std::uint64_t value=0;
+        for(unsigned j=0;j<pointer_width;j++)
+            value|=std::uint64_t(table[static_cast<std::size_t>(i*pointer_width+j)])<<(8*j);
+        const auto kind=value>>shift;
+        const auto length=static_cast<std::uint32_t>(value&mask);
+        const auto expanded=static_cast<std::uint32_t>(
             std::min<std::uint64_t>(block_bytes_,logical_size_-i*block_bytes_));
         Codec codec{};
-        switch (kind) {
+        switch(kind) {
         case 0:
-            check(length == expected || length == block_bytes_,
+            check(length==0 || length==expanded || length==block_bytes_,
                   "invalid zero ISZ chunk size");
-            codec = Codec::zeros;
-            break;
+            codec=Codec::zeros;break;
         case 1:
-            check(length == expected, "uncompressed ISZ length mismatch");
-            codec = Codec::stored;
-            break;
+            check(length==expanded || length==block_bytes_,
+                  "uncompressed ISZ length mismatch");
+            codec=Codec::stored;break;
         case 2:
-            check(length > 0 && length <= block_bytes_ + 65536u,
+            check(length>0 && length<=block_bytes_+65536u,
                   "invalid ISZ zlib size");
-            codec = Codec::zlib;
-            break;
+            codec=Codec::zlib;break;
         case 3:
-            check(length >= 4 && length <= block_bytes_ + 65536u,
-                  "invalid ISZ bzip2 compressed size");
-            codec = Codec::bzip2;
-            break;
+            check(length>=4 && length<=block_bytes_+65536u,
+                  "invalid ISZ bzip2 size");
+            codec=Codec::bzip2;break;
         default:
             throw std::runtime_error("invalid ISZ chunk codec");
         }
-        const auto consumed = codec == Codec::zeros ? 0 : length;
-        check(physical <= physical_size_ &&
-              consumed <= physical_size_ - physical,
-              "ISZ data chunk exceeds the file");
-        chunks_.push_back({physical, consumed, codec});
-        physical += consumed;
+        const auto consumed=codec==Codec::zeros?0u:length;
+        check(stored_at<=isz_data_size_ &&
+              consumed<=isz_data_size_-stored_at,
+              "ISZ chunk references missing segment data");
+        chunks_.push_back({stored_at,consumed,codec});
+        stored_at+=consumed;
     }
 }
 
@@ -286,12 +433,16 @@ void PackedOptical::decode(std::size_t index) {
         break;
     case Codec::stored: {
         check(entry.encoded_size >= expected, "truncated packed ISO stored block");
-        const auto data = physical_read(entry.offset,expected);
+        const auto data = type_==Type::isz
+            ? read_isz_data(entry.offset,expected)
+            : physical_read(entry.offset,expected);
         std::copy(data.begin(),data.end(),cached_bytes_.begin());
         break;
     }
     case Codec::bzip2: {
-        const auto stored = physical_read(entry.offset,entry.encoded_size);
+        const auto stored = type_==Type::isz
+            ? read_isz_data(entry.offset,entry.encoded_size)
+            : physical_read(entry.offset,entry.encoded_size);
         check(stored.size() >= 4, "truncated ISZ bzip2 block");
         // ISZ substitutes the BZh signature with its private 3-byte prefix;
         // the remaining bzip2 stream and its CRCs are standard.
@@ -309,7 +460,9 @@ void PackedOptical::decode(std::size_t index) {
     }
     case Codec::zlib:
     case Codec::raw_deflate: {
-        const auto data = physical_read(entry.offset,entry.encoded_size);
+        const auto data = type_==Type::isz
+            ? read_isz_data(entry.offset,entry.encoded_size)
+            : physical_read(entry.offset,entry.encoded_size);
         inflate_exact(data,cached_bytes_,expected,
                       entry.codec == Codec::zlib ? MAX_WBITS : -MAX_WBITS);
         break;
