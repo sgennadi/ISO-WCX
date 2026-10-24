@@ -25,6 +25,17 @@ static std::string wide_to_utf8(const wchar_t* text) {
 }
 #endif
 
+static void route_edit(const std::filesystem::path& image,
+                       const std::vector<iso_wcx::ArchiveChange>& changes,
+                       const iso_wcx::EditProgress& progress) {
+    auto ext = image.extension().string();
+    for (auto& c : ext) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+    if (ext == ".ima" || ext == ".img" || ext == ".bif" ||
+        ext == ".vfd" || ext == ".flp")
+        iso_wcx::edit_fat12(image, changes, progress);
+    else iso_wcx::edit_optical(image, changes, progress);
+}
+
 static int invoke(const std::filesystem::path& image,
                   const std::string& operation,
                   const std::string& name,
@@ -39,7 +50,7 @@ static int invoke(const std::filesystem::path& image,
             if (!has_source) return 2;
             change.source = source;
         }
-        iso_wcx::edit_optical(image, {change}, [&] { return operation != "cancel"; });
+        route_edit(image, {change}, [&] { return operation != "cancel"; });
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
@@ -53,7 +64,7 @@ static int invoke_batch(const std::filesystem::path& image,
                         bool cancel) {
     try {
         unsigned ticks=0;
-        iso_wcx::edit_optical(image,changes,[&] {
+        route_edit(image,changes,[&] {
             return !cancel || ++ticks<=40;
         });
         return 0; // Cancellation probes must fail by actually cancelling.

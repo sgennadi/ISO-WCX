@@ -16,6 +16,13 @@ disk mount, driver, or standalone disk extraction program is necessary.
 The WCX binaries include ISO/UDF, supported virtual-disk readers and
 native ISZ/DAA optical compressed-stream decoding.
 
+Preview floppy support: IMA/IMG/VFD/FLP raw images with no partition map
+open directly into the FAT12/16/32 root. BIF images open as FAT when valid;
+otherwise their original bytes appear as boot-image.bin (read-only).
+FAT12 images with verified geometry and matching FAT copies allow 8.3 name
+file add/replace/delete and folder changes in a staged atomic write. FAT16/32,
+non-8.3 creation and opaque BIF editing remain disabled.
+
 The integrated HDD reader supports MBR/GPT partitions containing FAT12/16/32,
 exFAT and experimental subsets of ext2/3/4 and NTFS in raw IMG/RAW, fixed
 VHD and clean base fixed/dynamic VHDX. Files appear under partition1/, etc.
