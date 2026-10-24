@@ -531,6 +531,68 @@ public:
                        interval.range.bytes==target.bytes;
             }),reserved_.end());
     }
+    // Release only a regular file's exclusively owned FE and recorded
+    // ShortAD sectors. All destination allocations are already planned:
+    // these freed sectors cannot be reused until a later transaction.
+    [[nodiscard]] std::vector<Location> reclaim_file_blocks(const File& file) {
+        need(bitmap_ && integrity_,"UDF reclamation needs a closed bitmap/LVID");
+        const auto owner=file.fe.at;
+        const auto found=references_.find(owner);
+        need(file.fe.type==5 && found!=references_.end() &&
+             found->second==1 && !deleted_icbs_.count(owner),
+             "UDF file has aliases or dangling deleted FID references");
+        std::vector<Location> reclaimed{{owner,block}};
+        for(const auto& run:file.fe.runs) {
+            need(run.blocks && run.recorded &&
+                 run.recorded<=std::uint64_t(run.blocks)*block,
+                 "UDF reclaim has invalid ShortAD sector geometry");
+            reclaimed.push_back({run.at,std::uint64_t(run.blocks)*block});
+        }
+        // Preflight the ENTIRE set before changing any bitmap bit.
+        for(std::size_t i=0;i<reclaimed.size();++i) {
+            const auto& range=reclaimed[i];
+            need(range.bytes && range.bytes%block==0,
+                 "UDF reclaim has non-sector-aligned extent");
+            const auto first=logical_of(range.at);
+            const auto count=range.bytes/block;
+            need(count<=partition_blocks_-first,
+                 "UDF reclaim exceeds partition");
+            for(std::size_t j=0;j<i;++j)
+                need(!intersects(range,reclaimed[j]),
+                     "UDF reclaim extents overlap");
+            unsigned matches=0;
+            for(const auto& occupied:reserved_) {
+                if(!intersects(range,occupied.range))continue;
+                need(occupied.owner==owner &&
+                     occupied.range.at==range.at &&
+                     occupied.range.bytes==range.bytes,
+                     "UDF reclaim crosses another referenced descriptor");
+                ++matches;
+            }
+            need(matches==1,"UDF reclaim extent lacks unique ownership");
+            for(std::uint64_t j=0;j<count;++j)
+                need(!bitmap_free(*bitmap_,first+static_cast<std::uint32_t>(j)),
+                     "UDF reclaim sector is already free");
+        }
+        for(const auto& range:reclaimed) {
+            const auto first=logical_of(range.at);
+            for(std::uint64_t j=0;j<range.bytes/block;++j) {
+                const auto logical=first+static_cast<std::uint32_t>(j);
+                bitmap_->bytes[24u+logical/8u] |=
+                    static_cast<std::uint8_t>(1u<<(logical%8u));
+            }
+        }
+        reserved_.erase(std::remove_if(reserved_.begin(),reserved_.end(),
+            [&](const Interval& interval) {
+                return interval.owner==owner &&
+                       std::any_of(reclaimed.begin(),reclaimed.end(),
+                            [&](const Location& range) {
+                                return interval.range.at==range.at &&
+                                       interval.range.bytes==range.bytes;
+                            });
+            }),reserved_.end());
+        return reclaimed;
+    }
     [[nodiscard]] std::pair<std::uint64_t,Bytes> updated_bitmap() const {
         need(bitmap_.has_value(),"UDF bitmap is absent");
         auto b=bitmap_->bytes;
@@ -600,6 +662,7 @@ private:
     std::optional<Bitmap> bitmap_;
     std::optional<Integrity> integrity_;
     std::map<std::uint64_t,std::size_t> references_;
+    std::set<std::uint64_t> deleted_icbs_;
     std::set<std::uint32_t> directories_;
     std::vector<Interval> reserved_;
 
@@ -733,6 +796,12 @@ private:
             const auto characteristics=data[p+18];
             const auto child_lba=u32(data,p+24);
             const auto child_map=u16(data,p+28);
+            // A tombstone in an older image may still point at an FE.
+            // Never reclaim an FE which such a FID could still reference.
+            if(n && (characteristics&0x04u) &&
+               u32(data,p+20)!=0 && child_map==0 &&
+               child_lba<partition_blocks_)
+                deleted_icbs_.insert(physical(child_lba));
             if(n && !(characteristics&0x0cu)) {
                 const auto filename=name(data,p+38+impl,n);
                 const auto path=prefix.empty()?filename:prefix+"/"+filename;
