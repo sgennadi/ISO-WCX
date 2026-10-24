@@ -151,19 +151,23 @@ public:
     }
 
     void apply(const ArchiveChange& c) {
-        const auto path = upper(edit_path(c.path));
-        const auto slash = path.find_last_of('/');
-        const auto parent = slash == std::string::npos ? std::string{} : path.substr(0, slash);
-        const auto base = slash == std::string::npos ? path : path.substr(slash + 1);
-        const auto alias = dos_encode(base);
+        const auto logical = edit_path(c.path);
+        const auto slash = logical.find_last_of('/');
+        const auto raw_parent = slash == std::string::npos ? std::string{} :
+                                logical.substr(0, slash);
+        const auto parent = resolve_path(raw_parent);
+        const auto base = slash == std::string::npos ? logical : logical.substr(slash + 1);
+        validate_vfat_component(base);
+        const auto path = resolve_path(join(parent, base));
+        const auto existing = nodes_.find(path);
         if (c.remove) { erase(path); return; }
         check(dirs_.contains(parent), "FAT12 parent folder does not exist");
-        const auto existing = nodes_.find(path);
+        if (c.directory && existing != nodes_.end()) {
+            check(existing->second.directory(), "FAT12 file already uses folder name");
+            return;
+        }
+        const auto planned = new_name(parent, base, existing != nodes_.end());
         if (c.directory) {
-            if (existing != nodes_.end()) {
-                check(existing->second.directory(), "FAT12 file already uses folder name");
-                return;
-            }
             const auto child = allocate(1).front();
             const auto at = offset(child);
             std::fill_n(bytes_.begin() + static_cast<std::ptrdiff_t>(at), cluster_bytes_, 0);
@@ -172,10 +176,15 @@ public:
             write_entry(at, dot, 0x10, child, 0);
             dot[1] = '.';
             write_entry(at + 32, dot, 0x10, dirs_.at(parent), 0);
-            const auto slot = entry_slot(dirs_.at(parent));
-            write_entry(slot, alias, 0x10, child, 0);
-            nodes_.emplace(path, Node{slot, child, 0, 0x10, {}});
+            const auto reserved = reserve_slots(dirs_.at(parent), planned.lfn_count + 1);
+            const auto short_at = reserved.back();
+            const std::vector<std::size_t> lfn(reserved.begin(), reserved.end()-1);
+            if (!lfn.empty()) vfat::encode(bytes_, lfn, base, planned.alias);
+            write_entry(short_at, planned.alias, 0x10, child, 0);
+            const auto dos_path = join(parent, alias_name(planned.alias));
+            nodes_.emplace(path, Node{short_at, child, 0, 0x10, lfn, dos_path});
             dirs_.emplace(path, child);
+            aliases_.emplace(dos_path, path);
             return;
         }
         check(std::filesystem::is_regular_file(c.source) &&
@@ -190,20 +199,27 @@ public:
                                static_cast<std::streamsize>(data.size())))),
               "cannot read new FAT12 file");
         std::size_t slot{};
+        std::vector<std::size_t> new_lfn;
         if (existing != nodes_.end()) {
             check(!existing->second.directory(), "cannot replace FAT12 directory");
             check(!(existing->second.attrs & 0x01), "FAT12 read-only file cannot be replaced");
             slot = existing->second.at;
             release(existing->second.first);
-        } else slot = entry_slot(dirs_.at(parent));
+        } else {
+            const auto reserved = reserve_slots(dirs_.at(parent), planned.lfn_count + 1);
+            new_lfn.assign(reserved.begin(), reserved.end()-1);
+            if (!new_lfn.empty())
+                vfat::encode(bytes_, new_lfn, base, planned.alias);
+            slot = reserved.back();
+        }
         const auto needed = (data.size() + cluster_bytes_ - 1) / cluster_bytes_;
         const auto allocated = allocate(needed);
         for (std::size_t i = 0; i < allocated.size(); ++i) {
             const auto at = offset(allocated[i]);
-            const auto start = i * cluster_bytes_;
-            const auto count_here = std::min<std::size_t>(cluster_bytes_, data.size() - start);
+            const auto first = i * cluster_bytes_;
+            const auto count_here = std::min<std::size_t>(cluster_bytes_, data.size() - first);
             std::fill_n(bytes_.begin() + static_cast<std::ptrdiff_t>(at), cluster_bytes_, 0);
-            std::copy_n(data.data() + start, count_here, bytes_.data() + at);
+            std::copy_n(data.data() + first, count_here, bytes_.data() + at);
         }
         const auto first = allocated.empty() ? std::uint16_t{} : allocated.front();
         if (existing != nodes_.end()) {
@@ -212,9 +228,11 @@ public:
             existing->second.first = first;
             existing->second.size = static_cast<std::uint32_t>(data.size());
         } else {
-            write_entry(slot, alias, 0x20, first, static_cast<std::uint32_t>(data.size()));
+            write_entry(slot, planned.alias, 0x20, first, static_cast<std::uint32_t>(data.size()));
+            const auto dos_path = join(parent, alias_name(planned.alias));
             nodes_.emplace(path, Node{slot, first, static_cast<std::uint32_t>(data.size()),
-                                      0x20, {}});
+                                      0x20, std::move(new_lfn), dos_path});
+            aliases_.emplace(dos_path, path);
         }
     }
 
