@@ -2,6 +2,7 @@
 #include "iso_wcx/volume_reader.hpp"
 #include "iso_wcx/virtual_disk.hpp"
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <map>
 #include <set>

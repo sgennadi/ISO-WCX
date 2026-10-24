@@ -3,6 +3,7 @@
 #include <array>
 #include <functional>
 #include <limits>
+#include <iterator>
 #include <ostream>
 #include <stdexcept>
 

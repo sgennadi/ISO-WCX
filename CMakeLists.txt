@@ -178,7 +178,7 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
 endif()
 
 # Built-in native FAT12/16/32 and exFAT readers, linked directly into WCX.
-add_library(iso_virtual_fat STATIC src/fat_volume.cpp src/exfat_volume.cpp src/ext_volume.cpp)
+add_library(iso_virtual_fat STATIC src/fat_volume.cpp src/exfat_volume.cpp src/ext_volume.cpp src/ntfs_volume.cpp)
 target_include_directories(iso_virtual_fat PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(iso_virtual_fat PUBLIC iso_virtual_partitions)
 target_compile_features(iso_virtual_fat PUBLIC cxx_std_20)
@@ -195,6 +195,8 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
   target_link_libraries(exfat_inspect PRIVATE iso_virtual_fat)
   add_executable(ext_inspect src/ext_inspect_tool.cpp)
   target_link_libraries(ext_inspect PRIVATE iso_virtual_fat)
+  add_executable(ntfs_inspect src/ntfs_inspect_tool.cpp)
+  target_link_libraries(ntfs_inspect PRIVATE iso_virtual_fat)
 endif()
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -207,6 +209,9 @@ if(BUILD_TESTING)
   add_test(NAME ext_native_volume_read_and_corruption
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ext.py"
             "$<TARGET_FILE:ext_inspect>")
+  add_test(NAME ntfs_native_mft_index_and_corruption
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ntfs.py"
+            "$<TARGET_FILE:ntfs_inspect>")
 endif()
 
 if(ISO_WCX_BUILD_DEV_TOOLS)
@@ -328,6 +333,9 @@ if(BUILD_TESTING)
     add_test(NAME integrated_virtual_disk_ext_wcx
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_ext.py" "$<TARGET_FILE:disc_inspect>")
     set_tests_properties(integrated_virtual_disk_ext_wcx PROPERTIES TIMEOUT 180)
+    add_test(NAME integrated_virtual_disk_ntfs_wcx
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_ntfs.py" "$<TARGET_FILE:disc_inspect>")
+    set_tests_properties(integrated_virtual_disk_ntfs_wcx PROPERTIES TIMEOUT 180)
     if(WIN32)
       add_test(NAME integrated_virtual_disk_fat_wcx_exports
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_fat.py"
@@ -344,6 +352,11 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_ext.py"
           "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:ISO-WCX>" "$<TARGET_FILE:wcx_virtual_ext_smoke>")
       set_tests_properties(integrated_virtual_disk_ext_wcx_exports PROPERTIES TIMEOUT 180)
+      add_executable(wcx_virtual_ntfs_smoke tests/wcx_virtual_ntfs_smoke.cpp)
+      add_test(NAME integrated_virtual_disk_ntfs_wcx_exports
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_virtual_ntfs.py"
+          "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:ISO-WCX>" "$<TARGET_FILE:wcx_virtual_ntfs_smoke>")
+      set_tests_properties(integrated_virtual_disk_ntfs_wcx_exports PROPERTIES TIMEOUT 180)
     endif()
     add_test(NAME iso_udf_image_smoke
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_images.py" "$<TARGET_FILE:disc_inspect>")
