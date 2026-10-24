@@ -32,7 +32,6 @@ void require(bool valid, const char* message) {
     if (!valid) throw std::runtime_error(message);
 }
 constexpr std::size_t max_descriptor = 16u * 1024u * 1024u;
-constexpr std::array<std::uint8_t, 64> empty_salt{};
 
 // Message orders and rotations defined in the public RIPEMD-160 standard.
 // The algorithm is implemented in-source so no crypto DLL is distributed.
