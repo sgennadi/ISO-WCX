@@ -8,7 +8,7 @@ Installation (no additional tools)
 2. Open ISO-WCX-preview.zip in Total Commander. Confirm the plugin
    installation requested by pluginst.inf.
 3. Verify the plugin directory contains ISO-WCX.wcx and ISO-WCX.wcx64.
-   These are the 32-bit and 64-bit versions of the SAME read-only plugin.
+   These are the 32-bit and 64-bit versions of the same WCX plugin.
 4. Restart Total Commander and open an ISO, VHD or VHDX with Ctrl+PgDn.
 
 No setup EXE, repair CMD, PowerShell script, external parser DLL, virtual
@@ -43,7 +43,9 @@ Check other extensions only if they point to that same obsolete plugin.
 The installed plugin also handles cue, ccd, nrg, mds v1, cso, zso,
 limited single-file isz/daa, partitioned img, raw, vhd and vhdx.
 
-This is read-only preview software. Supported compressed optical subsets:
+This is PREVIEW software: most formats are read-only. Only plain ISO9660/
+Joliet and standard unsplit WIM support restricted editing.
+Supported compressed optical subsets:
 single-file ISZ v1 (zero/raw/zlib/bzip2) and DAA 1.00 (raw DEFLATE).
 Experimental CHD v5 uncompressed 2048-byte data is readable when manually
 opened, but CHD is NOT registered by default.
@@ -55,7 +57,14 @@ Source: https://github.com/sgennadi/ISO-WCX
 
 WIM / ESD
 ---------
-Open install.wim or boot.wim using Ctrl+PgDn, then browse image1/, image2/.
-Supported ESD files are handled the same way. Read-only extraction with F5.
-The system's wimgapi.dll is used inside the WCX; no mounting or extra
-programs. Split SWM and reparse-point extraction are not yet supported.
+Open WIM, compatible ESD or any member of a complete split SWM set with
+Ctrl+PgDn. Browse image1/, image2/, etc. and extract with F5.
+Unsplit, non-solid standard WIM supports file/directory edits inside an
+existing image index and deletion of an index except the last one.
+WIM editing needs NTFS staging and elevated Windows backup/restore/security
+privileges. ESD and SWM writes are not supported. Plain ISO9660/Joliet
+images support restricted, transactional file/folder edits; hybrid,
+UDF-bridge and Rock Ridge ISO images remain read-only. Important media
+should be edited as copies. System wimgapi.dll runs inside the WCX;
+no additional DLL, EXE, mount or driver is required. NTFS alternate
+streams and reparse points are not restored by individual-file extraction.

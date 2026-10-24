@@ -1,7 +1,9 @@
 # ISO-WCX
 
-**ISO-WCX v0.15.0 Preview** — a self-contained modern C++20, read-only
-Total Commander WCX plugin for optical disc images, WIM/ESD archives and virtual HDD filesystems.
+**ISO-WCX v0.15.0 Preview** — a self-contained modern C++20 Total Commander
+WCX plugin for optical images, WIM/ESD/SWM and virtual HDD filesystems.
+Browsing/extraction supports the listed formats; editing is restricted to
+validated plain ISO9660/Joliet and standard unsplit WIM files.
 
 ## Install into Total Commander
 
@@ -27,8 +29,8 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 
 | Format/layout | Coverage |
 | --- | --- |
-| WIM / ESD on Windows | In-process system WIMGAPI, read-only multiple image indexes under `image1/`, `image2/`, etc.; browse and extract files with XPRESS/LZX/LZMS as supported by Windows. No mount, added DLL or EXE. Split SWM sets are discovered beside the selected part; missing/duplicate parts are rejected. Streams and reparse points excluded. |
-| ISO 9660 / Joliet | File listing and extraction, Unicode names, multi-extent and interleaved files; recover from broken Joliet directory using valid ISO9660 primary volume |
+| WIM / ESD / SWM on Windows | Browse/extract multiple `imageN/` indexes with system WIMGAPI (XPRESS/LZX/LZMS as supported by Windows), including complete split SWM sets validated by GUID and sequence. **Edit:** standard unsplit WIM only, using Windows WIMGAPI and an NTFS staging workspace with elevated privileges; ESD/SWM read-only. No external utility or extra DLL. |
+| ISO 9660 / Joliet | Browse/extract Unicode names, multi-extent and interleaved files; fallback from corrupt Joliet. **Edit:** add/replace/delete files and folders in validated plain 2048-byte ISO9660/Joliet images; refuses hybrid/system-area, UDF-bridge, Rock Ridge and multi-extent rewriting. Stages and verifies the new image. |
 | Rock Ridge | RRIP NM/CE and relocated CL directories; PX read-only and TF modification timestamps; no symlink/device extraction |
 | Raw BIN/IMG | CD Mode 1 / Mode 2 Form 1 (2352-byte), XA Form 1 (2336-byte); automatic probing limited to single-track images |
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
@@ -83,7 +85,8 @@ This is an independent modern reimplementation; original ISO.WCX 1.7.6 source co
 - **Regression coverage:** a native public-API test covers cancellation, overwriting, source truncation, successful commit, test-only reads and no orphaned staging files. The Windows WCX loader test additionally validates `SetProcessDataProcW`, ANSI fallback, byte deltas and `E_EABORTED`.
 - **CI hardening:** Linux Clang AddressSanitizer/UndefinedBehaviorSanitizer testing is now a regular GitHub Actions job, alongside Windows x86/x64 build and DLL smoke tests.
 
-As before, the WCX adapter is read-only and **Preview** quality. We have not demonstrated compatibility with every optical-media image format, commercial disc or live Total Commander installation. Destination path symlinks are checked, but extracting into a directory modified concurrently by an adversary remains outside the current threat model.
+In v0.8 the adapter was read-only; current v0.15 supports restricted ISO/WIM
+editing and remains **Preview** quality. We have not demonstrated compatibility with every optical-media image format, commercial disc or live Total Commander installation. Destination path symlinks are checked, but extracting into a directory modified concurrently by an adversary remains outside the current threat model.
 
 ## Historical changelog
 
@@ -250,7 +253,15 @@ See [bounded optical container design](docs/packed-optical.md).
   cancellation path. No DISM, wimlib-imagex.exe, mount, external DLL or driver.
 - Split SWM sets: open any part with all `.swm` files in the same folder.
   Parts are matched by GUID and part number, including renamed files.
-- Alternate streams, reparse-point restoration, unsupported ESD
-  compression and non-Windows systems are excluded in this preview.
+- Plain ISO9660/Joliet editing adds/replaces/removes files and folders
+  transactionally; unsupported hybrid, UDF and Rock Ridge layouts fail
+  without modifying the input. Existing boot-image sectors are preserved.
+- Standard unsplit WIM editing can add/replace/remove files and directories,
+  and remove existing image indexes except the final one. It uses native
+  WIMGAPI apply/capture with an NTFS workspace and elevated backup/restore/
+  security privileges. The result is validated before replacing the input.
+- ESD/SWM, virtual disks, UDF and compressed optical formats stay read-only.
+  Individual WCX file extraction does not restore alternate data streams or
+  reparse points. Unsupported ESD compression remains excluded.
 - See [WIM design notes](docs/wim-integration.md).
 
