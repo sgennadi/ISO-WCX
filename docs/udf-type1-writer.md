@@ -41,6 +41,16 @@ not universal UDF 1.02–2.60 editing.
   All FIDs remain four-byte aligned and tightly packed, including records
   that straddle logical-sector boundaries. TagLocation is recalculated from
   the sector where each descriptor begins.
+- Reuse verified, previously deleted file FID slots without expanding the
+  parent directory. Only Deleted FIDs with an entirely cleared ICB, a valid
+  descriptor tag/CRC, correct TagLocation and four-byte alignment qualify.
+  Exact-size replacements keep zero ImplementationUse; a sufficiently larger
+  slot may carry a zero-padded ImplementationUse region with its required
+  32-byte EntityID. Unsafe leftover spans (1–31 bytes) are never split or
+  repurposed. Multiple new files can reserve different slots in one batch;
+  newly deleted FIDs are not reused until a later transaction. The original
+  directory logical length and unrelated FID offsets remain unchanged.
+  If no suitable slot exists, the writer still appends normally.
 - Reclaim **superseded directory data extents** and **newly deleted regular
   file FE/ShortAD allocations**, each after exclusive-ownership verification.
   File sectors are scrubbed and released only after all new FE/ShortAD and
@@ -104,10 +114,11 @@ original image byte-for-byte unchanged.
 Synthetic fixtures check FE/EFE and multi-ShortAD replacement, final-ShortAD
 in-place growth, rejected over-allocation, FID deletion, fragmented file
 allocation, mixed atomic create/replace/delete batches with nested
-directories, embedded/external FID relocation, exclusive FE/ShortAD
-reclamation, wiped sectors and next-transaction allocation reuse, stale
-deleted-FID alias rejection, tag CRC, bitmap/LVID accounting, Unicode
-and atomic rollback. CI independently generates UDF 1.02 HD/DVD-RAM images
+directories, embedded/external FID relocation, exact-size and padded deleted
+FID slot reuse, repeated add/delete cycling without directory growth,
+exclusive FE/ShortAD reclamation, wiped sectors and next-transaction
+allocation reuse, stale deleted-FID alias rejection, tag CRC,
+bitmap/LVID accounting, Unicode and atomic rollback. CI independently generates UDF 1.02 HD/DVD-RAM images
 with `mkudffs` and validates changes via `udfinfo` and 7-Zip. A dedicated
 CI job creates, grows, rejects an overrun and replaces a file larger than
 4 GiB, checking complete independently decoded 7-Zip SHA-256 each time.
