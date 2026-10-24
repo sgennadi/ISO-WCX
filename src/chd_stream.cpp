@@ -84,6 +84,7 @@ struct OpticalTrack {
     std::uint32_t number = 0;
     std::uint32_t preferred_offset = 0;
     bool readable_data = false;
+    bool is_audio = false;
 };
 
 std::vector<OpticalTrack> optical_track_map(chd_file* image,
@@ -123,7 +124,9 @@ std::vector<OpticalTrack> optical_track_map(chd_file* image,
         track.number = static_cast<std::uint32_t>(number);
         const auto type = get_field(meta, "TYPE:");
         require(!type.empty(), "CHD CD track type is missing");
-        if (type == "MODE1" || type == "MODE1_RAW") {
+        if (type == "AUDIO") {
+            track.is_audio = true;
+        } else if (type == "MODE1" || type == "MODE1_RAW") {
             track.preferred_offset = 16;
             track.readable_data = true;
         } else if (type == "MODE2_FORM1" || type == "MODE2_FORM1_RAW" ||
@@ -230,6 +233,16 @@ ChdStream::ChdStream(const std::filesystem::path& path) {
         // sector plus 96-byte subcode. Only expose Mode 1 / Mode 2 Form 1
         // logical user data, not the sync, ECC or subchannel bytes.
         const auto tracks = optical_track_map(chd_.get(), frames);
+        for (const auto& track : tracks) {
+            if (track.is_audio) {
+                require(track.frames <= max_logical / 2352u,
+                        "CHD audio track length exceeds safety limit");
+                audio_tracks_.push_back({
+                    track.number, track.first_frame, track.frames
+                });
+            }
+        }
+
 
         // A valid ISO PVD or UDF anchor is required before a physical track
         // is exposed to the filesystem parsers. Try the last data track first,
@@ -300,7 +313,12 @@ ChdStream::ChdStream(const std::filesystem::path& path) {
                 }
             }
         }
-        require(found, "CHD CD has no validated ISO/UDF Mode 1/2 Form 1 track");
+        // Audio-only CHDs and mixed discs without a supported filesystem are
+        // valid audio archives. Other unrecognized optical layouts fail closed.
+        require(found || !audio_tracks_.empty(),
+                "CHD CD has neither validated ISO/UDF nor playable CDDA tracks");
+        if (!found)
+            label_ = "CHD v5 / native Red Book CDDA audio (no ISO/UDF track)";
 
     }
 }
@@ -341,6 +359,48 @@ std::vector<std::uint8_t> ChdStream::read(
         std::copy_n(hunk_.data() + within_hunk, count, result.data() + done);
         done += count;
     }
+    return result;
+}
+
+std::vector<std::uint8_t> ChdStream::read_audio(
+        std::uint32_t track_number, std::uint64_t start, std::size_t length) {
+    require(unit_bytes_ == cd_frame,
+            "only CD CHD frames contain Red Book PCM audio");
+    const auto selected = std::find_if(audio_tracks_.begin(),audio_tracks_.end(),
+        [track_number](const ChdAudioTrack& t){return t.number==track_number;});
+    require(selected!=audio_tracks_.end(),"requested CHD CDDA track does not exist");
+    require(selected->frames <= max_logical / 2352u,
+            "CHD audio geometry exceeds size limit");
+    const auto pcm_size=selected->frames*2352u;
+    require(start <= pcm_size && length <= pcm_size-start &&
+            length <= 32u*1024u*1024u && (start%2u)==0 && (length%2u)==0,
+            "CHD audio PCM request exceeds a sample-aligned track");
+    std::vector<std::uint8_t> result(length);
+    std::size_t done=0;
+    while(done<length) {
+        const std::uint64_t position=start+done;
+        const std::uint64_t local_frame=position/2352u;
+        const std::uint32_t in_frame=static_cast<std::uint32_t>(position%2352u);
+        require(local_frame<selected->frames,
+                "CHD audio PCM frame exceeds track bounds");
+        const std::uint64_t absolute_frame=selected->first_frame+local_frame;
+        const std::uint64_t physical=absolute_frame*cd_frame+in_frame;
+        const std::uint64_t index=physical/hunk_bytes_;
+        if(cached_hunk_!=index)load_hunk(index);
+        const auto hunk_pos=static_cast<std::size_t>(physical%hunk_bytes_);
+        const auto count=std::min<std::size_t>(
+            {length-done,2352u-in_frame,hunk_bytes_-hunk_pos});
+        require(count>0 && count%2u==0 && hunk_pos<=hunk_.size() &&
+                count<=hunk_.size()-hunk_pos,
+                "CHD audio PCM hunk data is incomplete");
+        std::copy_n(hunk_.data()+hunk_pos,count,result.data()+done);
+        done+=count;
+    }
+    // MAME CD CHD stores standard CD audio as big-endian 16-bit sample
+    // words; WAVE PCM16 is little-endian. Swapping after fully assembling
+    // the bounded buffer also handles requests spanning hunk boundaries.
+    for(std::size_t i=0;i<result.size();i+=2)
+        std::swap(result[i],result[i+1]);
     return result;
 }
 
