@@ -31,7 +31,7 @@ using ProcessFn = int (__stdcall*)(HANDLE,int,wchar_t*,wchar_t*);
 using CloseFn = int (__stdcall*)(HANDLE);
 
 int wmain(int argc, wchar_t** argv) {
-    if(argc != 4 && argc != 6) return 2;
+    if(argc != 4 && argc != 5 && argc != 6) return 2;
     const auto module = LoadLibraryW(argv[1]);
     if(!module) { std::wcerr << L"Cannot load WCX\n"; return 3; }
     const auto open = reinterpret_cast<OpenFn>(GetProcAddress(module,"OpenArchiveW"));
@@ -50,7 +50,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     int result = 6;
     bool extracted = false;
-    const std::wstring target = argc==6 ? argv[4] : L"HELLO.TXT";
+    const std::wstring target = argc==6 ? argv[4] : (argc==5 ? argv[3] : L"HELLO.TXT");
     for(unsigned i = 0; i < 100000; ++i) {
         HeaderExW entry{};
         const int rc = header(archive,&entry);
@@ -59,6 +59,19 @@ int wmain(int argc, wchar_t** argv) {
         if(std::wstring(entry.FileName) == target) {
             if(argc==4 && (entry.UnpSize != 5 || entry.UnpSizeHigh != 0)) {
                 result = 9; break;
+            }
+            if(argc==5) {
+                const auto declared=std::uint64_t(entry.UnpSize) |
+                                    (std::uint64_t(entry.UnpSizeHigh)<<32);
+                const auto packed=std::uint64_t(entry.PackSize) |
+                                  (std::uint64_t(entry.PackSizeHigh)<<32);
+                const auto expected_size=std::stoull(argv[4]);
+                if(declared!=expected_size || packed!=expected_size ||
+                   process(archive,0,nullptr,nullptr)!=0) {
+                    result=9; break;
+                }
+                extracted=true;
+                continue;
             }
             if(argc==6) {
                 const auto expected_size=std::filesystem::file_size(argv[5]);
@@ -81,6 +94,8 @@ int wmain(int argc, wchar_t** argv) {
         std::cerr << "WCX packed optical test failed: " << result << "\n";
         return result;
     }
+    // Size-only WCX ABI probing verifies both high words without writing 4 GiB.
+    if(argc==5)return 0;
     std::ifstream output(argv[3],std::ios::binary);
     if(!output)return 12;
     if(argc==4) {

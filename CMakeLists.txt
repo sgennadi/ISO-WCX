@@ -284,6 +284,8 @@ endif()
 if(BUILD_TESTING)
   add_executable(chd_parallel_read_tests tests/chd_parallel_read.cpp)
   target_link_libraries(chd_parallel_read_tests PRIVATE iso_disc Threads::Threads)
+  add_executable(chd_rf64_gate tests/chd_rf64_gate.cpp)
+  target_link_libraries(chd_rf64_gate PRIVATE iso_disc)
   add_executable(cd_audio_wav_tests tests/test_cd_audio_wav.cpp)
   target_link_libraries(cd_audio_wav_tests PRIVATE iso_disc)
   add_test(NAME native_chd_cdda_wav_and_rf64_headers COMMAND cd_audio_wav_tests)
@@ -355,6 +357,21 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chd_cdda_wcx.py"
                 "$<TARGET_FILE:disc_inspect>"
                 "$<TARGET_FILE:chd_parallel_read_tests>")
+    endif()
+    add_test(NAME chd_rf64_64bit_seek_corruption_cancel
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chd_rf64_sparse.py"
+        "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:chd_rf64_gate>")
+    set_tests_properties(chd_rf64_64bit_seek_corruption_cancel PROPERTIES TIMEOUT 180)
+    if(WIN32)
+      # Keep multi-gigabyte WCX header checking fast, including Win32.
+      # ReadHeaderExW must carry both high size words without extracting.
+      add_test(NAME chd_rf64_wcx_highword_win32_win64
+        COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chd_rf64_sparse.py"
+          "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:chd_rf64_gate>"
+          "$<TARGET_FILE:ISO-WCX>" "$<TARGET_FILE:wcx_packed_smoke>")
+      set_tests_properties(chd_rf64_wcx_highword_win32_win64 PROPERTIES TIMEOUT 180)
     endif()
     # Genuine MAME-produced compressed CD/DVD CHD fixtures, available in
     # the Linux preview CI job. chdman is test-only, never a WCX dependency.
