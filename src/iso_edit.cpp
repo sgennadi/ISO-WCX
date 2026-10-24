@@ -130,7 +130,17 @@ Bytes directory_data(Node& n,unsigned view) {
     Bytes b;
     auto append=[&](const Bytes& r){if(b.size()%block+r.size()>block)b.resize((b.size()/block+1)*block);b.insert(b.end(),r.begin(),r.end());};
     append(record(n,Bytes{0},view,&n));append(record(n,Bytes{1},view,n.parent?n.parent:&n));
-    std::vector<Node*> sorted;for(auto& x:n.children)sorted.push_back(x.get());std::sort(sorted.begin(),sorted.end(),[&](auto* a,auto* c){return (view?a->joliet_identifier:a->identifier)<(view?c->joliet_identifier:c->identifier);});
+    std::vector<Node*> sorted;for(auto& x:n.children)sorted.push_back(x.get());std::sort(sorted.begin(), sorted.end(), [&](const Node* a, const Node* c) {
+        // Avoid the GCC 13/14 -Wstringop-overread false positive in the
+        // optimized libstdc++ vector three-way comparison (with -Werror).
+        const Bytes& lhs = view ? a->joliet_identifier : a->identifier;
+        const Bytes& rhs = view ? c->joliet_identifier : c->identifier;
+        const auto count = std::min(lhs.size(), rhs.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            if (lhs[i] != rhs[i]) return lhs[i] < rhs[i];
+        }
+        return lhs.size() < rhs.size();
+    });
     for(auto* x:sorted)append(record(*x,view?x->joliet_identifier:x->identifier,view));
     b.resize((b.size()+block-1)/block*block);return b;
 }
