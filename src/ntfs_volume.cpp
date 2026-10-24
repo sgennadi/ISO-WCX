@@ -198,7 +198,8 @@ NtfsVolume::Record NtfsVolume::parse_record(std::vector<std::uint8_t> bytes) {
         const auto* p=bytes.data()+at;
         need(type!=kAttributeList,
              "NTFS attribute lists are not supported in Preview");
-        const auto name_len=p[9],name_offset=le16(p+10);
+        const auto name_len=p[9];
+        const auto name_offset=le16(p+10);
         const auto flags=le16(p+12);
         need(name_len==0 ||
              (name_offset>=16 && std::size_t(name_offset)+2*name_len<=size),
@@ -207,7 +208,8 @@ NtfsVolume::Record NtfsVolume::parse_record(std::vector<std::uint8_t> bytes) {
         for(unsigned i=0;i<name_len;++i)
             a.name.push_back(static_cast<char16_t>(le16(p+name_offset+2*i)));
         if(p[8]==0) {
-            const auto val_size=le32(p+16),val_off=le16(p+20);
+            const auto val_size=le32(p+16);
+            const auto val_off=le16(p+20);
             need(val_off>=24 && val_off<=size &&
                  val_size<=size-val_off &&
                  val_size<=1024*1024,"invalid resident NTFS data");
