@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace iso_wcx {
 namespace {
@@ -29,18 +30,26 @@ std::uint64_t header_be64(const std::uint8_t* p) {
     return (std::uint64_t(header_be32(p)) << 32) | header_be32(p+4);
 }
 
-// Limited, conservative CHD CD track interpretation. Do not guess offsets on
-// audio, mixed-mode or disc images with pregap arrangements we do not yet map.
+// Interpret native CHD CD track geometry, including MAME's four-frame padding.
+// Audio and unsupported sector modes consume storage but are never exposed as
+// ISO/UDF user data. No external chdman utility is needed at runtime.
 std::string get_field(std::string_view metadata, std::string_view name) {
-    const auto pos = metadata.find(name);
-    if (pos == std::string_view::npos) return {};
-    const auto start = pos + name.size();
-    if (start >= metadata.size()) return {};
-    const auto end = metadata.find_first_of(" \t\r\n", start);
-    return std::string(metadata.substr(start,
-        end == std::string_view::npos ? metadata.size() - start : end - start));
+    // Match a complete metadata token, not a substring of another key.
+    std::size_t at = 0;
+    while (at < metadata.size()) {
+        const auto start = metadata.find_first_not_of(" \t\r\n", at);
+        if (start == std::string_view::npos) break;
+        const auto end = metadata.find_first_of(" \t\r\n", start);
+        const auto token = metadata.substr(start,
+            end == std::string_view::npos ? metadata.size() - start : end - start);
+        if (token.starts_with(name))
+            return std::string(token.substr(name.size()));
+        if (end == std::string_view::npos) break;
+        at = end;
+    }
+    return {};
 }
-std::uint64_t parse_count(std::string_view str) {
+std::uint64_t parse_count(std::string_view str, bool allow_zero = false) {
     require(!str.empty() && str.size() <= 18, "CHD track frame count missing");
     std::uint64_t result = 0;
     for (const auto c : str) {
@@ -49,7 +58,7 @@ std::uint64_t parse_count(std::string_view str) {
                 "CHD track frame count overflows");
         result = result * 10 + std::uint64_t(c - '0');
     }
-    require(result != 0, "CHD data track is empty");
+    require(allow_zero || result != 0, "CHD data track is empty");
     return result;
 }
 std::string metadata_string(chd_file* image, std::uint32_t tag,
@@ -67,6 +76,73 @@ std::string metadata_string(chd_file* image, std::uint32_t tag,
             "CHD track metadata has invalid terminator");
     return std::string(buffer.data());
 }
+// cdrom_file in MAME and libchdr align each track independently to four
+// 2448-byte frames. FRAMES excludes those artificial padding frames.
+struct OpticalTrack {
+    std::uint64_t first_frame = 0;
+    std::uint64_t frames = 0;
+    std::uint32_t number = 0;
+    std::uint32_t preferred_offset = 0;
+    bool readable_data = false;
+};
+
+std::vector<OpticalTrack> optical_track_map(chd_file* image,
+                                           std::uint64_t total_frames) {
+    std::vector<OpticalTrack> tracks;
+    std::uint64_t cursor = 0;
+    constexpr std::uint32_t max_tracks = 99;
+    for (std::uint32_t i = 0; i < max_tracks; ++i) {
+        // New CHT2 metadata is preferred over the original CHTR tag.
+        auto meta = metadata_string(image, CDROM_TRACK_METADATA2_TAG, i);
+        if (meta.empty())
+            meta = metadata_string(image, CDROM_TRACK_METADATA_TAG, i);
+        if (meta.empty()) break;
+
+        const auto number = parse_count(get_field(meta, "TRACK:"));
+        require(number == std::uint64_t(i) + 1,
+                "CHD track numbers are missing or not sequential");
+        const auto count = parse_count(get_field(meta, "FRAMES:"));
+        require(count <= total_frames - cursor,
+                "CHD track frame count exceeds compressed image");
+        const auto pad = (4u - (count % 4u)) % 4u;
+        require(pad <= total_frames - cursor - count,
+                "CHD CD four-frame alignment exceeds compressed image");
+
+        const auto pregap = get_field(meta, "PREGAP:");
+        const auto postgap = get_field(meta, "POSTGAP:");
+        if (!pregap.empty())
+            require(parse_count(pregap, true) <= total_frames,
+                    "CHD CD pregap is invalid");
+        if (!postgap.empty())
+            require(parse_count(postgap, true) <= total_frames,
+                    "CHD CD postgap is invalid");
+
+        OpticalTrack track{};
+        track.first_frame = cursor;
+        track.frames = count;
+        track.number = static_cast<std::uint32_t>(number);
+        const auto type = get_field(meta, "TYPE:");
+        require(!type.empty(), "CHD CD track type is missing");
+        if (type == "MODE1" || type == "MODE1_RAW") {
+            track.preferred_offset = 16;
+            track.readable_data = true;
+        } else if (type == "MODE2_FORM1" || type == "MODE2_FORM1_RAW" ||
+                   type == "MODE2_RAW") {
+            // MODE2_RAW is included only when the ISO/UDF anchor validates
+            // the actual sector payload. Form 2 files are not exposed.
+            track.preferred_offset = 24;
+            track.readable_data = true;
+        }
+        tracks.push_back(track);
+        cursor += count + pad;
+    }
+    require(!tracks.empty(), "CHD CD track metadata is required");
+    require(metadata_string(image, CDROM_TRACK_METADATA2_TAG, max_tracks).empty() &&
+            metadata_string(image, CDROM_TRACK_METADATA_TAG, max_tracks).empty(),
+            "CHD CD has more than 99 tracks");
+    return tracks;
+}
+
 } // namespace
 
 void ChdStream::FileCloser::operator()(std::FILE* file) const noexcept {
@@ -153,44 +229,14 @@ ChdStream::ChdStream(const std::filesystem::path& path) {
         // chdman-style CD images have 2448-byte frames: 2352 bytes raw CD
         // sector plus 96-byte subcode. Only expose Mode 1 / Mode 2 Form 1
         // logical user data, not the sync, ECC or subchannel bytes.
-        auto meta = metadata_string(chd_.get(),CDROM_TRACK_METADATA2_TAG,0);
-        std::uint32_t tag = CDROM_TRACK_METADATA2_TAG;
-        if (meta.empty()) {
-            tag = CDROM_TRACK_METADATA_TAG;
-            meta = metadata_string(chd_.get(),tag,0);
-        }
-        require(!meta.empty(), "CHD CD track metadata is required");
-        require(metadata_string(chd_.get(),tag,1).empty(),
-                "CHD multi-track CD mapping is not supported yet");
-        const auto type = get_field(meta,"TYPE:");
-        const auto track = get_field(meta,"TRACK:");
-        require(track == "1", "CHD CD must contain one data track");
-        if (type == "MODE1" || type == "MODE1_RAW") {
-            data_offset_ = 16;
-        } else if (type == "MODE2_FORM1" || type == "MODE2_FORM1_RAW") {
-            data_offset_ = 24;
-        } else {
-            throw std::runtime_error("CHD CD track is not Mode 1/Mode 2 Form 1 data");
-        }
-        require(get_field(meta,"PREGAP:").empty() ||
-                get_field(meta,"PREGAP:") == "0",
-                "CHD CD pregap mapping is not supported");
-        require(get_field(meta,"POSTGAP:").empty() ||
-                get_field(meta,"POSTGAP:") == "0",
-                "CHD CD postgap mapping is not supported");
-        const auto used_frames = parse_count(get_field(meta,"FRAMES:"));
-        require(used_frames <= frames &&
-                used_frames <= max_logical / iso_sector,
-                "CHD track exceeds logical frame count");
-        logical_size_ = used_frames * iso_sector;
-        label_ = "CHD v5 / compressed single-track CD Mode 1/2 Form 1";
+        const auto tracks = optical_track_map(chd_.get(), frames);
 
-        // Some CHD CD containers represent a 150-sector CD lead-in and
-        // cooked vs. raw track offsets differently. Trust a validated ISO
-        // PVD or UDF anchor instead of guessing a fixed frame offset.
+        // A valid ISO PVD or UDF anchor is required before a physical track
+        // is exposed to the filesystem parsers. Try the last data track first,
+        // matching CUE/NRG handling, while allowing audio tracks on either side.
         auto probe = [&](std::uint64_t frame, std::uint32_t offset,
                          bool udf) -> bool {
-            if (frame >= used_frames || offset > unit_bytes_ - 16)
+            if (frame >= frames || offset > unit_bytes_ - 16)
                 return false;
             const auto pos = frame * unit_bytes_ + offset;
             if (pos > header->logicalbytes ||
@@ -209,44 +255,52 @@ ChdStream::ChdStream(const std::filesystem::path& path) {
             for (int i=0; i<16; ++i) if (i!=4) sum += p[i];
             return (sum & 255u) == p[4];
         };
+
         bool found = false;
-        const auto try_leading = [&](std::uint32_t lead, bool udf) -> bool {
-            if (used_frames <= std::uint64_t(lead) + (udf ? 256u : 16u))
-                return false;
-            for (const auto offset : {data_offset_,0u,16u,24u}) {
-                if (probe(std::uint64_t(lead) + (udf ? 256u : 16u),
-                          offset,udf)) {
+        for (auto it = tracks.rbegin(); it != tracks.rend() && !found; ++it) {
+            const auto& track = *it;
+            if (!track.readable_data) continue;
+            const auto try_leading = [&](std::uint32_t lead, bool udf) -> bool {
+                const std::uint64_t descriptor_sector = udf ? 256u : 16u;
+                if (track.frames <= std::uint64_t(lead) + descriptor_sector)
+                    return false;
+                const auto anchor = track.first_frame + lead + descriptor_sector;
+                for (const auto offset : {track.preferred_offset, 0u, 16u, 24u}) {
+                    if (!probe(anchor, offset, udf)) continue;
                     data_offset_ = offset;
-                    leading_frames_ = lead;
-                    logical_size_ = (used_frames - lead) * iso_sector;
+                    leading_frames_ = track.first_frame + lead;
+                    logical_size_ = (track.frames - lead) * iso_sector;
+                    label_ = "CHD v5 / compressed CD track " +
+                             std::to_string(track.number) + " of " +
+                             std::to_string(tracks.size()) +
+                             " / validated Mode 1 or Mode 2 Form 1";
                     return true;
                 }
+                return false;
+            };
+
+            // The track start is derived from CHD metadata, never from
+            // concatenated unpadded CUE lengths. A 150-sector lead-in or
+            // captured INDEX 00 can shift the filesystem anchor.
+            for (const auto lead : {0u, 150u}) {
+                if (try_leading(lead, false) || try_leading(lead, true)) {
+                    found = true;
+                    break;
+                }
             }
-            return false;
-        };
-        // Standard layouts are the fast path. Some chdman-produced and
-        // vendor CD images place a data-track lead-in at other frame offsets.
-        // Allow up to 512 frames, but only after observing a valid ISO PVD
-        // or UDF anchor. Never guess and expose unknown audio as file bytes.
-        for (const auto lead : {0u,150u}) {
-            if (try_leading(lead,false) || try_leading(lead,true)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
+            if (found) break;
             const auto limit = static_cast<std::uint32_t>(
-                std::min<std::uint64_t>(512,used_frames > 16 ?
-                    used_frames-17 : 0));
-            for (std::uint32_t lead=1; lead<=limit; ++lead) {
-                if (lead==150) continue;
-                if (try_leading(lead,false) || try_leading(lead,true)) {
+                std::min<std::uint64_t>(512, track.frames > 16 ?
+                    track.frames - 17 : 0));
+            for (std::uint32_t lead = 1; lead <= limit; ++lead) {
+                if (lead == 150) continue;
+                if (try_leading(lead, false) || try_leading(lead, true)) {
                     found = true;
                     break;
                 }
             }
         }
-        require(found, "CHD CD track has no validated ISO/UDF data anchor");
+        require(found, "CHD CD has no validated ISO/UDF Mode 1/2 Form 1 track");
 
     }
 }
