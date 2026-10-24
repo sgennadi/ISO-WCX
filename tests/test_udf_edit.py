@@ -58,6 +58,10 @@ def fe(image, lba, data, directory=False, efe=False):
 def base_image(*, layout='embedded', nested=False, efe=False, overlap=False):
     image = bytearray(udf_image())
     image[19*B+1:19*B+6] = b'NSR02'
+    # Independent reader tolerated a synthetic FID tagVersion=0; the
+    # writer intentionally requires legal ECMA-167 tagVersion 2/3.
+    p16(image,301*B+176+2,2)
+    checksum(image,301*B+176)
     if layout == 'short':
         # The shortAD records five bytes but occupies the entire 2048-byte
         # sector, so bounded growth can update the shortAD to 100 bytes.

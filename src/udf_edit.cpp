@@ -510,6 +510,7 @@ void edit_udf(const std::filesystem::path& image,
             put32(fe,u16(fe,0)==266?212u:172u,
                   static_cast<std::uint32_t>(len));
             put64(fe,56,len);
+            if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
             tag_update(fe,0,target.fe.ad_offset+static_cast<std::size_t>(len));
             staged_write(out,target.fe.at,fe);
         } else {
@@ -520,6 +521,7 @@ void edit_udf(const std::filesystem::path& image,
             need(bool(source),"cannot open UDF replacement content");
             copy(source,out,len,progress);
             put64(fe,56,len);
+            if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
             // Maintain the old extent length on shrink, otherwise extend
             // the short AD only within the already-allocated full blocks.
             const auto current=u32(fe,target.fe.ad_offset)&0x3fffffffu;
