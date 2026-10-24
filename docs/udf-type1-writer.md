@@ -15,8 +15,16 @@ not universal UDF 1.02–2.60 editing.
   reserving bitmap blocks. Expanding an earlier extent, allocating more
   blocks during replacement or changing the ShortAD count is unsupported.
   Supports nested paths and streamed verification.
-- Logically delete an existing regular file by setting its FID deleted bit,
-  updating descriptor CRC/checksum. Deletion **does not reclaim blocks**.
+- Delete an existing regular file by setting its FID Deleted bit and updating
+  descriptor CRC/checksum. On supported bitmap-equipped Type-1 volumes,
+  deletion also zeros the 16-byte FID ICB reference, wipes the orphan FE and
+  every recorded ShortAD sector **in the staged image**, marks those blocks
+  free in the Space Bitmap and increments the LVID free count. The LVID
+  file counter is decremented where ImplementationUse provides one.
+  Every extent must have exactly one verified owner and be recorded as
+  allocated. Previously deleted FIDs with stale ICB references block
+  unsafe reclamation. On legacy images **without a writable bitmap**, only
+  logical deletion remains supported and no sectors are reclaimed.
 - Create **multiple regular files and empty subdirectories in one atomic
   transaction** under compatible embedded or single-ShortAD parents. Its size is bounded by
   image/partition capacity, available bitmap blocks and the finite number of
@@ -33,9 +41,13 @@ not universal UDF 1.02–2.60 editing.
   All FIDs remain four-byte aligned and tightly packed, including records
   that straddle logical-sector boundaries. TagLocation is recalculated from
   the sector where each descriptor begins.
-- Reclaim only **superseded directory data extents** after exclusive-ownership
-  verification. This reclamation never applies to logically deleted files.
-  Update bitmap, LVID and FE LogicalBlocksRecorded atomically.
+- Reclaim **superseded directory data extents** and **newly deleted regular
+  file FE/ShortAD allocations**, each after exclusive-ownership verification.
+  File sectors are scrubbed and released only after all new FE/ShortAD and
+  directory allocation planning completes. Therefore, a newly deleted
+  file's blocks become available to the **next transaction**, never to
+  another addition within the same batch. Update bitmap/LVID and directory
+  FE LogicalBlocksRecorded atomically.
 - Encode newly created names with OSTA CS0 (BMP Unicode including Cyrillic and
   Hebrew; non-BMP names intentionally rejected in this write mode).
 - In one **mixed atomic batch**, create new files/directories, replace
@@ -46,9 +58,10 @@ not universal UDF 1.02–2.60 editing.
   together. All new FE/FIDs, data extents and parent relocations are planned
   together; update the bitmap and closed LVID **once** with aggregate
   allocated/reclaimed sectors, unique IDs and file/directory counters.
-  Deleted files remain allocated; no freed blocks are reused in this batch.
-  Stage the image once, reparse it and verify **every** new/replaced file
-  and every logical deletion before atomic replacement. Cancellation or any
+  Deleted files' blocks are released only when uniquely owned and all
+  allocation descriptors validate. Reclamation happens after new allocations
+  are planned, preventing same-batch reuse. Stage the image once, reparse it
+  and verify **every** new/replaced file and deletion before atomic replacement. Cancellation or any
   failed change leaves the original image unchanged.
 - If a single path occurs more than once in a mixed batch (including delete
   then recreate at that same path, or case-only collisions), reject the
@@ -78,8 +91,8 @@ not universal UDF 1.02–2.60 editing.
 
 Renaming, removing directories, editing ISO/UDF Bridge metadata,
 delete-and-recreate of the same path in one batch, directory growth beyond
-8 MiB, freeing blocks from deleted files, bitmap descriptors larger than
-8 MiB, sparse/unrecorded
+8 MiB, automatic reclamation of **old** logically deleted/orphaned files,
+bitmap descriptors larger than 8 MiB, sparse/unrecorded
 file extents, chained AED writing, non-BMP new names and any
 VAT/Sparable/Metadata writer.
 
@@ -91,8 +104,10 @@ original image byte-for-byte unchanged.
 Synthetic fixtures check FE/EFE and multi-ShortAD replacement, final-ShortAD
 in-place growth, rejected over-allocation, FID deletion, fragmented file
 allocation, mixed atomic create/replace/delete batches with nested
-directories, embedded/external FID relocation, tag CRC, bitmap/LVID
-accounting, Unicode and atomic rollback. CI independently generates UDF 1.02 HD/DVD-RAM images
+directories, embedded/external FID relocation, exclusive FE/ShortAD
+reclamation, wiped sectors and next-transaction allocation reuse, stale
+deleted-FID alias rejection, tag CRC, bitmap/LVID accounting, Unicode
+and atomic rollback. CI independently generates UDF 1.02 HD/DVD-RAM images
 with `mkudffs` and validates changes via `udfinfo` and 7-Zip. A dedicated
 CI job creates, grows, rejects an overrun and replaces a file larger than
 4 GiB, checking complete independently decoded 7-Zip SHA-256 each time.
