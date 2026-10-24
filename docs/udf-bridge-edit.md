@@ -33,7 +33,8 @@ path intact. The staged file is atomically replaced only after validation.
 No directory creation/removal, adding/deleting files, resizing, UDF FE/FID
 metadata writes, free-space allocation, updating VAT/metadata partitions,
 repairing corrupted UDF, NTFS metadata restoration, or rewriting El Torito
-on bridged media. UDF-only optical images remain read-only.
+on bridged media. UDF-only Type-1 images have a separate limited native writer, including
+bitmap-backed new files and empty directories in compatible embedded parents.
 
 UDF-only Type-1 files have a separate, strictly limited native writer for
 in-allocation size updates and FID deletion; these new features **do not**

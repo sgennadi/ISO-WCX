@@ -980,23 +980,54 @@ class Udf {
         require(active_.insert(key).second,"cyclic UDF directory");
         auto directory=fe(lba,map);require(directory.type==4,"UDF ICB is not a directory");
         auto bytes=directory_bytes(directory);
-        for(std::size_t p=0;p+38<=bytes.size();) {
-            if(std::all_of(bytes.begin()+static_cast<std::ptrdiff_t>(p),bytes.begin()+static_cast<std::ptrdiff_t>(p+16),[](std::uint8_t v){return v==0;}))break;
+        for(std::size_t p=0;p<bytes.size();) {
+            const auto remaining=bytes.size()-p;
+            if(remaining<38) {
+                require(std::all_of(
+                    bytes.begin()+static_cast<std::ptrdiff_t>(p),
+                    bytes.end(),[](std::uint8_t v){return v==0;}),
+                    "trailing incomplete UDF directory identifier");
+                break;
+            }
+            if(std::all_of(bytes.begin()+static_cast<std::ptrdiff_t>(p),
+                           bytes.begin()+static_cast<std::ptrdiff_t>(p+16),
+                           [](std::uint8_t v){return v==0;})) {
+                const auto padding=std::min<std::size_t>(
+                    block_-p%block_,remaining);
+                require(std::all_of(
+                    bytes.begin()+static_cast<std::ptrdiff_t>(p),
+                    bytes.begin()+static_cast<std::ptrdiff_t>(p+padding),
+                    [](std::uint8_t v){return v==0;}),
+                    "invalid UDF sector padding");
+                p+=padding;
+                continue;
+            }
             check_tag(bytes,p,257);
             auto n=bytes[p+19];auto impl=u16(bytes,p+36);
             require(impl<=bytes.size()-p-38 && n<=bytes.size()-p-38-impl,"invalid UDF FID length");
             auto record_length=(std::size_t(38)+impl+n+3u)&~std::size_t(3);
-            require(record_length<=bytes.size()-p && record_length>0,"invalid UDF FID record");
+            require(record_length<=remaining && record_length>0,
+                    "UDF FID exceeds logical directory length");
             if(!(bytes[p+18]&0x0cu) && n) {
                 auto item_name=udf_name(bytes,p+38+impl,n);
                 auto child_lba=u32(bytes,p+24);auto child_map=u16(bytes,p+28);
                 auto child=fe(child_lba,child_map);
-                Item item;item.path=prefix+item_name;item.directory=child.type==4;
-                item.attributes=item.directory?0x10u:0x20u;item.dos_time=child.dos_time;
-                item.size=item.directory?0:child.size;
-                item.extents=std::move(child.extents);item.inline_data=std::move(child.inline_bytes);
-                append(entries_,std::move(item));
-                if(child.type==4)walk(child_lba,child_map,prefix+item_name+"/",depth+1);
+                // ECMA-167 ICB file types 4 and 5 are directories and
+                // ordinary files. Never present symbolic links (type 12),
+                // devices, FIFOs or other special ICBs as ordinary bytes
+                // to the WCX extraction API. We do not materialize links.
+                if(child.type==4 || child.type==5) {
+                    Item item;item.path=prefix+item_name;
+                    item.directory=child.type==4;
+                    item.attributes=item.directory?0x10u:0x20u;
+                    item.dos_time=child.dos_time;
+                    item.size=item.directory?0:child.size;
+                    item.extents=std::move(child.extents);
+                    item.inline_data=std::move(child.inline_bytes);
+                    append(entries_,std::move(item));
+                    if(child.type==4)
+                        walk(child_lba,child_map,prefix+item_name+"/",depth+1);
+                }
             }
             p+=record_length;
         }
@@ -1005,15 +1036,22 @@ class Udf {
 public:
     explicit Udf(Source& src) : src_(src) {}
     bool parse() {
-        constexpr std::array<std::uint32_t,4> candidates={2048,512,1024,4096};
+        // Read unusual large-block UDF images, and probe sector 512 as
+        // a last-resort, validated AVDP when ordinary anchors are absent.
+        constexpr std::array<std::uint32_t,7> candidates={
+            2048,512,1024,4096,8192,16384,32768};
         for(auto sector:candidates) {
             auto count=src_.size()/sector;
-            std::array<std::uint64_t,3> anchors={256,count>=256?count-256:0,count?count-1:0};
+            std::array<std::uint64_t,4> anchors={
+                256,count>=256?count-256:0,count?count-1:0,512};
             for(auto anchor:anchors) {
                 if(anchor>=count)continue;
                 try {
                     auto a=src_.read(anchor*sector,sector);
                     check_tag(a,0,2);
+                    if(anchor==512)
+                        require(u32(a,12)==512,
+                                "UDF sector-512 anchor location mismatch");
                     for(unsigned copy=0;copy<2;copy++) {
                         try {
                     auto length=u32(a,16+8*copy),start=u32(a,20+8*copy);
@@ -1031,7 +1069,9 @@ public:
                     }
                     require(!lvd.empty()&&!partitions_.empty(),"missing UDF volume descriptor");
                     block_=u32(lvd,212);
-                    require(block_==512||block_==1024||block_==2048||block_==4096,"unsupported UDF block size");
+                    require(block_>=512 && block_<=32768 &&
+                            (block_&(block_-1))==0,
+                            "unsupported UDF logical block size");
                     auto map_bytes=u32(lvd,264),map_count=u32(lvd,268);
                     require(map_count>0&&map_count<=64 && lvd.size()>=440 && map_bytes<=lvd.size()-440,"UDF partition maps too large");
                     std::size_t p=440;
@@ -1058,9 +1098,11 @@ public:
                                 sp.partition=u16(lvd,p+38);
                                 sp.packet=u16(lvd,p+40);
                                 sp.table_size=u32(lvd,p+44);
-                                const auto count=lvd[p+42];
-                                require(count>=1&&count<=4,"invalid number of sparing tables");
-                                for(unsigned t=0;t<count;t++)sp.locations.push_back(u32(lvd,p+48+t*4));
+                                const auto sparing_table_count=lvd[p+42];
+                                require(sparing_table_count>=1&&sparing_table_count<=4,
+                                        "invalid number of sparing tables");
+                                for(unsigned t=0;t<sparing_table_count;t++)
+                                    sp.locations.push_back(u32(lvd,p+48+t*4));
                             } else mapping_.push_back(-1);
                         } else mapping_.push_back(-1);
                         p+=n;
@@ -1122,13 +1164,16 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
         throw std::runtime_error("WIM/ESD browsing requires Windows WIMGAPI");
 #endif
     }
-    if(extension == L".vhd" || extension == L".vhdx" || extension == L".raw") {
+    if(extension == L".vhd" || extension == L".vhdx") {
         open_virtual();
         return;
     }
-    if(extension == L".img") {
+    if(extension == L".img" || extension == L".raw") {
+        // A .raw file can be a whole-disk UDF volume (even with a fake,
+        // zero-start MBR). First try real MBR/GPT filesystems, then require
+        // independently valid UDF/ISO descriptors before using optical mode.
         try {open_virtual(); return;}
-        catch(const std::exception&) { /* Fall back to optical parsing. */ }
+        catch(const std::exception&) { /* Try optical/UDF validation. */ }
     }
     if(cue || nrg || mds || ccd) {
         const std::size_t count=cue?cue_data_tracks(image_).size():

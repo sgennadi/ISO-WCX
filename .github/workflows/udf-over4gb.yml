@@ -1,0 +1,33 @@
+name: UDF over-4-GiB native write and independent readback
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/udf-bitmap-allocator
+    paths:
+      - 'tests/test_udf_over4gb.py'
+      - '.github/workflows/udf-over4gb.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  udf-over-4gib:
+    name: mkudffs UDF >4 GiB ShortAD + independent 7-Zip SHA256
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check free disk capacity
+        run: df -h .
+      - name: Install independent UDF tools (CI only)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends udftools p7zip-full
+      - name: Build editor and UDF inspector
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target archive_edit_fixture disc_inspect --parallel 2
+      - name: "Over 4 GiB UDF create, parse and 7z streaming hash"
+        run: python3 tests/test_udf_over4gb.py build/archive_edit_fixture build/disc_inspect

@@ -1,6 +1,8 @@
-# ISO-WCX v0.16.0 — Stable Core with experimental format notes
+# ISO-WCX v0.16.0 Stable Core + experimental UDF writer Preview
 
 Modern Total Commander WCX plugin with a Stable installation channel and explicitly restricted ISO/WIM/UDF editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
+
+The latest UDF Type-1 allocator remains **experimental**, outside the published stable package.
 
 ## If Total Commander says `File iso.wcx not found!`
 
@@ -13,8 +15,10 @@ This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.
 - Rock Ridge RRIP NM/CE names, CL relocated directory references, PX non-writable/read-only mapping, TF modification timestamps and mirrored CE/PX number validation; symbolic links and POSIX special files are ignored rather than followed.
 - 2048-byte logical images, raw 2352-byte CD Mode 1 and Mode 2 Form 1, and 2336-byte XA Form 1 frames (no Form 2).
 - Some images with 150-sector lead-in (relative and absolute session LBA conventions), but **not full multisession TOC/CUE parsing**.
-- UDF Type-1 physical partition mapping, File Entry/Extended File Entry, embedded/short/long allocation descriptors, AED continuations, OSTA CS0 UTF-16 names (surrogate pairs), and reserve VDS recovery. **Restricted write Preview:** UDF-only single physical partition; resize/replace existing FE/EFE inline or single-ShortAD regular files within already allocated blocks and logically delete an existing FID. No new allocations or freed blocks.
-- **Experimental** UDF Metadata, Virtual (VAT) and Sparable partition-map reading, including mirror metadata fallback and packet redirects.
+- UDF Type-1 physical partition mapping, FE/EFE, embedded/short/long allocation descriptors, AED continuations, OSTA CS0 Unicode and reserve VDS recovery. **Read-only portability:** UDF 2.01 raw 512–32768-byte power-of-two whole-device images, including zero-start fake MBR, via .raw/.img/.udf/.iso content fallback. **Write Preview (standalone 2048-byte UDF Type-1):** replace existing regular files within their allocations, logically delete file FIDs, create one new regular file with bounded, potentially fragmented ShortAD
+runs (even beyond 8 MiB, subject to image capacity and FE slots), or one
+empty directory per transaction; automatically expand compatible embedded/ShortAD parent directories across sectors with contiguous allocations, verified bitmap/LVID and rollback. No VAT, Metadata, Sparable or ISO/UDF Bridge metadata writer. See [UDF writer](docs/udf-type1-writer.md).
+- **Experimental** UDF Metadata, Virtual (VAT) and Sparable partition-map reading, including mirror metadata fallback and packet redirects. UDF symbolic links (ICB type 12) and device/special ICBs are deliberately excluded from ordinary WCX extraction; they are never followed or materialized as regular files.
 - WCX list/test/extract for supported images, streamed file data and 64-bit sizes. Restricted PackFiles/DeleteFiles support is limited to validated plain ISO9660/Joliet images and standard unsplit WIM on Windows.
 
 ## Limits and cautions
@@ -180,7 +184,8 @@ one narrow write mode: equal-length replacement of an existing regular file
 whose ISO and UDF entries share a single physical extent. Bridge bootable
 images, addition/deletion, resize, embedded/sparse/hard-linked extents and
 UDF metadata rebuilding remain unsupported. Separate UDF-only Type-1 images
-permit only in-allocation existing-file replacement and FID deletion; no new
+permit bounded new file/directory creation and contiguous ShortAD parent
+directory expansion, in addition to existing-file replacement/FID deletion; no
 files/directories or free-space reclamation. Hybrid system-area ISO,
 Rock Ridge and multi-extent rewrites are refused. WIM edits require
 an NTFS staging workspace and elevated Windows backup/restore/security

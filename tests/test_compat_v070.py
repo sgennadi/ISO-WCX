@@ -112,6 +112,113 @@ def udf_with_reserve_vds(*, corrupt_main: bool = False, corrupt_both: bool = Fal
     return image
 
 
+def udf_anchor_at_512(*, corrupt: bool = False):
+    """Read UDF if only a tag-location-validated alternate AVDP remains."""
+    image = udf_image()
+    source = 256*B
+    target = 512*B
+    image[target:target+B] = image[source:source+B]
+    p32(image, target+12, 511 if corrupt else 512)
+    update_tag_checksum(image, 512)
+    image[source:source+B] = bytes(B)
+    return image
+
+
+def udf_multisector_directory(*, dirty_padding: bool = False):
+    """Tightly packed FIDs; the last record crosses the sector boundary."""
+    image = udf_image()
+    root = 301*B
+    directory = bytearray()
+    for i in range(47):
+        identifier = 'hello' if i == 0 else (
+            'extra' if i == 46 else f'q{i:04d}')
+        encoded = b'\x08' + identifier.encode('ascii')
+        assert len(encoded) == 6
+        fid = bytearray(44)
+        p16(fid, 0, 257)
+        p16(fid, 2, 2)
+        p32(fid, 12, 20+len(directory)//B)
+        fid[19] = len(encoded)
+        p32(fid, 20, B)
+        p32(fid, 24, 2)
+        fid[38:44] = encoded
+        fid[4] = sum(fid[j] for j in range(16) if j != 4) & 255
+        directory.extend(fid)
+    assert len(directory)==47*44 and 46*44<B<len(directory)
+    image[320*B:320*B+len(directory)] = directory
+    if dirty_padding:
+        # This changes a real FID header, not permitted sector padding.
+        image[321*B+2] ^= 0x20
+    p16(image, root+34, 0)  # One ShortAD directory extent
+    p64(image, root+56, len(directory))
+    p64(image, root+64, 2)
+    p32(image, root+172, 8)
+    p32(image, root+176, len(directory))
+    p32(image, root+180, 20)
+    update_tag_checksum(image, 301)
+    return image
+
+
+def udf_multisector_check(exe: str) -> None:
+    image=udf_multisector_directory()
+    with tempfile.TemporaryDirectory() as temporary:
+        source=pathlib.Path(temporary)/'two-blocks.udf'
+        output=pathlib.Path(temporary)/'extracted'
+        source.write_bytes(image)
+        result=subprocess.run([exe,str(source),'--extract',str(output)],
+                              capture_output=True,text=True,
+                              encoding='utf-8',timeout=10)
+        assert result.returncode==0,(result.stdout,result.stderr)
+        assert (output/'hello').read_bytes()==b'world'
+        assert (output/'extra').read_bytes()==b'world'
+
+
+def udf_special_icb_image(file_type: int):
+    """Retain ordinary content but suppress symlinks/devices on extraction."""
+    image = udf_image()
+    special = bytearray(B)
+    p16(special, 0, 261)
+    p16(special, 2, 2)
+    special[27] = file_type
+    p16(special, 34, 3)
+    p64(special, 56, 7)
+    p32(special, 172, 7)
+    special[176:183] = b'../etc/'
+    special[4] = sum(special[i] for i in range(16) if i != 4) & 255
+    image[303*B:304*B] = special
+    record = bytearray(44)
+    p16(record, 0, 257)
+    p16(record, 2, 2)
+    record[19] = 5
+    p32(record, 20, B)
+    p32(record, 24, 3)
+    record[38:43] = b'\x08link'
+    record[4] = sum(record[i] for i in range(16) if i != 4) & 255
+    root = 301*B
+    image[root+176+44:root+176+88] = record
+    p64(image, root+56, 88)
+    p32(image, root+172, 88)
+    update_tag_checksum(image, 301)
+    return image
+
+
+def udf_special_icb_check(exe: str) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        source = root/'special.udf'
+        output = root/'out'
+        for kind in (12, 6):  # symbolic link and block device
+            source.write_bytes(udf_special_icb_image(kind))
+            result = subprocess.run([exe,str(source),'--extract',str(output)],
+                                    capture_output=True,text=True,
+                                    encoding='utf-8',timeout=10)
+            assert result.returncode == 0, (kind,result.stdout,result.stderr)
+            assert 'FILE 5 hello' in result.stdout
+            assert 'link' not in result.stdout
+            assert (output/'hello').read_bytes() == b'world'
+            assert not (output/'link').exists(), kind
+
+
 def main(exe: str) -> None:
     image, expected = interleaved_image()
     run(exe, image, 'INTERLV.BIN', expected)
@@ -127,9 +234,14 @@ def main(exe: str) -> None:
     run(exe, udf_with_reserve_vds(), 'hello', b'world')
     run(exe, udf_with_reserve_vds(corrupt_main=True), 'hello', b'world')
     run(exe, udf_with_reserve_vds(corrupt_main=True, corrupt_both=True), None)
+    run(exe, udf_anchor_at_512(), 'hello', b'world')
+    run(exe, udf_anchor_at_512(corrupt=True), None)
+    udf_multisector_check(exe)
+    udf_special_icb_check(exe)
+    run(exe, udf_multisector_directory(dirty_padding=True), None)
     run(exe, udf_unicode_image('unused', invalid_name=b'\x10\xd8\x3d'), None)
     run(exe, udf_unicode_image('unused', invalid_name=b'\x10\xdc\x80\x00\x61'), None)
-    print('PASS: 12 ISO/Joliet/UDF v0.7 conformance and corruption cases')
+    print('PASS: ISO/Joliet/UDF conformance, cross-sector FIDs, special ICB safety and corruption cases')
 
 
 if __name__ == '__main__':

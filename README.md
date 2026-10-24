@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.16.0 Stable Core** — a native C++20 Total Commander WCX
+**ISO-WCX v0.16.0 Stable Core + experimental UDF writer Preview (PR #33)** — a native C++20 Total Commander WCX
 plugin for optical ISO/UDF, WIM/ESD/SWM and virtual HDD images.
 Core browsing/extraction and packaging are verified in Windows x86/x64 and
 Linux CI. **Advanced readers and write modes explicitly marked experimental
@@ -40,8 +40,8 @@ experimental support. See [v0.16.0 release notes](RELEASE_NOTES.md).
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
 | CloneCD CCD/IMG | `.ccd` version 3 + matching `.img` (2352-byte sectors), single-session Mode 1 / Mode 2 Form 1 data tracks, including ECMA-130 scrambled sectors. Optional `.sub` sidecar exposed byte-for-byte under `subchannels/disc.sub`; CD-Audio and CD-Text decoding not implemented; CRC-valid Q track/index frames summarized in `subchannels/q-index.csv`. |
 | 150-sector prefix | Relative and some absolute-LBA cases (not full multisession parsing) |
-| UDF Type 1 | Browse FE/EFE, OSTA CS0 (including UTF-16 surrogate pairs), AED extents, reserve VDS failover. **Edit Preview (UDF-only 2048-byte Type-1 physical volumes):** replace existing file data with bounded growth/shrink within already-allocated blocks, FE/EFE embedded data, nested paths, and logical FID deletion (space is not reclaimed). No new files/dirs, no free-space allocation, no rewrite of ISO/UDF Bridge metadata. |
-| UDF Metadata / VAT / Sparable | Experimental, synthetic-fixture coverage; not comprehensive UDF 1.02–2.60 |
+| UDF Type 1 | Browse FE/EFE, OSTA CS0 Unicode, AED continuations and reserve VDS failover. Read-only whole-disk UDF 2.01 with 512–32768-byte power-of-two blocks and optional compatibility fake MBR (.iso/.udf/.img/.raw). **Write Preview (single physical 2048-byte UDF-only Type-1):** replace/resize regular files within prior allocations, logical FID deletion without file-block reclamation, create one regular file of any size fitting the image/partition and FE ShortAD slots (including fragmented, multi-gigabyte data), or one empty directory per transaction, and automatically expand/reallocate compatible parent directories via contiguous ShortAD extents with bitmap/LVID updates (directory size limit 8 MiB). ISO/UDF Bridge metadata, VAT and Metadata/Sparable partitions remain read-only. See [UDF writer](docs/udf-type1-writer.md) and [portability](docs/udf-cross-platform.md). |
+| UDF Metadata / VAT / Sparable | Experimental read-only partition-map support with synthetic fixtures, not comprehensive UDF 1.02–2.60. The UDF reader exposes regular files and directories; symlinks, block devices and other special ICB types are not materialized as ordinary files. |
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
 | Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352/2448 data sectors); synthetic-test coverage |
 | El Torito | Exposes validated BIOS and EFI boot-load images and the boot catalog under `boot.images/`; EFI FAT BPB sizing when valid |
@@ -269,10 +269,12 @@ See [bounded optical container design](docs/packed-optical.md).
   WIMGAPI apply/capture with an NTFS workspace and elevated backup/restore/
   security privileges. The result is validated before replacing the input.
 - ESD/SWM, virtual disks, complex UDF and compressed optical formats remain
-  read-only. UDF-only Type-1 supports only bounded existing-file replacement
-  and FID deletion; **deleted file blocks are not reclaimed**. ISO/UDF Bridge
-  remains limited to shared-extent equal-length replacement; new UDF file
-  allocation, addition and full filesystem restructuring are not implemented.
+  read-only. The experimental UDF-only Type-1 allocator supports bounded new
+  files/empty directories, contiguous directory expansion and existing-file
+  replacement, but **deleted file blocks are not reclaimed**. Superseded
+  directory extents may be reclaimed after ownership checks. ISO/UDF Bridge
+  remains limited to shared-extent equal-length replacement; hybrid UDF
+  metadata rebuilding is not implemented.
   Individual WCX file extraction does not restore alternate data streams or
   reparse points. Unsupported ESD compression remains excluded.
 - See [WIM design notes](docs/wim-integration.md).
@@ -292,17 +294,29 @@ It rejects attribute-list continuations, encrypted/compressed data,
 reparse reconstruction and journal recovery. See [exFAT design](docs/exfat-integration.md),
 [ext reader design](docs/ext-integration.md) and [NTFS preview](docs/ntfs-integration.md).
 
-## Native UDF Type-1 writer (Preview)
+## Native UDF Type-1 writer (experimental PR #33)
 
-After PR #32, the in-process UDF writer can replace, grow or shrink **existing**
-regular files without allocating blocks (FE/EFE embedded data or one ShortAD
-extent) and mark existing regular files as deleted in their FID. It supports
-nested directories as target paths, but cannot create/rename/delete directories
-or insert a new file. Logical FID deletion does not free the original extent.
+The in-process writer edits compatible standalone 2048-byte UDF Type-1 images
+without third-party DLLs or executables. It can replace/grow/shrink existing
+regular files within their recorded FE/EFE or one ShortAD allocation and
+logically delete file FIDs (without freeing deleted file blocks). The Preview
+allocator can create **one new regular file bounded by image/partition space
+and FE ShortAD capacity** or **one empty directory** per atomic transaction,
+updating the bitmap, LVID and unique IDs. For nonembedded files the writer
+supports several fragmented ShortAD runs and streamed verification without
+allocating a second extracted copy. Writes beyond 4 GiB remain experimental
+and require broader independent large-media coverage.
 
-Supported input is a nonhybrid, 2048-byte UDF-only image with one Type-1
-physical partition, validated descriptors and no overlapping allocations.
-The original is replaced only after a staged image is reparsed and extracted
-bytes checked. UDF VAT/Metadata/Sparable writers, multi-extent updates,
-El Torito, Rock Ridge and hybrid partition-table modifications are not
-provided. See [native writer scope](docs/udf-type1-writer.md).
+Parent directories may automatically move from inline FE data to contiguous
+ShortAD blocks and grow across multiple sectors (8 MiB directory-data limit).
+The writer keeps FIDs tightly packed even across sector boundaries; validates
+the allocated run and reclaims superseded directory blocks only when
+ownership is unambiguous. The original image is not replaced until a staged
+copy is structurally reparsed and extracted bytes verified.
+
+Hybrid ISO/UDF Bridge mutation, FAT/NTFS in virtual drives, VAT/Metadata/
+Sparable writers, sparse/unrecorded allocation descriptors, AED continuation
+writing, deleted-file block reclamation and unsupported layouts remain
+read-only or are explicitly refused. See
+[UDF writer scope](docs/udf-type1-writer.md) and
+[portable UDF recognition](docs/udf-cross-platform.md).
