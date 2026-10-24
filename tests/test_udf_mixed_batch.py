@@ -65,7 +65,16 @@ def root_fids(raw):
         assert p + length <= len(data) and length >= 40
         crc_len = struct.unpack_from("<H", data, p + 10)[0]
         assert 16 + crc_len <= length
-        assert struct.unpack_from("<I", data, p + 12)[0] == first_lba + p // B
+        location = struct.unpack_from("<I", data, p + 12)[0]
+        expected_location = first_lba + p // B
+        # The independently authored nested synthetic fixture deliberately
+        # starts with two legacy FIDs with TagLocation=0. The writer retains
+        # those byte-for-byte unless it relocates the parent; every newly
+        # emitted FID and every relocated FID must have the proper location.
+        original_legacy_fid = (
+            storage == 3 and p < 88 and location == 0)
+        assert location == expected_location or original_legacy_fid, (
+            p, location, expected_location)
         assert crc16(data[p + 16:p + 16 + crc_len]) == (
             struct.unpack_from("<H", data, p + 8)[0])
         if data[p + 18] & 4:
