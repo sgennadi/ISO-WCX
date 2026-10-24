@@ -68,8 +68,11 @@ Unsplit, non-solid standard WIM supports file/directory edits inside an
 existing image index and deletion of an index except the last one.
 WIM editing needs NTFS staging and elevated Windows backup/restore/security
 privileges. ESD and SWM writes are not supported. Plain ISO9660/Joliet
-images support restricted, transactional file/folder edits; hybrid,
-UDF-bridge and Rock Ridge ISO images remain read-only. Important media
+images support restricted, transactional file/folder edits, including
+experimental ISO Long(221) identifiers and Joliet Long(110) UTF-16 units.
+Long names can be incompatible with other readers. BIOS/EFI El Torito
+sectors are retained and modifications overlapping them are rejected;
+hybrid, UDF-bridge and Rock Ridge ISO images remain read-only. Important media
 should be edited as copies. System wimgapi.dll runs inside the WCX;
 no additional DLL, EXE, mount or driver is required. NTFS alternate
 streams and reparse points are not restored by individual-file extraction.
