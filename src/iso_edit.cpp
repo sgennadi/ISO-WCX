@@ -118,6 +118,23 @@ public:
         auto system=read(0,16*block);need(std::all_of(system.begin(),system.end(),[](auto c){return c==0;}),"hybrid/system-area ISO editing is not supported");
         // Refuse UDF bridges before touching either namespace.
         for(std::uint32_t lba=16;lba<256&&std::uint64_t(lba+1)*block<=size;++lba){auto b=read(std::uint64_t(lba)*block,8);need(std::memcmp(b.data()+1,"BEA01",5)&&std::memcmp(b.data()+1,"NSR02",5)&&std::memcmp(b.data()+1,"NSR03",5),"UDF/ISO bridge editing is not supported");}
+        // A damaged or nonstandard bridge can be missing its VRS sequence
+        // while still carrying live UDF anchors. Never rewrite only the ISO
+        // namespace of an image with a plausible ECMA-167 AVDP.
+        const auto sectors=size/block;
+        auto avdp=[&](std::uint64_t lba) {
+            if(lba>=sectors)return false;
+            const auto tag=read(lba*block,16);
+            if(le(tag,0,2)!=2 || (le(tag,2,2)!=2 && le(tag,2,2)!=3) ||
+               le(tag,12)!=lba)return false;
+            unsigned sum=0;
+            for(std::size_t i=0;i<tag.size();++i)
+                if(i!=4)sum+=tag[i];
+            return static_cast<unsigned char>(sum)==tag[4];
+        };
+        need(!avdp(256) && !(sectors>256 && avdp(sectors-256)) &&
+             !avdp(sectors-1),
+             "UDF anchor detected; ISO/UDF Bridge editing requires a synchronized UDF writer");
         Bytes primary,supplementary;bool end=false;
         for(std::uint32_t lba=16;lba<64;++lba){auto b=read(std::uint64_t(lba)*block,block);need(std::memcmp(b.data()+1,"CD001",5)==0&&b[6]==1,"unsupported ISO descriptors");
             if(b[0]==255){end=true;break;}
