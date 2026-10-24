@@ -168,7 +168,7 @@ def main(editor: pathlib.Path, inspector: pathlib.Path):
             [("mkdir", "missing/a", None),
              ("add", "missing/a/b.txt", marker_file)],
             [("add", "hello", marker_file),
-             ("add", "new-file.txt", nested_file)],
+             ("add", "HELLO", nested_file)],  # Case-colliding change names.
             [("add", "docs", marker_file),
              ("add", "another.txt", nested_file)],
             [("mkdir", "new-writable", None),

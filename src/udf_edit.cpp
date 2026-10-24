@@ -1265,6 +1265,116 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     tx.commit(progress);
 }
 
+// A single bounded replacement engine serves standalone edits and mixed
+// transactions. Callers preflight FE/ShortAD capacity and ownership before
+// allocating or writing the transaction's temporary image.
+void write_udf_existing_replacement(std::fstream& out,const File& target,
+                                    const std::filesystem::path& source_path,
+                                    const EditProgress& progress) {
+        const auto len=std::filesystem::file_size(source_path);
+        auto fe=staged_read(out,target.fe.at,block);
+        tag_check(fe,0,u16(fe,0));
+        if(target.fe.storage==3) {
+            Bytes data(static_cast<std::size_t>(len));
+            std::ifstream input(source_path,std::ios::binary);
+            need(bool(input),"cannot open UDF replacement");
+            input.read(reinterpret_cast<char*>(data.data()),
+                       static_cast<std::streamsize>(data.size()));
+            need(bool(input) || data.empty(),"UDF source shortened");
+            const auto at=target.fe.ad_offset;
+            std::fill(fe.begin()+static_cast<std::ptrdiff_t>(at),
+                      fe.begin()+static_cast<std::ptrdiff_t>(
+                          at+std::max<std::uint64_t>(len,target.fe.size)),0);
+            std::copy(data.begin(),data.end(),
+                      fe.begin()+static_cast<std::ptrdiff_t>(at));
+            // For Extended File Entry this is at 212; regular File
+            // Entries keep the allocation-descriptor length at 172.
+            put32(fe,u16(fe,0)==266?212u:172u,
+                  static_cast<std::uint32_t>(len));
+            put64(fe,56,len);
+            if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
+            tag_update(fe,0,target.fe.ad_offset+static_cast<std::size_t>(len));
+            staged_write(out,target.fe.at,fe);
+        } else {
+            std::ifstream source(source_path,std::ios::binary);
+            need(bool(source),"cannot open UDF replacement content");
+            std::uint64_t remaining=len;
+            for(std::size_t i=0;i<target.fe.runs.size();++i) {
+                if(!remaining)break;
+                const auto& run=target.fe.runs[i];
+                const bool last=i+1==target.fe.runs.size();
+                // The final run is allowed to consume its sector tail.
+                const auto run_limit=last?
+                    std::uint64_t(run.blocks)*block:run.recorded;
+                const auto count=std::min(remaining,run_limit);
+                out.clear();
+                out.seekp(static_cast<std::streamoff>(run.at));
+                need(bool(out),"cannot seek UDF content ShortAD run");
+                copy(source,out,count,progress);
+                remaining-=count;
+            }
+            need(remaining==0,"UDF replacement ShortAD sequence incomplete");
+            put64(fe,56,len);
+            if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
+            if(len>target.fe.recorded) {
+                // Preserve every preceding ShortAD and extend only the
+                // last recorded length, not its logical LBA or allocation.
+                const auto& last=target.fe.runs.back();
+                const auto grown=last.recorded+(len-target.fe.recorded);
+                need(grown<=0x3fffffffull &&
+                     grown<=std::uint64_t(last.blocks)*block,
+                     "UDF final ShortAD cannot accommodate growth");
+                put32(fe,target.fe.ad_offset+
+                      (target.fe.runs.size()-1u)*8u,
+                      static_cast<std::uint32_t>(grown));
+            }
+            tag_update(fe,0,target.fe.ad_offset+target.fe.ads);
+            staged_write(out,target.fe.at,fe);
+        }
+}
+
+void validate_udf_existing_change(const Type1& volume,
+                                  const ArchiveChange& change) {
+        const auto name=edit_path(change.path);
+        need(!change.directory,"UDF directory creation/deletion not yet supported");
+        const auto it=volume.files().find(name);
+        need(it!=volume.files().end(),"UDF only supports existing files");
+        const auto& target=it->second;
+        need(target.fe.type==5,
+             "UDF deletion or replacement of a directory is unsupported");
+        if(!change.remove) {
+            need(std::filesystem::is_regular_file(
+                     std::filesystem::symlink_status(change.source)),
+                 "UDF replacement must be a regular file, not symlink");
+            const auto len=std::filesystem::file_size(change.source);
+            // Only the last ShortAD's unused final sector can grow without
+            // moving data or changing the order of existing logical runs.
+            // Earlier runs may have padding but extending them would shift
+            // every subsequent file offset. Keep the growth fully in place.
+            std::uint64_t available=target.fe.capacity;
+            if(!target.fe.runs.empty()) {
+                const auto& last=target.fe.runs.back();
+                const auto last_allocated=std::uint64_t(last.blocks)*block;
+                need(last.recorded<=last_allocated,
+                     "UDF final ShortAD exceeds its allocated blocks");
+                const auto last_limit=std::min<std::uint64_t>(
+                    last_allocated,0x3fffffffull);
+                need(last.recorded<=last_limit,
+                     "UDF final ShortAD exceeds 30-bit recorded length");
+                available=target.fe.recorded+(last_limit-last.recorded);
+            }
+            need(len<=target.fe.capacity && len<=available,
+                 "UDF replacement exceeds existing ShortAD allocation");
+            for(const auto& run:target.fe.runs) {
+                const Location dest{run.at,std::uint64_t(run.blocks)*block};
+                for(const auto& interval:volume.intervals())
+                    if(interval.owner!=target.fe.at)
+                        need(!intersects(dest,interval.range),
+                             "UDF file extent overlaps another file/descriptor");
+            }
+        }
+}
+
 // Plan every new child FE, file run and parent FID before editing a single
 // byte of the source. Each modified parent is relocated at most once.
 // The staged image is copied once, validated once and atomically committed
@@ -1300,13 +1410,26 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     }
     std::vector<Prepared> prepared;
     prepared.reserve(changes.size());
+    std::vector<ArchiveChange> existing_changes;
+    existing_changes.reserve(changes.size());
+    std::set<std::string> changed_names;
     for(const auto& change:changes) {
-        need(!change.remove,"UDF create batch cannot remove files");
+        const auto key=edit_path(change.path);
+        need(changed_names.insert(fold(key)).second,
+             "UDF batch contains duplicate or case-colliding changes");
+        if(volume.files().count(key)) {
+            validate_udf_existing_change(volume,change);
+            existing_changes.push_back(change);
+            continue;
+        }
+        need(!change.remove,"UDF cannot delete a nonexistent file");
+        need(!volume.directories().count(key),
+             "UDF cannot replace or recreate an existing directory");
         Prepared p;
         p.change=change;
-        p.key=edit_path(change.path);
+        p.key=key;
         need(names.insert(fold(p.key)).second,
-             "UDF batch has an existing or duplicate case-insensitive path");
+             "UDF new name collides with an existing file or directory");
         const auto slash=p.key.rfind('/');
         p.parent=slash==std::string::npos?
                  std::string{}:p.key.substr(0,slash);
@@ -1479,6 +1602,46 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         children.push_back(std::move(child));
     }
 
+    // Apply logical deletes to the same in-memory directory payload used
+    // for FID appends and relocations. Never write a stale parent FE later:
+    // an embedded parent checksum must cover both mutations together.
+    for(const auto& change:existing_changes) {
+        if(!change.remove)continue;
+        edit_tick(progress);
+        const auto key=edit_path(change.path);
+        const auto& existing=volume.files().at(key);
+        const auto slash=key.rfind('/');
+        const auto parent_key=slash==std::string::npos?
+                              std::string{}:key.substr(0,slash);
+        auto at=parents.find(parent_key);
+        if(at==parents.end()) {
+            const auto old=volume.directories().find(parent_key);
+            need(old!=volume.directories().end(),
+                 "UDF deleted FID parent is missing");
+            ParentPlan plan;
+            plan.original=old->second;
+            plan.payload=volume.directory_payload(plan.original);
+            plan.preexisting=true;
+            at=parents.emplace(parent_key,std::move(plan)).first;
+        }
+        auto& parent=at->second;
+        need(parent.original.at==existing.parent_at &&
+             existing.fid_at>=parent.original.data_at,
+             "UDF deleted FID refers to the wrong parent");
+        const auto relative=existing.fid_at-parent.original.data_at;
+        need(relative<=parent.payload.size() &&
+             existing.fid_bytes<=parent.payload.size()-relative,
+             "UDF deleted FID lies outside directory payload");
+        const auto p=static_cast<std::size_t>(relative);
+        tag_check(parent.payload,p,257);
+        need(!(parent.payload[p+18]&0x0cu) &&
+             u32(parent.payload,p+24)==
+                 volume.logical_of(existing.fe.at),
+             "UDF deleted FID identity or state mismatch");
+        parent.payload[p+18]|=0x04u;
+        tag_update(parent.payload,p,existing.fid_bytes);
+    }
+
     // Allocate all destination parent runs before releasing old ones.
     // Thus a later child allocation can never reuse a block scheduled for
     // zeroing after an original directory is relocated.
@@ -1508,6 +1671,14 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         record_allocation(parent.new_blocks);
 
         parent.fe_write=fe.bytes;
+        if(!parent.external) {
+            need(fe.ad_offset<=block &&
+                 parent.payload.size()<=block-fe.ad_offset,
+                 "UDF embedded directory payload exceeds FE");
+            std::copy(parent.payload.begin(),parent.payload.end(),
+                      parent.fe_write.begin()+
+                      static_cast<std::ptrdiff_t>(fe.ad_offset));
+        }
         put64(parent.fe_write,56,length);
         const bool extended=u16(parent.fe_write,0)==266;
         if(extended)put64(parent.fe_write,64,length);
@@ -1620,6 +1791,13 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                  "UDF batch data source length changed during writing");
         }
     }
+    for(const auto& change:existing_changes) {
+        edit_tick(progress);
+        if(change.remove)continue; // FID was patched in its parent payload.
+        write_udf_existing_replacement(
+            out,volume.files().at(edit_path(change.path)),
+            change.source,progress);
+    }
     for(const auto& [key,parent]:parents) {
         (void)key;
         edit_tick(progress);
@@ -1651,6 +1829,11 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                  strict.files().count(child.key)!=0,
                  "UDF batch staged namespace is incomplete");
         }
+        for(const auto& change:existing_changes) {
+            const auto key=edit_path(change.path);
+            need((strict.files().count(key)!=0)==!change.remove,
+                 "UDF mixed batch deletion/replacement namespace mismatch");
+        }
         strict.close();
         const Disc inspected(tx.output);
         need(inspected.format()=="UDF",
@@ -1659,6 +1842,24 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         for(std::size_t i=0;i<inspected.items().size();++i)
             need(by_path.emplace(inspected.items()[i].path,i).second,
                  "duplicate staged UDF batch name");
+        for(const auto& change:existing_changes) {
+            edit_tick(progress);
+            const auto key=edit_path(change.path);
+            const auto at=by_path.find(key);
+            if(change.remove) {
+                need(at==by_path.end(),
+                     "UDF mixed batch deleted file remains visible");
+            } else {
+                need(at!=by_path.end() &&
+                     !inspected.items()[at->second].directory &&
+                     inspected.items()[at->second].size==
+                         std::filesystem::file_size(change.source),
+                     "UDF mixed batch replacement size mismatch");
+                need(same_staged_item(tx.output,inspected.items()[at->second],
+                                      change.source,progress),
+                     "UDF mixed batch replacement content mismatch");
+            }
+        }
         for(const auto& child:children) {
             edit_tick(progress);
             const auto at=by_path.find(child.key);
@@ -1686,9 +1887,10 @@ void edit_udf(const std::filesystem::path& image,
     need(before.format()=="UDF","not a plain readable UDF volume");
     Type1 volume(image);
     need(!changes.empty(),"no UDF changes");
-    // Full creation batches share one in-memory allocator, one staged copy,
-    // one bitmap/LVID update and one final atomic rename.
-    if(changes.size()>1 && std::all_of(changes.begin(),changes.end(),
+    // A mixed creation/replacement/deletion batch shares one allocator and
+    // one atomic image commit. Existing-only edits retain their original
+    // bounded, non-allocating transaction path.
+    if(changes.size()>1 && std::any_of(changes.begin(),changes.end(),
         [&](const ArchiveChange& change) {
             const auto key=edit_path(change.path);
             return !change.remove &&
@@ -1710,43 +1912,7 @@ void edit_udf(const std::filesystem::path& image,
     for(const auto& change:changes) {
         const auto name=edit_path(change.path);
         need(distinct.insert(name).second,"duplicate UDF change path");
-        need(!change.directory,"UDF directory creation/deletion not yet supported");
-        const auto it=volume.files().find(name);
-        need(it!=volume.files().end(),"UDF only supports existing files");
-        const auto& target=it->second;
-        need(target.fe.type==5,
-             "UDF deletion or replacement of a directory is unsupported");
-        if(!change.remove) {
-            need(std::filesystem::is_regular_file(
-                     std::filesystem::symlink_status(change.source)),
-                 "UDF replacement must be a regular file, not symlink");
-            const auto len=std::filesystem::file_size(change.source);
-            // Only the last ShortAD's unused final sector can grow without
-            // moving data or changing the order of existing logical runs.
-            // Earlier runs may have padding but extending them would shift
-            // every subsequent file offset. Keep the growth fully in place.
-            std::uint64_t available=target.fe.capacity;
-            if(!target.fe.runs.empty()) {
-                const auto& last=target.fe.runs.back();
-                const auto last_allocated=std::uint64_t(last.blocks)*block;
-                need(last.recorded<=last_allocated,
-                     "UDF final ShortAD exceeds its allocated blocks");
-                const auto last_limit=std::min<std::uint64_t>(
-                    last_allocated,0x3fffffffull);
-                need(last.recorded<=last_limit,
-                     "UDF final ShortAD exceeds 30-bit recorded length");
-                available=target.fe.recorded+(last_limit-last.recorded);
-            }
-            need(len<=target.fe.capacity && len<=available,
-                 "UDF replacement exceeds existing ShortAD allocation");
-            for(const auto& run:target.fe.runs) {
-                const Location dest{run.at,std::uint64_t(run.blocks)*block};
-                for(const auto& interval:volume.intervals())
-                    if(interval.owner!=target.fe.at)
-                        need(!intersects(dest,interval.range),
-                             "UDF file extent overlaps another file/descriptor");
-            }
-        }
+        validate_udf_existing_change(volume,change);
     }
 
     EditTransaction tx(image);
@@ -1780,66 +1946,7 @@ void edit_udf(const std::filesystem::path& image,
             }
             continue;
         }
-        const auto len=std::filesystem::file_size(change.source);
-        auto fe=staged_read(out,target.fe.at,block);
-        tag_check(fe,0,u16(fe,0));
-        if(target.fe.storage==3) {
-            Bytes data(static_cast<std::size_t>(len));
-            std::ifstream input(change.source,std::ios::binary);
-            need(bool(input),"cannot open UDF replacement");
-            input.read(reinterpret_cast<char*>(data.data()),
-                       static_cast<std::streamsize>(data.size()));
-            need(bool(input) || data.empty(),"UDF source shortened");
-            const auto at=target.fe.ad_offset;
-            std::fill(fe.begin()+static_cast<std::ptrdiff_t>(at),
-                      fe.begin()+static_cast<std::ptrdiff_t>(
-                          at+std::max<std::uint64_t>(len,target.fe.size)),0);
-            std::copy(data.begin(),data.end(),
-                      fe.begin()+static_cast<std::ptrdiff_t>(at));
-            // For Extended File Entry this is at 212; regular File
-            // Entries keep the allocation-descriptor length at 172.
-            put32(fe,u16(fe,0)==266?212u:172u,
-                  static_cast<std::uint32_t>(len));
-            put64(fe,56,len);
-            if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
-            tag_update(fe,0,target.fe.ad_offset+static_cast<std::size_t>(len));
-            staged_write(out,target.fe.at,fe);
-        } else {
-            std::ifstream source(change.source,std::ios::binary);
-            need(bool(source),"cannot open UDF replacement content");
-            std::uint64_t remaining=len;
-            for(std::size_t i=0;i<target.fe.runs.size();++i) {
-                if(!remaining)break;
-                const auto& run=target.fe.runs[i];
-                const bool last=i+1==target.fe.runs.size();
-                // The final run is allowed to consume its sector tail.
-                const auto run_limit=last?
-                    std::uint64_t(run.blocks)*block:run.recorded;
-                const auto count=std::min(remaining,run_limit);
-                out.clear();
-                out.seekp(static_cast<std::streamoff>(run.at));
-                need(bool(out),"cannot seek UDF content ShortAD run");
-                copy(source,out,count,progress);
-                remaining-=count;
-            }
-            need(remaining==0,"UDF replacement ShortAD sequence incomplete");
-            put64(fe,56,len);
-            if(u16(fe,0)==266)put64(fe,64,len); // EFE Object Size
-            if(len>target.fe.recorded) {
-                // Preserve every preceding ShortAD and extend only the
-                // last recorded length, not its logical LBA or allocation.
-                const auto& last=target.fe.runs.back();
-                const auto grown=last.recorded+(len-target.fe.recorded);
-                need(grown<=0x3fffffffull &&
-                     grown<=std::uint64_t(last.blocks)*block,
-                     "UDF final ShortAD cannot accommodate growth");
-                put32(fe,target.fe.ad_offset+
-                      (target.fe.runs.size()-1u)*8u,
-                      static_cast<std::uint32_t>(grown));
-            }
-            tag_update(fe,0,target.fe.ad_offset+target.fe.ads);
-            staged_write(out,target.fe.at,fe);
-        }
+        write_udf_existing_replacement(out,target,change.source,progress);
     }
     out.flush();
     need(bool(out),"staged UDF flush failed");

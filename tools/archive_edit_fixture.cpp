@@ -80,6 +80,7 @@ int wmain(int argc, wchar_t** argv) {
                 iso_wcx::ArchiveChange c;
                 c.path=wide_to_utf8(argv[at++]);
                 if(kind=="mkdir")c.directory=true;
+                else if(kind=="delete")c.remove=true;
                 else if(kind=="add") {
                     if(at==argc)return 2;
                     c.source=std::filesystem::path(argv[at++]);
@@ -110,6 +111,7 @@ int main(int argc, char** argv) {
             iso_wcx::ArchiveChange c;
             c.path=argv[at++];
             if(kind=="mkdir")c.directory=true;
+            else if(kind=="delete")c.remove=true;
             else if(kind=="add") {
                 if(at==argc)return 2;
                 c.source=std::filesystem::path(argv[at++]);
