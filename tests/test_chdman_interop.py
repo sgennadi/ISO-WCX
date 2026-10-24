@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import wave
 
 from test_images import iso_image, udf_image, raw_cd_image
 
@@ -114,6 +115,31 @@ def main(reader: pathlib.Path) -> None:
         # never invokes chdman.
         audio = root / "audio.bin"
         audio.write_bytes(bytes(i & 255 for i in range(37 * 2352)))
+        def check_cdda(directory: pathlib.Path,
+                       track_numbers: list[int]) -> None:
+            folder = directory / "CDDA"
+            if not track_numbers:
+                assert not folder.exists(), "data-only CD created fake CDDA tracks"
+                return
+            files = sorted(p.name for p in folder.glob("*.wav"))
+            expected_files = [f"track{number:02d}.wav" for number in track_numbers]
+            assert files == expected_files, (directory, files, expected_files)
+            original = audio.read_bytes()
+            # Raw CUE/BINARY CDDA sectors use big-endian 16-bit sample words.
+            # PCM WAV 16-bit audio has little-endian words, so byte pairs swap.
+            expected_pcm = bytearray(original)
+            expected_pcm[::2] = original[1::2]
+            expected_pcm[1::2] = original[::2]
+            for number in track_numbers:
+                path = folder / f"track{number:02d}.wav"
+                with wave.open(str(path), "rb") as wav:
+                    assert wav.getnchannels() == 2
+                    assert wav.getsampwidth() == 2
+                    assert wav.getframerate() == 44100
+                    assert wav.getnframes() == len(original) // 4
+                    assert wav.readframes(wav.getnframes()) == expected_pcm
+                assert path.stat().st_size == len(original) + 44
+
         first_cd = root / "first.bin"
         first_cd.write_bytes(raw_cd_image(
             iso_image(filename="FIRST.TXT;1"), mode=1))
@@ -133,8 +159,12 @@ def main(reader: pathlib.Path) -> None:
             output_chd = root / (name + ".chd")
             run([chdman, "createcd", "-i", str(cue_file), "-o",
                  str(output_chd), "-c", "cdlz", "-np", "1"])
-            verify(reader, output_chd, root / ("out-" + name),
-                   expected, b"world")
+            extraction = root / ("out-" + name)
+            verify(reader, output_chd, extraction, expected, b"world")
+            check_cdda(extraction, [
+                index for index, (_, kind) in enumerate(tracks, 1)
+                if kind == "AUDIO"
+            ])
 
         # The 37-frame AUDIO track requires three physical padding frames
         # before the next CD track. A simplistic cumulative offset fails.
@@ -151,6 +181,22 @@ def main(reader: pathlib.Path) -> None:
                    [("audio.bin", "AUDIO"),
                     ("second.bin", "MODE1/2352"),
                     ("audio.bin", "AUDIO")], "SECOND.TXT")
+
+        # An audio-only CHD has no ISO9660 PVD/UDF anchor. It must still
+        # be a valid archive that exposes the CDDA WAV track in Total Commander.
+        only_cue = root / "audio-only.cue"
+        only_cue.write_text(
+            'FILE "audio.bin" BINARY\n'
+            '  TRACK 01 AUDIO\n'
+            '    INDEX 01 00:00:00\n', encoding="ascii")
+        only_chd = root / "audio-only.chd"
+        run([chdman, "createcd", "-i", str(only_cue),
+             "-o", str(only_chd), "-c", "cdlz", "-np", "1"])
+        only_listing = run([str(reader), str(only_chd)])
+        assert "CDDA/track01.wav" in only_listing, only_listing
+        only_out = root / "out-audio-only"
+        run([str(reader), str(only_chd), "--extract", str(only_out)])
+        check_cdda(only_out, [1])
 
         # Fail closed on malformed file signatures and unsupported parents.
         raw = bytearray(cd.read_bytes())
@@ -171,6 +217,7 @@ def main(reader: pathlib.Path) -> None:
                  root / "bad-map")
         print("PASS: MAME chdman CHD v5 DVD zlib/lzma, UDF lzma, "
               "CD cdlz Mode1, four-frame padded audio/mixed-mode tracks, "
+              "audio-only and mixed-track stereo WAV extraction, "
               "last data track selection, malformed/parent rejection")
 
 
