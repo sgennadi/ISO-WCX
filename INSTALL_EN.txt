@@ -42,11 +42,13 @@ wincmd.ini is a Total Commander WCX capability mask, NOT part of the
 file path. Do not type it in the file selection dialog.
 
 Check other extensions only if they point to that same obsolete plugin.
+The installer also registers `.udf`; a UDF-only `.iso` is detected by content.
 The installed plugin also handles cue, ccd, nrg, mds v1, cso, zso,
 limited single-file isz/daa, partitioned img, raw, vhd and vhdx.
 
-This is PREVIEW software: most formats are read-only. Only plain ISO9660/
-Joliet and standard unsplit WIM support restricted editing.
+This is PREVIEW software: most formats are read-only. Plain ISO9660/Joliet,
+standard unsplit WIM and restricted UDF Type-1 support editing; ISO/UDF Bridge
+supports only byte-only equal-length existing-file replacement.
 Supported compressed optical subsets:
 single-file ISZ v1 (zero/raw/zlib/bzip2) and DAA 1.00 (raw DEFLATE).
 CHD v5 supports compressed optical 2048-byte ISO/UDF and experimental
@@ -74,7 +76,11 @@ Long names can be incompatible with other readers. BIOS/EFI El Torito
 sectors are retained and modifications overlapping them are rejected.
 ISO/UDF Bridge has limited, byte-only replacement of existing equal-size
 files when both filesystems point at one identical physical extent. Bootable
-Bridge images, add/delete, resize and UDF metadata edits are refused. Hybrid
+Bridge images, add/delete, resize and UDF metadata edits are refused.
+**UDF-only Type-1** (single 2048-byte physical partition): replace/resize
+existing regular FE/EFE/ShortAD files within their preallocated blocks;
+logical FID deletion hides a file but does not free its space. New files,
+new directories and block reallocation are not yet supported. Hybrid
 system-area and Rock Ridge rewrites remain unsupported. Important media
 should be edited as copies. System wimgapi.dll runs inside the WCX;
 no additional DLL, EXE, mount or driver is required. NTFS alternate

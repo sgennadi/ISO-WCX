@@ -4,5 +4,5 @@ version=0.15.0-preview
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX
-defaultextension=iso,cue,ccd,nrg,mds,cso,zso,isz,daa,img,raw,vhd,vhdx,wim,esd,swm
+defaultextension=iso,udf,cue,ccd,nrg,mds,cso,zso,isz,daa,img,raw,vhd,vhdx,wim,esd,swm
 

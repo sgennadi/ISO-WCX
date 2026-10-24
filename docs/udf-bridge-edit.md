@@ -35,6 +35,10 @@ metadata writes, free-space allocation, updating VAT/metadata partitions,
 repairing corrupted UDF, NTFS metadata restoration, or rewriting El Torito
 on bridged media. UDF-only optical images remain read-only.
 
+UDF-only Type-1 files have a separate, strictly limited native writer for
+in-allocation size updates and FID deletion; these new features **do not**
+extend to ISO/UDF Bridge volumes. See [UDF Type-1 writer](udf-type1-writer.md).
+
 The test suite builds a self-contained synthetic ISO/UDF Bridge with a shared
 file data extent, tests successful replacement through the same WCX edit
 core, independently reads back ISO and UDF, and tests rollback when the

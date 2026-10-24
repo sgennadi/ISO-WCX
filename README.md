@@ -36,7 +36,7 @@ For detailed instructions see [PREVIEW.md](PREVIEW.md),
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
 | CloneCD CCD/IMG | `.ccd` version 3 + matching `.img` (2352-byte sectors), single-session Mode 1 / Mode 2 Form 1 data tracks, including ECMA-130 scrambled sectors. Optional `.sub` sidecar exposed byte-for-byte under `subchannels/disc.sub`; CD-Audio and CD-Text decoding not implemented; CRC-valid Q track/index frames summarized in `subchannels/q-index.csv`. |
 | 150-sector prefix | Relative and some absolute-LBA cases (not full multisession parsing) |
-| UDF Type 1 | File Entry/Extended File Entry, OSTA CS0 (including UTF-16 surrogate-pair names), AED extents and reserve VDS failover |
+| UDF Type 1 | Browse FE/EFE, OSTA CS0 (including UTF-16 surrogate pairs), AED extents, reserve VDS failover. **Edit Preview (UDF-only 2048-byte Type-1 physical volumes):** replace existing file data with bounded growth/shrink within already-allocated blocks, FE/EFE embedded data, nested paths, and logical FID deletion (space is not reclaimed). No new files/dirs, no free-space allocation, no rewrite of ISO/UDF Bridge metadata. |
 | UDF Metadata / VAT / Sparable | Experimental, synthetic-fixture coverage; not comprehensive UDF 1.02–2.60 |
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
 | Alcohol MDS/MDF | MDS version 1 track/session descriptors and sidecar MDF (2048/2336/2352/2448 data sectors); synthetic-test coverage |
@@ -264,9 +264,11 @@ See [bounded optical container design](docs/packed-optical.md).
   and remove existing image indexes except the final one. It uses native
   WIMGAPI apply/capture with an NTFS workspace and elevated backup/restore/
   security privileges. The result is validated before replacing the input.
-- ESD/SWM, virtual disks, UDF-only and compressed optical formats stay
-  read-only. ISO/UDF Bridge is write-limited to shared-extent equal-length
-  replacement; full UDF filesystem mutation is **not** implemented.
+- ESD/SWM, virtual disks, complex UDF and compressed optical formats remain
+  read-only. UDF-only Type-1 supports only bounded existing-file replacement
+  and FID deletion; **deleted file blocks are not reclaimed**. ISO/UDF Bridge
+  remains limited to shared-extent equal-length replacement; new UDF file
+  allocation, addition and full filesystem restructuring are not implemented.
   Individual WCX file extraction does not restore alternate data streams or
   reparse points. Unsupported ESD compression remains excluded.
 - See [WIM design notes](docs/wim-integration.md).
@@ -285,3 +287,18 @@ UTF-16 filenames, resident and fragmented/sparse nonresident files.
 It rejects attribute-list continuations, encrypted/compressed data,
 reparse reconstruction and journal recovery. See [exFAT design](docs/exfat-integration.md),
 [ext reader design](docs/ext-integration.md) and [NTFS preview](docs/ntfs-integration.md).
+
+## Native UDF Type-1 writer (Preview)
+
+After PR #32, the in-process UDF writer can replace, grow or shrink **existing**
+regular files without allocating blocks (FE/EFE embedded data or one ShortAD
+extent) and mark existing regular files as deleted in their FID. It supports
+nested directories as target paths, but cannot create/rename/delete directories
+or insert a new file. Logical FID deletion does not free the original extent.
+
+Supported input is a nonhybrid, 2048-byte UDF-only image with one Type-1
+physical partition, validated descriptors and no overlapping allocations.
+The original is replaced only after a staged image is reparsed and extracted
+bytes checked. UDF VAT/Metadata/Sparable writers, multi-extent updates,
+El Torito, Rock Ridge and hybrid partition-table modifications are not
+provided. See [native writer scope](docs/udf-type1-writer.md).
