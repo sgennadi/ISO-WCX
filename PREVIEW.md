@@ -61,12 +61,12 @@ The plugin opens partitioned raw HDD IMG/RAW, fixed VHD and clean fixed/dynamic 
 
 ## MDS v2 / MDX inspection research (not an archive handler)
 
-The developer-only `mds_descriptor_inspect` test utility detects MDS version 1,
-packed/encrypted MDS major version 2, and MDX monolithic metadata envelopes,
-with strict file-offset and overflow checks. It does **not** decrypt,
-decompress or extract data from MDS v2 or MDX. A recognized MDX will
-produce a specific error rather than being silently misread as ISO. The
-installer does not associate .mdx. Read
+The developer-only `mds_descriptor_inspect` test utility detects MDS v1,
+encrypted MDS v2, and MDX metadata envelopes with strict offset checks.
+Using its optional `--decode` mode, it decrypts and inflates bounded MDS v2 /
+MDX **metadata only**, in-process (AES-256, RIPEMD160/PBKDF2 and zlib).
+It still does **not** extract disc data sectors or make those formats
+available in Total Commander. The installer does not associate .mdx. Read
 [the Aaru issue #256 compatibility notes](docs/mds-v2-mdx-research.md).
 
 ## NRG and MDS/MDF preview support

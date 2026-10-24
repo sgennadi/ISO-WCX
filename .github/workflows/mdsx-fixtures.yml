@@ -1,10 +1,15 @@
-name: MDSv2 and MDX real fixture probe (research)
+name: MDSv2 and MDX encrypted metadata interoperability
 
 on:
   pull_request:
     paths:
       - 'include/iso_wcx/mds_probe.hpp'
       - 'src/mds_probe.cpp'
+      - 'src/mds_v2.cpp'
+      - 'include/iso_wcx/mds_v2.hpp'
+      - 'third_party/tiny_aes/**'
+      - 'tests/mds_crypto_vectors.cpp'
+      - 'CMakeLists.txt'
       - 'tools/mds_descriptor_inspect.cpp'
       - 'tests/mds_descriptor_probe.cpp'
       - 'tests/test_mdsx_external_fixtures.py'
@@ -16,7 +21,7 @@ permissions:
 
 jobs:
   real-mdsx-envelope-smoke:
-    name: Real MDSv2 / MDX metadata only
+    name: Real MDSv2 / MDX descriptor AES256 / PBKDF2
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -25,5 +30,5 @@ jobs:
         run: cmake -S . -B build-mds -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DISO_WCX_BUILD_DEV_TOOLS=ON
       - name: Build native descriptor probe
         run: cmake --build build-mds --target mds_descriptor_inspect --parallel 2
-      - name: Recognize external fixed-revision MDSv2 and MDX fixtures
+      - name: Decrypt and validate eight pinned encrypted MDSv2 / MDX fixtures
         run: python3 tests/test_mdsx_external_fixtures.py ./build-mds/mds_descriptor_inspect

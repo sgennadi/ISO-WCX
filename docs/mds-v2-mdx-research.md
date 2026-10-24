@@ -1,4 +1,4 @@
-# MDS v2 / MDX reverse-engineering notes (metadata-only stage)
+# MDS v2 / MDX independent metadata decoder (experimental)
 
 Sources reviewed on 2026-10-23:
 
@@ -9,38 +9,39 @@ Sources reviewed on 2026-10-23:
 
 ## What is implemented in ISO-WCX today
 
-An independent C++20 metadata probe is built into iso_disc and as a
-standalone mds_descriptor_inspect tool:
+There are two strictly separated operations:
 
-    mds_descriptor_inspect IMAGE.mds
-    mds_descriptor_inspect IMAGE.mdx
+1. `mds_descriptor_inspect IMAGE.mds|IMAGE.mdx` performs a 96-byte
+   fast-recognition probe of original MDS v1, MDS v2 and embedded MDX
+   sentinel/region pointers. It rejects malformed offsets before any
+   decryption.
+2. `mds_descriptor_inspect IMAGE.mds|IMAGE.mdx --decode` runs the native
+   metadata decoder: password-free salt unshuffle, PBKDF2-HMAC-RIPEMD160
+   (2000 iterations), AES-256 CBC with the format-specific whitening,
+   authenticated-header CRC32 validation, and bounded zlib inflation into
+   the reconstructed in-memory MDS v2 descriptor. The 16 MiB decoded
+   metadata limit does not cap the MDX container file size.
 
-The tool reads at most **96 bytes** of the descriptor initially, rejects
-symlink/non-file inputs, validates the "MEDIA DESCRIPTOR" signature and
-recognizes original Alcohol MDS v1, packed/encrypted DAEMON Tools MDS major v2
-and MDX's embedded-file sentinel. For v2/MDX it checks the encrypted 512-byte
-header lies within the file and validates the packed metadata region's
-byte bounds, including 64-bit arithmetic overflow protections.
+The AES-256 block decryptor is compiled statically from pinned public-domain
+tiny-AES-c (full Unlicense included in THIRD_PARTY_NOTICES.txt). The
+RIPEMD-160/HMAC/PBKDF2 routines are an independent in-tree implementation.
+No runtime OpenSSL DLL, chdman executable or mounting tool is needed.
 
-**Recognition is NOT decryption or extraction.** The MDS v1 uncompressed
-track parser is unchanged. In Total Commander, MDS v2 and MDX are explicitly
-rejected with a specific error instead of being silently interpreted as an
-ISO file or incorrectly parsed as legacy MDS v1. The ZIP installer does NOT
-register .mdx yet; no unsupported association is silently installed.
+The opt-in developer command **does not decode or expose CD/DVD track
+sectors** and does not copy decrypted key data to disk. The Total Commander
+WCX handler continues to reject MDS v2 and MDX as unsupported archive
+formats until their data decoders pass genuine image and WCX ABI tests.
+The ZIP installer does not register .mdx.
 
-The probe intentionally does not:
-- infer track counts from encrypted metadata;
-- open, follow, mount or edit companion MDF files;
-- derive keys, ask for passwords, brute-force passwords or import old crypto;
-- decompress encrypted metadata or compressed track groups;
-- expose CD-Audio, protected-track modes, indexes or encrypted sectors;
-- claim that synthetically constructed headers prove vendor interoperability.
+Unit regressions cover header boundaries, malformed pointers, the
+RIPEMD-160 reference digest vectors and ciphertext tampering.
+A dedicated CI workflow downloads eight pinned genuine .mds/.mdx
+descriptors from Marisa-Chan/mdsx, checks their Git blob hashes,
+successfully decrypts metadata and rejects an encrypted-header mutation.
+This independently validates descriptor compatibility; it is **not**
+yet a test of compressed/encrypted track-data extraction.
 
-Unit regressions cover valid synthetic format envelopes, wrong signatures,
-truncation, malicious offsets, integer overflows and both forms of MDX marker.
-A separate WCX/Disc regression confirms a recognized MDX is safely rejected.
-
-## Before implementing a real decoder
+## Remaining work before a production data-track reader
 
 1. **Provenance and licensing:** Although mdsx has a root **MIT** LICENSE,
    parts of its implementation originated in TrueCrypt 5.1a and carry their
@@ -48,10 +49,11 @@ A separate WCX/Disc regression confirms a recognized MDX is safely rejected.
    separate attribution terms. Do not copy its common/ or crypto/ directories
    directly into this WCX DLL under an assumption of MIT-only licensing.
    Any actual import requires a per-file review and notices.
-2. **Keep format detection separate from decryption.** Build an optional,
-   separately tested decoder backend for validated encrypted headers,
-   compressed track block indexes, and 2048/2324/2336/2352/2448
-   data-sector layout. Never parse encrypted metadata as plaintext.
+2. **Keep metadata and track decoding separate.** The encrypted-header
+   metadata stage is now implemented. Implement a separate bounded
+   random-access stream for plain, compressed-group and optional LRW
+   encrypted track data covering 2048/2324/2336/2352/2448-byte sectors.
+   Never parse encrypted or unvalidated data as ordinary ISO data.
 3. **Require a representative image corpus:** Non-password MDSv2, compressed
    and uncompressed MDS/MDF, monolithic MDX, multiple sessions/tracks,
    Mode 1/Mode 2 Form 1, mixed-mode discs, subchannels, a known-password
@@ -65,5 +67,5 @@ A separate WCX/Disc regression confirms a recognized MDX is safely rejected.
 
 The mdsx README states its current implementation is research-grade, and
 Aaru issue #256 remains open; neither project establishes complete vendor
-compatibility. This stage delivers a safe recognition boundary, not a
-production MDSv2/MDX filesystem reader.
+compatibility. This stage delivers tested descriptor decryption but not a production
+MDSv2/MDX filesystem reader.
