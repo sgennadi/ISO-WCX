@@ -1264,6 +1264,418 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     }
     tx.commit(progress);
 }
+
+// Plan every new child FE, file run and parent FID before editing a single
+// byte of the source. Each modified parent is relocated at most once.
+// The staged image is copied once, validated once and atomically committed
+// only after *all* requested paths and file contents verify successfully.
+void create_udf_type1_batch(const std::filesystem::path& image,
+                            Type1& volume,
+                            const std::vector<ArchiveChange>& changes,
+                            const EditProgress& progress) {
+    need(changes.size()>1 && changes.size()<=max_items && volume.has_bitmap(),
+         "UDF batch requires multiple new objects and a valid bitmap");
+    struct Prepared {
+        ArchiveChange change;
+        std::string key,parent;
+        Bytes name;
+        std::uint64_t length=0;
+    };
+    auto fold=[](std::string text) {
+        for(char& c:text)
+            if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
+        return text;
+    };
+    std::set<std::string> names;
+    for(const auto& [key,item]:volume.files()) {
+        (void)item;
+        need(names.insert(fold(key)).second,
+             "UDF existing names conflict case-insensitively");
+    }
+    for(const auto& [key,item]:volume.directories()) {
+        (void)item;
+        if(!key.empty())
+            need(names.insert(fold(key)).second,
+                 "UDF existing directory names conflict case-insensitively");
+    }
+    std::vector<Prepared> prepared;
+    prepared.reserve(changes.size());
+    for(const auto& change:changes) {
+        need(!change.remove,"UDF create batch cannot remove files");
+        Prepared p;
+        p.change=change;
+        p.key=edit_path(change.path);
+        need(names.insert(fold(p.key)).second,
+             "UDF batch has an existing or duplicate case-insensitive path");
+        const auto slash=p.key.rfind('/');
+        p.parent=slash==std::string::npos?
+                 std::string{}:p.key.substr(0,slash);
+        const auto component=slash==std::string::npos?
+                             p.key:p.key.substr(slash+1);
+        p.name=encode_udf_cs0(component);
+        need(component.find('\\')==std::string::npos &&
+             component.find('/')==std::string::npos,
+             "UDF batch contains invalid path separators");
+        const auto fid_size=(38u+p.name.size()+3u)&~std::size_t(3);
+        need(fid_size>=40 && fid_size<=255,
+             "UDF batch FID is too large");
+        if(!change.directory) {
+            need(std::filesystem::is_regular_file(
+                     std::filesystem::symlink_status(change.source)),
+                 "UDF batch source must be a regular non-symlink file");
+            p.length=std::filesystem::file_size(change.source);
+            need(p.length<=volume.image_size(),
+                 "UDF batch file exceeds image capacity");
+        }
+        prepared.push_back(std::move(p));
+    }
+    // Depth ordering lets callers submit children before the mkdir entry,
+    // without ever accepting an unresolved parent or file-as-parent.
+    const auto depth=[](const Prepared& p) {
+        return std::count(p.key.begin(),p.key.end(),'/');
+    };
+    std::stable_sort(prepared.begin(),prepared.end(),
+        [&](const Prepared& a,const Prepared& b) {
+            return depth(a)<depth(b);
+        });
+
+    struct FidPlan {
+        Bytes name;
+        std::uint32_t child_lba=0;
+        bool directory=false;
+    };
+    struct ParentPlan {
+        Fe original;
+        Bytes payload;
+        std::vector<FidPlan> children;
+        bool preexisting=false;
+        std::uint32_t final_lba=0;
+        std::uint32_t old_blocks=0;
+        std::uint32_t new_blocks=0;
+        bool external=false;
+        Bytes fe_write,content_write;
+    };
+    struct ChildPlan {
+        std::string key;
+        std::filesystem::path source;
+        bool directory=false;
+        std::uint64_t length=0;
+        std::uint32_t lba=0;
+        Bytes fe;
+        std::vector<DataRun> runs;
+    };
+    std::map<std::string,ParentPlan> parents;
+    std::vector<ChildPlan> children;
+    children.reserve(prepared.size());
+    std::uint64_t allocated=0;
+    std::uint32_t files_added=0,dirs_added=0;
+    constexpr std::size_t fe_header=176;
+    const auto record_allocation=[&](std::uint64_t count) {
+        need(count<=std::numeric_limits<std::uint32_t>::max()-allocated,
+             "UDF batch block counter overflow");
+        allocated+=count;
+    };
+    for(const auto& p:prepared) {
+        edit_tick(progress);
+        auto parent_it=parents.find(p.parent);
+        if(parent_it==parents.end()) {
+            const auto original=volume.directories().find(p.parent);
+            need(original!=volume.directories().end(),
+                 "UDF batch parent does not exist or is not a directory");
+            ParentPlan state;
+            state.original=original->second;
+            state.payload=volume.directory_payload(state.original);
+            state.preexisting=true;
+            parent_it=parents.emplace(p.parent,std::move(state)).first;
+        }
+        auto& parent=parent_it->second;
+        const auto& parent_fe=parent.original;
+        need(parent_fe.type==4 &&
+             (parent_fe.storage==0 || parent_fe.storage==3) &&
+             parent_fe.size==parent.payload.size() &&
+             parent_fe.size<=parent_fe.capacity &&
+             parent_fe.ad_offset<=block &&
+             parent_fe.ads<=block-parent_fe.ad_offset &&
+             (parent_fe.storage!=3 || parent_fe.size<=parent_fe.ads) &&
+             (parent_fe.storage!=0 || parent_fe.runs.size()==1),
+             "UDF batch parent allocation layout is unsupported");
+        ChildPlan child;
+        child.key=p.key;
+        child.source=p.change.source;
+        child.directory=p.change.directory;
+        child.length=p.length;
+        child.lba=volume.allocate_block();
+        record_allocation(1);
+        const auto embedded=p.length<=block-fe_header;
+        const auto file_blocks=embedded?
+            0ull:(p.length+block-1u)/block;
+        need(file_blocks<=std::numeric_limits<std::uint32_t>::max(),
+             "UDF batch file exceeds partition block counters");
+        if(file_blocks) {
+            child.runs=volume.allocate_file_data(
+                p.length,(block-fe_header)/8u);
+            record_allocation(file_blocks);
+        }
+        child.fe.assign(block,0);
+        put16(child.fe,0,261);
+        put16(child.fe,2,2);
+        put32(child.fe,12,child.lba);
+        child.fe[27]=p.change.directory?4u:5u;
+        put16(child.fe,34,embedded?3u:0u);
+        put32(child.fe,36,0xffffffffu);
+        put32(child.fe,40,0xffffffffu);
+        put32(child.fe,44,p.change.directory?0x000001ffu:0x000001b6u);
+        put16(child.fe,48,1);
+        put64(child.fe,56,p.length);
+        put64(child.fe,64,file_blocks);
+        put32(child.fe,108,1);
+        put64(child.fe,160,volume.new_unique_id(children.size()));
+        const auto ad_bytes=8u*child.runs.size();
+        need(ad_bytes<=block-fe_header,
+             "UDF batch child ShortAD array exceeds FE");
+        put32(child.fe,168,0);
+        put32(child.fe,172,embedded?
+              static_cast<std::uint32_t>(p.length):
+              static_cast<std::uint32_t>(ad_bytes));
+        if(!embedded) {
+            for(std::size_t i=0;i<child.runs.size();++i) {
+                const auto& run=child.runs[i];
+                need(run.recorded<=0x3fffffffull,
+                     "UDF batch ShortAD exceeds 30-bit length");
+                put32(child.fe,fe_header+i*8u,
+                      static_cast<std::uint32_t>(run.recorded));
+                put32(child.fe,fe_header+i*8u+4u,run.logical);
+            }
+        } else if(p.length) {
+            std::ifstream input(p.change.source,std::ios::binary);
+            need(bool(input),"cannot open embedded UDF batch source");
+            input.read(reinterpret_cast<char*>(
+                           child.fe.data()+fe_header),
+                       static_cast<std::streamsize>(p.length));
+            need(bool(input),"embedded UDF batch source is truncated");
+        }
+        tag_update(child.fe,0,fe_header+(embedded?
+                   static_cast<std::size_t>(p.length):ad_bytes));
+        parent.children.push_back({p.name,child.lba,p.change.directory});
+        if(p.change.directory) {
+            ParentPlan nested;
+            nested.original.bytes=child.fe;
+            nested.original.at=volume.absolute(child.lba);
+            nested.original.data_at=nested.original.at+fe_header;
+            nested.original.size=0;
+            nested.original.capacity=block-fe_header;
+            nested.original.recorded=0;
+            nested.original.base=fe_header;
+            nested.original.ad_offset=fe_header;
+            nested.original.ads=0;
+            nested.original.storage=3;
+            nested.original.type=4;
+            need(parents.emplace(p.key,std::move(nested)).second,
+                 "duplicate UDF batch-created directory");
+            ++dirs_added;
+        } else {
+            ++files_added;
+        }
+        children.push_back(std::move(child));
+    }
+
+    // Allocate all destination parent runs before releasing old ones.
+    // Thus a later child allocation can never reuse a block scheduled for
+    // zeroing after an original directory is relocated.
+    for(auto& [key,parent]:parents) {
+        (void)key;
+        edit_tick(progress);
+        const auto& fe=parent.original;
+        std::uint64_t length=parent.payload.size();
+        for(const auto& fid:parent.children) {
+            const auto bytes=(38u+fid.name.size()+3u)&~std::size_t(3);
+            need(bytes<=max_dir-length,
+                 "UDF batch directory exceeds 8-MiB limit");
+            length+=bytes;
+        }
+        need(length<=max_dir &&
+             fe.ad_offset<=block && fe.ads<=block-fe.ad_offset,
+             "UDF batch parent descriptor is invalid");
+        const bool relocate=length>fe.capacity;
+        parent.external=relocate || fe.storage==0;
+        parent.new_blocks=relocate?
+            static_cast<std::uint32_t>((length+block-1u)/block):0u;
+        parent.old_blocks=relocate && fe.storage==0?
+            static_cast<std::uint32_t>(fe.capacity/block):0u;
+        parent.final_lba=relocate?
+            volume.allocate_blocks(parent.new_blocks):
+            (fe.storage==0?volume.logical_of(fe.data_at):0u);
+        record_allocation(parent.new_blocks);
+
+        parent.fe_write=fe.bytes;
+        put64(parent.fe_write,56,length);
+        const bool extended=u16(parent.fe_write,0)==266;
+        if(extended)put64(parent.fe_write,64,length);
+        const auto ad_length_field=extended?212u:172u;
+        if(parent.external) {
+            parent.content_write=parent.payload;
+            if(relocate && !parent.payload.empty())
+                retag_directory_fids(parent.content_write,parent.final_lba);
+            const auto capacity=relocate?
+                std::uint64_t(parent.new_blocks)*block:fe.capacity;
+            need(length<=capacity && capacity<=max_dir,
+                 "UDF batch relocated directory capacity is invalid");
+            parent.content_write.resize(static_cast<std::size_t>(capacity),0);
+        }
+        std::size_t at=parent.payload.size();
+        for(const auto& item:parent.children) {
+            const auto bytes=(38u+item.name.size()+3u)&~std::size_t(3);
+            Bytes fid(bytes,0);
+            put16(fid,0,257);
+            put16(fid,2,2);
+            put32(fid,12,parent.external?
+                  parent.final_lba+static_cast<std::uint32_t>(at/block):
+                  volume.logical_of(fe.at));
+            put16(fid,16,1);
+            fid[18]=item.directory?2u:0u;
+            fid[19]=static_cast<std::uint8_t>(item.name.size());
+            put32(fid,20,static_cast<std::uint32_t>(block));
+            put32(fid,24,item.child_lba);
+            put16(fid,28,0);
+            std::copy(item.name.begin(),item.name.end(),fid.begin()+38);
+            tag_update(fid,0,fid.size());
+            if(parent.external)
+                std::copy(fid.begin(),fid.end(),
+                          parent.content_write.begin()+
+                          static_cast<std::ptrdiff_t>(at));
+            else
+                std::copy(fid.begin(),fid.end(),
+                          parent.fe_write.begin()+
+                          static_cast<std::ptrdiff_t>(fe.ad_offset+at));
+            at+=fid.size();
+        }
+        need(at==length,"UDF batch FID payload length mismatch");
+        if(relocate) {
+            need(fe.ad_offset+8u<=block,
+                 "UDF batch cannot relocate parent with nonempty AD header");
+            std::fill(parent.fe_write.begin()+
+                      static_cast<std::ptrdiff_t>(fe.ad_offset),
+                      parent.fe_write.end(),std::uint8_t{0});
+            put16(parent.fe_write,34,
+                  static_cast<std::uint16_t>(u16(parent.fe_write,34)&~7u));
+            put32(parent.fe_write,ad_length_field,8u);
+            put32(parent.fe_write,fe.ad_offset,
+                  static_cast<std::uint32_t>(length));
+            put32(parent.fe_write,fe.ad_offset+4u,parent.final_lba);
+            put64(parent.fe_write,extended?72u:64u,parent.new_blocks);
+        } else if(parent.external) {
+            put32(parent.fe_write,fe.ad_offset,
+                  static_cast<std::uint32_t>(length));
+        } else {
+            put32(parent.fe_write,ad_length_field,
+                  static_cast<std::uint32_t>(length));
+        }
+        tag_update(parent.fe_write,0,parent.external?
+                   fe.ad_offset+8u:fe.ad_offset+
+                   static_cast<std::size_t>(length));
+    }
+    std::uint64_t released=0;
+    for(const auto& [key,parent]:parents) {
+        (void)key;
+        if(parent.old_blocks) {
+            volume.release_directory_blocks(
+                parent.original.at,parent.original.data_at,
+                parent.old_blocks);
+            released+=parent.old_blocks;
+        }
+    }
+    need(allocated>released &&
+         allocated-released<=std::numeric_limits<std::uint32_t>::max(),
+         "UDF batch has invalid net allocation count");
+
+    EditTransaction tx(image);
+    std::fstream out(tx.output,std::ios::binary|std::ios::in|
+                     std::ios::out|std::ios::trunc);
+    need(bool(out),"cannot create staged UDF batch image");
+    std::ifstream original(image,std::ios::binary);
+    need(bool(original),"cannot open UDF batch source image");
+    copy_image_sparse(original,out,volume.image_size(),progress);
+    original.close();
+    volume.close();
+    for(const auto& child:children) {
+        edit_tick(progress);
+        staged_write(out,volume.absolute(child.lba),child.fe);
+        if(!child.runs.empty()) {
+            std::ifstream source(child.source,std::ios::binary);
+            need(bool(source),"cannot open UDF batch data source");
+            std::uint64_t copied=0;
+            for(const auto& run:child.runs) {
+                out.clear();
+                out.seekp(static_cast<std::streamoff>(run.at));
+                need(bool(out),"cannot seek UDF batch data extent");
+                copy(source,out,run.recorded,progress);
+                copied+=run.recorded;
+                const auto tail=std::uint64_t(run.blocks)*block-
+                                run.recorded;
+                if(tail)
+                    staged_write(out,run.at+run.recorded,
+                                 Bytes(static_cast<std::size_t>(tail),0));
+            }
+            need(copied==child.length,
+                 "UDF batch data source length changed during writing");
+        }
+    }
+    for(const auto& [key,parent]:parents) {
+        (void)key;
+        edit_tick(progress);
+        if(parent.old_blocks)
+            staged_write(out,parent.original.data_at,
+                         Bytes(std::size_t(parent.old_blocks)*block,0));
+        if(parent.external)
+            staged_write(out,volume.absolute(parent.final_lba),
+                         parent.content_write);
+        staged_write(out,parent.original.at,parent.fe_write);
+    }
+    const auto [bitmap_at,bitmap_bytes]=volume.updated_bitmap();
+    staged_write(out,bitmap_at,bitmap_bytes);
+    const auto [lvid_at,lvid_bytes]=volume.updated_integrity_batch(
+        files_added,dirs_added,static_cast<std::uint32_t>(allocated-released));
+    staged_write(out,lvid_at,lvid_bytes);
+    out.flush();
+    need(bool(out),"cannot flush staged UDF batch image");
+    out.close();
+
+    // A strict second parse detects invalid tag CRC/location, FE/FID aliases,
+    // bitmap/LVID mismatches and parent allocation errors. Read every new
+    // file through Disc extents and compare its complete source stream.
+    {
+        Type1 strict(tx.output);
+        for(const auto& child:children) {
+            need(child.directory?
+                 strict.directories().count(child.key)!=0:
+                 strict.files().count(child.key)!=0,
+                 "UDF batch staged namespace is incomplete");
+        }
+        strict.close();
+        const Disc inspected(tx.output);
+        need(inspected.format()=="UDF",
+             "UDF batch staged filesystem is unreadable");
+        std::map<std::string,std::size_t> by_path;
+        for(std::size_t i=0;i<inspected.items().size();++i)
+            need(by_path.emplace(inspected.items()[i].path,i).second,
+                 "duplicate staged UDF batch name");
+        for(const auto& child:children) {
+            edit_tick(progress);
+            const auto at=by_path.find(child.key);
+            need(at!=by_path.end(),
+                 "UDF batch child is not visible in staged image");
+            const auto& entry=inspected.items()[at->second];
+            need(entry.directory==child.directory &&
+                 (child.directory || entry.size==child.length),
+                 "UDF batch child type/size mismatch");
+            if(!child.directory)
+                need(same_staged_item(tx.output,entry,child.source,progress),
+                     "UDF batch staged file differs from source");
+        }
+    }
+    tx.commit(progress);
+}
+
 } // namespace
 
 void edit_udf(const std::filesystem::path& image,
@@ -1274,8 +1686,18 @@ void edit_udf(const std::filesystem::path& image,
     need(before.format()=="UDF","not a plain readable UDF volume");
     Type1 volume(image);
     need(!changes.empty(),"no UDF changes");
-    // Allocation is a separate one-file atomic transaction until multi-file
-    // directory/bitmap/LVID updates can be planned and verified together.
+    // Full creation batches share one in-memory allocator, one staged copy,
+    // one bitmap/LVID update and one final atomic rename.
+    if(changes.size()>1 && std::all_of(changes.begin(),changes.end(),
+        [&](const ArchiveChange& change) {
+            const auto key=edit_path(change.path);
+            return !change.remove &&
+                   !volume.files().count(key) &&
+                   !volume.directories().count(key);
+        })) {
+        create_udf_type1_batch(image,volume,changes,progress);
+        return;
+    }
     if(changes.size()==1 && !changes[0].remove) {
         const auto path=edit_path(changes[0].path);
         if(!volume.files().count(path) &&
