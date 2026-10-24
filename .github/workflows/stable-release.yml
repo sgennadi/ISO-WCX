@@ -1,0 +1,184 @@
+name: ISO-WCX Stable v0.16.0
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/stable-release.yml'
+      - 'RELEASE_NOTES.md'
+      - 'pluginst.inf'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iso-wcx-v0.16.0-stable
+  cancel-in-progress: false
+
+env:
+  ISO_WCX_RELEASE_TAG: v0.16.0
+  ISO_WCX_RELEASE_FILE: ISO-WCX-v0.16.0.zip
+
+jobs:
+  windows:
+    name: Stable WCX - ${{ matrix.arch }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [Win32, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DCMAKE_CXX_STANDARD=20
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Run all tests including WCX DLL and UDF mutation
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Verify association repair safety
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
+      - name: Upload tested WCX binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-${{ matrix.arch }}
+          path: build/Release/ISO-WCX.wcx*
+          if-no-files-found: error
+          retention-days: 90
+
+  linux:
+    name: Stable Linux C++20 regression
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install independent test fixtures
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mame-tools libarchive-dev
+          command -v chdman
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizer:
+    name: Stable ASan + UBSan regression
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure sanitizers
+        run: |
+          cmake -S . -B build-sanitized -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -O1' \
+            '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined'
+      - name: Build sanitizers
+        run: cmake --build build-sanitized --parallel 2
+      - name: Run parser, UDF/ISO mutation and extraction tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+        run: ctest --test-dir build-sanitized --output-on-failure
+
+  package:
+    name: Verify Stable installable ZIP
+    needs: [windows, linux, sanitizer]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download both tested WCX architectures
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stable-*
+          path: binaries
+          merge-multiple: true
+      - name: Build and verify ZIP and SHA256
+        run: |
+          set -euo pipefail
+          grep -Fxq 'version=0.16.0' pluginst.inf
+          grep -Fq 'defaultextension=iso,udf,' pluginst.inf
+          test -s binaries/ISO-WCX.wcx
+          test -s binaries/ISO-WCX.wcx64
+          if find binaries -maxdepth 1 -type f \( -iname '*.dll' -o -iname '*.exe' -o -iname '*.so*' -o -iname '*.dylib' \) | grep -q .; then
+            echo "Unexpected executable/shared library in stable installer" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          cp binaries/ISO-WCX.wcx binaries/ISO-WCX.wcx64 dist/
+          cp pluginst.inf INSTALL_EN.txt INSTALL_RU.txt PREVIEW.md \
+             THIRD_PARTY_NOTICES.txt RELEASE_NOTES.md CHANGELOG.md dist/
+          (cd dist && zip -9 "../${ISO_WCX_RELEASE_FILE}" \
+            pluginst.inf ISO-WCX.wcx ISO-WCX.wcx64 \
+            INSTALL_EN.txt INSTALL_RU.txt PREVIEW.md \
+            THIRD_PARTY_NOTICES.txt RELEASE_NOTES.md CHANGELOG.md)
+          unzip -t "${ISO_WCX_RELEASE_FILE}"
+          unzip -Z1 "${ISO_WCX_RELEASE_FILE}" | grep -Fxq 'ISO-WCX.wcx'
+          unzip -Z1 "${ISO_WCX_RELEASE_FILE}" | grep -Fxq 'ISO-WCX.wcx64'
+          sha256sum "${ISO_WCX_RELEASE_FILE}" > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+      - name: Upload Stable installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ISO-WCX-Installable-v0.16.0-Stable
+          path: |
+            ISO-WCX-v0.16.0.zip
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 90
+
+  release:
+    name: Publish Stable v0.16.0 only after all checks succeed
+    needs: [package]
+    if: github.ref == 'refs/heads/main' && github.repository == 'sgennadi/ISO-WCX'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ISO-WCX-Installable-v0.16.0-Stable
+          path: release-asset
+      - name: Create immutable GitHub Stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -s release-asset/"${ISO_WCX_RELEASE_FILE}"
+          test -s release-asset/SHA256SUMS.txt
+          if gh release view "${ISO_WCX_RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release already exists. Refusing to overwrite existing assets."
+            exit 0
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${ISO_WCX_RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Version tag exists without a release; refusing to overwrite it." >&2
+            exit 1
+          fi
+          gh release create "${ISO_WCX_RELEASE_TAG}" \
+            "release-asset/${ISO_WCX_RELEASE_FILE}" \
+            release-asset/SHA256SUMS.txt \
+            --target "${GITHUB_SHA}" \
+            --title "ISO-WCX v0.16.0 - Stable Core" \
+            --notes-file RELEASE_NOTES.md \
+            --latest
+          gh release view "${ISO_WCX_RELEASE_TAG}" --json url,tagName,isPrerelease
+
+  repository-about:
+    name: Update GitHub About when admin token is configured
+    needs: [release]
+    if: github.ref == 'refs/heads/main' && github.repository == 'sgennadi/ISO-WCX'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Synchronize repository description (optional admin permission)
+        env:
+          GH_TOKEN: ${{ secrets.ISO_WCX_REPO_ADMIN_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "ISO_WCX_REPO_ADMIN_TOKEN is not configured; README and release notes were updated."
+            echo "GitHub About requires a token with repository Administration: write."
+            exit 0
+          fi
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}" \
+            -f description='ISO-WCX - native C++20 Total Commander WCX plugin for ISO/UDF, WIM/ESD/SWM, optical images and RAW/VHD/VHDX. Win32/x64, no external extractors.'
