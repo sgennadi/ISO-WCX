@@ -511,51 +511,63 @@ private:
         check(depth <= 32, "FAT12 directory nesting too deep");
         if (folder) for (const auto c : chain(folder))
             check(claimed_.insert(c).second, "cross-linked FAT12 directories");
-        std::vector<std::size_t> lfn;
+        std::vector<std::size_t> pending_lfn;
         for (const auto at : slots(folder)) {
-            if (bytes_[at] == 0) break;
-            if (bytes_[at] == 0xe5) { lfn.clear(); continue; }
+            if (bytes_[at] == 0) {
+                check(pending_lfn.empty(), "orphaned VFAT long-name records");
+                break;
+            }
+            if (bytes_[at] == 0xe5) { pending_lfn.clear(); continue; }
             const auto attrs = bytes_[at + 11];
-            if (attrs == 0x0f) { lfn.push_back(at); continue; }
+            if (attrs == 0x0f) {
+                pending_lfn.push_back(at);
+                check(pending_lfn.size() <= 20, "excessive VFAT long-name records");
+                continue;
+            }
             check((attrs & 0xc0u) == 0, "unsupported FAT12 directory attributes");
-            if ((attrs & 0x08u) || bytes_[at] == '.') { lfn.clear(); continue; }
-            const auto path = parent.empty() ? dos_name(bytes_, at) :
-                 parent + "/" + dos_name(bytes_, at);
-            check(nodes_.size() < 100000 && !nodes_.contains(path),
-                  "duplicate FAT12 directory path");
+            if ((attrs & 0x08u) || bytes_[at] == '.') {
+                check(pending_lfn.empty(), "orphaned VFAT records before label or dot entry");
+                continue;
+            }
+            const auto dos = dos_name(bytes_, at);
+            std::string actual = dos;
+            if (!pending_lfn.empty()) {
+                try {
+                    actual = vfat::decode(bytes_, pending_lfn, at);
+                } catch (const std::exception&) {
+                    throw EditUnsupported("invalid VFAT long-name metadata; image remains read-only");
+                }
+                validate_vfat_component(actual);
+            }
+            const auto path = join(parent, fold_name(actual));
+            const auto dos_path = join(parent, fold_name(dos));
+            check(nodes_.size() < 100000 && !nodes_.contains(path) &&
+                  !aliases_.contains(path) && !aliases_.contains(dos_path) &&
+                  !nodes_.contains(dos_path),
+                  "duplicate FAT12 name or ambiguous 8.3 alias");
             const auto first = rd16(bytes_, at + 26);
             const auto size = rd32(bytes_, at + 28);
             const bool directory = (attrs & 0x10u) != 0;
             check(rd16(bytes_, at + 20) == 0, "FAT12 high cluster word set");
             check(directory ? (size == 0 && first >= 2) :
-                 (size == 0 ? first == 0 : first >= 2),
+                  (size == 0 ? first == 0 : first >= 2),
                   "invalid FAT12 directory entry");
-            std::vector<std::size_t> attached;
-            if (!lfn.empty()) {
-                const auto checksum = name_checksum(bytes_, at);
-                bool valid = lfn.size() <= 20;
-                for (std::size_t j = 0; j < lfn.size(); ++j) {
-                    const auto at_lfn = lfn[j];
-                    valid = valid && bytes_[at_lfn + 13] == checksum &&
-                        (bytes_[at_lfn] & 0x1fu) == lfn.size() - j &&
-                        ((bytes_[at_lfn] & 0x40u) != 0) == (j == 0);
-                }
-                if (valid) attached = lfn;
-            }
-            lfn.clear();
-            nodes_.emplace(path, Node{at, first, size, attrs, std::move(attached)});
+            nodes_.emplace(path, Node{at, first, size, attrs, pending_lfn, dos_path});
+            aliases_.emplace(dos_path, path);
+            pending_lfn.clear();
             if (directory) {
                 check(dirs_.emplace(path, first).second, "duplicate FAT12 folder");
                 walk(path, first, depth + 1);
             } else if (first) {
                 const auto blocks = chain(first);
                 check(blocks.size() == (static_cast<std::size_t>(size) + cluster_bytes_ - 1) /
-                       cluster_bytes_, "FAT12 file chain length mismatch");
+                      cluster_bytes_, "FAT12 file chain length mismatch");
                 for (const auto c : blocks)
                     check(claimed_.insert(c).second, "cross-linked FAT12 files");
             }
         }
     }
+
     void erase(const std::string& path) {
         check(nodes_.contains(path), "FAT12 delete target missing");
         std::vector<std::string> targets;
@@ -575,6 +587,7 @@ private:
             bytes_[node.at] = 0xe5;
             for (const auto at : node.long_name_slots) bytes_[at] = 0xe5;
             if (node.directory()) dirs_.erase(key);
+            aliases_.erase(node.dos_path);
             nodes_.erase(key);
         }
     }
