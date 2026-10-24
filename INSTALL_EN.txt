@@ -1,11 +1,11 @@
-ISO-WCX v0.15.0 Preview - standalone Total Commander WCX plugin
+ISO-WCX v0.16.0 Stable Core - standalone Total Commander WCX plugin
 ================================================================
 
 Installation (no additional tools)
 ----------------------------------
-1. In the GitHub WCX preview workflow, download the combined
-   ISO-WCX-Installable-Preview artifact and unzip the outer envelope.
-2. Open ISO-WCX-preview.zip in Total Commander. Confirm the plugin
+1. Open https://github.com/sgennadi/ISO-WCX/releases/latest and download
+   ISO-WCX-v0.16.0.zip from the published Stable release.
+2. Open ISO-WCX-v0.16.0.zip in Total Commander. Confirm the plugin
    installation requested by pluginst.inf.
 3. Verify the plugin directory contains ISO-WCX.wcx and ISO-WCX.wcx64.
    These are the 32-bit and 64-bit versions of the same WCX plugin.
@@ -46,7 +46,8 @@ The installer also registers `.udf`; a UDF-only `.iso` is detected by content.
 The installed plugin also handles cue, ccd, nrg, mds v1, cso, zso,
 limited single-file isz/daa, partitioned img, raw, vhd and vhdx.
 
-This is PREVIEW software: most formats are read-only. Plain ISO9660/Joliet,
+This is the Stable Core build. Advanced image readers and editing modes
+remain experimental, with strict limitations. Most formats are read-only. Plain ISO9660/Joliet,
 standard unsplit WIM and restricted UDF Type-1 support editing; ISO/UDF Bridge
 supports only byte-only equal-length existing-file replacement.
 Supported compressed optical subsets:

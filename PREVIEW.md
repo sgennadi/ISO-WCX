@@ -1,6 +1,8 @@
 # ISO-WCX v0.16.0 Stable Core + experimental UDF writer Preview
 
-Modern Total Commander WCX plugin with restricted ISO/WIM editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
+Modern Total Commander WCX plugin with a Stable installation channel and explicitly restricted ISO/WIM/UDF editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
+
+The latest UDF Type-1 allocator remains **experimental**, outside the published stable package.
 
 ## If Total Commander says `File iso.wcx not found!`
 
