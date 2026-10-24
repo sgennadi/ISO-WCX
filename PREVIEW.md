@@ -152,10 +152,11 @@ https://sourceware.org/bzip2/downloads.html for official source and license.
 The format logic itself is independently authored; no GPL image decoder
 code was copied.
 
-**Not supported yet:** multi-volume ISZ, ISZ passwords/encryption, DAA 1.10,
-password-protected/multipart DAA, CHD audio, multi-track/mixed-mode,
-parent chains and unusual sector layouts, plus MDS v2/MDX metadata decryption.
-These deliberately fail closed.
+**Not supported in this historical v0.14 implementation:** ISZ passwords/encryption,
+DAA 1.10 and multipart DAA, CHD audio/multitrack/parent chains, and MDS v2/MDX
+metadata decryption. The current development preview now supports split ISZ,
+CHD multitrack/CDDA WAV and MDS v2/MDX data reads in specific tested layouts;
+unsupported proprietary variants still fail closed.
 Authentic vendor samples and GUI testing are still required for stable.
 
 ## WIM/ESD in v0.15 Preview
