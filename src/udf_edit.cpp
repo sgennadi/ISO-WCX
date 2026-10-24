@@ -9,6 +9,7 @@
 #include <fstream>
 #include <limits>
 #include <optional>
+#include <queue>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -142,12 +143,18 @@ bool intersects(Location a,Location b) {
     return a.bytes && b.bytes &&
            a.at<b.at+b.bytes && b.at<a.at+a.bytes;
 }
+// A file's 64-bit InformationLength can span multiple 30-bit ShortADs.
+struct DataRun {
+    std::uint64_t at{},recorded{};
+    std::uint32_t logical{},blocks{};
+};
 struct Fe {
     Bytes bytes;
-    std::uint64_t at{},data_at{},size{},capacity{};
+    std::uint64_t at{},data_at{},size{},capacity{},recorded{};
     std::size_t base{},ads{},ad_offset{};
     unsigned storage{};
     std::uint8_t type{};
+    std::vector<DataRun> runs;
 };
 struct File {
     Fe fe;
@@ -172,7 +179,7 @@ struct Integrity {
     std::uint64_t next_id{};
 };
 // UDF 4/14.12: each set bit represents an unallocated logical block.
-// Only single-block Space Bitmap Descriptors are supported at this stage.
+// Bitmap descriptors may span multiple sectors (bounded by max_dir).
 bool bitmap_free(const Bitmap& bitmap,std::uint32_t logical) {
     need(logical<bitmap.bits,"UDF bitmap logical address outside partition");
     return (bitmap.bytes[24+logical/8]&(1u<<(logical%8)))!=0;
@@ -420,6 +427,76 @@ public:
     [[nodiscard]] std::uint32_t allocate_block() {
         return allocate_blocks(1);
     }
+    // Keep only the largest candidate free runs. UDF's 30-bit ShortAD length
+    // is split on aligned block boundaries; one FE has finitely many AD slots.
+    [[nodiscard]] std::vector<DataRun> allocate_file_data(
+        std::uint64_t length,std::size_t ad_limit) {
+        need(bitmap_.has_value() && integrity_.has_value() && length>0 &&
+             ad_limit>0,"UDF multi-extent allocator is unavailable");
+        constexpr std::uint32_t max_extent_blocks=0x3fffffffu/block;
+        const auto blocks_needed=(length+block-1u)/block;
+        need(blocks_needed<=partition_blocks_ &&
+             blocks_needed<=u32(integrity_->bytes,80),
+             "UDF large file exceeds available partition blocks");
+        using Candidate=std::pair<std::uint32_t,std::uint32_t>; // count, LBA
+        std::priority_queue<Candidate,std::vector<Candidate>,
+                            std::greater<Candidate>> best;
+        const auto& bitmap=*bitmap_;
+        for(std::uint32_t at=0;at<bitmap.bits;) {
+            if(!bitmap_free(bitmap,at)) {++at;continue;}
+            const auto start=at;
+            do {++at;} while(at<bitmap.bits && bitmap_free(bitmap,at));
+            const Candidate candidate{at-start,start};
+            if(best.size()<ad_limit) best.push(candidate);
+            else if(candidate.first>best.top().first) {
+                best.pop();best.push(candidate);
+            }
+        }
+        std::vector<Candidate> available;
+        available.reserve(best.size());
+        while(!best.empty()) {available.push_back(best.top());best.pop();}
+        std::sort(available.begin(),available.end(),
+                  [](const Candidate& a,const Candidate& b) {
+                      return a.first>b.first ||
+                             (a.first==b.first && a.second<b.second);
+                  });
+        std::vector<DataRun> planned;
+        std::uint64_t remaining_blocks=blocks_needed,remaining_bytes=length;
+        for(const auto& [free_blocks,free_lba]:available) {
+            std::uint32_t used=0;
+            while(remaining_blocks && used<free_blocks) {
+                need(planned.size()<ad_limit,
+                     "UDF fragmented file exceeds FE ShortAD capacity");
+                const auto count=static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(
+                        {remaining_blocks,free_blocks-used,max_extent_blocks}));
+                const auto bytes=std::min(remaining_bytes,
+                                          std::uint64_t(count)*block);
+                need(count>0 && bytes>0 && bytes<=0x3fffffffull,
+                     "invalid UDF ShortAD file run");
+                const auto logical=free_lba+used;
+                planned.push_back({physical(logical),bytes,logical,count});
+                remaining_blocks-=count;
+                remaining_bytes-=bytes;
+                used+=count;
+            }
+            if(!remaining_blocks)break;
+        }
+        need(remaining_blocks==0 && remaining_bytes==0,
+             "UDF file cannot fit in the free bitmap/ShortAD slots");
+        for(const auto& run:planned) {
+            const Location target{run.at,std::uint64_t(run.blocks)*block};
+            for(const auto& occupied:reserved_)
+                need(!intersects(target,occupied.range),
+                     "UDF bitmap disagrees with an occupied run");
+        }
+        for(const auto& run:planned) {
+            for(std::uint32_t i=0;i<run.blocks;++i)
+                bitmap_reserve(*bitmap_,run.logical+i);
+            reserved_.push_back({{run.at,std::uint64_t(run.blocks)*block},0});
+        }
+        return planned;
+    }
     // Reclaim a directory's superseded contiguous ShortAD allocation.
     // Reject hard links, aliasing and any overlap with unrelated descriptors.
     // This is only called after a separate replacement run was reserved.
@@ -549,24 +626,39 @@ private:
             fe.capacity=block-fe.ad_offset;
             need(fe.size<=fe.capacity,"UDF embedded data outside descriptor");
         } else {
-            need(fe.ads==8,"only one short UDF extent can be rewritten");
-            const auto raw=u32(fe.bytes,fe.ad_offset);
-            need((raw>>30)==0,"unrecorded/sparse UDF extent is read-only");
-            const auto lba_data=u32(fe.bytes,fe.ad_offset+4);
-            const auto sectors=(std::uint64_t(raw&0x3fffffffu)+block-1)/block;
-            need(sectors>0 && lba_data<partition_blocks_ &&
-                 sectors<=partition_blocks_-lba_data,
-                 "UDF data extent outside partition");
-            fe.data_at=physical(lba_data);
-            // The allocation occupies whole logical blocks, although the
-            // shortAD recorded length may be smaller than one block.
-            // Growth is permitted only inside those blocks and after an
-            // overlap check against all indexed data/metadata allocations.
-            fe.capacity=sectors*block;
-            need(fe.size<=std::uint64_t(raw&0x3fffffffu),
-                 "UDF file size exceeds recorded extent");
-            need(fe.capacity<=size_-fe.data_at,
-                 "UDF extent outside disk");
+            need(fe.ads>=8 && fe.ads%8==0,
+                 "UDF ShortAD array is truncated or empty");
+            for(std::size_t p=fe.ad_offset;p<fe.ad_offset+fe.ads;p+=8) {
+                const auto raw=u32(fe.bytes,p);
+                const auto length=std::uint64_t(raw&0x3fffffffu);
+                const auto lba_data=u32(fe.bytes,p+4);
+                need((raw>>30)==0 && length>0,
+                     "unrecorded/sparse/empty UDF ShortAD is read-only");
+                const auto sectors=(length+block-1u)/block;
+                need(lba_data<partition_blocks_ &&
+                     sectors<=partition_blocks_-lba_data,
+                     "UDF ShortAD data outside partition");
+                const auto at=physical(lba_data);
+                need(sectors*block<=size_-at,
+                     "UDF ShortAD extent exceeds image");
+                const Location candidate{at,sectors*block};
+                for(const auto& prior:fe.runs)
+                    need(!intersects(candidate,
+                         {prior.at,std::uint64_t(prior.blocks)*block}),
+                         "UDF file has overlapping ShortAD descriptors");
+                need(fe.recorded<=std::numeric_limits<std::uint64_t>::max()-length &&
+                     fe.capacity<=std::numeric_limits<std::uint64_t>::max()-sectors*block,
+                     "UDF file extent length overflow");
+                fe.runs.push_back({at,length,lba_data,
+                                   static_cast<std::uint32_t>(sectors)});
+                fe.recorded+=length;
+                fe.capacity+=sectors*block;
+            }
+            need(fe.size<=fe.recorded,
+                 "UDF file InformationLength exceeds ShortAD data");
+            fe.data_at=fe.runs.front().at;
+            need(fe.type!=4 || fe.runs.size()==1,
+                 "multi-extent UDF directories are not yet writable");
         }
         return fe;
     }
@@ -585,9 +677,9 @@ private:
         need(directory_files_.emplace(prefix,directory).second,
              "duplicate UDF directory path");
         reserved_.push_back({{directory.at,block},directory.at});
-        if(directory.storage!=3)
-            reserved_.push_back({{directory.data_at,directory.capacity},
-                                 directory.at});
+        for(const auto& run:directory.runs)
+            reserved_.push_back({{run.at,std::uint64_t(run.blocks)*block},
+                                  directory.at});
         const auto data=directory_data(directory);
         for(std::size_t p=0;p<data.size();) {
             const auto remaining=data.size()-p;
@@ -637,9 +729,9 @@ private:
                     walk(child_lba,child_map,path,depth+1);
                 } else {
                     reserved_.push_back({{child.at,block},child.at});
-                    if(child.storage!=3)
-                        reserved_.push_back({{child.data_at,child.capacity},
-                                             child.at});
+                    for(const auto& run:child.runs)
+                        reserved_.push_back({{run.at,std::uint64_t(run.blocks)*block},
+                                              child.at});
                     File file;
                     file.fe=std::move(child);
                     file.fid_at=directory.data_at+p;
