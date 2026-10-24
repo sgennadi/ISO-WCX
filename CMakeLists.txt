@@ -139,7 +139,7 @@ if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
 endif()
 
 find_package(Threads REQUIRED)
-add_library(iso_disc STATIC src/archive_edit.cpp src/iso_edit.cpp src/udf_edit.cpp src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/mds_v2.cpp src/mds_v2_tracks.cpp src/cd_audio_wav.cpp third_party/tiny_aes/mds_aes.c src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
+add_library(iso_disc STATIC src/archive_edit.cpp src/floppy_edit.cpp src/iso_edit.cpp src/udf_edit.cpp src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/mds_v2.cpp src/mds_v2_tracks.cpp src/cd_audio_wav.cpp third_party/tiny_aes/mds_aes.c src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET} chdr-static Threads::Threads)
 if(WIN32)
   target_sources(iso_disc PRIVATE src/wim_archive.cpp src/wim_edit.cpp)
