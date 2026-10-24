@@ -269,6 +269,72 @@ def check_real_atomic_batch(editor, inspector, root):
           flush=True)
 
 
+
+def check_real_mixed_batch(editor, inspector, root):
+    """Independent 7z proof of one mixed UDF create/replace/delete commit."""
+    image = image_with_mkudffs(root, "hd", "real-mixed-batch")
+    removed = root / "to-remove.dat"
+    removed.write_bytes(b"MUST NOT SURVIVE MIXED BATCH")
+    previous = root / "existing-shortad.dat"
+    previous.write_bytes(b"A" * (3 * 2048 + 19))
+    command(editor, image, "add", "TO-DELETE.TXT", removed)
+    command(editor, image, "add", "EXISTING.BIN", previous)
+    updated = root / "replacement-shortad.dat"
+    updated.write_bytes(b"B" * (3 * 2048 + 199))
+    new = root / "mixed-new.dat"
+    new.write_bytes(b"UDF MIXED NESTED PAYLOAD")
+    changes = [
+        ("add", "EXISTING.BIN", updated),
+        ("delete", "TO-DELETE.TXT", None),
+        ("add", "MixedDir/Inner/new.txt", new),
+        ("mkdir", "MixedDir/Inner", None),
+        ("mkdir", "MixedDir", None),
+        ("add", "Root-New.txt", new),
+    ]
+    for i in range(18):
+        changes.append(("add", f"MIXED-REAL-{i:02d}-" +
+                        "R" * 61 + ".TXT", new))
+    args = []
+    for kind, name, source in changes:
+        args.extend((kind, name))
+        if kind == "add":
+            args.append(source)
+    original = image.read_bytes()
+    command(editor, image, "batch", *args)
+    current = image.read_bytes()
+    assert current != original and len(current) == len(original)
+    assert current[:16 * 2048] == original[:16 * 2048]
+    command("udfinfo", image)
+    native = command(inspector, image).stdout.decode("utf-8")
+    listed = command("7z", "l", image).stdout.decode(
+        "utf-8", errors="strict")
+    assert "TO-DELETE.TXT" not in native
+    assert "TO-DELETE.TXT" not in listed
+    for name in ("EXISTING.BIN", "MixedDir/Inner/new.txt", "Root-New.txt"):
+        assert name in native, name
+    independent_extract(image, root, "EXISTING.BIN",
+                        updated.read_bytes())
+    independent_extract(image, root, "MixedDir/Inner/new.txt",
+                        new.read_bytes())
+    independent_extract(image, root, changes[-1][1], new.read_bytes())
+
+    before_failure = image.read_bytes()
+    invalid = root / "too-large-source.dat"
+    invalid.write_bytes(b"X" * (15 * 2048))
+    failure = command(
+        editor, image, "batch",
+        "add", "MUST-ROLLBACK.txt", new,
+        "delete", "Root-New.txt",
+        "add", "EXISTING.BIN", invalid,
+        allowed=(1,))
+    assert failure.returncode == 1
+    assert image.read_bytes() == before_failure
+    assert not list(root.glob(".iso-wcx-edit-*"))
+    print("PASS real mkudffs mixed UDF create/replace/delete batch, "
+          "embedded-to-external FID relocation and independent 7z readback",
+          flush=True)
+
+
 def main(editor, inspector):
     for command_name in ("mkudffs", "udfinfo", "7z"):
         assert shutil.which(command_name), f"missing CI test-only tool {command_name}"
@@ -276,6 +342,7 @@ def main(editor, inspector):
         root = pathlib.Path(t)
         verify_portable_udf_read(root, editor, inspector)
         check_real_atomic_batch(editor,inspector,root)
+        check_real_mixed_batch(editor,inspector,root)
         for media in ("hd", "dvdram"):
             image = image_with_mkudffs(root, media, "real-" + media)
             before = image.read_bytes()
