@@ -50,9 +50,10 @@ the WCX DLL. IMG/RAW, fixed VHD and supported VHDX images expose FAT
 files under partition1/, etc. Extraction participates in the WCX progress,
 cancellation and rollback transaction. The standalone CLI is developer-only.
 
-It does not yet read exFAT, NTFS, ext, APFS, compressed/encrypted
-filesystems, host physical disks, snapshot parent chains, FAT timestamps
-or extended attributes.
+This document describes the original FAT12/16/32 backend. Separate
+native readers now add exFAT and a deliberately limited ext2/3/4 subset
+inside WCX. NTFS, APFS, encrypted filesystems, physical disk access,
+snapshot parents, and FAT timestamps/extended attributes remain unsupported.
 
 The regression suite uses independently constructed synthetic FAT12,
 FAT16 and FAT32 partitioned images and fixed-size VHD plus malformed

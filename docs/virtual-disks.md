@@ -76,8 +76,9 @@ format handler code.
    backup fallback and linked EBR are implemented with mutation tests.
 3. FAT12/16/32 is available both in WCX and a developer-only bounded reader
    (`virtual_fat_inspect` list/cat) over IMG, fixed VHD and clean base VHDX.
-   Broader real-image and GUI validation remains required. exFAT and
-   NTFS remain unimplemented; NTFS sparse runs, compression, reparse points
+   Broader real-image and GUI validation remains required. exFAT is
+   implemented as a separate bounded reader, while ext2/3/4 remains an
+   experimental subset. NTFS sparse runs, compression, reparse points
    and alternate streams require separate design and integrity tests.
 4. Expand the real VHD/VHDX/VMDK/NTFS corpus. Native Windows Win32/x64 WCX
    smoke tests now exercise in-process FAT extraction for supported images.
@@ -113,3 +114,16 @@ disk writes or present vendor VHD/VMDK coverage until independently tested.
 This is a format-interoperability research and implementation effort, not a
 fork of, or endorsement by Tal Aloni. The architecture also draws on the
 [official 7-Zip disk handlers](7zip-disk-formats.md); no 7-Zip code was copied.
+
+## Current filesystem reader layering (post v0.15 Preview)
+
+Partition mapping selects each MBR/GPT extent and probes distinct in-process
+readers via a common VolumeReader interface: FAT12/16/32, exFAT 1.0 and
+experimental ext2/3/4. File names are validated and mapped beneath
+`partitionN/`. The existing WCX transactional staging and cancellation
+mechanism is reused for extraction. No mount or external disk DLL is loaded.
+
+The ext2/3/4 reader is intentionally limited to supported superblocks,
+block maps, ext4 extents, regular files and directories; modern ext4 features
+such as journal replay, encryption and inline data are refused. Real-media
+validation is outstanding; these readers are preview, read-only.

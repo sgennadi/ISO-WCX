@@ -16,10 +16,11 @@ disk mount, driver, or standalone disk extraction program is necessary.
 The WCX binaries include ISO/UDF, supported virtual-disk readers and
 native ISZ/DAA optical compressed-stream decoding.
 
-The included virtual HDD reader supports MBR/GPT FAT12/16/32 partitions
-in raw HDD IMG/RAW, fixed VHD, and clean base fixed/dynamic VHDX.
-FAT files appear inside partition1/, partition2/, etc. Unsupported
-filesystems such as NTFS, exFAT and ext4 are NOT decoded yet.
+The integrated HDD reader supports MBR/GPT partitions containing FAT12/16/32,
+exFAT and experimental subsets of ext2/3/4 in raw IMG/RAW, fixed VHD and
+clean base fixed/dynamic VHDX. Files appear under partition1/, etc.
+Modern ext4 optional features and NTFS remain unsupported; filesystem
+browsing is strictly read-only.
 
 Fixing an old broken ISO.WCX association
 ----------------------------------------
@@ -53,7 +54,7 @@ CHD is not registered by default because audio and mixed/multi-track
 images remain unsupported.
 Not supported: MDS v2/MDX, encrypted/multipart ISZ or DAA, DAA 1.10,
 CHD audio/mixed/multi-track/parent chains, dynamic/differencing VHD,
-differencing/dirty VHDX, NTFS, exFAT and ext-family filesystems.
+differencing/dirty VHDX, NTFS and advanced unsupported ext4 features.
 
 Source: https://github.com/sgennadi/ISO-WCX
 
