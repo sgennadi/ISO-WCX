@@ -19,7 +19,28 @@ if(ISO_WCX_CXX_STANDARD STREQUAL "26")
   # CMake/Clang/MSVC support for C++26 is still evolving. Explicit flags avoid
   # quietly compiling in C++23 via CMake's standard-level fallback.
   if(MSVC)
-    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++latest>")
+    if(MSVC_VERSION LESS 1950)
+      message(FATAL_ERROR "C++26 requires the Visual Studio 2026 MSVC 19.50+ toolchain")
+    endif()
+    # MSVC currently exposes C++26 draft features under /std:c++latest,
+    # not a finalized /std:c++26 switch. /Zc:__cplusplus makes the active
+    # language level observable to our code and test fixtures.
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++latest>"
+                        "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>")
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "/std:c++latest /Zc:__cplusplus")
+    check_cxx_source_compiles("
+      #if !defined(_MSVC_LANG) || _MSVC_LANG < 202400L
+      #error MSVC did not enable draft C++26 mode
+      #endif
+      #if __cplusplus < 202400L
+      #error MSVC did not report its latest C++ draft standard
+      #endif
+      int main() { return 0; }" ISO_WCX_HAS_MSVC_CXX26_DRAFT)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(NOT ISO_WCX_HAS_MSVC_CXX26_DRAFT)
+      message(FATAL_ERROR "MSVC /std:c++latest draft dialect verification failed")
+    endif()
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-std=c++26>")
   elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")

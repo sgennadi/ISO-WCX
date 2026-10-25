@@ -14,12 +14,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-2025]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Configure C++20 compatibility baseline (VS2026 on Windows)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DISO_WCX_CXX_STANDARD=20
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test

@@ -63,3 +63,34 @@ jobs:
         run: cmake --build build-cxx26 --parallel 2
       - name: Run full test suite under C++26
         run: ctest --test-dir build-cxx26 --output-on-failure
+
+  windows-vs2026-cxx26:
+    name: VS2026 MSVC C++26 - ${{ matrix.arch }}
+    runs-on: windows-2025
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [Win32, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Display modern toolchain
+        shell: pwsh
+        run: |
+          cmake --version
+          Write-Host "Windows runner image: $env:ImageOS $env:ImageVersion"
+      - name: Configure Visual Studio 2026 C++26 draft dialect
+        run: cmake -S . -B build-cxx26 -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26
+      - name: Require VS2026 C++26 configuration
+        shell: pwsh
+        run: |
+          $cache = Get-Content build-cxx26/CMakeCache.txt
+          if ($cache -notcontains 'CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026') { throw 'Wrong Visual Studio generator' }
+          if ($cache -notcontains 'ISO_WCX_CXX_STANDARD:STRING=26') { throw 'Wrong C++ language mode' }
+      - name: Build every WCX and native parser/test target
+        run: cmake --build build-cxx26 --config Release --parallel 2
+      - name: Run all native and WCX ABI smoke tests
+        run: ctest --test-dir build-cxx26 -C Release --output-on-failure
+      - name: Check Total Commander association repair
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1

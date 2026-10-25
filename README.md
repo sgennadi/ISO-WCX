@@ -40,6 +40,21 @@ Win32. Dynamic/sparse VHDX, 4K-sector VHDX, differencing/dirty-log images and
 NTFS/exFAT/ext writes remain strictly read-only. No additional runtime DLLs,
 helper executables or mounts. See [VHDX implementation](docs/vhdx-native.md).
 
+## Modern Windows build toolchain (development Preview)
+
+The **development Preview** is compiled with **Visual Studio 2026 (v18),
+MSVC v145, and experimental C++26 (`/std:c++latest`)** for Win32 and
+x64. Both WCX architectures must pass all CTest and Total Commander ABI
+smoke checks; GitHub also runs a VS2026 C++20 compatibility baseline.
+Linux GCC 14 and Clang 19 C++26 tests remain independent. Microsoft's
+latest-draft mode enables implemented C++26 features, not a claim that
+the entire unfinished standard is supported. See
+[toolchain policy](docs/toolchains.md).
+
+Published **Stable v0.19.0 remains unchanged** on its original tested
+VS2022/C++20 toolchain. New Stable releases will use VS2026/C++26 only
+after release-quality gates pass.
+
 ## Built-in update checker (included in v0.19.0)
 
 ISO-WCX v0.19.0 includes an in-process updater.
