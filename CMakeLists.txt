@@ -130,6 +130,10 @@ if(BUILD_TESTING)
   add_test(NAME native_imz_zip_deflate_floppy
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_imz.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  add_test(NAME native_dynamic_vhd_fat_transactional_write
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dynamic_vhd_edit.py"
+      "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  set_tests_properties(native_dynamic_vhd_fat_transactional_write PROPERTIES TIMEOUT 420)
   add_test(NAME native_fat_streamed_large_and_fixed_vhd
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fat_streamed_fixed_vhd.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
