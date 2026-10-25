@@ -31,9 +31,10 @@ std::filesystem::path fresh_stage_name(const std::filesystem::path& original,
                                        std::uint64_t nonce) {
     // Keep the source extension on the staged copy. VirtualDiskReader needs
     // to recognize .vhd/.img when auditing the *actual bytes* before commit.
-    return original.parent_path() /
-       (original.filename().wstring() + L".iso-wcx-fat-" +
-        std::to_wstring(nonce) + L".tmp" + original.extension().wstring());
+    auto result=original;
+    result += ".iso-wcx-fat-" + std::to_string(nonce) + ".tmp";
+    result += original.extension().native();
+    return result;
 }
 constexpr std::size_t copy_buffer_size = 1024u * 1024u;
 
@@ -98,7 +99,7 @@ void close_fd(int& fd) noexcept {
 }
 void copy_disk_file(const std::filesystem::path& original,int target,
                     std::size_t length) {
-    const int src=::open(original.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    int src=::open(original.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
     require(src>=0,"cannot open original FAT disk without following symlinks");
     try {
         struct stat info{};
@@ -124,7 +125,7 @@ void copy_disk_file(const std::filesystem::path& original,int target,
             }
             copied+=static_cast<std::size_t>(n);
         }
-        close_fd(const_cast<int&>(src));
+        close_fd(src);
     }catch(...) {
         (void)::close(src);
         throw;
@@ -150,8 +151,17 @@ FatMappedImage::FatMappedImage(const std::filesystem::path& source,
             "image exceeds FAT mapped-write address or safety limit");
     size_=static_cast<std::size_t>(size);
     original_write_time_=std::filesystem::last_write_time(source);
-    if(staged_) create_stage();
-    else open_mapping(source_path_);
+    try {
+        if(staged_) create_stage();
+        else open_mapping(source_path_);
+    }catch(...) {
+        unmap();
+        if(!stage_path_.empty()) {
+            std::error_code ignored;
+            std::filesystem::remove(stage_path_,ignored);
+        }
+        throw;
+    }
 }
 
 FatMappedImage::~FatMappedImage() noexcept {
