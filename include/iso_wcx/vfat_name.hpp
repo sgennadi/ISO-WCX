@@ -1,5 +1,5 @@
 #pragma once
-// VFAT long filename codec for native FAT12 writer.
+// VFAT long filename codec for native FAT12/16/32 writers.
 // Independent implementation of the on-disk specification; no external code.
 #include <array>
 #include <cstddef>
@@ -105,7 +105,7 @@ inline std::uint8_t checksum(const std::uint8_t* short_name) {
 inline std::size_t required_slots(std::string_view name) {
     return (utf16(name).size()+12)/13;
 }
-inline std::string decode(const std::vector<std::uint8_t>& disk,
+inline std::string decode(std::span<const std::uint8_t> disk,
                           const std::vector<std::size_t>& offsets,
                           std::size_t short_at) {
     verify(!offsets.empty() && offsets.size() <= 20, "invalid VFAT slot count");
@@ -132,7 +132,7 @@ inline std::string decode(const std::vector<std::uint8_t>& disk,
     }
     return utf8(units);
 }
-inline void encode(std::vector<std::uint8_t>& disk,
+inline void encode(std::span<std::uint8_t> disk,
                    const std::vector<std::size_t>& slots,
                    std::string_view name,
                    const std::array<std::uint8_t,11>& alias) {
