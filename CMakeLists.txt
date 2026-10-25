@@ -191,6 +191,14 @@ if(BUILD_TESTING)
   add_executable(virtual_disk_tests tests/virtual_disk.cpp)
   target_link_libraries(virtual_disk_tests PRIVATE iso_virtual_partitions)
   add_test(NAME raw_fixed_vhd_read_only COMMAND virtual_disk_tests)
+  add_executable(dynamic_vhd_read_fixture tests/dynamic_vhd_read_fixture.cpp)
+  target_link_libraries(dynamic_vhd_read_fixture PRIVATE iso_virtual_partitions)
+  add_test(NAME native_dynamic_vhd_sparse_bat_and_fat
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dynamic_vhd.py"
+            "$<TARGET_FILE:virtual_fat_inspect>"
+            "$<TARGET_FILE:virtual_partition_inspect>"
+            "$<TARGET_FILE:dynamic_vhd_read_fixture>")
+  set_tests_properties(native_dynamic_vhd_sparse_bat_and_fat PROPERTIES TIMEOUT 180)
   add_executable(vhdx_read_fixture tests/vhdx_read_fixture.cpp)
   target_link_libraries(vhdx_read_fixture PRIVATE iso_virtual_partitions)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
