@@ -9,6 +9,8 @@ Also test MBR partition1/2 writes on a fixed VHD with a checksumed footer.
 from __future__ import annotations
 
 import pathlib
+import os
+import stat
 import struct
 import subprocess
 import sys
@@ -82,6 +84,8 @@ def verify_fat32(image: pathlib.Path, original_boot: bytes, size: int):
 def test_large(editor: pathlib.Path, reader: pathlib.Path, root: pathlib.Path):
     image = root / "large-fat32.raw"
     size = long_fat32(image)
+    if os.name != "nt":
+        image.chmod(0o640)  # The atomic clone must not silently become 0600.
     with image.open("rb") as f:
         original_boot = f.read(SECTOR)
     payload = root / "large-input.bin"
@@ -91,6 +95,8 @@ def test_large(editor: pathlib.Path, reader: pathlib.Path, root: pathlib.Path):
     readback(reader, image, {logical: payload.read_bytes()},
              root / "large-extracted")
     verify_fat32(image, original_boot, size)
+    if os.name != "nt":
+        assert stat.S_IMODE(image.stat().st_mode) == 0o640,             "atomic FAT update changed original POSIX access permissions"
 
     # Fail closed for invalid FAT mirror even when a stage would be large.
     corrupt = root / "large-mirror-broken.raw"
