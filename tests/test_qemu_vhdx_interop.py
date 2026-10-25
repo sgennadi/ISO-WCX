@@ -55,7 +55,10 @@ def main(qemu: pathlib.Path, partition: pathlib.Path,
         # converts the modified image back to RAW for byte-level verification.
         writable = partitioned(root, "fat16")
         fixed = root / "qemu-fixed-write.vhdx"
-        invoke(qemu, "convert", "-f", "raw", "-O", "vhdx",
+        # -S 0 forbids optimization of zero blocks into sparse BAT
+        # states: this Preview intentionally accepts only fully allocated
+        # fixed VHDX, never missing/zero/partial payload BAT entries.
+        invoke(qemu, "convert", "-S", "0", "-f", "raw", "-O", "vhdx",
                "-o", "subformat=fixed", writable, fixed)
         original = writable.read_bytes()
         original_size = fixed.stat().st_size
