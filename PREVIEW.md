@@ -1,8 +1,14 @@
-# ISO-WCX v0.20.0 Stable Core + Fixed VHDX FAT and UDF Writer Preview
+# ISO-WCX v0.21.0 Stable Core + Export Image Structure and bounded writer Preview
 
 Modern Total Commander WCX plugin with a Stable installation channel and explicitly restricted ISO/WIM/UDF editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2026, MSVC C++26 draft (Windows Win32/x64).
 
-The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.20.0, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
+The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.21.0, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
+
+v0.21.0 includes the read-only in-process **Export Image Structure**
+button and internal WIM metadata validation groundwork. It does **not**
+make creating a folder inside a large WIM instantaneous: WIMGAPI
+Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
+in PR #65 is **not** part of this Stable build.
 
 ## If Total Commander says `File iso.wcx not found!`
 

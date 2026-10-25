@@ -1,8 +1,7 @@
 [plugininstall]
-description=ISO-WCX v0.20.0 Stable Core + fixed VHDX FAT Preview, WIM fix, VS2026 C++26, updater
-version=0.20.0
+description=ISO-WCX v0.21.0 Stable: Export Image Structure, WIM diagnostics, VS2026 C++26
+version=0.21.0
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX
 defaultextension=iso,udf,cue,ccd,nrg,mds,mdx,cso,zso,isz,daa,img,raw,vhd,vhdx,wim,esd,swm,ima,vfd,flp,bif,imz
-
