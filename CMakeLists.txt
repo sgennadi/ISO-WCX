@@ -185,6 +185,7 @@ else()
 endif()
 
 if(BUILD_TESTING)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_executable(virtual_partition_tests tests/partition_map.cpp)
   target_link_libraries(virtual_partition_tests PRIVATE iso_virtual_partitions)
   add_test(NAME raw_virtual_disk_mbr_gpt COMMAND virtual_partition_tests)
@@ -201,7 +202,6 @@ if(BUILD_TESTING)
   set_tests_properties(native_dynamic_vhd_sparse_bat_and_fat PROPERTIES TIMEOUT 180)
   add_executable(vhdx_read_fixture tests/vhdx_read_fixture.cpp)
   target_link_libraries(vhdx_read_fixture PRIVATE iso_virtual_partitions)
-  find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME native_vhdx_container_bat_crc32c
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_vhdx.py"
             "$<TARGET_FILE:virtual_partition_inspect>" "$<TARGET_FILE:virtual_fat_inspect>"
