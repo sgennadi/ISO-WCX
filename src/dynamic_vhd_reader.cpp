@@ -86,6 +86,7 @@ DynamicVhdReader::DynamicVhdReader(
             "dynamic base VHD unexpectedly contains parent metadata");
 
     const auto bat_offset=be64(header.data()+16);
+    bat_offset_=bat_offset;
     const auto entries=be32(header.data()+28);
     block_size_=be32(header.data()+32);
     require(block_size_>=sector_size && block_size_<=maximum_block_size &&
