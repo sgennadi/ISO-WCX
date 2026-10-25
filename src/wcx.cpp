@@ -280,7 +280,10 @@ WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
 WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
     try { iso_wcx::configure_updates(parent,module); } catch(...) {}
 }
-WCX_EXPORT int __stdcall GetPackerCaps() {return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT|2|4|8;}
+WCX_EXPORT int __stdcall GetPackerCaps() {
+    iso_wcx::schedule_update_check();
+    return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT|2|4|8|16; // 16=PK_CAPS_OPTIONS
+}
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
     if(!path)return 0;
     try{iso_wcx::Disc test{std::filesystem::path(path)};return 1;}catch(...){return 0;}
