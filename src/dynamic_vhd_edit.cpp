@@ -171,7 +171,7 @@ std::uint32_t allocate_physical_block(
     // 0xffffffff is reserved as the BAT "not present" sentinel.
     require(insert_at/512 < UINT32_MAX,
             "dynamic VHD physical address exceeds 32-bit BAT range");
-    std::array<std::uint8_t,buffer_limit> zeros{};
+    std::vector<std::uint8_t> zeros(buffer_limit,0);
     const auto extent=std::uint64_t(bitmap_size)+block_size;
     require(extent>0 &&
             stage_size<=std::uint64_t(std::numeric_limits<std::streamoff>::max())-extent,
@@ -332,7 +332,7 @@ void edit_dynamic_vhd(const std::filesystem::path& image,
                           std::filesystem::path(".") : image.parent_path();
         std::error_code ec;
         const auto available=std::filesystem::space(parent,ec);
-        if(!ec && available.available!=UINTMAX_MAX) {
+        if(!ec && available.available!=std::numeric_limits<std::uintmax_t>::max()) {
             require(available.available >=
                     std::uint64_t(original.size())*3+
                     std::filesystem::file_size(image),
