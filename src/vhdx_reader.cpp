@@ -83,7 +83,9 @@ struct Header {
 };
 std::optional<Header> parse_header(const Bytes& bytes) {
     if (bytes.size()!=4096 || !begins(bytes.data(),"head") || !valid_crc(bytes) ||
-        u16(bytes.data()+66)!=1)
+        u16(bytes.data()+64)!=0 || u16(bytes.data()+66)!=1 ||
+        !std::all_of(bytes.begin()+80,bytes.end(),
+                     [](std::uint8_t v){return v==0;}))
         return std::nullopt;
     Header header;
     header.seq=u64(bytes.data()+8);
@@ -102,14 +104,19 @@ struct Region {
 struct Regions {
     Region bat;
     Region meta;
+    std::vector<Region> optional;
     friend bool operator==(const Regions&,const Regions&)=default;
 };
 std::optional<Regions> parse_regions(const Bytes& bytes,std::uint64_t physical_size) {
-    if (bytes.size()!=65536 || !begins(bytes.data(),"regi") || !valid_crc(bytes))
+    if (bytes.size()!=65536 || !begins(bytes.data(),"regi") || !valid_crc(bytes) ||
+        u32(bytes.data()+12)!=0)
         return std::nullopt;
     const auto count=u32(bytes.data()+8);
     if (count>2047) return std::nullopt;
     std::optional<Region> bat,meta;
+    std::vector<Region> seen;
+    std::vector<Region> optional;
+    seen.reserve(count);
     for (std::uint32_t i=0;i<count;++i) {
         const auto* item=bytes.data()+16+std::size_t(i)*32;
         const auto offset=u64(item+16);
@@ -118,6 +125,11 @@ std::optional<Regions> parse_regions(const Bytes& bytes,std::uint64_t physical_s
         if(flags>1 || offset<MiB || offset%MiB || !length ||
            length%MiB || offset>physical_size || length>physical_size-offset)
             return std::nullopt;
+        const Region current{offset,length};
+        for (const auto& previous:seen)
+            if (overlap(current.offset,current.size,previous.offset,previous.size))
+                return std::nullopt;
+        seen.push_back(current);
         const auto id=guid(item);
         if(id==BatId) {
             if(bat) return std::nullopt;
@@ -127,10 +139,10 @@ std::optional<Regions> parse_regions(const Bytes& bytes,std::uint64_t physical_s
             meta=Region{offset,length};
         } else if(flags==1)
             return std::nullopt;
+        else optional.push_back(current);
     }
-    if(!bat || !meta ||
-       overlap(bat->offset,bat->size,meta->offset,meta->size)) return std::nullopt;
-    return Regions{*bat,*meta};
+    if(!bat || !meta) return std::nullopt;
+    return Regions{*bat,*meta,std::move(optional)};
 }
 } // namespace
 
@@ -191,6 +203,15 @@ void VhdxReader::parse() {
     if(regions1 && regions2) require(*regions1==*regions2,
                                    "conflicting valid VHDX region tables");
     const auto regions=regions1?*regions1:*regions2;
+    // VHDX region tables may include optional vendor-defined areas. Do not
+    // allow payload BAT entries to alias them as ordinary disk contents.
+    optional_regions_=regions.optional;
+    for (const auto& region:optional_regions_)
+        require(!overlap(region.offset,region.size,0,MiB) &&
+                (!active.log_length ||
+                 !overlap(region.offset,region.size,
+                          active.log_offset,active.log_length)),
+                "optional VHDX region overlaps reserved header or transaction log");
     require(!overlap(regions.bat.offset,regions.bat.size,0,MiB) &&
             !overlap(regions.meta.offset,regions.meta.size,0,MiB),
             "VHDX regions overlap header section");
@@ -206,13 +227,19 @@ void VhdxReader::parse() {
     metadata_length_=regions.meta.size;
     require(metadata_length_>=65536,"VHDX metadata truncated");
     const auto table=file_read(metadata_offset_,65536);
-    require(begins(table.data(),"metadata"),"VHDX metadata table signature missing");
+    require(begins(table.data(),"metadata") &&
+            u16(table.data()+8)==0 &&
+            std::all_of(table.begin()+12,table.begin()+32,
+                        [](std::uint8_t v){return v==0;}),
+            "VHDX metadata table signature or reserved bytes invalid");
     const auto count=u16(table.data()+10);
     require(count<=2047,"VHDX metadata table count invalid");
 
     std::optional<std::uint32_t> block_size,logical_sector,physical_sector;
     std::optional<std::uint64_t> virtual_size;
     bool has_disk_id=false;
+    std::vector<Region> item_regions;
+    item_regions.reserve(count);
     for (unsigned i=0;i<count;++i) {
         const auto* entry=table.data()+32+i*32;
         const auto id=guid(entry);
@@ -223,6 +250,10 @@ void VhdxReader::parse() {
         require(offset>=65536 && offset<=metadata_length_ &&
                 len && len<=MiB && len<=metadata_length_-offset,
                 "invalid VHDX metadata extent");
+        for (const auto& previous:item_regions)
+            require(!overlap(offset,len,previous.offset,previous.size),
+                    "overlapping VHDX metadata item extents");
+        item_regions.push_back(Region{offset,len});
         if (id==ParentId)
             throw std::runtime_error("differencing VHDX parent locator unsupported");
         if (id==ParamsId) {
@@ -309,6 +340,9 @@ std::vector<std::uint8_t> VhdxReader::read(
                     (!log_length_ ||
                      !overlap(physical,block_size_,log_offset_,log_length_)),
                     "VHDX payload overlaps reserved region or transaction log");
+            for (const auto& region:optional_regions_)
+                require(!overlap(physical,block_size_,region.offset,region.size),
+                        "VHDX payload aliases optional vendor region");
             const auto bytes=file_read(physical+local,count);
             std::copy(bytes.begin(),bytes.end(),out.begin()+done);
             break;
