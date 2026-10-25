@@ -51,6 +51,7 @@ using WimCloseFn=BOOL(WINAPI*)(HANDLE);
 static std::atomic<unsigned> pack_progress_calls{0};
 static std::atomic<unsigned> wim_percent_calls{0};
 static std::atomic<unsigned> wim_stage_calls{0};
+static std::atomic<unsigned> wim_fast_mount_stages{0};
 static std::atomic<bool> cancel_next_wim{false};
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
@@ -58,6 +59,10 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
         ++wim_percent_calls;
         if(stage && std::wstring_view(stage).starts_with(L"WIM: "))
             ++wim_stage_calls;
+        if(stage && std::wstring_view(stage).find(
+                L"Create WIM folders without applying image") !=
+                std::wstring_view::npos)
+            ++wim_fast_mount_stages;
         if(cancel_next_wim.load() && stage &&
            std::wstring_view(stage).find(L"Extract WIM image")!=std::wstring_view::npos)
             return 0;
@@ -80,7 +85,9 @@ std::string load(const fs::path& filename) {
     return {std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
 }
 int wmain(int argc,wchar_t** argv) {
-    if(argc!=2) return 1;
+    const bool fast_mount_test=argc==3 &&
+        std::wstring_view(argv[2])==L"--fast-mount";
+    if(argc!=2 && !fast_mount_test) return 1;
     try {
         const auto root=fs::temp_directory_path()/
             (L"iso-wcx-wim-smoke-"+std::to_wstring(GetCurrentProcessId())+L"-"+
@@ -300,6 +307,55 @@ int wmain(int argc,wchar_t** argv) {
         HANDLE broken=open(&args);
         if(broken){close(broken);return 11;}
         std::error_code ec;
+        if(fast_mount_test) {
+            // Disposable Windows integration: actually run the optional
+            // WIMMountImageHandle -> WIMCommitImageHandle path on a genuine
+            // WIM captured earlier by the system WIMGAPI.
+            const auto fast_dir=incoming/L"FAST_MOUNT_FOLDER";
+            fs::create_directories(fast_dir);
+            wchar_t fast_list[]=L"FAST_MOUNT_FOLDER\0\0";
+            std::wstring index_sub=L"image1";
+            const auto before_fast=load(original);
+            wim_fast_mount_stages.store(0);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"1");
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int fast_rc=pack(packed.data(),index_sub.data(),
+                                   src.data(),fast_list,0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+            if(fast_rc!=0) {
+                // The plugin may retain a failed mounted staging workspace.
+                // Do not recursively delete the fixture tree on failure.
+                if(load(original)!=before_fast)return 43;
+                std::wcerr<<L"WIM mount Preview failed (code "<<fast_rc
+                          <<L"). Preserved test root for recovery: "
+                          <<root.c_str()<<L"\n";
+                return 44;
+            }
+            if(wim_fast_mount_stages.load()==0)
+                return 45; // Must actually reach the mount edit stage.
+            std::wstring verify_path=original.wstring();
+            OpenW check_open{};
+            check_open.ArcName=verify_path.data();
+            const HANDLE mounted_check=open(&check_open);
+            if(!mounted_check)return 46;
+            bool folder_found=false;
+            for(unsigned n=0;n<100000;++n) {
+                HeaderExW entry{};
+                const int rc=read(mounted_check,&entry);
+                if(rc==10)break;
+                if(rc!=0){close(mounted_check);return 47;}
+                if(std::wstring_view(entry.FileName)==
+                      L"image1\\FAST_MOUNT_FOLDER")
+                    folder_found=(entry.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
+                if(process(mounted_check,0,nullptr,nullptr)!=0){
+                    close(mounted_check);return 48;
+                }
+            }
+            close(mounted_check);
+            if(!folder_found || !content(L"image1\\HELLO.TXT",data) ||
+               data!="hello-two")return 49;
+        }
         fs::remove_all(root,ec);
         std::cout<<"PASS: Windows WIMGAPI multi-index LZX WIM, ESD and split SWM through WCX x86/x64 API\n";
         return 0;
