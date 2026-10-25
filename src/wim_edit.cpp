@@ -260,6 +260,21 @@ void fast_mount_folder_edit(
     // Keep a recoverable sibling clone. Even a failed mount must never
     // touch the original WIM or delete a still-mounted Windows directory.
     Privileges privileges;
+    // Fail before the potentially multi-gigabyte stage clone if the host
+    // does not export its native Windows WIM mount/commit entry points.
+    Library library;
+    HMODULE dll=library.h;
+    using Mount=BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD);
+    using Commit=BOOL(WINAPI*)(HANDLE,DWORD,PHANDLE);
+    using Unmount=BOOL(WINAPI*)(HANDLE,DWORD);
+    auto mount=api<Mount>(dll,"WIMMountImageHandle");
+    auto commit=api<Commit>(dll,"WIMCommitImageHandle");
+    auto unmount=api<Unmount>(dll,"WIMUnmountImageHandle");
+    auto create=api<HANDLE(WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD)>(
+        dll,"WIMCreateFile");
+    auto close=api<Close>(dll,"WIMCloseHandle");
+    auto temp=api<BOOL(WINAPI*)(HANDLE,PCWSTR)>(dll,"WIMSetTemporaryPath");
+    auto load=api<HANDLE(WINAPI*)(HANDLE,DWORD)>(dll,"WIMLoadImage");
     EditTransaction tx(path);
     const auto folder=tx.workspace/L"mounted";
     const auto scratch=tx.workspace/L"scratch";
@@ -297,19 +312,6 @@ void fast_mount_folder_edit(
 
     // WIMGAPI's mount driver may not be installed on every Windows host.
     // This Preview mode refuses and preserves the original if unavailable.
-    Library library;
-    HMODULE dll=library.h;
-    using Mount=BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD);
-    using Commit=BOOL(WINAPI*)(HANDLE,DWORD,PHANDLE);
-    using Unmount=BOOL(WINAPI*)(HANDLE,DWORD);
-    auto mount=api<Mount>(dll,"WIMMountImageHandle");
-    auto commit=api<Commit>(dll,"WIMCommitImageHandle");
-    auto unmount=api<Unmount>(dll,"WIMUnmountImageHandle");
-    auto create=api<HANDLE(WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD)>(
-        dll,"WIMCreateFile");
-    auto close=api<Close>(dll,"WIMCloseHandle");
-    auto temp=api<BOOL(WINAPI*)(HANDLE,PCWSTR)>(dll,"WIMSetTemporaryPath");
-    auto load=api<HANDLE(WINAPI*)(HANDLE,DWORD)>(dll,"WIMLoadImage");
     {
         // Windows WIMGAPI mount access is the GENERIC_EXECUTE bit. Keep
         // READ|WRITE as well so WIMCommitImageHandle can update the staged WIM.
@@ -382,6 +384,15 @@ void fast_mount_folder_edit(
     // The mount and all WIMGAPI handles must be closed before independent
     // metadata enumeration and before attempting to replace the source WIM.
     report(L"Verify WIM folder changes",87);
+    wim_detail::Header updated_header{};
+    if(!wim_detail::read_header(tx.output,updated_header))
+        throw EditUnsupported("fast WIM output has no valid header");
+    wim_detail::validate(updated_header);
+    if(wim_detail::u32(updated_header,44)!=
+           wim_detail::u32(stage_header,44) ||
+       wim_detail::u32(updated_header,120)!=
+           wim_detail::u32(stage_header,120))
+        throw EditUnsupported("fast WIM unexpectedly changed image count or boot index");
     {
         const WimArchive updated(tx.output);
         const auto newer=tree_snapshot(updated);
