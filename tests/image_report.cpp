@@ -12,6 +12,7 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace fs=std::filesystem;
@@ -58,7 +59,14 @@ int main() {
         bytes[boot]=0;std::memcpy(bytes.data()+boot+1,"CD001",5);
         std::memcpy(bytes.data()+boot+7,"EL TORITO SPECIFICATION",23);
         bytes[boot+6]=1;le32(bytes,boot+71,25);
-        const auto end=18*sector;
+        const auto svd=18*sector;
+        bytes[svd]=2;std::memcpy(bytes.data()+svd+1,"CD001",5);
+        bytes[svd+6]=1;
+        bytes[svd+88]='%';bytes[svd+89]='/';bytes[svd+90]='E';
+        const auto joliet_root=rec(22,sector,2,std::string(1,'\0'));
+        std::copy(joliet_root.begin(),joliet_root.end(),
+                  bytes.begin()+static_cast<std::ptrdiff_t>(svd+156));
+        const auto end=19*sector;
         bytes[end]=255;std::memcpy(bytes.data()+end+1,"CD001",5);
         bytes[end+6]=1;
         const auto catalog=25*sector;
@@ -67,6 +75,25 @@ int main() {
         auto file=rec(21,5,0,"HELLO.TXT;1");
         std::size_t pos=20*sector;
         for(const auto& record:{root,dotdot,file}) {
+            std::copy(record.begin(),record.end(),
+                      bytes.begin()+static_cast<std::ptrdiff_t>(pos));
+            pos+=record.size();
+        }
+        // A second, UTF-16BE Joliet tree matches real bootable images
+        // with independent PVD and Joliet directory records.
+        const auto unicode_name=[](std::u16string_view value) {
+            std::string encoded;
+            for(const auto codepoint:value) {
+                encoded.push_back(static_cast<char>(codepoint>>8));
+                encoded.push_back(static_cast<char>(codepoint&0xff));
+            }
+            return encoded;
+        };
+        const auto joliet_parent=rec(22,sector,2,std::string(1,'\1'));
+        const auto joliet_hello=rec(21,5,0,unicode_name(u"HELLO.TXT;1"));
+        const auto joliet_hebrew=rec(21,5,0,unicode_name(u"\u05E9\u05DC\u05D5\u05DD.TXT;1"));
+        pos=22*sector;
+        for(const auto& record:{joliet_root,joliet_parent,joliet_hello,joliet_hebrew}) {
             std::copy(record.begin(),record.end(),
                       bytes.begin()+static_cast<std::ptrdiff_t>(pos));
             pos+=record.size();
@@ -96,6 +123,11 @@ int main() {
              "System area not detected");
         need(report.find("El Torito boot descriptor: yes")!=std::string::npos,
              "El Torito not detected");
+        need(report.find("Joliet present: yes")!=std::string::npos,
+             "Bootable ISO Joliet descriptor not detected");
+        const std::u8string expected_hebrew=u8"\u05E9\u05DC\u05D5\u05DD.TXT";
+        need(report.find(std::string(expected_hebrew.begin(),expected_hebrew.end()))!=
+                 std::string::npos,"Joliet Unicode file path missing");
         need(report.find("UDF VRS NSR02: not detected")!=std::string::npos,
              "Invalid UDF reporting");
         need(report.find("FILE\t5\t")!=std::string::npos &&
