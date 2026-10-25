@@ -11,7 +11,16 @@ endif()
 if(ISO_WCX_CXX_STANDARD STREQUAL "26" AND CMAKE_VERSION VERSION_LESS 3.25)
   message(FATAL_ERROR "The experimental C++26 lane requires CMake 3.25 or newer")
 endif()
-set(CMAKE_CXX_STANDARD ${ISO_WCX_CXX_STANDARD})
+# VS2026 MSVC implements /std:c++latest, but CMake's VS generator
+# currently lacks a CXX26 language standard mapping. Keep the CMake
+# language metadata at CXX20 only for this experimental MSVC lane;
+# pass the actual draft mode flags explicitly below and verify them.
+if(MSVC AND ISO_WCX_CXX_STANDARD STREQUAL "26")
+  set(CMAKE_CXX_STANDARD 20)
+  message(STATUS "MSVC C++26 draft uses /std:c++latest")
+else()
+  set(CMAKE_CXX_STANDARD ${ISO_WCX_CXX_STANDARD})
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
