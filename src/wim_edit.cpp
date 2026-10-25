@@ -246,11 +246,20 @@ void fast_mount_folder_edit(
     const std::string prefix="image"+std::to_string(plan.index)+"/";
     bool all_exist=true;
     for(const auto& relative:plan.paths) {
-        const auto key=prefix+relative;
-        const auto hit=known.find(key);
-        if(hit!=known.end() && !hit->second)
-            throw EditUnsupported("cannot create folder over an existing WIM file");
-        if(hit==known.end())all_exist=false;
+        std::size_t start=0;
+        while(start<relative.size()) {
+            const auto slash=relative.find('/',start);
+            const auto end=slash==std::string::npos?relative.size():slash;
+            const auto key=prefix+relative.substr(0,end);
+            const auto hit=known.find(key);
+            if(hit!=known.end() && !hit->second)
+                throw EditUnsupported("cannot create WIM folder beneath an existing file");
+            if(slash==std::string::npos) {
+                if(hit==known.end())all_exist=false;
+                break;
+            }
+            start=slash+1;
+        }
     }
     if(all_exist) {
         report(L"WIM folders already exist",99);
