@@ -9,6 +9,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <array>
+#include <cstdint>
 // Public Windows WIMGAPI ABI; no optional ADK wimgapi.h header required.
 // This structure starts with WIN32_FIND_DATAW, followed by WIM metadata.
 // The public WIMGAPI ABI inherits WIN32_FIND_DATAW. On the tested
@@ -30,7 +32,6 @@ static_assert(sizeof(WimFindData)==(sizeof(void*)==4 ? 656u : 672u),
 
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cwctype>
 #include <limits>
