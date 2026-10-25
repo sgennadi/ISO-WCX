@@ -28,6 +28,16 @@ struct Item {
     std::vector<Extent> extents;
     std::vector<std::uint8_t> inline_data;
 };
+// Metadata-only ISO namespace view. Used to compare the ISO9660 primary
+// namespace against UDF/Joliet in hybrid optical images. No file payloads
+// are extracted and no image writes are performed.
+struct IsoNamespaceView {
+    std::string format;
+    std::vector<Item> items;
+};
+[[nodiscard]] IsoNamespaceView inspect_iso_namespace(
+    const std::filesystem::path& image, bool primary_only = true);
+
 class Disc {
 public:
     explicit Disc(std::filesystem::path image);

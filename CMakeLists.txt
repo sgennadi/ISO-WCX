@@ -127,6 +127,10 @@ if(BUILD_TESTING)
   add_test(NAME udf_bridge_same_length_edit
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_bridge_edit.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  add_test(NAME image_structure_iso_udf_bridge_namespaces
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_image_report_bridge.py"
+      "$<TARGET_FILE:disc_inspect>")
+  set_tests_properties(image_structure_iso_udf_bridge_namespaces PROPERTIES TIMEOUT 90)
   add_test(NAME udf_type1_native_resize_delete
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_edit.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
@@ -188,7 +192,7 @@ if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
 endif()
 
 find_package(Threads REQUIRED)
-add_library(iso_disc STATIC src/archive_edit.cpp src/floppy_edit.cpp src/dynamic_vhd_edit.cpp src/vhdx_edit.cpp src/fat_mapped_image.cpp src/iso_edit.cpp src/udf_edit.cpp src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/mds_v2.cpp src/mds_v2_tracks.cpp src/cd_audio_wav.cpp third_party/tiny_aes/mds_aes.c src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
+add_library(iso_disc STATIC src/archive_edit.cpp src/floppy_edit.cpp src/dynamic_vhd_edit.cpp src/vhdx_edit.cpp src/fat_mapped_image.cpp src/iso_edit.cpp src/udf_edit.cpp src/disc.cpp src/image_report.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/mds_v2.cpp src/mds_v2_tracks.cpp src/cd_audio_wav.cpp third_party/tiny_aes/mds_aes.c src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET} chdr-static Threads::Threads)
 if(WIN32)
   target_sources(iso_disc PRIVATE src/wim_archive.cpp src/wim_edit.cpp)
@@ -197,6 +201,10 @@ endif()
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 if(BUILD_TESTING)
   target_link_libraries(archive_edit_fixture PRIVATE iso_disc)
+  add_executable(image_structure_report_tests tests/image_report.cpp)
+  target_link_libraries(image_structure_report_tests PRIVATE iso_disc)
+  add_test(NAME image_structure_metadata_export_read_only
+           COMMAND image_structure_report_tests)
 endif()
 target_compile_features(iso_disc PUBLIC cxx_std_20)
 if(MSVC)
@@ -316,7 +324,7 @@ endif()
 
 if(WIN32)
   add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp)
-  target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32)
+  target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32)
   target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
     ISO_WCX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     ISO_WCX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
