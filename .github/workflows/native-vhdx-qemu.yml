@@ -33,7 +33,7 @@ jobs:
       - name: Configure native CLI without disk DLLs
         run: cmake -S . -B build-qemu -DCMAKE_BUILD_TYPE=Release
       - name: Build native read-only tools
-        run: cmake --build build-qemu --target virtual_partition_inspect virtual_fat_inspect dynamic_vhd_read_fixture --parallel 2
+        run: cmake --build build-qemu --target virtual_partition_inspect virtual_fat_inspect dynamic_vhd_read_fixture archive_edit_fixture --parallel 2
       - name: Verify FAT extraction from QEMU-created VHDX
         run: |
           python3 tests/test_qemu_vhdx_interop.py \
@@ -46,4 +46,5 @@ jobs:
             "$(command -v qemu-img)" \
             ./build-qemu/virtual_partition_inspect \
             ./build-qemu/virtual_fat_inspect \
-            ./build-qemu/dynamic_vhd_read_fixture
+            ./build-qemu/dynamic_vhd_read_fixture \
+            ./build-qemu/archive_edit_fixture
