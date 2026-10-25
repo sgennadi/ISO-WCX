@@ -247,9 +247,20 @@ WimArchive::WimArchive(const std::filesystem::path& image)
                 std::array<std::uint32_t,128> trailing{};
                 GuardedFind() {trailing.fill(0xa55a5aa5u);}
                 void validate() const {
-                    for(auto value:trailing)
-                        require(value==0xa55a5aa5u,
-                                "WIMGAPI wrote beyond WIM_FIND_DATA buffer");
+                    std::size_t first=trailing.size(),last=0,changed=0;
+                    for(std::size_t i=0;i<trailing.size();++i)
+                        if(trailing[i]!=0xa55a5aa5u){
+                            if(first==trailing.size())first=i;
+                            last=i;
+                            ++changed;
+                        }
+                    if(changed){
+                        std::fprintf(stderr,
+                            "[WIM-OPEN] WIMGAPI overrun: first_word=%zu last_word=%zu changed_words=%zu sizeof_record=%zu\n",
+                            first,last,changed,sizeof(data));
+                        std::fflush(stderr);
+                        throw std::runtime_error("WIMGAPI wrote beyond WIM_FIND_DATA buffer");
+                    }
                 }
             } record;
             auto& data=record.data;
