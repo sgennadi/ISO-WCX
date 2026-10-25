@@ -187,6 +187,10 @@ if(BUILD_TESTING)
   add_executable(wim_metadata_tree_tests tests/wim_metadata_tree.cpp)
   target_include_directories(wim_metadata_tree_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME wim_uncompressed_metadata_tree_read_only COMMAND wim_metadata_tree_tests)
+  # Cross-platform safety gate for the optional Windows WIM folder mount.
+  add_executable(wim_mount_fast_plan_tests tests/wim_mount_fast_plan.cpp)
+  target_include_directories(wim_mount_fast_plan_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME wim_fast_mount_plan_and_tree_parity COMMAND wim_mount_fast_plan_tests)
 endif()
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
 # runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
