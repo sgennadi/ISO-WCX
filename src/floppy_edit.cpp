@@ -694,8 +694,13 @@ void edit_fat(const std::filesystem::path& image,
           "FAT writer only accepts raw images and validated base VHD");
     if(changes.empty())return;
     if(ext==".VHD") {
-        VirtualDiskReader container(image);
-        if(container.format()==VirtualDiskFormat::dynamic_vhd) {
+        bool is_dynamic_vhd=false;
+        {
+            VirtualDiskReader container(image);
+            is_dynamic_vhd=(container.format()==VirtualDiskFormat::dynamic_vhd);
+        } // Close the original input handle before the transactional commit:
+          // on Windows an open std::ifstream blocks MoveFileExW replacement.
+        if(is_dynamic_vhd) {
             // edit_dynamic_vhd uses a private logical RAW clone and calls
             // this same FAT writer on .img: no recursion on the container.
             edit_dynamic_vhd(image,changes,progress);
