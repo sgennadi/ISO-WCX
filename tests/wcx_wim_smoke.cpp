@@ -17,6 +17,7 @@
 #include <iostream>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 namespace fs = std::filesystem;
 
@@ -48,8 +49,19 @@ using WimTempFn=BOOL(WINAPI*)(HANDLE,PCWSTR);
 using WimSplitFn=BOOL(WINAPI*)(HANDLE,PCWSTR,PLARGE_INTEGER,DWORD);
 using WimCloseFn=BOOL(WINAPI*)(HANDLE);
 static std::atomic<unsigned> pack_progress_calls{0};
-static int __stdcall count_pack_progress(wchar_t*,int) {
+static std::atomic<unsigned> wim_percent_calls{0};
+static std::atomic<unsigned> wim_stage_calls{0};
+static std::atomic<bool> cancel_next_wim{false};
+static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
+    if(size<0){
+        ++wim_percent_calls;
+        if(stage && std::wstring_view(stage).starts_with(L"WIM: "))
+            ++wim_stage_calls;
+        if(cancel_next_wim.load() && stage &&
+           std::wstring_view(stage).find(L"Extract WIM image")!=std::wstring_view::npos)
+            return 0;
+    }
     return 1;
 }
 
@@ -224,6 +236,44 @@ int wmain(int argc,wchar_t** argv) {
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";return 21;}
         if(!pack_progress_calls.load())return 26;
+        // Regression: Total Commander creates an *empty folder* through the
+        // same PackFilesW API as a file. Verify the index survives correctly.
+        fs::create_directories(incoming/L"NEW_EMPTY_FOLDER");
+        wchar_t mkdir_list[]=L"NEW_EMPTY_FOLDER\0\0";
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int folder_rc=pack(packed.data(),sub.data(),src.data(),mkdir_list,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(folder_rc!=0)return 27;
+        if(wim_percent_calls.load()==0 || wim_stage_calls.load()==0)
+            return 32; // Progress must be visible even for empty folders.
+        // Cancel during a long apply before replacing the original WIM.
+        fs::create_directories(incoming/L"CANCEL_FOLDER");
+        wchar_t cancel_list[]=L"CANCEL_FOLDER\0\0";
+        const auto before_cancel=load(original);
+        cancel_next_wim.store(true);
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int cancel_rc=pack(packed.data(),sub.data(),src.data(),cancel_list,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        cancel_next_wim.store(false);
+        if(cancel_rc!=21 || load(original)!=before_cancel)
+            return 33; // A cancelled edit must leave WIM byte-identical.
+        {
+            OpenW args{};args.ArcName=packed.data();
+            HANDLE h=open(&args);
+            if(!h)return 28;
+            bool seen_folder=false;
+            for(;;){
+                HeaderExW item{};
+                const int result=read(h,&item);
+                if(result==10)break;
+                if(result){close(h);return 29;}
+                if(std::wstring_view(item.FileName)==L"image1\\NEW_EMPTY_FOLDER")
+                    seen_folder=(item.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
+                if(process(h,0,nullptr,nullptr)){close(h);return 30;}
+            }
+            close(h);
+            if(!seen_folder)return 31;
+        }
         auto content=[&](const std::wstring& wanted,std::string& data){
             OpenW a{};a.ArcName=packed.data();HANDLE h=open(&a);if(!h)return false;
             for(;;){HeaderExW head{};const int r=read(h,&head);if(r==10){close(h);return false;}if(r){close(h);return false;}

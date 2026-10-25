@@ -32,7 +32,12 @@ void edit_fat(const std::filesystem::path&, const std::vector<ArchiveChange>&, c
 // Content-based ISO/Joliet, ISO/UDF Bridge and UDF-only dispatch.
 void edit_optical(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
 #ifdef _WIN32
-void edit_wim(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
+// Stage label and overall 0..100 percentage for WCX pack-progress callbacks.
+// This is an independent, optional observer; the cancellation contract is
+// identical to EditProgress. Called by WIMGAPI worker callbacks when active.
+using WimEditStatus = std::function<bool(const wchar_t*, unsigned)>;
+void edit_wim(const std::filesystem::path&, const std::vector<ArchiveChange>&,
+              const EditProgress& = {}, const WimEditStatus& = {});
 #endif
 std::string edit_path(std::string path);
 }

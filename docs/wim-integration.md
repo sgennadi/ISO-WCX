@@ -36,10 +36,21 @@ thread impersonation token rather than changing the process token.
 Affected images are applied into a sibling workspace using WIMGAPI,
 edited there and recaptured; unaffected indexes are exported directly.
 Image descriptive XML and boot-index selection are preserved where
-supported. The staged WIM is reopened and visible regular files are
-verified before the original archive path is replaced. Cancellation,
-rejected input or processing failure before final commit does not change
-the original archive. Space usage can be substantial.
+supported. WIM creation and folder edits are **not constant-time**: the entire affected
+index must still be extracted and recaptured. A large install.wim can
+legitimately require several minutes even for one empty folder. During
+Apply/Capture, WIMGAPI percent updates are mapped to Total Commander
+WCX's progress bar (with the current image/stage label and cancellation).
+Unchanged indexes are exported rather than reapplied.
+
+The staged WIM is reopened; all image-index metadata and edited directory
+entries are checked, and **changed files** are read back byte-for-byte.
+Unchanged compressed file contents are not redundantly decompressed and
+re-read after an already-expensive Apply/Capture. Deletions, unsafe paths,
+empty folders and cancellation are covered by WCX regression tests.
+The original image is only replaced after the checks and flush succeed.
+A cancelled or rejected edit does not modify the original WIM; temporary
+disk usage can be substantial. This is still a Preview implementation.
 
 ## Windows 2025 WIMGAPI output compatibility
 
