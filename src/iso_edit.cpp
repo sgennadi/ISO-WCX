@@ -555,6 +555,25 @@ void unlink_boot_iso_files(const std::filesystem::path& path,
         }
     }
     need(!cuts.empty() && cuts.size()<=512,"too many ISO directory sectors");
+    // In untrusted optical images, a directory extent can alias an ordinary
+    // file extent. Do not edit any sector that is also exposed as a payload:
+    // this additionally guards full boot-image files whose El Torito entry
+    // points into the middle of their extent.
+    std::vector<const Node*> check_nodes{iso.root.get()};
+    for(std::size_t i=0;i<check_nodes.size();++i) {
+        const Node* current=check_nodes[i];
+        if(!current->directory && current->size!=0) {
+            const auto occupied=(std::uint64_t(current->size)+block-1)/block;
+            for(const auto& [sector,_]:cuts) {
+                const auto lba=sector/block;
+                need(!(lba>=current->lba && lba-current->lba<occupied),
+                     "ISO directory sector aliases file or boot payload");
+            }
+        }
+        for(const auto& child:current->children)
+            check_nodes.push_back(child.get());
+        need(check_nodes.size()<=200000,"oversized hybrid ISO tree");
+    }
     // Prepare every edited sector in memory, then stage a full sibling copy.
     // Higher offsets are removed first so offsets of earlier records remain
     // stable. Changes in the same directory sector are combined atomically.
