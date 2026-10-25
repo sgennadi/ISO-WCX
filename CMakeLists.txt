@@ -386,9 +386,16 @@ if(WIN32)
       # incompressible LZX WIM with protected DACL and NTFS ADS.
       add_executable(wcx_wim_integrity tests/wcx_wim_integrity.cpp)
       target_link_libraries(wcx_wim_integrity PRIVATE advapi32)
-      add_test(NAME wcx_wim_fast_mount_acl_ads_64mib
+      add_test(NAME wcx_wim_fast_mount_acl_ads_hardlinks
         COMMAND wcx_wim_integrity "$<TARGET_FILE:ISO-WCX>")
-      set_tests_properties(wcx_wim_fast_mount_acl_ads_64mib PROPERTIES TIMEOUT 420)
+      set_tests_properties(wcx_wim_fast_mount_acl_ads_hardlinks
+        PROPERTIES TIMEOUT 420)
+      # x64 runs a genuine 512 MiB compressed WIM; Win32 retains the
+      # 64 MiB fixture to cover 32-bit API and pointer-size compatibility.
+      if(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
+        set_tests_properties(wcx_wim_fast_mount_acl_ads_hardlinks
+          PROPERTIES ENVIRONMENT "ISO_WCX_WIM_INTEGRITY_MIB=512")
+      endif()
     endif()
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()

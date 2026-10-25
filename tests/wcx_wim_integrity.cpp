@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -147,12 +148,24 @@ static std::uint64_t hash(const fs::path& file) {
     require(input.eof() && !input.bad(),"large WIM input could not be hashed");
     return value;
 }
-static void write_incompressible(const fs::path& file) {
+static unsigned payload_mib() {
+    wchar_t value[16]{};
+    const DWORD count=GetEnvironmentVariableW(
+        L"ISO_WCX_WIM_INTEGRITY_MIB",value,16);
+    if(count==0)return 64;
+    require(count<16,"integrity payload size setting is too long");
+    wchar_t* end=nullptr;
+    const auto number=std::wcstoul(value,&end,10);
+    require(end!=value && *end==0 && number>=64 && number<=2048,
+            "integrity payload MiB must be between 64 and 2048");
+    return static_cast<unsigned>(number);
+}
+static void write_incompressible(const fs::path& file,unsigned mib) {
     std::ofstream out(file,std::ios::binary|std::ios::trunc);
-    require(bool(out),"cannot create 64-MiB payload");
+    require(bool(out),"cannot create WIM integrity payload");
     std::array<char,64*1024> block{};
     std::uint32_t random=0x71c6d32bu;
-    for(unsigned n=0;n<1024;++n) {
+    for(unsigned n=0;n<mib*16u;++n) {
         for(auto& item:block) {
             random^=random<<13;
             random^=random>>17;
@@ -188,10 +201,12 @@ int wmain(int argc,wchar_t** argv) {
         const auto expected_acl=dacl(protected_file);
         require(expected_acl.find(L"D:P")!=std::wstring::npos,
                 "protected DACL fixture is not marked protected");
-        const auto large=source/L"64MiB-random.bin";
-        write_incompressible(large);
+        const unsigned mib=payload_mib();
+        const auto large=source/(std::to_wstring(mib)+L"MiB-random.bin");
+        write_incompressible(large,mib);
         const auto size=fs::file_size(large);
-        require(size==64ull*1024ull*1024ull,"large input must be 64 MiB");
+        require(size==static_cast<std::uint64_t>(mib)*1024ull*1024ull,
+                "large WIM integrity input has the wrong size");
         const auto expected_hash=hash(large);
         save(source2/L"second.txt","Second index must be unchanged");
         const auto wim=root/L"integrity.wim";
@@ -250,10 +265,10 @@ int wmain(int argc,wchar_t** argv) {
                     "NTFS hardlink protected DACL changed");
             require(shared_file_id(restored,linked),
                     "WIM mounted edit broke two-name NTFS hardlink identity");
-            const auto restored_large=folder/L"64MiB-random.bin";
+            const auto restored_large=folder/(std::to_wstring(mib)+L"MiB-random.bin");
             require(fs::file_size(restored_large)==size,"large file length changed");
             require(hash(restored_large)==expected_hash,
-                    "64-MiB incompressible WIM file bytes changed");
+                    "incompressible WIM file bytes changed");
         };
         unpack(root/L"baseline",1);
         verify(root/L"baseline"); // Baseline proves WIM captured DACL + ADS.
@@ -290,7 +305,7 @@ int wmain(int argc,wchar_t** argv) {
         preserve_on_failure=false;
         std::error_code ec;
         fs::remove_all(root,ec);
-        std::cout<<"PASS: 64-MiB LZX WIM fast mount preserved regular files, "
+        std::cout<<"PASS: "<<mib<<"-MiB LZX WIM fast mount preserved regular files, "
                     "protected DACL, NTFS ADS, hardlinks and second index\n";
         return 0;
     }catch(const std::exception& e){

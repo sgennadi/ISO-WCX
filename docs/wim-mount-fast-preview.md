@@ -54,10 +54,13 @@ ONE existing imageN index, ISO-WCX tries the Windows WIMGAPI mount path:
   Recovery may require privileged Windows DISM mount cleanup.
 - Failed mount does **not** silently retry Apply/Capture; old behaviour
   stays the default unless explicitly opted into mount mode.
-- The Windows Preview CI now includes an independent re-apply of a genuine
-  64-MiB incompressible two-index LZX WIM containing a protected NTFS DACL
-  and named ADS. It compares data hashes, ACL SDDL, ADS bytes and the
-  unaffected index before/after the optional mounted-folder edit.
+- The Windows Preview CI now independently re-applies a genuine two-index
+  LZX WIM with a protected NTFS DACL, two hardlink names, and a named ADS.
+  It compares data hashes, ACL SDDL, ADS bytes, hardlink file identity and
+  the unaffected image index after mounted-folder changes.
+  Win32 uses a 64-MiB incompressible payload; VS2026 x64 uses 512 MiB.
+  The optional test environment variable `ISO_WCX_WIM_INTEGRITY_MIB`
+  accepts 64..2048 MiB for deeper stress testing outside the installer.
 - Tree equality alone remains a metadata-level safety check. Larger
   production install.wim files, reparse/hardlinks, mount-driver crash
   recovery and real-machine performance still need validation before
