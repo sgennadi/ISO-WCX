@@ -184,8 +184,10 @@ def negative_cases(valid: pathlib.Path, root: pathlib.Path,
     data[first_physical] &= 0x7F
     sparse.write_bytes(data)
     assert run(direct, sparse, 0, 512).stdout == bytes(512)
-    run(inspector, sparse, success=True)  # No partition in blank logical MBR.
-    run(direct, sparse, 0, 512)
+    # The missing MBR signature makes the partition table invalid, but raw
+    # sector reads must still correctly return zero rather than stale bytes.
+    run(inspector, sparse, success=False)
+    assert run(direct, sparse, 0, 512).stdout == bytes(512)
 
     # Explicit parent/differencing VHD is still refused.
     differencing = root / "differencing.vhd"
