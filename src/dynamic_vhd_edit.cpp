@@ -340,7 +340,11 @@ void edit_dynamic_vhd(const std::filesystem::path& image,
         copy_logical_view(original,flat.path(),progress);
         // This is the same independently verified FAT12/16/32 writer used
         // for normal RAW, IMG and fixed VHD. It edits its own staged clone.
-        edit_fat(flat.path(),changes,progress);
+        try {
+            edit_fat(flat.path(),changes,progress);
+        } catch(const EditUnsupported& e) {
+            throw EditUnsupported(std::string("dynamic VHD logical RAW scratch commit: ")+e.what());
+        }
         progress_check(progress);
 
         staged=std::make_unique<FatMappedImage>(image,true);
@@ -352,6 +356,10 @@ void edit_dynamic_vhd(const std::filesystem::path& image,
                                   original.size(),progress);
     } // Original image and validation readers are released before replacement.
     progress_check(progress);
-    staged->replace_source(); // Only here may the original pathname change.
+    try {
+        staged->replace_source(); // Only here may the original pathname change.
+    } catch(const EditUnsupported& e) {
+        throw EditUnsupported(std::string("dynamic VHD physical stage commit: ")+e.what());
+    }
 }
 } // namespace iso_wcx
