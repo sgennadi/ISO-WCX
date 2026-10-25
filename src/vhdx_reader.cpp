@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -346,6 +347,23 @@ std::vector<std::uint8_t> VhdxReader::read(
             for (const auto& region:optional_regions_)
                 require(!overlap(physical,block_size_,region.offset,region.size),
                         "VHDX payload aliases optional vendor region");
+            // Two different virtual blocks must not both claim the same
+            // physical bytes. A second read of the same block is allowed.
+            // Check predecessor and successor in O(log n) for visited
+            // extents; never load the entire BAT or host disk into memory.
+            const auto next=visited_payload_blocks_.lower_bound(physical);
+            if(next!=visited_payload_blocks_.end())
+                require(next->first==physical ? next->second==block :
+                        !overlap(physical,block_size_,next->first,block_size_),
+                        "VHDX payload BAT entries overlap");
+            if(next!=visited_payload_blocks_.begin()) {
+                const auto previous=std::prev(next);
+                require(!overlap(physical,block_size_,
+                                  previous->first,block_size_) ||
+                        (previous->first==physical && previous->second==block),
+                        "VHDX payload BAT entries overlap");
+            }
+            visited_payload_blocks_.emplace(physical,block);
             const auto bytes=file_read(physical+local,count);
             std::copy(bytes.begin(),bytes.end(),out.begin()+done);
             break;
