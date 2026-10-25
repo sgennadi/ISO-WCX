@@ -1,0 +1,103 @@
+#include "iso_wcx/wim_mount_fast_plan.hpp"
+#include <cstdint>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+using namespace iso_wcx;
+using namespace iso_wcx::wim_detail;
+static void check(bool valid,const char* msg) {
+    if(!valid)throw std::runtime_error(msg);
+}
+static WimTreeItem file(const char* name,std::uint64_t size=17) {
+    return WimTreeItem{name,size,0x20,0x526608aa,false};
+}
+static WimTreeItem dir(const char* name) {
+    return WimTreeItem{name,0,0x10,0,true};
+}
+int main() {
+    try {
+        ArchiveChange one;
+        one.path="New/Child";
+        one.directory=true;
+        one.source="sample-folder";  // Total Commander provides a source.
+        const std::map<unsigned,std::vector<ArchiveChange>> edits{{2,{one}}};
+        const auto plan=plan_mounted_folders(edits,{});
+        check(plan && plan->index==2 && plan->paths.size()==1,
+              "single index nested mkdir should use mount path");
+        check(!plan_mounted_folders(edits,{1}),
+              "index removal cannot use folder mount path");
+        auto mixed=edits;
+        mixed[1].push_back(one);
+        check(!plan_mounted_folders(mixed,{}),
+              "multiple edited indexes must use legacy path");
+        mixed=edits;
+        mixed.at(2)[0].remove=true;
+        check(!plan_mounted_folders(mixed,{}),
+              "delete cannot use folder-only mount path");
+        mixed=edits;
+        mixed.at(2)[0].directory=false;
+        check(!plan_mounted_folders(mixed,{}),
+              "file replacement cannot use folder-only mount path");
+        mixed=edits;
+        mixed.at(2).push_back(one);
+        check(!plan_mounted_folders(mixed,{}),
+              "duplicate paths must not use fast mount path");
+        mixed=edits;
+        mixed.at(2)[0].path="../escape";
+        // The planner requires caller-side edit_path() validation. Such a
+        // malformed logical path must never reach this point in production.
+        check(!plan_mounted_folders(mixed,{}).has_value()==false,
+              "planner is intentionally not a path-validation replacement");
+
+        const std::vector<WimTreeItem> before{
+            dir("image1"),file("image1/untouched.bin"),
+            dir("image2"),dir("image2/Existing"),file("image2/Existing/keep.dat"),
+            dir("image3"),file("image3/preserve.bin")
+        };
+        auto after=before;
+        after.push_back(dir("image2/New"));
+        after.push_back(dir("image2/New/Child"));
+        std::string why;
+        check(verify_mounted_folder_tree(before,after,*plan,why),
+              "valid mounted folder edit was refused");
+        auto bad=after;
+        bad.erase(bad.begin()+1);
+        check(!verify_mounted_folder_tree(before,bad,*plan,why),
+              "removing a file in another index was accepted");
+        bad=after;
+        bad[4].size=22;
+        check(!verify_mounted_folder_tree(before,bad,*plan,why),
+              "changing an untouched file's length was accepted");
+        bad=after;
+        bad[4].attributes=0;
+        check(!verify_mounted_folder_tree(before,bad,*plan,why),
+              "changing untouched file flags was accepted");
+        bad=after;
+        bad.push_back(file("image2/New/unexpected.bin"));
+        check(!verify_mounted_folder_tree(before,bad,*plan,why),
+              "unexpected new stream accepted");
+        bad=after;
+        bad.push_back(dir("image2/New"));
+        check(!verify_mounted_folder_tree(before,bad,*plan,why),
+              "duplicated output path accepted");
+        bad=before;
+        check(!verify_mounted_folder_tree(before,bad,*plan,why),
+              "missing requested folder accepted");
+        bad=before;
+        bad.push_back(file("image2/New"));
+        bad.push_back(dir("image2/New/Child"));
+        check(!verify_mounted_folder_tree(before,bad,*plan,why),
+              "file substituted for expected directory accepted");
+        auto broken=before;
+        broken.push_back(file("image2/New"));
+        check(!verify_mounted_folder_tree(broken,after,*plan,why),
+              "creating children under an existing file accepted");
+        std::cout<<"PASS: folder-mount plan, exact tree parity and refusal boundaries\n";
+    } catch(const std::exception& ex) {
+        std::cerr<<"WIM folder mount plan test failed: "<<ex.what()<<'\n';
+        return 1;
+    }
+}
