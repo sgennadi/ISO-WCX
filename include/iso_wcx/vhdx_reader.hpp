@@ -37,6 +37,11 @@ private:
     std::uint64_t bat_length_ = 0;
     std::uint64_t metadata_offset_ = 0;
     std::uint64_t metadata_length_ = 0;
+    struct OptionalRegion {
+        std::uint64_t offset{};
+        std::uint64_t size{};
+    };
+    std::vector<OptionalRegion> optional_regions_;
     std::uint64_t log_offset_ = 0;
     std::uint64_t log_length_ = 0;
     std::uint64_t chunk_ratio_ = 0;
