@@ -6,6 +6,9 @@
   and experimental C++26 draft flags, with compiled dialect enforcement.
 - Add bounded FAT12/16/32 `partitionN/` writes in fully mapped fixed VHDX:
   private physical clone, CRC32C paired headers and full bytewise readback.
+- Improve WIM edit progress in Total Commander, verify changed streams only
+  after rebuilding, and test cancelling an empty-folder update without
+  changing the original WIM (PR #61); full Apply/Capture remains required.
 - Guard WIM/ESD enumeration from Win32 WIMGAPI's observed extra 16-byte
   output; preserve native system-WIMGAPI backend and unchanged WCX ABI.
 - Gate Stable publication on VS2026 C++26 and C++20 compatibility Win32/x64,

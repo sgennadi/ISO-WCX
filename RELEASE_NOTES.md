@@ -27,6 +27,12 @@ Full language-standard conformance is not implied.
   and boundary validation after each enumeration. The observed
   `0xC0000374` WIM/ESD heap corruption no longer occurs in the tested
   multi-index Windows x86/x64 fixtures.
+- **WIM folder edit responsiveness (PR #61).** Total Commander receives
+  stage labels and throttled WIMGAPI progress during Apply/Capture. Rebuilt
+  WIMs are structurally enumerated, with byte-for-byte readback limited
+  to changed files rather than every unchanged compressed file. Tests verify
+  empty-folder creation, cancellation rollback and Win32/x64. This is
+  faster but **still uses full Apply/Capture**, so large WIMs can take time.
 - **Compiler modernization**: Stable uses VS2026 + C++26 draft for both
   Win32/x64. It additionally runs independent VS2026 C++20 compatibility
   checks for both architectures, GCC 14/Clang 19 C++26, Linux C++20,
