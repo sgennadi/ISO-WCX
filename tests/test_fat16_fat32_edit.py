@@ -137,6 +137,17 @@ def exercise(kind: str, editor: pathlib.Path, reader: pathlib.Path,
     assert len(initial) == size, "image geometry changed"
     if kind == "fat32":
         assert_fsinfo(image)
+        # The root directory initially occupies a single 512-byte cluster.
+        # This Unicode LFN overflows its 16 slots and tests a chain extension
+        # where the LFN records cross a physical cluster boundary.
+        expand = "root expansion and Unicode 📁 example.txt"
+        run(editor, image, "add", expand, payload)
+        readback(reader, image, {expand: payload.read_bytes()},
+                 root / "expanded-fat32-root")
+        grown = image.read_bytes()
+        fat_at = le16(grown, 14) * SECTOR
+        assert (le32(grown, fat_at + 6 * 4) & MAX_FAT32_CLUSTER) < 0x0ffffff8,             "FAT32 root directory did not extend to the next cluster"
+        assert_fsinfo(image)
 
     # Replacement in-place preserves both existing VFAT long-name records
     # and original DOS short name, even when using case-insensitive lookup.
@@ -197,6 +208,9 @@ def exercise(kind: str, editor: pathlib.Path, reader: pathlib.Path,
         table = bytearray(corrupt[start:start + fatbytes])
         for c in range(8, 65536):
             fat_set(table, kind, c, MAX_FAT32_CLUSTER)
+        # The upper four bits belong to the on-disk FAT32 record, not the
+        # 28-bit cluster value: allocation must preserve them unchanged.
+        fat_set(table, kind, 65536, 0xa0000000)
         for copy in (0, 1):
             corrupt[start + copy * fatbytes:start + (copy + 1) * fatbytes] = table
         high.write_bytes(corrupt)
@@ -204,6 +218,10 @@ def exercise(kind: str, editor: pathlib.Path, reader: pathlib.Path,
         readback(reader, high, {"HIGH.BIN": payload.read_bytes()},
                  root / "high-cluster-readback")
         assert_fsinfo(high)
+        after = high.read_bytes()
+        for fat_copy in (0, 1):
+            raw_entry = le32(after, start + fat_copy * fatbytes + 65536 * 4)
+            assert raw_entry & 0xf0000000 == 0xa0000000,                 "writer cleared FAT32 reserved high nibble"
         geometry(high, kind)
 
     # Explicit partitioned FAT input must stay read-only for this preview.
