@@ -25,3 +25,7 @@ fuzzing, cancellation, power-loss, NTFS ACL, ADS and multiple-index tests.
 
 Format study: Microsoft's published WIM layout and the independent
 `microsoft/go-winio/wim` reader. No wimlib source is copied or linked.
+
+Serialized directory and stream record sizes are rounded up to an 8-byte
+storage boundary when advancing. A zero or 8-byte sentinel ends a sibling
+list. Logical record length must still cover the declared names/streams.
