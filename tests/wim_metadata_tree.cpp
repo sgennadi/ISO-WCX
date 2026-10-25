@@ -1,9 +1,11 @@
 #include "iso_wcx/wim_metadata_tree_probe.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -77,6 +79,10 @@ int main(){
         put64(damaged,136,120);
         check(!scan_uncompressed_metadata(damaged).valid,
               "cycle in child offsets accepted");
+        damaged=b;
+        put64(damaged,136,0);
+        check(!scan_uncompressed_metadata(damaged).valid,
+              "directory with no subdirectory list accepted");
         damaged=b;
         put32(damaged,132,0);
         check(!scan_uncompressed_metadata(damaged).valid,
