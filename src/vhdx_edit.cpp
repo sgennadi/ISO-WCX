@@ -244,7 +244,9 @@ void transfer_modified_sectors(VirtualDiskReader& original,
     // replace the file and payload write GUIDs, recompute CRC32C.
     // Do not touch region tables, BAT, metadata, log or optional vendor data.
     std::array<std::uint8_t,4096> header{};
-    read_at(stage,0x10000,header.data(),header.size());
+    // The secondary header may have the higher sequence, so preserve the
+    // *active* header's log and other fields rather than a stale backup.
+    read_at(stage,layout.active_header_offset,header.data(),header.size());
     require(std::equal(header.begin(),header.begin()+4,"head"),
             "fixed VHDX staged header is invalid");
     le64(header.data()+8,layout.active_sequence+1);
