@@ -99,7 +99,7 @@ public:
             candidate+=".iso-wcx-dynamic-"+std::to_string(entropy)+".img";
 #ifdef _WIN32
             HANDLE fd=CreateFileW(candidate.c_str(),GENERIC_READ|GENERIC_WRITE,
-                                  0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_TEMPORARY,
+                                  0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,
                                   nullptr);
             if(fd==INVALID_HANDLE_VALUE) {
                 const auto status=GetLastError();
