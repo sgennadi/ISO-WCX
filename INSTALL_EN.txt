@@ -1,11 +1,11 @@
-ISO-WCX v0.17.0 Stable Core - standalone Total Commander WCX plugin
+ISO-WCX v0.18.0 Stable Core + FAT12 VFAT/IMZ Preview - Total Commander WCX plugin
 ================================================================
 
 Installation (no additional tools)
 ----------------------------------
 1. Open https://github.com/sgennadi/ISO-WCX/releases/latest and download
-   ISO-WCX-v0.17.0.zip from the published Stable release.
-2. Open ISO-WCX-v0.17.0.zip in Total Commander. Confirm the plugin
+   ISO-WCX-v0.18.0.zip from the published Stable release.
+2. Open ISO-WCX-v0.18.0.zip in Total Commander. Confirm the plugin
    installation requested by pluginst.inf.
 3. Verify the plugin directory contains ISO-WCX.wcx and ISO-WCX.wcx64.
    These are the 32-bit and 64-bit versions of the same WCX plugin.
