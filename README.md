@@ -298,7 +298,7 @@ It rejects attribute-list continuations, encrypted/compressed data,
 reparse reconstruction and journal recovery. See [exFAT design](docs/exfat-integration.md),
 [ext reader design](docs/ext-integration.md) and [NTFS preview](docs/ntfs-integration.md).
 
-## Native UDF Type-1 writer (experimental PR #33)
+## Native UDF Type-1 writer (experimental)
 
 The in-process writer edits compatible standalone 2048-byte UDF Type-1 images
 without third-party DLLs or executables. It can replace/grow/shrink existing
