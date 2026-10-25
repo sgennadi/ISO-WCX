@@ -103,7 +103,7 @@ def reject(editor: pathlib.Path, image: pathlib.Path,
     before = image.read_bytes()
     run(editor, image, "add", "REJECT.TXT", source, ok=False)
     assert image.read_bytes() == before, name
-    assert not list(root.rglob("*.iso-wcx-fat-*.tmp")), name
+    assert not list(root.rglob("*.iso-wcx-fat-*.tmp*")), name
 
 
 def exercise(kind: str, editor: pathlib.Path, reader: pathlib.Path,

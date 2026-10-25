@@ -224,7 +224,7 @@ def main(editor: pathlib.Path, reader: pathlib.Path):
         cycle.write_bytes(broken)
         run(editor, cycle, "add", "EXTRA.TXT", payload, ok=False)
         assert cycle.read_bytes() == broken
-        assert not list(root.rglob("*.iso-wcx-fat-*.tmp"))
+        assert not list(root.rglob("*.iso-wcx-fat-*.tmp*"))
 
         print("PASS: native IMA/IMG/VFD/FLP/BIF, FAT12 write & rollback, "
               "LFN preservation, mirrors, nested folders, opaque BIF")

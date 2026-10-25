@@ -120,10 +120,16 @@ Support statements below describe their respective releases; see **v0.14** at th
 - Mirrored FAT copies are checked before writes and updated consistently.
   FAT32 FSInfo and backup FSInfo are verified and receive exact free/next
   cluster counts; the backup boot sector must match the primary.
-- Only exact-size, unpartitioned FAT raw floppy/superfloppy images no greater
-  than 256 MiB are writable. MBR/GPT volumes, VHD/VHDX, nonmirrored FAT32,
-  malformed metadata, encrypted/compressed images and larger images remain
-  read-only. Changes stage and re-parse before atomic commit.
+- The staged image is a demand-paged OS mapping of a *separate complete
+  same-directory disk copy*, not a source-sized RAM vector. Image safety caps:
+  **64 GiB on x64, 512 MiB on Win32**. Requires sufficient disk free space.
+- Exact-size standalone FAT raw superfloppies and FAT `partitionN/` volumes
+  inside validated MBR/GPT RAW/IMG and **fixed VHD** are writable. Only one
+  partition may be edited per transaction. Original MBR/GPT, unrelated
+  partitions and the fixed VHD footer are preserved byte-for-byte.
+- Dynamic and differencing VHD, all VHDX, nonmirrored FAT32, damaged FAT,
+  encrypted/compressed disks and oversized images remain read-only. Changes
+  stage, sync, independently re-parse and commit atomically.
 - Independent tests verify Unicode names, root and directory allocation,
   FAT mirrors, high-word cluster indexes, FSInfo bookkeeping and unchanged
   originals after failed edits. Stable v0.18.0 does not include this preview.

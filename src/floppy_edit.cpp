@@ -1,7 +1,8 @@
-// Transactional native FAT12/16/32 raw-volume editor; no helpers, mounts or DLLs.
-// FAT16/32 preview is restricted to validated, nonpartitioned images <= 256 MiB.
+// Transactional native FAT12/16/32 editor: demand-paged staged clone,
+// no helpers, mounts, elevated access or extra runtime parser DLLs.
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/fat_volume.hpp"
+#include "iso_wcx/fat_mapped_image.hpp"
 #include "iso_wcx/partition_map.hpp"
 #include "iso_wcx/virtual_disk.hpp"
 #include "iso_wcx/vfat_name.hpp"
@@ -14,6 +15,8 @@
 #include <map>
 #include <optional>
 #include <random>
+#include <span>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -30,19 +33,19 @@ namespace {
 void check(bool ok, const char* why) {
     if (!ok) throw EditUnsupported(why);
 }
-std::uint16_t rd16(const std::vector<std::uint8_t>& v, std::size_t at) {
+std::uint16_t rd16(std::span<const std::uint8_t> v, std::size_t at) {
     check(at <= v.size() && v.size() - at >= 2, "truncated FAT12 word");
     return std::uint16_t(v[at]) | (std::uint16_t(v[at + 1]) << 8);
 }
-std::uint32_t rd32(const std::vector<std::uint8_t>& v, std::size_t at) {
+std::uint32_t rd32(std::span<const std::uint8_t> v, std::size_t at) {
     return std::uint32_t(rd16(v, at)) | (std::uint32_t(rd16(v, at + 2)) << 16);
 }
-void wr16(std::vector<std::uint8_t>& v, std::size_t at, std::uint16_t x) {
+void wr16(std::span<std::uint8_t> v, std::size_t at, std::uint16_t x) {
     check(at <= v.size() && v.size() - at >= 2, "FAT12 metadata write overflow");
     v[at] = static_cast<std::uint8_t>(x);
     v[at + 1] = static_cast<std::uint8_t>(x >> 8);
 }
-void wr32(std::vector<std::uint8_t>& v, std::size_t at, std::uint32_t x) {
+void wr32(std::span<std::uint8_t> v, std::size_t at, std::uint32_t x) {
     wr16(v, at, static_cast<std::uint16_t>(x));
     wr16(v, at + 2, static_cast<std::uint16_t>(x >> 16));
 }
@@ -84,7 +87,7 @@ std::string alias_name(const std::array<std::uint8_t,11>& alias) {
     return base + (ext.empty() ? "" : "." + ext);
 }
 
-std::string dos_name(const std::vector<std::uint8_t>& v, std::size_t at) {
+std::string dos_name(std::span<const std::uint8_t> v, std::size_t at) {
     std::string base(reinterpret_cast<const char*>(v.data() + at), 8);
     std::string ext(reinterpret_cast<const char*>(v.data() + at + 8), 3);
     while (!base.empty() && base.back() == ' ') base.pop_back();
@@ -128,17 +131,20 @@ struct Node {
 
 class Editor {
 public:
-    explicit Editor(const std::filesystem::path& image) {
-        check(std::filesystem::is_regular_file(image) && !std::filesystem::is_symlink(image),
-              "FAT source image is not a regular file");
-        const auto size = std::filesystem::file_size(image);
-        check(size >= 512 && size <= 256u * 1024u * 1024u,
-              "FAT editing preview limited to 256 MiB");
-        bytes_.resize(static_cast<std::size_t>(size));
-        std::ifstream input(image, std::ios::binary);
-        check(bool(input) && bool(input.read(reinterpret_cast<char*>(bytes_.data()),
-                                             static_cast<std::streamsize>(bytes_.size()))),
-              "cannot read FAT raw image");
+    Editor(const std::filesystem::path& image,
+           std::uint64_t volume_start,std::uint64_t volume_length,
+           bool staged)
+        : mapped_(image,staged),volume_start_(volume_start),
+          volume_length_(volume_length) {
+        const auto image_size=mapped_.bytes().size();
+        check(volume_start<=image_size &&
+              volume_length>=512 &&
+              volume_length<=image_size-volume_start &&
+              volume_start<=std::numeric_limits<std::size_t>::max() &&
+              volume_length<=std::numeric_limits<std::size_t>::max(),
+              "invalid FAT region mapping within disk image");
+        bytes_=mapped_.bytes().subspan(static_cast<std::size_t>(volume_start),
+                                      static_cast<std::size_t>(volume_length));
         setup();
         dirs_.at("") = kind_ == FatKind::fat32 ? root_cluster_ : 0u;
         walk("", dirs_.at(""), 0);
@@ -186,12 +192,10 @@ public:
         const auto count = std::filesystem::file_size(c.source);
         check(count <= bytes_.size() && count <= UINT32_MAX,
               "new FAT12 file exceeds available volume size");
-        std::vector<std::uint8_t> data(static_cast<std::size_t>(count));
+        // Stream the host file cluster by cluster straight into the mapped
+        // stage. Large files never allocate a proportional RAM buffer.
         std::ifstream source(c.source, std::ios::binary);
-        check(bool(source) && (data.empty() ||
-              bool(source.read(reinterpret_cast<char*>(data.data()),
-                               static_cast<std::streamsize>(data.size())))),
-              "cannot read new FAT12 file");
+        check(bool(source), "cannot open new FAT input file");
         std::size_t slot{};
         std::vector<std::size_t> new_lfn;
         if (existing != nodes_.end()) {
@@ -206,84 +210,61 @@ public:
                 vfat::encode(bytes_, new_lfn, base, planned.alias);
             slot = reserved.back();
         }
-        const auto needed = (data.size() + cluster_bytes_ - 1) / cluster_bytes_;
-        const auto allocated = allocate(needed);
-        for (std::size_t i = 0; i < allocated.size(); ++i) {
-            const auto at = offset(allocated[i]);
-            const auto first = i * cluster_bytes_;
-            const auto count_here = std::min<std::size_t>(cluster_bytes_, data.size() - first);
-            std::fill_n(bytes_.begin() + static_cast<std::ptrdiff_t>(at), cluster_bytes_, 0);
-            std::copy_n(data.data() + first, count_here, bytes_.data() + at);
+        const auto needed = (count + cluster_bytes_ - 1) / cluster_bytes_;
+        const auto allocated = allocate(static_cast<std::size_t>(needed));
+        std::uint64_t copied = 0;
+        for (const auto cluster : allocated) {
+            const auto at = offset(cluster);
+            const auto count_here = static_cast<std::size_t>(
+                std::min<std::uint64_t>(cluster_bytes_, count - copied));
+            std::fill_n(bytes_.data() + at, cluster_bytes_, 0);
+            check(bool(source.read(reinterpret_cast<char*>(bytes_.data() + at),
+                                   static_cast<std::streamsize>(count_here))),
+                  "new FAT file was truncated during streaming copy");
+            copied += count_here;
         }
+        check(copied == count, "FAT staged file length mismatch");
         const auto first = allocated.empty() ? std::uint32_t{} : allocated.front();
         if (existing != nodes_.end()) {
             wr16(bytes_, slot + 20, static_cast<std::uint16_t>(first >> 16));
             wr16(bytes_, slot + 26, static_cast<std::uint16_t>(first));
-            wr32(bytes_, slot + 28, static_cast<std::uint32_t>(data.size()));
+            wr32(bytes_, slot + 28, static_cast<std::uint32_t>(count));
             existing->second.first = first;
-            existing->second.size = static_cast<std::uint32_t>(data.size());
+            existing->second.size = static_cast<std::uint32_t>(count);
         } else {
-            write_entry(slot, planned.alias, 0x20, first, static_cast<std::uint32_t>(data.size()));
+            write_entry(slot, planned.alias, 0x20, first, static_cast<std::uint32_t>(count));
             const auto dos_path = join(parent, alias_name(planned.alias));
-            nodes_.emplace(path, Node{slot, first, static_cast<std::uint32_t>(data.size()),
+            nodes_.emplace(path, Node{slot, first, static_cast<std::uint32_t>(count),
                                       0x20, std::move(new_lfn), dos_path});
             aliases_.emplace(dos_path, path);
         }
     }
 
-    void commit(const std::filesystem::path& image, const EditProgress& progress) {
+    void commit(const EditProgress& progress) {
         if (progress && !progress()) throw EditCancelled();
-        // Update FAT32 free-cluster accounting only after every edit succeeds.
         if (kind_ == FatKind::fat32) update_fsinfo();
-        std::filesystem::path stage;
-        std::random_device random;
-        for (unsigned i = 0; i < 20; ++i) {
-            auto attempt = image;
-            attempt += ".iso-wcx-fat-" + std::to_string(
-                (std::uint64_t(random()) << 32) | random()) + ".tmp";
-            if (!std::filesystem::exists(attempt)) { stage = attempt; break; }
-        }
-        check(!stage.empty(), "cannot select FAT12 staging filename");
-        struct Cleanup {
-            std::filesystem::path path;
-            ~Cleanup() {
-                if (!path.empty()) {
-                    std::error_code ignored;
-                    std::filesystem::remove(path, ignored);
-                }
-            }
-        } cleanup{stage};
+        // Unmap and flush exact staged bytes. The original remains untouched
+        // while the independent FAT reader validates all allocation chains.
+        mapped_.flush_and_close();
         {
-            std::ofstream output(stage, std::ios::binary | std::ios::trunc);
-            check(bool(output), "cannot create FAT12 staging image");
-            output.write(reinterpret_cast<const char*>(bytes_.data()),
-                         static_cast<std::streamsize>(bytes_.size()));
-            output.close();
-            check(bool(output), "cannot finish FAT12 staging image");
-        }
-        // Check the actual result, including mirrored FATs, all reachable
-        // cluster chains, and browseability before replacing the original.
-        {
-            Editor audit(stage);
-            (void)audit;
-            VirtualDiskReader virtual_disk(stage);
-            FatVolume filesystem(virtual_disk, 0, virtual_disk.size());
-            check(filesystem.kind() == kind_, "written staged FAT kind mismatch");
+            Editor audit(mapped_.stage_path(),volume_start_,volume_length_,false);
+            (void)audit; // FAT mirrors, cluster owners, LFN, FSInfo.
+            VirtualDiskReader disk(mapped_.stage_path());
+            check(volume_start_<=disk.size() &&
+                  volume_length_<=disk.size()-volume_start_,
+                  "FAT edited partition no longer fits staged disk");
+            FatVolume filesystem(disk,volume_start_,volume_length_);
+            check(filesystem.kind()==kind_,"edited FAT filesystem type changed");
             (void)filesystem.list();
-        } // Close read handles before the Windows atomic replacement.
+        } // Release mapped views and reader handles before atomic commit.
         if (progress && !progress()) throw EditCancelled();
-#ifdef _WIN32
-        if (!MoveFileExW(stage.c_str(), image.c_str(),
-                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-            throw EditUnsupported("atomic FAT image replace failed");
-#else
-        std::filesystem::rename(stage, image);
-#endif
-        cleanup.path.clear();
+        mapped_.replace_source();
     }
 
 private:
-    std::vector<std::uint8_t> bytes_;
+    FatMappedImage mapped_;
+    std::span<std::uint8_t> bytes_;
+    std::uint64_t volume_start_{},volume_length_{};
     std::size_t fat_at_{}, fat_length_{}, root_at_{}, data_at_{};
     std::size_t cluster_bytes_{}, root_entries_{};
     std::uint32_t clusters_{}, fats_{}, root_cluster_{};
@@ -317,7 +298,7 @@ private:
         check(cluster_bytes_ <= 1024u*1024u, "FAT cluster exceeds 1 MiB");
         const bool is_fat32_bpb = root_entries_ == 0 && fat16_sectors == 0;
         const auto fat_sectors = is_fat32_bpb ? rd32(bytes_,36) : fat16_sectors;
-        check(fat_sectors && fat_sectors <= 65536,
+        check(fat_sectors && fat_sectors <= 1048576,
               "unsupported FAT sectors-per-table count");
         const auto root_sectors = (root_entries_*32u + bps - 1)/bps;
         const std::uint64_t system_sectors =
@@ -330,7 +311,7 @@ private:
               (kind_ == FatKind::fat32 || root_entries_>0),
               "FAT type contradicts BPB root directory layout");
         check(static_cast<std::uint64_t>(total)*bps == bytes_.size(),
-              "FAT editor requires exact-size unpartitioned raw image");
+              "FAT editor requires exact filesystem extent; refusing hidden slack");
         fat_at_ = static_cast<std::size_t>(reserved)*bps;
         fat_length_ = static_cast<std::size_t>(fat_sectors)*bps;
         root_at_ = static_cast<std::size_t>(
@@ -705,43 +686,84 @@ private:
 } // namespace
 
 void edit_fat(const std::filesystem::path& image,
-                const std::vector<ArchiveChange>& changes,
-                const EditProgress& progress) {
-    const auto ext = upper(image.extension().string());
-    check(ext == ".IMA" || ext == ".IMG" || ext == ".BIF" ||
-          ext == ".VFD" || ext == ".FLP" || ext == ".RAW",
-          "unsupported raw FAT image extension");
+              const std::vector<ArchiveChange>& changes,
+              const EditProgress& progress) {
+    const auto ext=upper(image.extension().string());
+    check(ext==".IMA" || ext==".IMG" || ext==".BIF" ||
+          ext==".VFD" || ext==".FLP" || ext==".RAW" || ext==".VHD",
+          "FAT writer only accepts raw image or fixed VHD");
+    if(changes.empty())return;
+    std::uint64_t volume_start=0,volume_length=0;
+    std::vector<ArchiveChange> ordered=changes;
     {
+        // Preflight the original with the independent read-only virtual disk
+        // layer. An MBR/GPT partition must be explicitly targeted using the
+        // exact partitionN/path shown to the user by VirtualArchive.
         VirtualDiskReader disk(image);
-        check(disk.format() == VirtualDiskFormat::raw_image,
-              "FAT12 editor only accepts raw floppy images");
+        check(disk.format()==VirtualDiskFormat::raw_image ||
+              disk.format()==VirtualDiskFormat::fixed_vhd,
+              "FAT writer refuses compressed, dynamic or differencing disks");
+        volume_length=disk.size();
+        std::vector<PartitionEntry> partitions;
         try {
-            const auto partitions = inspect_partition_table(disk, disk.logical_sector_size());
-            check(partitions.empty(), "partitioned HDD is not editable as a floppy");
-        } catch (const EditUnsupported&) { throw; }
-          catch (const std::exception&) { /* A floppy is not an MBR. */ }
-        FatVolume reader(disk, 0, disk.size());
-        check(reader.kind() == FatKind::fat12 ||
-              reader.kind() == FatKind::fat16 || reader.kind() == FatKind::fat32,
-              "FAT write preview requires FAT12, FAT16 or FAT32");
-        (void)reader.list();
-    } // The original must not be held open during an atomic replacement.
-    Editor editor(image);
-    std::vector<ArchiveChange> ordered = changes;
-    std::stable_sort(ordered.begin(), ordered.end(),
-                     [](const ArchiveChange& a, const ArchiveChange& b) {
-        if (a.remove != b.remove) return !a.remove;
-        auto depth = [](const std::string& s) {
-            return std::count(s.begin(), s.end(), '/');
+            partitions=inspect_partition_table(disk,disk.logical_sector_size());
+        } catch(const std::exception&) {
+            // A FAT superfloppy has no partition table. The FatVolume check
+            // below is mandatory, so an arbitrary invalid HDD cannot match.
+        }
+        if(!partitions.empty()) {
+            std::optional<std::size_t> selected;
+            for(auto& change:ordered) {
+                bool matched=false;
+                for(std::size_t i=0;i<partitions.size();++i) {
+                    const auto prefix="partition"+std::to_string(i+1)+"/";
+                    if(change.path.rfind(prefix,0)==0) {
+                        check(!selected || *selected==i,
+                              "a FAT write batch cannot span multiple partitions");
+                        selected=i;
+                        change.path=change.path.substr(prefix.size());
+                        check(!change.path.empty(),
+                              "cannot edit the partition directory itself");
+                        matched=true;
+                        break;
+                    }
+                }
+                check(matched,"partitioned image requires partitionN/filename");
+            }
+            check(selected.has_value(),"no FAT partition selected");
+            const auto& part=partitions[*selected];
+            const auto sector=disk.logical_sector_size();
+            check(part.first_lba<=disk.size()/sector &&
+                  part.sector_count<=disk.size()/sector-part.first_lba,
+                  "FAT partition address exceeds disk capacity");
+            volume_start=part.first_lba*sector;
+            volume_length=part.sector_count*sector;
+        } else {
+            // A fixed VHD without partitions was previously not exposed by
+            // VirtualArchive. Do not create a write-only/invisible view.
+            check(disk.format()==VirtualDiskFormat::raw_image,
+                  "fixed VHD editing requires a validated MBR/GPT partition");
+        }
+        FatVolume reader(disk,volume_start,volume_length);
+        (void)reader.list(); // Bounded native structure and chain validation.
+    }
+    // Independent preflight handles are now closed; the original remains
+    // untouched through the complete stage-write/audit transaction.
+    Editor editor(image,volume_start,volume_length,true);
+    std::stable_sort(ordered.begin(),ordered.end(),
+                     [](const ArchiveChange& a,const ArchiveChange& b) {
+        if(a.remove!=b.remove)return !a.remove;
+        const auto depth=[](const std::string& p) {
+            return std::count(p.begin(),p.end(),'/');
         };
-        if (a.remove) return depth(a.path) > depth(b.path);
-        if (a.directory != b.directory) return a.directory;
-        return depth(a.path) < depth(b.path);
+        if(a.remove)return depth(a.path)>depth(b.path);
+        if(a.directory!=b.directory)return a.directory;
+        return depth(a.path)<depth(b.path);
     });
-    for (const auto& change : ordered) {
-        if (progress && !progress()) throw EditCancelled();
+    for(const auto& change:ordered) {
+        if(progress && !progress())throw EditCancelled();
         editor.apply(change);
     }
-    if (!ordered.empty()) editor.commit(image, progress);
+    editor.commit(progress);
 }
 } // namespace iso_wcx
