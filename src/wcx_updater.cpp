@@ -463,7 +463,16 @@ std::optional<std::filesystem::path> choose_structure_output(
             throw std::runtime_error("Windows Save File dialog failed");
         return std::nullopt;
     }
-    return std::filesystem::path(name.data());
+    // Only text reports may be opened by ShellExecuteW after user approval.
+    // Prevent a crafted file name from writing an executable script and
+    // launching it from the success prompt.
+    const std::filesystem::path output(name.data());
+    auto extension=output.extension().wstring();
+    for(auto& ch:extension)
+        if(ch>=L'A' && ch<=L'Z')ch=static_cast<wchar_t>(ch-L'A'+L'a');
+    if(extension!=L".txt")
+        throw std::runtime_error("the structure report must be saved as .txt");
+    return output;
 }
 void write_structure_atomically(const std::filesystem::path& image,
                                 const std::filesystem::path& dest,
