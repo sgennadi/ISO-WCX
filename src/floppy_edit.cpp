@@ -691,8 +691,17 @@ void edit_fat(const std::filesystem::path& image,
     const auto ext=upper(image.extension().string());
     check(ext==".IMA" || ext==".IMG" || ext==".BIF" ||
           ext==".VFD" || ext==".FLP" || ext==".RAW" || ext==".VHD",
-          "FAT writer only accepts raw image or fixed VHD");
+          "FAT writer only accepts raw images and validated base VHD");
     if(changes.empty())return;
+    if(ext==".VHD") {
+        VirtualDiskReader container(image);
+        if(container.format()==VirtualDiskFormat::dynamic_vhd) {
+            // edit_dynamic_vhd uses a private logical RAW clone and calls
+            // this same FAT writer on .img: no recursion on the container.
+            edit_dynamic_vhd(image,changes,progress);
+            return;
+        }
+    }
     std::uint64_t volume_start=0,volume_length=0;
     std::vector<ArchiveChange> ordered=changes;
     {
@@ -702,7 +711,7 @@ void edit_fat(const std::filesystem::path& image,
         VirtualDiskReader disk(image);
         check(disk.format()==VirtualDiskFormat::raw_image ||
               disk.format()==VirtualDiskFormat::fixed_vhd,
-              "FAT writer refuses compressed, dynamic or differencing disks");
+              "FAT writer refuses compressed or unsupported disk containers");
         volume_length=disk.size();
         std::vector<PartitionEntry> partitions;
         try {
