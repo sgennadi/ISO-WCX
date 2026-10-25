@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstring>
 #include <algorithm>
+#include <array>
 #include <fstream>
 
 namespace iso_wcx { namespace {
@@ -206,7 +207,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     }
     report(L"Commit verified WIM",99);
     tx.commit(progress);
-    report(L"WIM edit complete",100);
+    // No cancellation or throwing callbacks after the atomic commit.
 }
 }
 #endif
