@@ -502,6 +502,11 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
 
 
 void schedule_update_check() {
+    // WCX methods are called for every archive and possibly in parallel.
+    // Decide once per process before opening the registry or allocating the
+    // 64-KiB executable-path buffer, so archive I/O stays fast.
+    if(background_started.exchange(true,std::memory_order_relaxed))
+        return;
     // With a non-TC host (e.g. the DLL loader smoke test), never start an
     // update worker or show unsolicited user-interface dialogs.
     std::array<wchar_t,32768> executable{};
@@ -509,8 +514,7 @@ void schedule_update_check() {
                                           static_cast<DWORD>(executable.size()));
     if(!length || length>=executable.size() ||
        !totalcmd_path(std::wstring_view(executable.data(),length)) ||
-       !read_dword(L"AutoCheck",1) || !due_today() ||
-       background_started.exchange(true))
+       !read_dword(L"AutoCheck",1) || !due_today())
         return;
 
     HMODULE module=nullptr;
