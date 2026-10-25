@@ -65,6 +65,36 @@ def main(binary):
         assert 'café.txt' not in read_image(image, True)
         assert changed[21*B:21*B+5] == b'world', 'unlinked payload must remain untouched'
 
+        # Atomic batch unlink: two records in the same directory sectors.
+        two = bootable_joliet()
+        primary = (iso_record(20,B,2,b'\0') +
+                   iso_record(20,B,2,b'\1') +
+                   iso_record(21,5,0,b'HELLO.TXT;1'))
+        secondary = (iso_record(22,B,2,b'\0') +
+                     iso_record(22,B,2,b'\1') +
+                     iso_record(21,5,0,'café.txt;1'.encode('utf-16-be')))
+        more_primary = iso_record(23,6,0,b'SECOND.TXT;1')
+        more_joliet = iso_record(23,6,0,'Second.txt;1'.encode('utf-16-be'))
+        two[20*B+len(primary):20*B+len(primary)+len(more_primary)] = more_primary
+        two[22*B+len(secondary):22*B+len(secondary)+len(more_joliet)] = more_joliet
+        two[23*B:23*B+6] = b'item 2'
+        image.write_bytes(two)
+        cmd = [str(binary), str(image), 'batch',
+               'delete', 'café.txt', 'delete', 'Second.txt']
+        process = subprocess.run(cmd, capture_output=True, text=True,
+                                 encoding='utf-8', timeout=60)
+        assert process.returncode == 0, (process.stdout, process.stderr)
+        batched = image.read_bytes()
+        assert 'HELLO.TXT' not in read_image(image)
+        assert 'SECOND.TXT' not in read_image(image)
+        assert 'café.txt' not in read_image(image, True)
+        assert 'Second.txt' not in read_image(image, True)
+        assert batched[21*B:21*B+5] == b'world'
+        assert batched[23*B:23*B+6] == b'item 2'
+        assert all(a == b for i,(a,b) in enumerate(zip(two, batched))
+                   if i < 20*B or 21*B <= i < 22*B or i >= 23*B), (
+                   'batch unlink wrote beyond directory sectors')
+
         # A hybrid-boot ISO cannot be remastered in this Preview.
         image.write_bytes(bootable_joliet())
         run(binary,image,'add','NEW.TXT',False)
