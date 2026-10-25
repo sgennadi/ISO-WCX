@@ -11,8 +11,9 @@
 #include <windows.h>
 // Public Windows WIMGAPI ABI; no optional ADK wimgapi.h header required.
 // This structure starts with WIN32_FIND_DATAW, followed by WIM metadata.
-struct WimFindData {
-    WIN32_FIND_DATAW find_data;
+// Match the Windows ADK WIM_FIND_DATA ABI: the original definition
+// *inherits* WIN32_FIND_DATAW rather than embedding it as a member.
+struct WimFindData : WIN32_FIND_DATAW {
     BYTE hash[20];
     SECURITY_DESCRIPTOR* security_descriptor;
     wchar_t** alternate_names;
@@ -241,9 +242,20 @@ WimArchive::WimArchive(const std::filesystem::path& image)
             require(current.depth <= 128,
                     "WIM directory depth exceeds safe limit");
             const auto pattern = current.path + L"\\*.*";
-            WimFindData data{};
+            struct GuardedFind {
+                WimFindData data{};
+                std::array<std::uint32_t,128> trailing{};
+                GuardedFind() {trailing.fill(0xa55a5aa5u);}
+                void validate() const {
+                    for(auto value:trailing)
+                        require(value==0xa55a5aa5u,
+                                "WIMGAPI wrote beyond WIM_FIND_DATA buffer");
+                }
+            } record;
+            auto& data=record.data;
             std::fprintf(stderr,"[WIM-OPEN] find-first-call; sizeof=%zu\n",sizeof(data)); std::fflush(stderr);
             HANDLE found = api_->first(himage, pattern.c_str(), &data);
+            record.validate();
             std::fprintf(stderr,"[WIM-OPEN] find-first-return\n"); std::fflush(stderr);
             if (!is_valid(found)) {
                 if (end_of_find(GetLastError())) continue;
@@ -251,15 +263,15 @@ WimArchive::WimArchive(const std::filesystem::path& image)
             }
             Impl::CloseHandle find_guard(api_.get(), found);
             for (;;) {
-                const std::wstring name(data.find_data.cFileName);
+                const std::wstring name(data.cFileName);
                 if (name != L"." && name != L"..") {
                     require(safe_name(name),
                             "WIM contains unsafe Windows filename");
                     const bool directory =
-                        (data.find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                        (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
                     // Do not expose junctions/reparse points as regular files
                     // or follow them into a different path tree.
-                    if (!(data.find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                    if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
                         const auto relative = current.relative + "/" + utf8(name);
                         const auto source = current.path + L"\\" + name;
                         require(relative.size() <= 2048 && source.size() <= 2048,
@@ -272,10 +284,10 @@ WimArchive::WimArchive(const std::filesystem::path& image)
                         item.path = relative;
                         item.directory = directory;
                         item.size = directory ? 0 :
-                           (std::uint64_t(data.find_data.nFileSizeHigh) << 32) |
-                            std::uint64_t(data.find_data.nFileSizeLow);
-                        item.dos_time = dos_time(data.find_data.ftLastWriteTime);
-                        item.attributes = data.find_data.dwFileAttributes;
+                           (std::uint64_t(data.nFileSizeHigh) << 32) |
+                            std::uint64_t(data.nFileSizeLow);
+                        item.dos_time = dos_time(data.ftLastWriteTime);
+                        item.attributes = data.dwFileAttributes;
                         entries_.push_back(std::move(item));
                         locations_.push_back({index, source});
                         if (directory)
@@ -284,6 +296,7 @@ WimArchive::WimArchive(const std::filesystem::path& image)
                 }
                 std::fprintf(stderr,"[WIM-OPEN] find-next-call\n"); std::fflush(stderr);
                 const BOOL found_next = api_->next(found, &data);
+                record.validate();
                 std::fprintf(stderr,"[WIM-OPEN] find-next-return=%d\n",int(found_next)); std::fflush(stderr);
                 if (!found_next) {
                     const DWORD error = GetLastError();
