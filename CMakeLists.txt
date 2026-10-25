@@ -517,3 +517,10 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/binary_reader_tes
   add_test(NAME binary_reader_tests COMMAND binary_reader_tests)
 endif()
 
+
+# A real compiler target probes MSVC draft mode after CMake generation.
+if(BUILD_TESTING AND MSVC AND ISO_WCX_CXX_STANDARD STREQUAL "26")
+  add_executable(msvc_cxx26_dialect_probe tests/msvc_cxx26_dialect_probe.cpp)
+  add_test(NAME msvc_cxx26_dialect_verified
+           COMMAND "$<TARGET_FILE:msvc_cxx26_dialect_probe>")
+endif()
