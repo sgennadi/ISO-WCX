@@ -313,8 +313,8 @@ jobs:
           test -s release-asset/"${ISO_WCX_RELEASE_FILE}"
           test -s release-asset/SHA256SUMS.txt
           if gh release view "${ISO_WCX_RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "Release already exists. Refusing to overwrite existing assets." >&2
-            exit 1
+            echo "::notice::${ISO_WCX_RELEASE_TAG} is already published and immutable; tested source changes will ship in a later version."
+            exit 0
           fi
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${ISO_WCX_RELEASE_TAG}" >/dev/null 2>&1; then
             echo "Version tag exists without a release; refusing to overwrite it." >&2

@@ -16,7 +16,7 @@ disk mount, driver, or standalone disk extraction program is necessary.
 The WCX binaries include ISO/UDF, supported virtual-disk readers and
 native ISZ/DAA optical compressed-stream decoding.
 
-Export Image Structure (built into new WCX builds)
+Export Image Structure (development Preview after v0.20.0)
 ---------------------------------------------------
 In Total Commander choose Files > Pack, select an ISO-WCX extension,
 click Configure... > Export Image Structure..., choose the source image,
@@ -26,7 +26,8 @@ attributes, extents, and, for raw ISO/UDF, PVD/Joliet/UDF/El Torito
 metadata plus a nonzero system-area warning. Image data is never
 copied or modified. No disc_inspect.exe or other utility is required.
 The report is saved transactionally and can be shared for diagnosis.
-Older published builds do not contain this new button.
+**Published Stable v0.20.0 does not contain this new button.** Use a
+newer tested Preview or a future Stable release with the feature.
 
 Updater (introduced in v0.19.0, included in v0.20.0)
 ------------------------------------------------------------

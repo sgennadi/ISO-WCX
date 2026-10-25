@@ -55,7 +55,12 @@ Published **Stable v0.19.0 remains unchanged** on its original tested
 VS2022/C++20 toolchain. Stable v0.20.0 instead uses VS2026/C++26 after
 the full release-quality checks pass.
 
-## Export Image Structure (built into the WCX plugin)
+## Export Image Structure (post-v0.20.0 Preview)
+
+**Availability:** This feature was added after the published v0.20.0
+Stable ZIP. It is in newer development/Preview builds and will be
+included in a future versioned Stable release. Installing the existing
+v0.20.0 release alone will **not** show the export button.
 
 In Total Commander choose **Files > Pack**, select an extension configured
 for ISO-WCX and click **Configure... > Export Image Structure...**.
