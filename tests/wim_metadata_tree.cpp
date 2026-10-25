@@ -71,6 +71,15 @@ int main(){
         check(ok.valid && ok.entries==2 && ok.directories==2 &&
               ok.streams==0 && ok.security_descriptors==0,
               "valid root and empty subdirectory not decoded");
+        // The on-disk logical record size can omit its 8-byte padding.
+        auto padded=b;
+        put64(padded,120,110);
+        check(scan_uncompressed_metadata(padded).valid,
+              "valid unaligned encoded size with 8-byte padding rejected");
+        padded=b;
+        put64(padded,232,8);
+        check(scan_uncompressed_metadata(padded).valid,
+              "WIM 8-byte sibling terminator rejected");
         auto damaged=b;
         put64(damaged,120,64);
         check(!scan_uncompressed_metadata(damaged).valid,
