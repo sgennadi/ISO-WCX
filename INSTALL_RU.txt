@@ -1,10 +1,10 @@
-ISO-WCX v0.17.0 Stable Core - единый WCX-плагин Total Commander
+ISO-WCX v0.18.0 Stable Core + VFAT/IMZ Preview — WCX-плагин Total Commander
 ==========================================================
 
 Установка без дополнительных программ
 --------------------------------------
 1. Откройте https://github.com/sgennadi/ISO-WCX/releases/latest .
-2. Скачайте ISO-WCX-v0.17.0.zip из Stable Release и откройте этот ZIP
+2. Скачайте ISO-WCX-v0.18.0.zip из Stable Release и откройте этот ZIP
    непосредственно в Total Commander.
 3. Согласитесь на установку из pluginst.inf. В каталоге плагина
    должны находиться ISO-WCX.wcx (32-bit) и ISO-WCX.wcx64 (64-bit).
