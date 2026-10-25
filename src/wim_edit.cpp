@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <string>
+#include <utility>
 
 namespace iso_wcx { namespace {
 void checked(bool ok,const char* what){if(!ok)throw std::runtime_error(std::string(what)+" (Win32 "+std::to_string(GetLastError())+")");}
@@ -38,15 +40,65 @@ struct Privileges {
     }
     ~Privileges(){SetThreadToken(nullptr,prior);if(prior)CloseHandle(prior);CloseHandle(token);}
 };
+// WIMGAPI reports percent during its long synchronous Apply/Capture calls.
+// Forward at most five UI notifications per second and preserve cancellation.
+// Status is serialized: some WIMGAPI notifications arrive on worker threads.
 struct Callback {
-    const EditProgress& progress;std::mutex mutex;std::atomic<bool> cancelled{false};
-    static DWORD CALLBACK call(DWORD message,WPARAM,LPARAM,void* context) noexcept {
+    const EditProgress& progress;
+    const WimEditStatus& status;
+    std::mutex mutex;
+    std::atomic<bool> cancelled{false};
+    std::wstring stage=L"Processing WIM";
+    unsigned phase_start=5, phase_span=0, last_percent=5;
+    ULONGLONG last_signal=0;
+
+    void notify_locked(unsigned percent,bool force=false) {
+        if(cancelled.load())return;
+        percent=std::clamp(percent,1u,99u);
+        percent=std::max(percent,last_percent);
+        const auto now=GetTickCount64();
+        // Do not repaint Total Commander for every file notification.
+        if(!force && now-last_signal<200u && percent==last_percent)return;
+        if(!force && now-last_signal<200u)return;
+        last_signal=now;
+        last_percent=percent;
+        if(status) {
+            if(!status(stage.c_str(),percent))cancelled.store(true);
+        }else if(progress && !progress()) {
+            cancelled.store(true);
+        }
+    }
+    void begin_stage(std::wstring label,unsigned start,unsigned span) {
+        std::lock_guard lock(mutex);
+        stage=std::move(label);
+        phase_start=std::max(last_percent,std::min(start,99u));
+        phase_span=std::min(span,99u-phase_start);
+        notify_locked(phase_start,true);
+        if(cancelled.load())throw EditCancelled();
+    }
+    static DWORD CALLBACK call(DWORD message,WPARAM wParam,LPARAM,void* context) noexcept {
         auto& self=*static_cast<Callback*>(context);
-        // PROCESS is the documented cancellation point. Never throw across ABI.
-        if(message==0x8000+0x1476+3){try{std::lock_guard lock(self.mutex);if(self.progress&&!self.progress())self.cancelled=true;}catch(...){self.cancelled=true;}if(self.cancelled)return 0xffffffffu;}
+        constexpr DWORD base=0x8000u+0x1476u;
+        if(message!=base+2u && message!=base+3u)return 0;
+        try {
+            std::lock_guard lock(self.mutex);
+            if(message==base+2u) {
+                const auto percent=static_cast<unsigned>(
+                    std::min<WPARAM>(wParam,100u));
+                self.notify_locked(self.phase_start+
+                    (self.phase_span*percent)/100u);
+            }else{
+                // PROCESS is WIMGAPI's documented abort point.
+                self.notify_locked(self.last_percent);
+            }
+        }catch(...){self.cancelled.store(true);}
+        if(message==base+3u && self.cancelled.load())return 0xffffffffu;
         return 0;
     }
-    void tick(){if(cancelled)throw EditCancelled();edit_tick(progress);}
+    void tick() {
+        if(cancelled.load())throw EditCancelled();
+        edit_tick(progress);
+    }
 };
 using Register=DWORD(WINAPI*)(HANDLE,FARPROC,void*);
 using Unregister=BOOL(WINAPI*)(HANDLE,FARPROC);
@@ -117,7 +169,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     wchar_t volume[MAX_PATH]{},filesystem[MAX_PATH]{};checked(GetVolumePathNameW(tx.workspace.c_str(),volume,MAX_PATH),"find WIM workspace volume");checked(GetVolumeInformationW(volume,nullptr,0,nullptr,nullptr,nullptr,filesystem,MAX_PATH),"inspect WIM workspace filesystem");
     if(_wcsicmp(filesystem,L"NTFS")!=0)throw EditUnsupported("WIM editing requires an NTFS workspace volume");
     auto create=api<HANDLE(WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD)>(m,"WIMCreateFile");auto close=api<Close>(m,"WIMCloseHandle");auto temp=api<BOOL(WINAPI*)(HANDLE,PCWSTR)>(m,"WIMSetTemporaryPath");auto load=api<HANDLE(WINAPI*)(HANDLE,DWORD)>(m,"WIMLoadImage");
-    Callback callback{progress,{},false};
+    Callback callback{progress,status};
     report(L"Open WIM indexes",5);
     {
         Handle source(create(path.c_str(),GENERIC_READ,OPEN_EXISTING,2,0,nullptr),close);
@@ -127,23 +179,45 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         unsigned out_index=0,new_boot=0;
         for(unsigned index=1;index<=images;++index){
             callback.tick();
-            report(L"Process WIM index",static_cast<unsigned>(6u+(index-1u)*73u/images));
-            if(deleted.count(index))continue;++out_index;if(boot==index)new_boot=out_index;Handle image(load(source.h,index),close);
-            if(!edits.count(index)){checked(api<BOOL(WINAPI*)(HANDLE,HANDLE,DWORD)>(m,"WIMExportImage")(image.h,output.h,1),"export unchanged WIM index");continue;}
-            const auto expanded=tx.workspace/L"expanded";std::filesystem::create_directory(expanded);
+            const unsigned begin=6u+static_cast<unsigned>(75ull*(index-1u)/images);
+            const unsigned end=6u+static_cast<unsigned>(75ull*index/images);
+            const std::wstring number=std::to_wstring(index)+L"/"+std::to_wstring(images);
+            if(deleted.count(index)){
+                callback.begin_stage(L"Skipping removed WIM image "+number,begin,0);
+                continue;
+            }
+            ++out_index;if(boot==index)new_boot=out_index;
+            Handle image(load(source.h,index),close);
+            if(!edits.count(index)){
+                callback.begin_stage(L"Export unchanged WIM image "+number,begin,end-begin);
+                checked(api<BOOL(WINAPI*)(HANDLE,HANDLE,DWORD)>(m,"WIMExportImage")(image.h,output.h,1),"export unchanged WIM index");
+                callback.tick();
+                continue;
+            }
+            const auto expanded=tx.workspace/L"expanded";
+            std::filesystem::create_directory(expanded);
             struct Cleanup {std::filesystem::path path;~Cleanup(){try{remove_tree(path);}catch(...){}}}cleanup{expanded};
-            report(L"Extract selected index",static_cast<unsigned>(8u+(index-1u)*73u/images));
-            const BOOL applied=api<BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMApplyImage")(image.h,expanded.c_str(),2u|0x100u);callback.tick();checked(applied,"apply WIM index");
-            report(L"Apply requested changes",static_cast<unsigned>(35u+(index-1u)*45u/images));
-            for(const auto& c:edits[index]){callback.tick();auto relative=relative_path(c.path);no_reparse(expanded,relative);auto target=expanded/relative;
+            const unsigned apply_end=begin+(end-begin)*55u/100u;
+            callback.begin_stage(L"Extract WIM image "+number,begin,apply_end-begin);
+            const BOOL applied=api<BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMApplyImage")(image.h,expanded.c_str(),2u|0x100u);
+            callback.tick();checked(applied,"apply WIM index");
+            callback.begin_stage(L"Edit WIM image "+number,apply_end,0);
+            for(const auto& c:edits[index]){
+                callback.tick();
+                auto relative=relative_path(c.path);no_reparse(expanded,relative);auto target=expanded/relative;
                 if(c.remove){remove_tree(target);continue;}
                 if(c.directory){std::filesystem::create_directories(target);continue;}
                 checked(std::filesystem::is_regular_file(std::filesystem::symlink_status(c.source)),"source must be a regular file");
-                std::filesystem::create_directories(target.parent_path());if(std::filesystem::exists(target)){if(std::filesystem::is_directory(target))throw EditUnsupported("cannot replace a directory with a file");remove_tree(target);}
+                std::filesystem::create_directories(target.parent_path());
+                if(std::filesystem::exists(target)){
+                    if(std::filesystem::is_directory(target))throw EditUnsupported("cannot replace a directory with a file");
+                    remove_tree(target);
+                }
                 checked(CopyFileW(c.source.c_str(),target.c_str(),TRUE),"copy replacement into WIM workspace");
             }
-            report(L"Rebuild changed WIM index",static_cast<unsigned>(48u+(index-1u)*33u/images));
-            HANDLE captured=api<HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMCaptureImage")(output.h,expanded.c_str(),2u|0x100u);callback.tick();Handle result(captured,close);preserve_metadata(m,image.h,result.h);
+            callback.begin_stage(L"Rebuild WIM image "+number,apply_end,end-apply_end);
+            HANDLE captured=api<HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMCaptureImage")(output.h,expanded.c_str(),2u|0x100u);
+            callback.tick();Handle result(captured,close);preserve_metadata(m,image.h,result.h);
         }
         checked(api<BOOL(WINAPI*)(HANDLE,DWORD)>(m,"WIMSetBootImage")(output.h,new_boot),"preserve WIM boot index");
     }
@@ -156,7 +230,10 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         std::map<std::string,std::size_t> found;
         const auto& items=verified.items();
         for(std::size_t i=0;i<items.size();++i){
-            callback.tick();
+            // Metadata may contain hundreds of thousands of entries. Avoid
+            // a UI callback for each one; checking cancellation every 1024
+            // entries is responsive without monopolizing Total Commander.
+            if((i&1023u)==0u)callback.tick();
             if(!found.emplace(items[i].path,i).second)
                 throw EditUnsupported("duplicate WIM output path");
         }

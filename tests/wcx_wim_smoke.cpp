@@ -49,8 +49,19 @@ using WimTempFn=BOOL(WINAPI*)(HANDLE,PCWSTR);
 using WimSplitFn=BOOL(WINAPI*)(HANDLE,PCWSTR,PLARGE_INTEGER,DWORD);
 using WimCloseFn=BOOL(WINAPI*)(HANDLE);
 static std::atomic<unsigned> pack_progress_calls{0};
-static int __stdcall count_pack_progress(wchar_t*,int) {
+static std::atomic<unsigned> wim_percent_calls{0};
+static std::atomic<unsigned> wim_stage_calls{0};
+static std::atomic<bool> cancel_next_wim{false};
+static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
+    if(size<0){
+        ++wim_percent_calls;
+        if(stage && std::wstring_view(stage).starts_with(L"WIM: "))
+            ++wim_stage_calls;
+        if(cancel_next_wim.load() && stage &&
+           std::wstring_view(stage).find(L"Extract WIM image")!=std::wstring_view::npos)
+            return 0;
+    }
     return 1;
 }
 
@@ -229,8 +240,23 @@ int wmain(int argc,wchar_t** argv) {
         // same PackFilesW API as a file. Verify the index survives correctly.
         fs::create_directories(incoming/L"NEW_EMPTY_FOLDER");
         wchar_t mkdir_list[]=L"NEW_EMPTY_FOLDER\0\0";
-        if(pack(packed.data(),sub.data(),src.data(),mkdir_list,0)!=0)
-            return 27;
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int folder_rc=pack(packed.data(),sub.data(),src.data(),mkdir_list,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(folder_rc!=0)return 27;
+        if(wim_percent_calls.load()==0 || wim_stage_calls.load()==0)
+            return 32; // Progress must be visible even for empty folders.
+        // Cancel during a long apply before replacing the original WIM.
+        fs::create_directories(incoming/L"CANCEL_FOLDER");
+        wchar_t cancel_list[]=L"CANCEL_FOLDER\0\0";
+        const auto before_cancel=load(original);
+        cancel_next_wim.store(true);
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int cancel_rc=pack(packed.data(),sub.data(),src.data(),cancel_list,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        cancel_next_wim.store(false);
+        if(cancel_rc!=21 || load(original)!=before_cancel)
+            return 33; // A cancelled edit must leave WIM byte-identical.
         {
             OpenW args{};args.ArcName=packed.data();
             HANDLE h=open(&args);

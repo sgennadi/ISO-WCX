@@ -261,12 +261,13 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
              iso_wcx::edit_optical(image,changes,progress);
         else if(ext==L".wim") {
             const auto status=[&](const wchar_t* stage,unsigned percent){
-                // WCX expects the percentage as a negative Size value.
-                // Snapshot callbacks outside the WIMGAPI callback threads.
-                (void)stage;
-                const int pct=-static_cast<int>(std::min(percent,100u));
-                if(pw)return pw(wide.data(),pct)!=0;
-                if(pa)return pa(ansi.data(),pct)!=0;
+                // The WCX callback uses negative Size for direct 1..100%.
+                // Display the active WIM stage instead of the same archive
+                // filename for five minutes. Unicode first, never both.
+                const int pct=-static_cast<int>(std::clamp(percent,1u,99u));
+                auto label=std::wstring(L"WIM: ")+stage;
+                if(pw)return pw(label.data(),pct)!=0;
+                if(pa){auto narrow=to_ansi(label);return pa(narrow.data(),pct)!=0;}
                 return true;
             };
             iso_wcx::edit_wim(image,changes,progress,status);
