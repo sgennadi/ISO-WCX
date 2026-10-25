@@ -62,6 +62,8 @@ int main() {
         const auto svd=18*sector;
         bytes[svd]=2;std::memcpy(bytes.data()+svd+1,"CD001",5);
         bytes[svd+6]=1;
+        le32(bytes,svd+80,32);
+        bytes[svd+128]=0;bytes[svd+129]=8;
         bytes[svd+88]='%';bytes[svd+89]='/';bytes[svd+90]='E';
         const auto joliet_root=rec(22,sector,2,std::string(1,'\0'));
         std::copy(joliet_root.begin(),joliet_root.end(),
