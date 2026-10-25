@@ -13,6 +13,26 @@
 
 namespace iso_wcx::wim_detail {
 
+// Avoid ambiguous aliases on case-insensitive NTFS when creating
+// directories through WIMGAPI. Leave non-ASCII UTF-8 bytes unchanged;
+// the Windows system APIs remain authoritative for Unicode casing.
+inline std::string ascii_case_key(std::string value) {
+    for(auto& ch:value)
+        if(ch>='A' && ch<='Z')
+            ch=static_cast<char>(ch-'A'+'a');
+    return value;
+}
+inline bool windows_device_name(const std::string& segment) {
+    const auto base=ascii_case_key(segment.substr(0,segment.find('.')));
+    if(base=="con" || base=="prn" || base=="aux" || base=="nul" ||
+       base=="conin$" || base=="conout$")
+        return true;
+    if(base.size()==4 && (base.starts_with("com") || base.starts_with("lpt"))
+       && base[3]>='1' && base[3]<='9')
+        return true;
+    return false;
+}
+
 struct MountFolderPlan {
     unsigned index = 0;
     std::vector<std::string> paths;
@@ -45,7 +65,8 @@ inline std::optional<MountFolderPlan> plan_mounted_folders(
             const auto stop=end==std::string::npos?change.path.size():end;
             const auto segment=change.path.substr(offset,stop-offset);
             if(segment.empty() || segment=="." || segment==".." ||
-               segment.back()=='.' || segment.back()==' ')
+               segment.back()=='.' || segment.back()==' ' ||
+               windows_device_name(segment))
                 return std::nullopt;
             for(const unsigned char ch:segment)
                 if(ch<32 || ch==127 || ch==':' || ch=='*' || ch=='?' ||
@@ -54,7 +75,8 @@ inline std::optional<MountFolderPlan> plan_mounted_folders(
             if(end==std::string::npos) break;
             offset=end+1;
         }
-        if (!paths.insert(change.path).second) return std::nullopt;
+        if (!paths.insert(ascii_case_key(change.path)).second)
+            return std::nullopt;
         plan.paths.push_back(change.path);
     }
     return plan;
@@ -82,12 +104,17 @@ inline bool verify_mounted_folder_tree(
     std::unordered_map<std::string,const WimTreeItem*> old, fresh;
     old.reserve(before.size());
     fresh.reserve(after.size());
-    for(const auto& item:before)
-        if(!old.emplace(item.path,&item).second)
-            return fail("duplicate original WIM path");
-    for(const auto& item:after)
-        if(!fresh.emplace(item.path,&item).second)
-            return fail("duplicate edited WIM path");
+    std::set<std::string> old_ci,fresh_ci;
+    for(const auto& item:before) {
+        if(!old.emplace(item.path,&item).second ||
+           !old_ci.insert(ascii_case_key(item.path)).second)
+            return fail("ambiguous original WIM path/case alias");
+    }
+    for(const auto& item:after) {
+        if(!fresh.emplace(item.path,&item).second ||
+           !fresh_ci.insert(ascii_case_key(item.path)).second)
+            return fail("ambiguous edited WIM path/case alias");
+    }
     const std::string prefix="image"+std::to_string(plan.index);
     const auto image=old.find(prefix);
     if(image==old.end() || !image->second->directory)

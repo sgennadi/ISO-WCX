@@ -57,6 +57,18 @@ int main() {
         mixed.at(2)[0].path="unsafe:name";
         check(!plan_mounted_folders(mixed,{}),
               "host-invalid name accepted by mount planner");
+        for(const auto* value:{"CON","nul.txt","lPt9.log","AUX","COM1",
+                               "sub/PRN.md","CONOUT$"}) {
+            mixed.at(2)[0].path=value;
+            check(!plan_mounted_folders(mixed,{}),
+                  "reserved Windows device filename accepted in fast WIM path");
+        }
+        mixed=edits;
+        auto alias=one;
+        alias.path="new/CHILD";
+        mixed.at(2).push_back(alias);
+        check(!plan_mounted_folders(mixed,{}),
+              "case-insensitive duplicate directory accepted");
 
         const std::vector<WimTreeItem> before{
             dir("image1"),file("image1/untouched.bin"),
@@ -89,6 +101,10 @@ int main() {
         bad.push_back(dir("image2/New"));
         check(!verify_mounted_folder_tree(before,bad,*plan,why),
               "duplicated output path accepted");
+        bad=after;
+        bad.push_back(dir("image2/new"));
+        check(!verify_mounted_folder_tree(before,bad,*plan,why),
+              "casefold directory collision accepted");
         bad=before;
         check(!verify_mounted_folder_tree(before,bad,*plan,why),
               "missing requested folder accepted");

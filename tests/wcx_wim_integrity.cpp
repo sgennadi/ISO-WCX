@@ -61,6 +61,31 @@ static std::string read(const fs::path& file) {
     require(bool(in),"cannot read preserved regular file or named ADS");
     return {std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>{}};
 }
+// WIM files can have multiple names for the *same* NTFS file ID.
+static bool shared_file_id(const fs::path& first,const fs::path& second) {
+    auto open=[](const fs::path& path) {
+        return CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,
+                 FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                 nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    };
+    const HANDLE a=open(first);
+    require(a!=INVALID_HANDLE_VALUE,"cannot open primary NTFS hardlink");
+    const HANDLE b=open(second);
+    if(b==INVALID_HANDLE_VALUE) {
+        CloseHandle(a);
+        require(false,"cannot open secondary NTFS hardlink");
+    }
+    BY_HANDLE_FILE_INFORMATION x{},y{};
+    const BOOL ok_a=GetFileInformationByHandle(a,&x);
+    const BOOL ok_b=GetFileInformationByHandle(b,&y);
+    CloseHandle(a);
+    CloseHandle(b);
+    require(ok_a && ok_b,"cannot query NTFS hardlink file identifiers");
+    return x.dwVolumeSerialNumber==y.dwVolumeSerialNumber &&
+           x.nFileIndexHigh==y.nFileIndexHigh &&
+           x.nFileIndexLow==y.nFileIndexLow &&
+           x.nNumberOfLinks>=2 && y.nNumberOfLinks>=2;
+}
 static fs::path ads(const fs::path& file) {
     return fs::path(file.wstring()+L":ISO_WCX_INTEGRITY");
 }
@@ -152,6 +177,12 @@ int wmain(int argc,wchar_t** argv) {
         const std::string ordinary="Untouched WIM file payload";
         const std::string stream="Named ADS preserved across WIM mounted edits";
         save(protected_file,ordinary);
+        const auto linked_file=source/L"Protected"/L"restricted-hardlink.dat";
+        require(CreateHardLinkW(linked_file.c_str(),protected_file.c_str(),
+                                nullptr)!=FALSE,
+                "cannot create NTFS hardlink fixture");
+        require(shared_file_id(protected_file,linked_file),
+                "fixture hardlinks do not share one NTFS file ID");
         save(ads(protected_file),stream);
         set_protected_dacl(protected_file);
         const auto expected_acl=dacl(protected_file);
@@ -210,6 +241,15 @@ int wmain(int argc,wchar_t** argv) {
             require(read(ads(restored))==stream,"NTFS named ADS content changed");
             require(dacl(restored)==expected_acl,
                     "protected NTFS DACL changed across WIM capture or commit");
+            const auto linked=folder/L"Protected"/L"restricted-hardlink.dat";
+            require(read(linked)==ordinary,
+                    "NTFS hardlink regular stream changed");
+            require(read(ads(linked))==stream,
+                    "NTFS hardlink named ADS stream changed");
+            require(dacl(linked)==expected_acl,
+                    "NTFS hardlink protected DACL changed");
+            require(shared_file_id(restored,linked),
+                    "WIM mounted edit broke two-name NTFS hardlink identity");
             const auto restored_large=folder/L"64MiB-random.bin";
             require(fs::file_size(restored_large)==size,"large file length changed");
             require(hash(restored_large)==expected_hash,
@@ -251,7 +291,7 @@ int wmain(int argc,wchar_t** argv) {
         std::error_code ec;
         fs::remove_all(root,ec);
         std::cout<<"PASS: 64-MiB LZX WIM fast mount preserved regular files, "
-                    "protected DACL, named NTFS ADS and second index\n";
+                    "protected DACL, NTFS ADS, hardlinks and second index\n";
         return 0;
     }catch(const std::exception& e){
         SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
