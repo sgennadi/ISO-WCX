@@ -362,7 +362,7 @@ IsoRecord record(const Bytes& b,std::size_t p,bool joliet) {
     else r.name=iso_name(b,p+33,n,joliet,(r.flags&2)!=0);
     return r;
 }
-std::vector<Item> parse_iso(Source& src,std::string& format) {
+std::vector<Item> parse_iso(Source& src,std::string& format,bool primary_only=false) {
     Bytes primary,alternative,boot_record;
     for(std::uint64_t i=16;i<16+128;i++) {
         require(i<=src.size()/iso_sector && src.size()/iso_sector-i>=1,"ISO volume descriptors truncated");
@@ -436,7 +436,7 @@ std::vector<Item> parse_iso(Source& src,std::string& format) {
             }
         }
     }
-    bool joliet=!alternative.empty() && !rr_skip.has_value();
+    bool joliet=!primary_only && !alternative.empty() && !rr_skip.has_value();
     require(joliet||!primary.empty(),"no ISO volume descriptor");
     const auto& volume=joliet?alternative:primary;
     auto root=read_record(volume,156,joliet);require(root.flags&2,"ISO root is not a directory");
@@ -1158,6 +1158,19 @@ void append_chd_audio_items(std::vector<Item>& entries, const ChdStream& chd) {
         append(entries,std::move(item));
     }
 }
+}
+
+IsoNamespaceView inspect_iso_namespace(const std::filesystem::path& image,
+                                        bool primary_only) {
+    auto extension=image.extension().wstring();
+    std::transform(extension.begin(),extension.end(),extension.begin(),
+                   [](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});
+    if(extension!=L".iso" && extension!=L".udf")
+        throw std::runtime_error("ISO namespace inspection requires raw .iso/.udf");
+    Source source(image);
+    IsoNamespaceView view;
+    view.items=parse_iso(source,view.format,primary_only);
+    return view;
 }
 
 Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
