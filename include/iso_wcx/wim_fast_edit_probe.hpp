@@ -110,6 +110,10 @@ inline FastEditProbe probe_fast_edit_metadata(const std::filesystem::path& file)
             return invalid("cannot read WIM lookup entry");
         const auto entry_flags = entry[7];
         if (!(entry_flags & 0x02u)) continue;
+        // A metadata descriptor may not be marked free, spanned or carry
+        // any unknown bit in this deliberately narrow fast-edit preflight.
+        if ((entry_flags & ~0x06u) != 0)
+            return invalid("unsupported WIM metadata resource flags");
         ++p.metadata_resources;
         const auto len = resource_size(entry.data());
         const auto offset = le64(entry.data() + 8);
