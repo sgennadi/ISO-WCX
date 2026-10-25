@@ -55,6 +55,50 @@ static std::atomic<unsigned> wim_fast_mount_stages{0};
 static std::atomic<bool> cancel_fast_mounted_edit{false};
 static std::atomic<bool> cancel_fast_after_commit{false};
 static std::atomic<bool> cancel_next_wim{false};
+
+// The Preview settings test must not leave any per-user WIM configuration
+// changed on its Windows runner, even when a regression fails.
+struct ScopedFastMountPreference {
+    HKEY key=nullptr;
+    DWORD previous_type=0;
+    std::vector<BYTE> previous_data;
+    bool existed=false;
+    ScopedFastMountPreference() {
+        const auto opened=RegCreateKeyExW(
+            HKEY_CURRENT_USER,L"Software\\ISO-WCX\\WIM",0,nullptr,0,
+            KEY_QUERY_VALUE|KEY_SET_VALUE,nullptr,&key,nullptr);
+        if(opened!=ERROR_SUCCESS)
+            throw std::runtime_error("cannot create isolated WIM test setting");
+        DWORD bytes=0;
+        const auto found=RegQueryValueExW(
+            key,L"FastMountFolders",nullptr,&previous_type,nullptr,&bytes);
+        if(found==ERROR_FILE_NOT_FOUND)return;
+        if(found!=ERROR_SUCCESS || bytes>4096)
+            throw std::runtime_error("cannot preserve existing WIM setting");
+        previous_data.resize(bytes);
+        if(RegQueryValueExW(key,L"FastMountFolders",nullptr,&previous_type,
+           previous_data.data(),&bytes)!=ERROR_SUCCESS)
+            throw std::runtime_error("cannot read existing WIM setting");
+        existed=true;
+    }
+    ScopedFastMountPreference(const ScopedFastMountPreference&)=delete;
+    ScopedFastMountPreference& operator=(const ScopedFastMountPreference&)=delete;
+    void set(DWORD value) {
+        if(RegSetValueExW(key,L"FastMountFolders",0,REG_DWORD,
+           reinterpret_cast<const BYTE*>(&value),sizeof(value))!=ERROR_SUCCESS)
+            throw std::runtime_error("cannot set WIM fast mode test preference");
+    }
+    ~ScopedFastMountPreference() {
+        if(!key)return;
+        if(existed)
+            (void)RegSetValueExW(key,L"FastMountFolders",0,previous_type,
+                 previous_data.data(),static_cast<DWORD>(previous_data.size()));
+        else
+            (void)RegDeleteValueW(key,L"FastMountFolders");
+        RegCloseKey(key);
+    }
+};
+
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
     if(size<0){
@@ -509,6 +553,39 @@ int wmain(int argc,wchar_t** argv) {
             for(const auto& item:fs::directory_iterator(root))
                 if(item.path().filename().wstring().starts_with(L".iso-wcx-edit-"))
                     return 54;
+            // Exercise the exact HKCU setting used by ConfigurePacker.
+            // No environment variable: the saved option must activate the
+            // WIM mount path for a new directory in this image.
+            {
+                ScopedFastMountPreference setting;
+                setting.set(1);
+                SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+                fs::create_directories(incoming/L"GUI_MOUNT_REGISTRY");
+                wchar_t gui_entry[]=L"GUI_MOUNT_REGISTRY\0\0";
+                const auto before_registry=load(original);
+                wim_fast_mount_stages.store(0);
+                set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+                const int gui_rc=pack(packed.data(),index_sub.data(),
+                                      src.data(),gui_entry,0);
+                set_progress(INVALID_HANDLE_VALUE,nullptr);
+                if(gui_rc!=0 || wim_fast_mount_stages.load()==0 ||
+                   load(original)==before_registry)
+                    return 65;
+
+                // An explicit environment override of 0 must win over
+                // the saved HKCU checkbox and force the legacy editor.
+                fs::create_directories(incoming/L"GUI_MOUNT_DISABLED");
+                wchar_t disabled_entry[]=L"GUI_MOUNT_DISABLED\0\0";
+                wim_fast_mount_stages.store(0);
+                SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"0");
+                set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+                const int disabled_rc=pack(packed.data(),index_sub.data(),
+                                           src.data(),disabled_entry,0);
+                set_progress(INVALID_HANDLE_VALUE,nullptr);
+                SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+                if(disabled_rc!=0 || wim_fast_mount_stages.load()!=0)
+                    return 66;
+            }
         }
         fs::remove_all(root,ec);
         std::cout<<"PASS: Windows WIMGAPI multi-index LZX WIM, ESD and split SWM through WCX x86/x64 API\n";
