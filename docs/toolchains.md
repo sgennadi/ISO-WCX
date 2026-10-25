@@ -1,6 +1,6 @@
 # ISO-WCX modern build toolchains
 
-## Development Preview
+## Stable v0.20.0 and Development Preview
 
 - Windows runner: `windows-2025`, GitHub-hosted Visual Studio 2026 (v18).
 - CMake generator: `Visual Studio 18 2026`, platform `Win32` or `x64`.
@@ -12,22 +12,23 @@
   FAT/UDF/WIM/optical fixture tests and Windows ABI smoke tests before
   its installable ZIP is uploaded.
 - Parallel Linux GCC 14 and Clang 19 C++26 suites run via Ninja.
-- Separate `windows-2025` C++20 x64 baseline ensures the application
+- Separate `windows-2025` C++20 Win32/x64 baselines ensure the application
   remains source-compatible with C++20 and exposes compiler regressions.
 
 This selects MSVC's **current draft C++26 feature set**, not a complete
 or finalized ISO C++26 implementation. Microsoft describes the mode as
 `/std:c++latest` and cautions that its experimental features may change.
 
-## Published Stable v0.19.0
+## Stable release reproducibility
 
-The existing v0.19.0 release and its SHA-256 manifest are immutable.
-The older `stable-release.yml` workflow is intentionally pinned to
-Visual Studio 2022/C++20 to reproduce that already published artifact.
-Do not rewrite its GitHub tag, ZIP, or checksum. For a **future**
-versioned Stable workflow, use the verified Visual Studio 2026/C++26
-Preview configuration and require Windows Win32/x64, Linux, sanitizer,
-QEMU and independent media-format tests before publication.
+Published **v0.19.0** and its SHA-256 manifest remain immutable. The
+v0.20.0 Stable workflow uses the same validated VS2026/C++26 draft configuration
+as the Preview for **both Win32 and x64**. It also requires Win32/x64
+C++20 compatibility, GCC14/Clang19 C++26, Linux C++20, Windows WCX ABI,
+QEMU VHDX, WIM/ESD, UDF, CHD, optical and sanitizer regressions.
+The ZIP is packaged only from tested WCX DLL artifacts; SHA256SUMS.txt
+is generated and checked before publication. Existing releases and tags
+must never be overwritten.
 
 ## Local Visual Studio 2026 build
 

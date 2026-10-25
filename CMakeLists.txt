@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.19.0 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.20.0 LANGUAGES C CXX)
 
-# Keep the released WCX ABI on its tested C++20 toolchain. The C++26 lane
-# exercises *exactly the same sources and tests*, without changing artifacts.
+# Retain C++20 as a backward-compatible local default. Stable v0.20.0
+# explicitly enables tested Visual Studio 2026 C++26 draft for Win32/x64.
+# Total Commander WCX ABI and package filenames remain unchanged.
 set(ISO_WCX_CXX_STANDARD "20" CACHE STRING "ISO-WCX C++ standard: 20 or experimental 26")
 set_property(CACHE ISO_WCX_CXX_STANDARD PROPERTY STRINGS 20 26)
 if(NOT ISO_WCX_CXX_STANDARD MATCHES "^(20|26)$")
