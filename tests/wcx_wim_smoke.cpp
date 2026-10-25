@@ -385,13 +385,37 @@ int wmain(int argc,wchar_t** argv) {
             // or rewrite the WIM, and its bytes must remain identical.
             const auto before_noop=load(original);
             wim_fast_mount_stages.store(0);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
             SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"1");
             const int no_op=pack(packed.data(),index_sub.data(),
                                  src.data(),fast_list,0);
             SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
             if(no_op!=0 || load(original)!=before_noop ||
                wim_fast_mount_stages.load()!=0)
                 return 52;
+
+            // Refuse folder creation UNDER an existing regular file before
+            // a staging clone or mount is attempted. This must be a no-write
+            // failure even when the caller's source is a valid directory.
+            const auto conflict_source=root/L"conflict-src";
+            fs::create_directories(conflict_source/L"HELLO.TXT"/L"CHILD");
+            wchar_t conflicting_dir[]=L"HELLO.TXT\\CHILD\0\0";
+            const auto before_conflict=load(original);
+            wim_fast_mount_stages.store(0);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"1");
+            const int conflict_rc=pack(packed.data(),index_sub.data(),
+                                       const_cast<wchar_t*>(conflict_source.c_str()),
+                                       conflicting_dir,0);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            if(conflict_rc==0 || load(original)!=before_conflict ||
+               wim_fast_mount_stages.load()!=0)
+                return 53;
+            for(const auto& item:fs::directory_iterator(root))
+                if(item.path().filename().wstring().starts_with(L".iso-wcx-edit-"))
+                    return 54;
         }
         fs::remove_all(root,ec);
         std::cout<<"PASS: Windows WIMGAPI multi-index LZX WIM, ESD and split SWM through WCX x86/x64 API\n";
