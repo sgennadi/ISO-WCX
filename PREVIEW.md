@@ -2,7 +2,7 @@
 
 Modern Total Commander WCX plugin with a Stable installation channel and explicitly restricted ISO/WIM/UDF editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
-The UDF Type-1 transactional writer is included in v0.17.0 but remains **experimental**, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
+The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.18.0, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
 
 ## If Total Commander says `File iso.wcx not found!`
 

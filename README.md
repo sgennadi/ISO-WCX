@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.17.0 Stable Core + transactional UDF writer Preview, native MDS v2/MDX and CHD CDDA/RF64** — a native C++20 Total Commander WCX
+**ISO-WCX v0.18.0 Stable Core + native FAT12 VFAT/IMZ Preview, UDF Type-1, MDS v2/MDX and CHD CDDA/RF64** — a native C++20 Total Commander WCX
 plugin for optical ISO/UDF, WIM/ESD/SWM and virtual HDD images.
 Core browsing/extraction and packaging are verified in Windows x86/x64 and
 Linux CI. **Advanced readers and write modes explicitly marked experimental
@@ -9,7 +9,7 @@ remain limited; this is not full NTFS/ext4/UDF compatibility.**
 ## Install into Total Commander
 
 1. Open the [latest Stable release](https://github.com/sgennadi/ISO-WCX/releases/latest).
-2. Download **ISO-WCX-v0.17.0.zip** and open it in Total Commander.
+2. Download **ISO-WCX-v0.18.0.zip** and open it in Total Commander.
 3. Let `pluginst.inf` install `ISO-WCX.wcx` (32-bit) and `ISO-WCX.wcx64` (64-bit).
 4. Restart Total Commander and open a supported image with Ctrl+PgDn.
 
@@ -27,7 +27,7 @@ association that prevents its DLL from loading in the first place.
 
 For installation see [INSTALL_EN.txt](INSTALL_EN.txt) and
 [INSTALL_RU.txt](INSTALL_RU.txt); [PREVIEW.md](PREVIEW.md) describes
-experimental support. See [v0.17.0 release notes](RELEASE_NOTES.md).
+experimental support. See [v0.18.0 release notes](RELEASE_NOTES.md).
 
 ## Format coverage (experimental subsets identified separately)
 
@@ -298,7 +298,7 @@ It rejects attribute-list continuations, encrypted/compressed data,
 reparse reconstruction and journal recovery. See [exFAT design](docs/exfat-integration.md),
 [ext reader design](docs/ext-integration.md) and [NTFS preview](docs/ntfs-integration.md).
 
-## Native UDF Type-1 writer (experimental PR #33)
+## Native UDF Type-1 writer (experimental)
 
 The in-process writer edits compatible standalone 2048-byte UDF Type-1 images
 without third-party DLLs or executables. It can replace/grow/shrink existing

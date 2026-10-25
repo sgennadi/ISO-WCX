@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.18.0 — 2026-10-25 — Stable Core + Floppy VFAT/IMZ Preview
+
+- Raw IMA/IMG/VFD/FLP floppy reading with native FAT12/16/32 superfloppy
+  detection; BIF FAT boot-image browsing and byte-exact opaque boot extraction.
+- Native transactional FAT12 writing with long Unicode VFAT filenames
+  (Cyrillic, Hebrew and emoji), checked 8.3 aliases and nested folder changes.
+- Native WinImage IMZ ZIP Stored/Deflate read-only decoding using static
+  zlib, strict ZIP metadata verification, CRC32 and decompression limits.
+- Add IMA/VFD/FLP/BIF/IMZ installer associations without extra runtime DLLs.
+- New regression tests for VFAT long names, 8.3 collisions, malformed ZIP,
+  damaged FAT tables and fail-closed rollback. Full Windows x86/x64, Linux,
+  sanitizer and independent large-UDF release checks remain mandatory.
+- FAT12 writer, IMZ reader, UDF Type-1 mutations and advanced optical formats
+  retain explicitly documented Preview limitations inside Stable packaging.
+
 ## v0.17.0 — 2026-10-25 — Stable Core + Transactional UDF Preview
 
 - UDF physical Type-1 writer: atomic multi-file/mkdir batches and mixed
