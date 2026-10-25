@@ -146,7 +146,7 @@ std::array<std::uint8_t,512> read_terminal_footer(
     const auto end=file.tellg();
     require(end>=static_cast<std::streamoff>(512),
             "dynamic VHD file is too small for final footer");
-    file.seekg(end-static_cast<std::streamoff>(512),std::ios::beg);
+    file.seekg(-static_cast<std::streamoff>(512),std::ios::end);
     std::array<std::uint8_t,512> footer{};
     file.read(reinterpret_cast<char*>(footer.data()),512);
     require(bool(file),"cannot read original dynamic VHD footer");
