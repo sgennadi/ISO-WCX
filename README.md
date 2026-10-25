@@ -86,6 +86,22 @@ button is available after installing a build that contains this change;
 published older Stable builds remain unchanged. If Configure... is missing,
 reassociate the WCX plugin so Total Commander refreshes its capability flags.
 
+## Experimental fast WIM folder creation (development Preview after v0.21.0)
+
+The new WIMGAPI **mount-and-commit** path can avoid applying and recapturing
+the complete WIM for a batch of empty directories in one image index.
+It is currently **opt-in only** with `ISO_WCX_WIM_FAST_MOUNT=1` set in
+Total Commander's process environment. The source is cloned transactionally,
+the mounted index is committed only to the private copy, and the result
+is independently enumerated and compared before source replacement.
+The staging clone is still proportional to the WIM file size; the mount
+driver and administrative access are required.
+
+**Published Stable v0.21.0 does not include this Preview feature**. Until
+privileged Windows mount, failure cleanup, ACL/ADS and real image tests
+complete, the normal Apply/Capture edit remains the safe default.
+See [WIM mount preview](docs/wim-mount-fast-preview.md).
+
 ## WIM read-only metadata validation (v0.21.0)
 
 v0.21.0 adds strict read-only development-side WIM metadata preflight,
