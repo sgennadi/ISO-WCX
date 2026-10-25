@@ -22,6 +22,7 @@ struct WimFindData {
 };
 
 
+#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -173,10 +174,13 @@ struct WimArchive::Impl {
 
 WimArchive::WimArchive(const std::filesystem::path& image)
     : api_(std::make_unique<Impl>()) {
+    std::fprintf(stderr,"[WIM-OPEN] ctor-enter\\n"); std::fflush(stderr);
     require(std::filesystem::is_regular_file(image) &&
             !std::filesystem::is_symlink(image),
             "WIM input must be a regular non-symlink file");
+    std::fprintf(stderr,"[WIM-OPEN] pre-resolve\\n"); std::fflush(stderr);
     const auto parts = resolve_wim_parts(image);
+    std::fprintf(stderr,"[WIM-OPEN] post-resolve\\n"); std::fflush(stderr);
     const auto input = parts.front().wstring();
     require(!input.empty(), "invalid WIM archive path");
 
@@ -184,6 +188,7 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     api_->archive = api_->create(input.c_str(), GENERIC_READ, OPEN_EXISTING,
                                    0, 0u, &opened);
     if (!is_valid(api_->archive)) fail_windows("cannot open WIM archive");
+    std::fprintf(stderr,"[WIM-OPEN] wimfile-opened\\n"); std::fflush(stderr);
 
     // WIMGAPI expands internal image metadata in Windows' temporary directory
     // as part of WIMLoadImage. No WIM is mounted and no helper is executed.
@@ -194,6 +199,7 @@ WimArchive::WimArchive(const std::filesystem::path& image)
             "Windows temporary directory is unavailable");
     if (!api_->set_temp(api_->archive, temporary.data()))
         fail_windows("WIMSetTemporaryPath failed");
+    std::fprintf(stderr,"[WIM-OPEN] temp-set\\n"); std::fflush(stderr);
 
     for (std::size_t i = 1; i < parts.size(); ++i) {
         // WIM_REFERENCE_APPEND, register exact validated paths before loading metadata.
@@ -202,6 +208,7 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     }
 
     const DWORD count = api_->count(api_->archive);
+    std::fprintf(stderr,"[WIM-OPEN] count=%lu\\n",static_cast<unsigned long>(count)); std::fflush(stderr);
     require(count > 0 && count <= 256,
             "WIM has no image indexes or too many images");
     format_ = "WIM / Windows Imaging API / " + std::to_string(count) +
@@ -213,7 +220,9 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     // Every WIM image index is represented under a separate top-level folder.
     // Iterate rather than recurse: malformed WIMs cannot exhaust the stack.
     for (DWORD index = 1; index <= count; ++index) {
+        std::fprintf(stderr,"[WIM-OPEN] index-load-call=%lu\\n",static_cast<unsigned long>(index)); std::fflush(stderr);
         HANDLE himage = api_->load(api_->archive, index);
+        std::fprintf(stderr,"[WIM-OPEN] index-load-return=%lu\\n",static_cast<unsigned long>(index)); std::fflush(stderr);
         if (!is_valid(himage)) fail_windows("WIMLoadImage failed");
         api_->images.push_back(himage);
         std::string prefix = "image" + std::to_string(index);
@@ -233,7 +242,9 @@ WimArchive::WimArchive(const std::filesystem::path& image)
                     "WIM directory depth exceeds safe limit");
             const auto pattern = current.path + L"\\*.*";
             WimFindData data{};
+            std::fprintf(stderr,"[WIM-OPEN] find-first-call; sizeof=%zu\\n",sizeof(data)); std::fflush(stderr);
             HANDLE found = api_->first(himage, pattern.c_str(), &data);
+            std::fprintf(stderr,"[WIM-OPEN] find-first-return\\n"); std::fflush(stderr);
             if (!is_valid(found)) {
                 if (end_of_find(GetLastError())) continue;
                 fail_windows("WIMFindFirstImageFile failed");
@@ -271,7 +282,10 @@ WimArchive::WimArchive(const std::filesystem::path& image)
                             stack.push_back({source, relative, current.depth + 1});
                     }
                 }
-                if (!api_->next(found, &data)) {
+                std::fprintf(stderr,"[WIM-OPEN] find-next-call\\n"); std::fflush(stderr);
+                const BOOL found_next = api_->next(found, &data);
+                std::fprintf(stderr,"[WIM-OPEN] find-next-return=%d\\n",int(found_next)); std::fflush(stderr);
+                if (!found_next) {
                     const DWORD error = GetLastError();
                     if (!end_of_find(error))
                         fail_windows("WIMFindNextImageFile failed");
@@ -280,6 +294,7 @@ WimArchive::WimArchive(const std::filesystem::path& image)
             }
         }
     }
+    std::fprintf(stderr,"[WIM-OPEN] ctor-complete\\n"); std::fflush(stderr);
 }
 
 WimArchive::~WimArchive() = default;
