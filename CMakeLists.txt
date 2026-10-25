@@ -376,6 +376,13 @@ if(WIN32)
     add_test(NAME wcx_wim_multi_image_lzx_esd
       COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>")
     set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 240)
+    option(ISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST
+      "Test opt-in Windows WIMGAPI mount/commit on a disposable WIM" OFF)
+    if(ISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST)
+      add_test(NAME wcx_wim_fast_mount_real_windows
+        COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>" --fast-mount)
+      set_tests_properties(wcx_wim_fast_mount_real_windows PROPERTIES TIMEOUT 420)
+    endif()
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()
 endif()
