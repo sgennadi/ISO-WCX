@@ -16,6 +16,9 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
+#include <memory>
+#include <type_traits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -442,21 +445,18 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
 void configure_updates(HWND parent,HINSTANCE instance) {
     // Zero-child dialog template; dynamically created controls scale with the
     // user's dialog font and avoid maintaining a separate .rc resource file.
-    struct alignas(DWORD) Dialog {
-        DLGTEMPLATE frame{};
-        WORD menu=0;
-        WORD window_class=0;
-        wchar_t title[32]{};
-    } dlg{};
-    dlg.frame.style=WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER;
-    dlg.frame.cdit=0;
-    dlg.frame.x=0;dlg.frame.y=0;
-    dlg.frame.cx=367;dlg.frame.cy=119;
+    alignas(DWORD) std::array<std::uint8_t,256> raw{};
+    const auto store32=[&](std::size_t at,DWORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
+    const auto store16=[&](std::size_t at,WORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
+    store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER);
+    store32(4,0);store16(8,0);store16(10,0);store16(12,0);
+    store16(14,367);store16(16,119);store16(18,0);store16(20,0);
     constexpr wchar_t caption[]=L"ISO-WCX Update Settings";
-    std::copy_n(caption,std::size(caption),dlg.title);
+    std::memcpy(raw.data()+22,caption,sizeof(caption));
     State state{};
-    (void)DialogBoxIndirectParamW(instance,&dlg.frame,parent,dialog_proc,
-                                  reinterpret_cast<LPARAM>(&state));
+    (void)DialogBoxIndirectParamW(instance,
+        reinterpret_cast<const DLGTEMPLATE*>(raw.data()),
+        parent,dialog_proc,reinterpret_cast<LPARAM>(&state));
 }
 } // namespace iso_wcx
 #endif
