@@ -306,6 +306,55 @@ int wmain(int argc,wchar_t** argv) {
         // A rejected traversal must not change one byte of the original.
         const auto original_bytes=load(original);wchar_t bad_list[]=L"..\\escape\0\0";
         if(pack(packed.data(),sub.data(),src.data(),bad_list,0)==0||load(original)!=original_bytes)return 24;
+        if(fast_mount_test) {
+            // Exercise the important multi-index case BEFORE deleting image1.
+            // Only image2 should gain a new directory; image1 file streams
+            // and both index labels must remain intact after native commit.
+            fs::create_directories(incoming/L"FAST_SECOND_INDEX");
+            wchar_t second_list[]=L"FAST_SECOND_INDEX\0\0";
+            std::wstring second_index=L"image2";
+            const auto before_second=load(original);
+            wim_fast_mount_stages.store(0);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"1");
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int second_result=pack(packed.data(),second_index.data(),
+                                         src.data(),second_list,0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+            if(second_result!=0) {
+                if(load(original)!=before_second)return 55;
+                std::wcerr<<L"Multi-index mount edit failed; preserved "
+                          <<root.c_str()<<L"\n";
+                return 56;
+            }
+            if(wim_fast_mount_stages.load()==0)return 57;
+            if(!content(L"image1\\HELLO.TXT",data) || data!="replacement" ||
+               !content(L"image2\\HELLO.TXT",data) || data!="hello-two")
+                return 58;
+            std::wstring name=original.wstring();
+            OpenW open_new{};
+            open_new.ArcName=name.data();
+            HANDLE check_archive=open(&open_new);
+            if(!check_archive)return 59;
+            bool first_index=false,second_index_found=false,new_folder=false;
+            for(unsigned n=0;n<100000;++n) {
+                HeaderExW entry{};
+                const int code=read(check_archive,&entry);
+                if(code==10)break;
+                if(code!=0){close(check_archive);return 60;}
+                const std::wstring_view filename(entry.FileName);
+                if(filename==L"image1")first_index=true;
+                if(filename==L"image2")second_index_found=true;
+                if(filename==L"image2\\FAST_SECOND_INDEX")
+                    new_folder=(entry.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
+                if(process(check_archive,0,nullptr,nullptr)!=0) {
+                    close(check_archive);return 61;
+                }
+            }
+            close(check_archive);
+            if(!first_index || !second_index_found || !new_folder)
+                return 62;
+        }
         wchar_t delete_index[]=L"image1\0\0";
         if(erase(packed.data(),delete_index)||!content(L"image1\\HELLO.TXT",data)||data!="hello-two"||content(L"image2\\HELLO.TXT",data))return 25;
         // Malformed files must not be reported as a valid WIM archive.
