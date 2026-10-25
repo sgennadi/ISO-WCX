@@ -17,6 +17,7 @@ using ProcessFn=int (__stdcall*)(HANDLE,int,wchar_t*,wchar_t*);
 using CloseFn=int (__stdcall*)(HANDLE);
 using SetProgressW=void (__stdcall*)(HANDLE,int (__stdcall*)(wchar_t*,int));
 using SetProgressA=void (__stdcall*)(HANDLE,int (__stdcall*)(char*,int));
+using PackerCaps=int (__stdcall*)();
 static int unicode_callbacks=0,ansi_callbacks=0,reported_bytes=0;
 static bool cancel_next=false;
 static int __stdcall progress_w(wchar_t*,int bytes) {
@@ -52,7 +53,13 @@ int main(int argc,char** argv){
     auto close=reinterpret_cast<CloseFn>(GetProcAddress(dll,"CloseArchive"));
     auto set_progress_w=reinterpret_cast<SetProgressW>(GetProcAddress(dll,"SetProcessDataProcW"));
     auto set_progress_a=reinterpret_cast<SetProgressA>(GetProcAddress(dll,"SetProcessDataProc"));
-    if(!open||!header||!process||!close||!set_progress_w||!set_progress_a){std::cerr<<"Missing WCX exports\n";return 3;}
+    auto caps=reinterpret_cast<PackerCaps>(GetProcAddress(dll,"GetPackerCaps"));
+    const auto configure=GetProcAddress(dll,"ConfigurePacker");
+    if(!open||!header||!process||!close||!set_progress_w||!set_progress_a||
+       !caps||!configure||(caps()&16)==0){
+        std::cerr<<"Missing WCX updater ConfigPacker export/options capability\n";
+        return 3;
+    }
     constexpr std::size_t block=2048;
     std::vector<std::uint8_t> image(32*block,0);
     std::size_t p=16*block;
