@@ -26,6 +26,9 @@ public:
     [[nodiscard]] std::uint64_t size() const noexcept { return capacity_; }
     [[nodiscard]] VirtualDiskFormat format() const noexcept { return format_; }
     [[nodiscard]] std::uint32_t logical_sector_size() const noexcept;
+    [[nodiscard]] const DynamicVhdReader* dynamic_vhd_layout() const noexcept {
+        return dynamic_vhd_.get();
+    }
 
     // Logical bytes: fixed VHD footer, dynamic VHD BAT/metadata, and VHDX
     // allocation metadata are hidden.

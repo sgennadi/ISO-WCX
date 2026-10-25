@@ -49,9 +49,14 @@ reader: it requires matching first/last footers, the `cxsparse` header,
 correct checksums and BAT extents, sector bitmap ownership and sparse zero
 fill. It rejects corrupted/overlapping blocks and differencing VHD parents.
 The WCX reader does not mount disks or enumerate physical drives.
-Transactional FAT **writes** remain restricted to RAW/IMG and **fixed** VHD;
-dynamic VHD and all VHDX are **read-only**. Optical ISO/BIN/IMG parsing is
-unchanged.
+Transactional FAT **writes** remain supported in RAW/IMG and fixed VHD.
+A separate **development Preview (PR #56)** now adds controlled edits to
+validated dynamic VHD base images, via a logical raw clone, physical VHD
+copy-on-write, BAT/bitmap patching and complete logical readback before
+atomic replacement. This initial implementation is capped at **1 GiB
+logical on x64 / 512 MiB on Win32** and requires room for temporary copies.
+Differencing VHD parents and all VHDX remain **read-only for writes**.
+Optical ISO/BIN/IMG parsing is unchanged.
 
 ## Native-only disk readers (no libvhdi)
 
@@ -79,9 +84,11 @@ format handler code.
 1. Extend independent QEMU/Microsoft interop and hostile-image tests
    for the VHD and VHDX readers. Dynamic VHD **read-only** footer/BAT/bitmap
    parsing is implemented and tested using independent FAT16/FAT32 synthetic
-   fixtures; safe dynamic **write** requires a separate transactional
-   allocator that updates physical blocks, BAT, bitmaps, both footers and
-   checks external-drive interoperability before enabling WCX PackFiles.
+   fixtures; the first bounded native dynamic **write Preview** is now in PR #56:
+   its private COW allocator updates physical blocks, BAT and bitmaps,
+   preserves both footers and verifies every logical byte before swap.
+   QEMU and Microsoft VirtDisk independent interoperability gates remain
+   mandatory before merging this Preview.
 2. GPT GUID names and labels, metadata consistency reporting; CRC-verified
    backup fallback and linked EBR are implemented with mutation tests.
 3. FAT12/16/32 is available both in WCX and a developer-only bounded reader

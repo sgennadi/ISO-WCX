@@ -21,6 +21,14 @@ public:
     DynamicVhdReader& operator=(const DynamicVhdReader&) = delete;
     [[nodiscard]] std::vector<std::uint8_t> read(std::uint64_t offset,
                                                   std::size_t length);
+    // Fully validated layout: read-only metadata used exclusively by the
+    // isolated dynamic FAT staging writer. Never expose writable BAT state.
+    [[nodiscard]] std::uint64_t bat_offset() const noexcept { return bat_offset_; }
+    [[nodiscard]] std::uint32_t block_bytes() const noexcept { return block_size_; }
+    [[nodiscard]] std::uint32_t bitmap_bytes() const noexcept { return bitmap_bytes_; }
+    [[nodiscard]] const std::vector<std::uint32_t>& bat_entries() const noexcept {
+        return bat_;
+    }
 private:
     void read_file(std::uint64_t physical,std::uint8_t* dest,std::size_t count);
     void load_bitmap(std::size_t block_index);
@@ -28,6 +36,7 @@ private:
     std::ifstream input_;
     std::uint64_t capacity_ = 0;
     std::uint64_t physical_size_ = 0;
+    std::uint64_t bat_offset_ = 0;
     std::uint32_t block_size_ = 0;
     std::uint32_t bitmap_bytes_ = 0;
     std::vector<std::uint32_t> bat_;

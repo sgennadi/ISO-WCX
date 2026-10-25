@@ -42,8 +42,14 @@ checked 8.3 aliases and staged atomic commits are built in. FAT16 fixed
 roots and FAT32 FSInfo + mirrored FATs + backup boot sectors are checked.
 MBR/GPT FAT volumes can be modified only using the exact path prefix
 `partition1/`, `partition2/`, etc. No batch may span two partitions.
-Dynamic/differencing VHD, VHDX, oversized or damaged FAT, and opaque BIF
-remain read-only. The original image and unrelated partitions are never
+In development Preview #56, **clean dynamic base VHD v1** can also
+be edited at selected FAT12/16/32 partitionN/ paths. It stages a complete
+logical disk, checks FAT changes, updates only modified sectors in an
+atomic physical VHD clone and independently verifies all logical bytes.
+Maximum logical size: 1 GiB (x64) / 512 MiB (Win32). Reserve sufficient
+scratch disk space for several copies. Differencing/snapshot VHD, all VHDX,
+oversized or damaged FAT, and opaque BIF remain read-only. This is NOT
+included in published Stable v0.18.0. The original image and unrelated partitions are never
 modified in place; verify adequate free disk space for a full staged clone. Original Stable v0.18.0 had FAT12 writes only. WinImage IMZ is browse/extract-only:
 one ZIP stored/deflated floppy image is decompressed in memory with CRC32
 validation and a strict 32 MiB image-size limit, without external tools.

@@ -317,9 +317,12 @@ void FatMappedImage::replace_source() {
     require(SetFileAttributesW(stage_path_.c_str(),
                portable_attributes ? portable_attributes : FILE_ATTRIBUTE_NORMAL)!=FALSE,
             "cannot preserve original FAT file attributes");
-    require(MoveFileExW(stage_path_.c_str(),source_path_.c_str(),
-            MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,
-            "cannot atomically replace FAT image");
+    if(!MoveFileExW(stage_path_.c_str(),source_path_.c_str(),
+            MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+        const auto code=GetLastError();
+        throw EditUnsupported(
+            "cannot atomically replace FAT image: Win32 "+std::to_string(code));
+    }
 #else
     // A private staging file starts 0600 to protect image contents. Preserve
     // the original POSIX mode *only after* edits are flushed and verified.

@@ -75,7 +75,7 @@ restart TC. This updater is not present in the original v0.18.0 Stable build.
 | Raw floppy IMA / IMG / VFD / FLP | **Preview:** FAT12/16/32 superfloppy detection without MBR/GPT; native list/extract. Transactional **FAT12/16/32 write Preview** using demand-paged, disk-backed atomic staging (up to **64 GiB x64** / **512 MiB Win32**) for exact-size raw superfloppies and validated `partitionN/` FAT volumes inside **RAW/IMG and fixed VHD**: native UTF-8/UTF-16 **VFAT long names** (Cyrillic, Hebrew, emoji), collision-aware DOS 8.3 aliases, add/replace/delete and folder operations. FAT16 uses fixed root and mirrored 16-bit FAT chains; FAT32 uses dynamic root, mirrored 28-bit allocation chains with preserved reserved nibble, checked FSInfo/backup boot and updated free-cluster hints. Refuses corrupt mirrors, FSInfo/backup mismatch, cycles, unsafe filenames, ambiguous partition selections, mounted/live source images and oversized disks; dynamic/differencing VHD and all VHDX stay read-only. Atomic staging and readback before replacing the original; no helper utilities or parser DLLs. **This write Preview is newer than Stable v0.18.0.** No external programs or DLLs. |
 | WinImage IMZ compressed floppy | **Preview:** in-process single-member ZIP stored/raw DEFLATE, CRC32 and ZIP directory validation, output limited to 32 MiB; FAT12/16/32 browse/extract without a temporary image. Rejects encryption, multiple members, ZIP64, malformed streams and excessive expansion. Read-only. |
 | BIF El Torito boot images | **Preview:** valid raw FAT images browseable like IMA; opaque no-emulation BIOS boot images expose original bytes as `boot-image.bin`. Opaque BIF stays read-only. |
-| Partitioned HDD IMG/RAW, fixed/dynamic VHD, clean base VHDX | Native MBR/GPT filesystem browsing under `partitionN/`: FAT12/16/32, exFAT and **experimental** ext2/3/4 and NTFS. NTFS supports basic MFT/`$I30` directory parsing, resident/nonresident and sparse uncompressed files; rejects attribute lists, compressed/encrypted files and unsupported index layouts. Read-only except for Preview FAT `partitionN/` writes in raw IMG/RAW and **fixed** VHD (exact source clone and atomic replace); **dynamic VHD** is a native, checksummed, sparse BAT/bitmap **read-only** format. No mount/driver/external parser DLL. VHDX supports clean fixed/dynamic base images and remains read-only. |
+| Partitioned HDD IMG/RAW, fixed/dynamic VHD, clean base VHDX | Native MBR/GPT filesystem browsing under `partitionN/`: FAT12/16/32, exFAT and **experimental** ext2/3/4 and NTFS. NTFS supports basic MFT/`$I30` directory parsing, resident/nonresident and sparse uncompressed files; rejects attribute lists, compressed/encrypted files and unsupported index layouts. Read-only except for Preview FAT `partitionN/` writes in raw IMG/RAW and **fixed** VHD (exact source clone and atomic replace); **dynamic VHD** is a native, checksummed, sparse BAT/bitmap reader with **bounded FAT12/16/32 transactional write Preview** for validated base images (PR #56). No mount/driver/external parser DLL. VHDX supports clean fixed/dynamic base images and remains read-only. |
 | Original Xbox XDVDFS | Read-only files, nested directories and timestamp metadata (original Xbox only, not Xbox 360 or Xbox One) |
 | Multisession descriptor tracks | When multiple CUE/NRG/MDS tracks contain readable filesystems, expose separate `session1/`, `session2/` virtual folders. Not a full merged multisession filesystem. |
 | ISZ v1 (single-file and split; experimental) | Built-in 2048-byte optical streams; 48/64-byte headers, 2/3/4-byte chunk indexes or implicit stored data, zero/raw/zlib/bzip2; split `.isz` + `.i01/.i02` or `.part01.isz` + `.part02.isz` without intermediate ISO. Encryption, non-first segment as input, other sector geometry and uncommon vendor variants remain unsupported. |
@@ -203,13 +203,22 @@ unsupported. The FAT-capable virtual disk readers are now linked into WCX;
 real-image interoperability and Windows GUI extraction still need broader validation.
 See [native VHDX design and test boundaries](docs/vhdx-native.md).
 
-**New Preview: dynamic VHD v1 read-only.** The native reader checks both
+**New Preview: dynamic VHD v1 reader and bounded FAT write.** The native reader checks both
 `conectix` footers, the `cxsparse` header, BAT physical extents and
 MSB-first per-sector bitmaps. Unallocated sectors are zero-filled and
 MBR/GPT filesystems are presented under `partitionN/`. The same
 FAT12/16/32, exFAT and limited NTFS/ext filesystem readers are reused.
-Differencing/AVHD parents and dynamic-VHD writes remain unsupported. This
-change is *not* in the published v0.18.0 Stable release.
+**Write Preview (development PR #56):** verified non-differencing **dynamic**
+VHD v1 FAT12/16/32 `partitionN/` edits stage a full logical raw disk, call the
+same native FAT editor, then apply only changed 512-byte sectors to a private
+physical VHD clone. BAT and sector bitmaps are extended when needed. The
+staged dynamic image is re-opened and compared against the edited logical
+disk **byte-for-byte** before original-path replacement. Safety cap:
+**1 GiB logical x64 / 512 MiB Win32** and enough free space for multiple
+temporary disk copies. Read/write changes require no mounts or helper DLLs.
+Differencing/AVHD parents, dirty VHDX, dynamic VHD corruption and non-FAT
+filesystem writes remain unsupported. Dynamic VHD writes are **not part of
+Stable v0.18.0** and will not enter main before all CI tests pass.
 
 **No external disk DLLs:** The experimental libvhdi adapter and its CI
 have been removed. ISO-WCX has its own native C++ raw IMG/fixed VHD reader.
