@@ -14,6 +14,7 @@
 #include <fstream>
 #include <string>
 #include <utility>
+#include <cstdint>
 
 namespace iso_wcx { namespace {
 void checked(bool ok,const char* what){if(!ok)throw std::runtime_error(std::string(what)+" (Win32 "+std::to_string(GetLastError())+")");}
@@ -50,6 +51,8 @@ struct Callback {
     std::atomic<bool> cancelled{false};
     std::wstring stage=L"Processing WIM";
     unsigned phase_start=5, phase_span=0, last_percent=5;
+    // WIM_MSG_SETRANGE/SETPOS/STEPIT convey file counts during capture.
+    std::uint64_t file_range=0,file_position=0;
     ULONGLONG last_signal=0;
 
     void notify_locked(unsigned percent,bool force=false) {
@@ -73,20 +76,42 @@ struct Callback {
         stage=std::move(label);
         phase_start=std::max(last_percent,std::min(start,99u));
         phase_span=std::min(span,99u-phase_start);
+        file_range=0;
+        file_position=0;
         notify_locked(phase_start,true);
         if(cancelled.load())throw EditCancelled();
     }
-    static DWORD CALLBACK call(DWORD message,WPARAM wParam,LPARAM,void* context) noexcept {
+    static DWORD CALLBACK call(DWORD message,WPARAM wParam,LPARAM lParam,void* context) noexcept {
         auto& self=*static_cast<Callback*>(context);
         constexpr DWORD base=0x8000u+0x1476u;
-        if(message!=base+2u && message!=base+3u)return 0;
+        // WIM_MSG_PROGRESS, PROCESS, SETRANGE, SETPOS and STEPIT.
+        if(message!=base+2u && message!=base+3u &&
+           message!=base+5u && message!=base+6u && message!=base+7u)
+            return 0;
         try {
             std::lock_guard lock(self.mutex);
             if(message==base+2u) {
+                // Applied-image progress is a direct percentage.
                 const auto percent=static_cast<unsigned>(
                     std::min<WPARAM>(wParam,100u));
                 self.notify_locked(self.phase_start+
                     (self.phase_span*percent)/100u);
+            }else if(message==base+5u) {
+                // WIM_MSG_SETRANGE: lParam is the number of files.
+                self.file_range=static_cast<std::uint32_t>(lParam);
+                self.file_position=0;
+            }else if(message==base+6u || message==base+7u) {
+                // Capture uses SETPOS + STEPIT rather than PROGRESS.
+                if(message==base+6u)
+                    self.file_position=static_cast<std::uint32_t>(lParam);
+                else if(self.file_position<self.file_range)
+                    ++self.file_position;
+                if(self.file_range) {
+                    const auto done=std::min(self.file_range,self.file_position);
+                    self.notify_locked(self.phase_start+
+                        static_cast<unsigned>(
+                            self.phase_span*done/self.file_range));
+                }
             }else{
                 // PROCESS is WIMGAPI's documented abort point.
                 self.notify_locked(self.last_percent);
