@@ -231,13 +231,10 @@ public:
         }
     }
 
-    void commit(const std::filesystem::path& image, const EditProgress& progress) const {
+    void commit(const std::filesystem::path& image, const EditProgress& progress) {
         if (progress && !progress()) throw EditCancelled();
         // Update FAT32 free-cluster accounting only after every edit succeeds.
-        if (kind_ == FatKind::fat32) {
-            auto& self = const_cast<Editor&>(*this);
-            self.update_fsinfo();
-        }
+        if (kind_ == FatKind::fat32) update_fsinfo();
         std::filesystem::path stage;
         std::random_device random;
         for (unsigned i = 0; i < 20; ++i) {
@@ -400,7 +397,7 @@ private:
                   "FAT mirror copies disagree; refusing write");
     }
     void validate_fsinfo(std::size_t at) const {
-        check(at<=bytes_.size() && 512<=bytes_.size()-at &&
+        check(at<=bytes_.size() && sector_bytes_<=bytes_.size()-at &&
               rd32(bytes_,at)==0x41615252u &&
               rd32(bytes_,at+484)==0x61417272u &&
               rd32(bytes_,at+508)==0xaa550000u,
