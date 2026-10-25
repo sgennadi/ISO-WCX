@@ -49,8 +49,14 @@ int main() {
         mixed.at(2)[0].path="../escape";
         // The planner requires caller-side edit_path() validation. Such a
         // malformed logical path must never reach this point in production.
-        check(!plan_mounted_folders(mixed,{}).has_value()==false,
-              "planner is intentionally not a path-validation replacement");
+        check(!plan_mounted_folders(mixed,{}),
+              "unsafe traversal accepted by mount planner");
+        mixed.at(2)[0].path="nested/../escape";
+        check(!plan_mounted_folders(mixed,{}),
+              "nested traversal accepted by mount planner");
+        mixed.at(2)[0].path="unsafe:name";
+        check(!plan_mounted_folders(mixed,{}),
+              "host-invalid name accepted by mount planner");
 
         const std::vector<WimTreeItem> before{
             dir("image1"),file("image1/untouched.bin"),
