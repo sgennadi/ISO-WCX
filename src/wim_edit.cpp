@@ -322,6 +322,18 @@ void fast_mount_folder_edit(
             "inspect mount workspace filesystem");
     if(_wcsicmp(filesystem,L"NTFS")!=0)
         throw EditUnsupported("WIM mount fast path requires an NTFS volume");
+    // CopyFileEx would otherwise fill the drive and fail after many minutes.
+    // Verify quota-aware caller-available space on the actual sibling mount
+    // volume, with a conservative allowance for mount scratch and metadata.
+    ULARGE_INTEGER available{};
+    checked(GetDiskFreeSpaceExW(tx.workspace.c_str(),&available,
+                                nullptr,nullptr),
+            "inspect NTFS free space for fast WIM staging");
+    const auto source_size=std::filesystem::file_size(path);
+    if(!wim_detail::enough_staging_space(
+          static_cast<std::uint64_t>(source_size),available.QuadPart))
+        throw EditUnsupported(
+            "insufficient NTFS free space for WIM clone and mount scratch");
     std::filesystem::create_directory(folder);
     std::filesystem::create_directory(scratch);
     report(L"Stage WIM before mounting",6);

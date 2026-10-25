@@ -19,6 +19,21 @@ static WimTreeItem dir(const char* name) {
 }
 int main() {
     try {
+        constexpr std::uint64_t mib=1024ull*1024ull;
+        check(!enough_staging_space(0,1ull<<40),
+              "zero-size WIM must be rejected");
+        check(!enough_staging_space(64*mib,319*mib),
+              "insufficient 256 MiB reserve accepted");
+        check(enough_staging_space(64*mib,320*mib),
+              "exact 256 MiB workspace reserve rejected");
+        check(!enough_staging_space(16ull*1024ull*mib,
+                                   16ull*1024ull*mib+799*mib),
+              "large WIM was accepted below 5% reserve");
+        check(enough_staging_space(16ull*1024ull*mib,
+                                  16ull*1024ull*mib+819*mib+200000),
+              "large WIM above the 5% reserve was rejected");
+        check(!enough_staging_space(UINT64_MAX-20u,UINT64_MAX),
+              "overflow-boundary staging budget accepted");
         ArchiveChange one;
         one.path="New/Child";
         one.directory=true;

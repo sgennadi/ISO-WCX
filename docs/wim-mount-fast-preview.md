@@ -86,3 +86,13 @@ The environment variable `ISO_WCX_WIM_FAST_MOUNT=1` **overrides** this
 preference for CI/diagnostics; `ISO_WCX_WIM_FAST_MOUNT=0` overrides to
 **force the safe legacy path**. When the variable is unset, the GUI preference
 applies. If the setting is unreadable, the plugin uses legacy Apply/Capture.
+
+
+## Disk space preflight
+
+Before cloning, the Preview checks **caller-available** free bytes on the
+same NTFS volume using `GetDiskFreeSpaceExW`. It requires the complete
+original WIM size **plus** at least 256 MiB or 5% of the WIM size,
+whichever is greater. Insufficient space aborts before any cloning or
+mount operation. This is a conservative lower bound, not a guarantee that
+WIMGAPI will never require additional scratch on unusually large images.

@@ -3,6 +3,7 @@
 // No filesystem write or Windows image mount occurs in this header.
 #include "iso_wcx/archive_edit.hpp"
 #include <algorithm>
+#include <limits>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -33,6 +34,16 @@ inline bool windows_device_name(const std::string& segment) {
     return false;
 }
 
+// The staged WIM is a complete sibling copy and WIMGAPI needs additional
+// temporary storage. Fail closed before copying when storage is insufficient.
+// Required margin: at least 256 MiB, or 5% of WIM size for larger archives.
+inline bool enough_staging_space(std::uint64_t wim_bytes,
+                                 std::uint64_t available_bytes) noexcept {
+    if(wim_bytes==0 || available_bytes<wim_bytes)return false;
+    const auto extra=std::max<std::uint64_t>(
+        256ull*1024ull*1024ull,wim_bytes/20u);
+    return available_bytes-wim_bytes>=extra;
+}
 struct MountFolderPlan {
     unsigned index = 0;
     std::vector<std::string> paths;
