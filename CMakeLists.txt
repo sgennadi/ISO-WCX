@@ -127,6 +127,10 @@ if(BUILD_TESTING)
   add_test(NAME udf_bridge_same_length_edit
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_bridge_edit.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  add_test(NAME image_structure_iso_udf_bridge_namespaces
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_image_report_bridge.py"
+      "$<TARGET_FILE:disc_inspect>")
+  set_tests_properties(image_structure_iso_udf_bridge_namespaces PROPERTIES TIMEOUT 90)
   add_test(NAME udf_type1_native_resize_delete
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_edit.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
