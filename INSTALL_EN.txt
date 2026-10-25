@@ -35,12 +35,16 @@ Preview floppy support: IMA/IMG/VFD/FLP raw images with no partition map
 open directly into the FAT12/16/32 root. BIF images open as FAT when valid;
 otherwise their original bytes appear as boot-image.bin (read-only).
 Preview builds after v0.18.0 add FAT12/FAT16/FAT32 file and folder
-editing for exact-size, unpartitioned RAW/IMG/IMA/VFD/FLP/BIF images up
-to 256 MiB. Unicode VFAT creation/replacement/deletion (UTF-8/UTF-16),
+editing for exact-size raw superfloppies and validated FAT `partitionN/`
+inside RAW/IMG or fixed VHD. Demand-paged staged writes support source
+images up to 64 GiB on x64 (512 MiB Win32). Unicode VFAT creation/replacement/deletion (UTF-8/UTF-16),
 checked 8.3 aliases and staged atomic commits are built in. FAT16 fixed
 roots and FAT32 FSInfo + mirrored FATs + backup boot sectors are checked.
-Partitioned HDD, VHD/VHDX, IMG with MBR, oversized or damaged FAT and
-opaque BIF remain read-only. Original Stable v0.18.0 had FAT12 writes only. WinImage IMZ is browse/extract-only:
+MBR/GPT FAT volumes can be modified only using the exact path prefix
+`partition1/`, `partition2/`, etc. No batch may span two partitions.
+Dynamic/differencing VHD, VHDX, oversized or damaged FAT, and opaque BIF
+remain read-only. The original image and unrelated partitions are never
+modified in place; verify adequate free disk space for a full staged clone. Original Stable v0.18.0 had FAT12 writes only. WinImage IMZ is browse/extract-only:
 one ZIP stored/deflated floppy image is decompressed in memory with CRC32
 validation and a strict 32 MiB image-size limit, without external tools.
 
