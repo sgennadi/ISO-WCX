@@ -156,9 +156,13 @@ def negative_cases(valid: pathlib.Path, root: pathlib.Path,
     expect("truncated-footer", lambda a: a.pop())
     expect("header-checksum", lambda a: a.__setitem__(DYN_HEADER + 28,
                                                       a[DYN_HEADER + 28] ^ 1))
-    expect("unallocated-parent", lambda a: a.__setitem__(
-        DYN_HEADER + 42, 1) or
-        seal_header(memoryview(a)[DYN_HEADER:DYN_HEADER + 1024]))
+    def parent_in_dynamic(a: bytearray):
+        header = bytearray(a[DYN_HEADER:DYN_HEADER + 1024])
+        header[42] = 1
+        seal_header(header)
+        a[DYN_HEADER:DYN_HEADER + 1024] = header
+
+    expect("unallocated-parent", parent_in_dynamic)
     expect("bat-overlaps-metadata", lambda a: struct.pack_into(
         ">I", a, BAT_AT, 0))
     expect("bat-out-of-bounds", lambda a: struct.pack_into(
@@ -180,8 +184,9 @@ def negative_cases(valid: pathlib.Path, root: pathlib.Path,
     data[first_physical] &= 0x7F
     sparse.write_bytes(data)
     assert run(direct, sparse, 0, 512).stdout == bytes(512)
-    assert run(direct, sparse, SECTOR, 512).stdout != bytes(512) or True
-    run(inspector, sparse, success=False)
+    run(inspector, sparse, success=True)  # No partition in blank logical MBR.
+    run(direct, sparse, 0, 512)
+
     # Explicit parent/differencing VHD is still refused.
     differencing = root / "differencing.vhd"
     a = bytearray(original)
