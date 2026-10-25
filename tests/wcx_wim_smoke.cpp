@@ -470,6 +470,24 @@ int wmain(int argc,wchar_t** argv) {
                wim_fast_mount_stages.load()!=0)
                 return 52;
 
+            // On case-insensitive NTFS, a different spelling of an existing
+            // directory must be rejected before copying a large WIM.
+            wchar_t alias_list[]=L"fast_mount_folder\0\0";
+            const auto case_before=load(original);
+            wim_fast_mount_stages.store(0);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"1");
+            const int alias_result=pack(packed.data(),index_sub.data(),
+                                        src.data(),alias_list,0);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            if(alias_result==0 || load(original)!=case_before ||
+               wim_fast_mount_stages.load()!=0)
+                return 63;
+            for(const auto& item:fs::directory_iterator(root))
+                if(item.path().filename().wstring().starts_with(L".iso-wcx-edit-"))
+                    return 64;
+
             // Refuse folder creation UNDER an existing regular file before
             // a staging clone or mount is attempted. This must be a no-write
             // failure even when the caller's source is a valid directory.
