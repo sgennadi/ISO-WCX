@@ -173,7 +173,7 @@ endif()
 # Native partition mapping is part of the WCX in-process virtual HDD reader.
 # It remains read-only and has no external disk DLL dependencies.
 add_library(iso_virtual_partitions STATIC
-  src/partition_map.cpp src/virtual_disk.cpp src/vhdx_reader.cpp src/imz_reader.cpp)
+  src/partition_map.cpp src/virtual_disk.cpp src/dynamic_vhd_reader.cpp src/vhdx_reader.cpp src/imz_reader.cpp)
 target_include_directories(iso_virtual_partitions PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(iso_virtual_partitions PUBLIC ${ISO_WCX_ZLIB_TARGET})
 target_compile_features(iso_virtual_partitions PUBLIC cxx_std_20)
