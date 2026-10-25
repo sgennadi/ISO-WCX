@@ -54,10 +54,14 @@ ONE existing imageN index, ISO-WCX tries the Windows WIMGAPI mount path:
   Recovery may require privileged Windows DISM mount cleanup.
 - Failed mount does **not** silently retry Apply/Capture; old behaviour
   stays the default unless explicitly opted into mount mode.
-- Tree equality is a metadata-level safety test, not proof that all
-  unchanged stream bytes remain identical; real payload hashes, ACL,
-  reparse, alternate streams, Windows mount-driver recovery and crash
-  testing are prerequisites for enabling by default.
+- The Windows Preview CI now includes an independent re-apply of a genuine
+  64-MiB incompressible two-index LZX WIM containing a protected NTFS DACL
+  and named ADS. It compares data hashes, ACL SDDL, ADS bytes and the
+  unaffected index before/after the optional mounted-folder edit.
+- Tree equality alone remains a metadata-level safety check. Larger
+  production install.wim files, reparse/hardlinks, mount-driver crash
+  recovery and real-machine performance still need validation before
+  enabling this path by default.
 - This is NOT a complete custom WIM format metadata writer.
   The pure metadata preflight/decoder also remains read-only.
 

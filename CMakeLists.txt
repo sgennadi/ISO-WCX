@@ -382,6 +382,13 @@ if(WIN32)
       add_test(NAME wcx_wim_fast_mount_real_windows
         COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>" --fast-mount)
       set_tests_properties(wcx_wim_fast_mount_real_windows PROPERTIES TIMEOUT 420)
+      # Independent Windows system-WIMGAPI apply/readback on a 64-MiB
+      # incompressible LZX WIM with protected DACL and NTFS ADS.
+      add_executable(wcx_wim_integrity tests/wcx_wim_integrity.cpp)
+      target_link_libraries(wcx_wim_integrity PRIVATE advapi32)
+      add_test(NAME wcx_wim_fast_mount_acl_ads_64mib
+        COMMAND wcx_wim_integrity "$<TARGET_FILE:ISO-WCX>")
+      set_tests_properties(wcx_wim_fast_mount_acl_ads_64mib PROPERTIES TIMEOUT 420)
     endif()
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()
