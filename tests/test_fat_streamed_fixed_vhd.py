@@ -142,6 +142,9 @@ def test_fixed_vhd(editor: pathlib.Path, reader: pathlib.Path, root: pathlib.Pat
     second, total = extend_two_partitions(original, "fat16")
     vhd = root / "two-partitions.vhd"
     make_fixed_vhd(original, vhd)
+    # Snapshot *all* bytes outside partition2, not just the MBR/footer.
+    # Even a single bit altered in partition1, gaps or VHD metadata fails.
+    original_disk = vhd.read_bytes()
     with vhd.open("rb") as f:
         mbr = f.read(SECTOR)
         f.seek(-512, 2)
@@ -157,6 +160,16 @@ def test_fixed_vhd(editor: pathlib.Path, reader: pathlib.Path, root: pathlib.Pat
         assert f.read(SECTOR) == mbr
         f.seek(-512, 2)
         assert f.read(SECTOR) == footer
+    edited_disk = vhd.read_bytes()
+    start = second * SECTOR
+    end = (second + total) * SECTOR
+    assert len(edited_disk) == len(original_disk)
+    assert edited_disk[:start] == original_disk[:start], (
+        "modification escaped partition2 into MBR, partition1 or alignment gap")
+    assert edited_disk[end:] == original_disk[end:], (
+        "modification escaped partition2 into trailing sectors or VHD footer")
+    assert edited_disk[start:end] != original_disk[start:end], (
+        "FAT partition2 was not updated")
     before = vhd.stat().st_size
     run(editor, vhd, "add", "README.TXT", data, ok=False)
     run(editor, vhd, "add", "partition3/FAIL.TXT", data, ok=False)
