@@ -110,6 +110,24 @@ Support statements below describe their respective releases; see **v0.14** at th
 - 2448-byte physical sectors are accepted for unswizzled raw MODE1/MODE2 Form 1 data, including supported MDS v1 subchannel layouts. Extra subchannel bytes are not exposed as ISO data.
 - Does not support `.isz`, `.daa`, `.mdx`, `.chd`, proprietary encryption, mixed audio extraction or all vendor MDF sector patterns. The bchunk and mdf2iso projects are useful test references; their GPL source is not included.
 
+## FAT16/FAT32 transactional raw-volume writer Preview (post-v0.18.0)
+
+- Shared FAT12/16/32 in-process writer with UTF-8/UTF-16 VFAT, checked DOS 8.3
+  aliases, file replacement/addition/removal and recursive folder changes.
+- FAT16 fixed root uses 16-bit chain values; FAT32 writes 28-bit chains while
+  preserving upper reserved entry bits. FAT32 root clusters are addressable
+  above 65535, with correct high-word FAT directory entry pointers.
+- Mirrored FAT copies are checked before writes and updated consistently.
+  FAT32 FSInfo and backup FSInfo are verified and receive exact free/next
+  cluster counts; the backup boot sector must match the primary.
+- Only exact-size, unpartitioned FAT raw floppy/superfloppy images no greater
+  than 256 MiB are writable. MBR/GPT volumes, VHD/VHDX, nonmirrored FAT32,
+  malformed metadata, encrypted/compressed images and larger images remain
+  read-only. Changes stage and re-parse before atomic commit.
+- Independent tests verify Unicode names, root and directory allocation,
+  FAT mirrors, high-word cluster indexes, FSInfo bookkeeping and unchanged
+  originals after failed edits. Stable v0.18.0 does not include this preview.
+
 ## Native FAT12 VFAT + WinImage IMZ preview
 
 - Raw IMA/IMG/VFD/FLP superfloppy images need no MBR; native FAT12/16/32 browse/extract.
