@@ -71,3 +71,18 @@ ONE existing imageN index, ISO-WCX tries the Windows WIMGAPI mount path:
 To disable the preview, remove the ISO_WCX_WIM_FAST_MOUNT environment
 variable or set it to 0. The default is always the established
 Apply/Capture path. Never test directly on the only copy of an ISO/WIM.
+
+
+## Enable from Total Commander (Preview builds only)
+
+Open **Configuration → Options → Plugins → Packer → ISO-WCX →
+Configure**, then select **Fast WIM folders (experimental; administrator
+required)**. This option is **OFF** by default. It is persisted per Windows
+user at `HKCU\\Software\\ISO-WCX\\WIM`, DWORD `FastMountFolders`.
+A warning is shown before enabling, and the option can be disabled in the
+same dialog. It does not require restarting Total Commander.
+
+The environment variable `ISO_WCX_WIM_FAST_MOUNT=1` **overrides** this
+preference for CI/diagnostics; `ISO_WCX_WIM_FAST_MOUNT=0` overrides to
+**force the safe legacy path**. When the variable is unset, the GUI preference
+applies. If the setting is unreadable, the plugin uses legacy Apply/Capture.

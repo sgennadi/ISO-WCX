@@ -180,9 +180,21 @@ void remove_tree(const std::filesystem::path& path){
 // WIM_GENERIC_MOUNT == GENERIC_EXECUTE; this uses the Windows system WIMGAPI,
 // never DISM.EXE, wimlib-imagex, a runtime DLL or a separate worker EXE.
 bool fast_mount_requested() {
+    // A process-level override is especially useful for CI and immediate
+    // emergency opt-out: 0 always disables; 1 enables regardless of GUI.
     wchar_t setting[16]{};
-    const DWORD n=GetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",setting,16);
-    return n==1 && setting[0]==L'1';
+    SetLastError(ERROR_SUCCESS);
+    const DWORD n=GetEnvironmentVariableW(
+        L"ISO_WCX_WIM_FAST_MOUNT",setting,16);
+    if(n!=0 || GetLastError()!=ERROR_ENVVAR_NOT_FOUND)
+        return n==1 && setting[0]==L'1';
+    // User preference is stored independently from the updater settings.
+    // Unset or malformed values fail closed to the old Apply/Capture path.
+    constexpr wchar_t registry_key[]=L"Software\\ISO-WCX\\WIM";
+    DWORD enabled=0,size=sizeof(enabled);
+    return RegGetValueW(HKEY_CURRENT_USER,registry_key,
+              L"FastMountFolders",RRF_RT_REG_DWORD,nullptr,&enabled,
+              &size)==ERROR_SUCCESS && enabled==1;
 }
 std::vector<wim_detail::WimTreeItem> tree_snapshot(const WimArchive& archive) {
     std::vector<wim_detail::WimTreeItem> result;

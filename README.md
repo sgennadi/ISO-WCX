@@ -90,8 +90,10 @@ reassociate the WCX plugin so Total Commander refreshes its capability flags.
 
 The new WIMGAPI **mount-and-commit** path can avoid applying and recapturing
 the complete WIM for a batch of empty directories in one image index.
-It is currently **opt-in only** with `ISO_WCX_WIM_FAST_MOUNT=1` set in
-Total Commander's process environment. The source is cloned transactionally,
+It is **opt-in only**, either from the new checkbox in
+**ISO-WCX → Configure** (Preview builds) or via
+`ISO_WCX_WIM_FAST_MOUNT=1` in Total Commander's process environment.
+The environment variable `0` forces the safe legacy path. The source is cloned transactionally,
 the mounted index is committed only to the private copy, and the result
 is independently enumerated and compared before source replacement.
 The staging clone is still proportional to the WIM file size; the mount
