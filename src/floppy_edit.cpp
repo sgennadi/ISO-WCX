@@ -192,12 +192,10 @@ public:
         const auto count = std::filesystem::file_size(c.source);
         check(count <= bytes_.size() && count <= UINT32_MAX,
               "new FAT12 file exceeds available volume size");
-        std::vector<std::uint8_t> data(static_cast<std::size_t>(count));
+        // Stream the host file cluster by cluster straight into the mapped
+        // stage. Large files never allocate a proportional RAM buffer.
         std::ifstream source(c.source, std::ios::binary);
-        check(bool(source) && (data.empty() ||
-              bool(source.read(reinterpret_cast<char*>(data.data()),
-                               static_cast<std::streamsize>(data.size())))),
-              "cannot read new FAT12 file");
+        check(bool(source), "cannot open new FAT input file");
         std::size_t slot{};
         std::vector<std::size_t> new_lfn;
         if (existing != nodes_.end()) {
@@ -212,26 +210,31 @@ public:
                 vfat::encode(bytes_, new_lfn, base, planned.alias);
             slot = reserved.back();
         }
-        const auto needed = (data.size() + cluster_bytes_ - 1) / cluster_bytes_;
-        const auto allocated = allocate(needed);
-        for (std::size_t i = 0; i < allocated.size(); ++i) {
-            const auto at = offset(allocated[i]);
-            const auto first = i * cluster_bytes_;
-            const auto count_here = std::min<std::size_t>(cluster_bytes_, data.size() - first);
-            std::fill_n(bytes_.begin() + static_cast<std::ptrdiff_t>(at), cluster_bytes_, 0);
-            std::copy_n(data.data() + first, count_here, bytes_.data() + at);
+        const auto needed = (count + cluster_bytes_ - 1) / cluster_bytes_;
+        const auto allocated = allocate(static_cast<std::size_t>(needed));
+        std::uint64_t copied = 0;
+        for (const auto cluster : allocated) {
+            const auto at = offset(cluster);
+            const auto count_here = static_cast<std::size_t>(
+                std::min<std::uint64_t>(cluster_bytes_, count - copied));
+            std::fill_n(bytes_.data() + at, cluster_bytes_, 0);
+            check(bool(source.read(reinterpret_cast<char*>(bytes_.data() + at),
+                                   static_cast<std::streamsize>(count_here))),
+                  "new FAT file was truncated during streaming copy");
+            copied += count_here;
         }
+        check(copied == count, "FAT staged file length mismatch");
         const auto first = allocated.empty() ? std::uint32_t{} : allocated.front();
         if (existing != nodes_.end()) {
             wr16(bytes_, slot + 20, static_cast<std::uint16_t>(first >> 16));
             wr16(bytes_, slot + 26, static_cast<std::uint16_t>(first));
-            wr32(bytes_, slot + 28, static_cast<std::uint32_t>(data.size()));
+            wr32(bytes_, slot + 28, static_cast<std::uint32_t>(count));
             existing->second.first = first;
-            existing->second.size = static_cast<std::uint32_t>(data.size());
+            existing->second.size = static_cast<std::uint32_t>(count);
         } else {
-            write_entry(slot, planned.alias, 0x20, first, static_cast<std::uint32_t>(data.size()));
+            write_entry(slot, planned.alias, 0x20, first, static_cast<std::uint32_t>(count));
             const auto dos_path = join(parent, alias_name(planned.alias));
-            nodes_.emplace(path, Node{slot, first, static_cast<std::uint32_t>(data.size()),
+            nodes_.emplace(path, Node{slot, first, static_cast<std::uint32_t>(count),
                                       0x20, std::move(new_lfn), dos_path});
             aliases_.emplace(dos_path, path);
         }
