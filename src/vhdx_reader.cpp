@@ -205,7 +205,10 @@ void VhdxReader::parse() {
     const auto regions=regions1?*regions1:*regions2;
     // VHDX region tables may include optional vendor-defined areas. Do not
     // allow payload BAT entries to alias them as ordinary disk contents.
-    optional_regions_=regions.optional;
+    optional_regions_.clear();
+    optional_regions_.reserve(regions.optional.size());
+    for (const auto& region:regions.optional)
+        optional_regions_.push_back({region.offset,region.size});
     for (const auto& region:optional_regions_)
         require(!overlap(region.offset,region.size,0,MiB) &&
                 (!active.log_length ||
