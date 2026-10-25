@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.20.0 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.21.0 LANGUAGES C CXX)
 
-# Retain C++20 as a backward-compatible local default. Stable v0.20.0
+# Retain C++20 as a backward-compatible local default. Stable v0.21.0
 # explicitly enables tested Visual Studio 2026 C++26 draft for Win32/x64.
 # Total Commander WCX ABI and package filenames remain unchanged.
 set(ISO_WCX_CXX_STANDARD "20" CACHE STRING "ISO-WCX C++ standard: 20 or experimental 26")

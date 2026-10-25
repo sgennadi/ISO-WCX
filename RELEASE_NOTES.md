@@ -1,74 +1,74 @@
-# ISO-WCX v0.20.0 — Visual Studio 2026 C++26 and fixed VHDX FAT Preview
+# ISO-WCX v0.21.0 — Export Image Structure and WIM metadata safety
 
-Native Total Commander plugin: `ISO-WCX.wcx` (Win32) and `ISO-WCX.wcx64` (x64).
-Stable binaries are built using **Visual Studio 2026 / MSVC 19.50+** with
-experimental **C++26 draft flags** `/std:c++latest /Zc:__cplusplus`.
-The generated Windows targets compile and run a dialect probe; CMake uses C++20
-feature metadata only because its MSVC generator has no dedicated CXX26 mapping.
-Full language-standard conformance is not implied.
+Total Commander in-process WCX plugin for Win32/x64, built with Visual
+Studio 2026 (MSVC 19.50+ and experimental C++26 draft flags). The two plugin
+binaries are `ISO-WCX.wcx` and `ISO-WCX.wcx64`. No helper EXE, parser
+DLL, mount service or third-party runtime program is required.
 
-## Changes since v0.19.0
+## New since Stable v0.20.0
 
-- **Bounded fixed VHDX FAT editing (Preview)**: native add/replace/delete
-  files and directories in selected `partitionN/` FAT12/16/32 volumes
-  of **fully allocated fixed VHDX**, 512-byte logical sector only.
-  Validates both CRC32C headers, clean log, complete and uniquely owned
-  BAT physical block allocation, metadata/optional-region overlaps and FAT.
-  Writes to a private physical clone only; compares the **entire logical
-  image byte-for-byte** against an edited staging disk before atomic replace.
-  Rebuilds the paired VHDX headers with fresh write GUIDs and sequence.
-  Limits: x64 **1 GiB logical / 2 GiB physical**, Win32 **512 MiB
-  logical and physical**. Requires free temporary disk space.
-  Sparse/dynamic, partially allocated, differencing, dirty-log, mounted/
-  live and 4K-sector VHDX remain read-only. Non-FAT writes remain unsupported.
-- **WIMGAPI Win32 compatibility**: fixed a Windows Server 2025 system WIMGAPI
-  behavior that wrote 16 bytes beyond the published WIM find-data structure.
-  Added a guarded 16-byte tail, static Win32/x64 structure-size assertions,
-  and boundary validation after each enumeration. The observed
-  `0xC0000374` WIM/ESD heap corruption no longer occurs in the tested
-  multi-index Windows x86/x64 fixtures.
-- **WIM folder edit responsiveness (PR #61).** Total Commander receives
-  stage labels and throttled WIMGAPI progress during Apply/Capture. Rebuilt
-  WIMs are structurally enumerated, with byte-for-byte readback limited
-  to changed files rather than every unchanged compressed file. Tests verify
-  empty-folder creation, cancellation rollback and Win32/x64. This is
-  faster but **still uses full Apply/Capture**, so large WIMs can take time.
-- **Compiler modernization**: Stable uses VS2026 + C++26 draft for both
-  Win32/x64. It additionally runs independent VS2026 C++20 compatibility
-  checks for both architectures, GCC 14/Clang 19 C++26, Linux C++20,
-  Clang ASan/UBSan, Windows WCX ABI, FAT/UDF/WIM and optical regressions.
-- Built-in optional updater from v0.19.0 (manual Check now; daily background
-  check; persistent opt-out), ISO/UDF write Preview, dynamic VHD FAT write
-  Preview, CHD, MDF/MDX, WIM/ESD/SWM, BIF/IMA/IMZ remain available within
-  their previously documented format limitations.
+### Built-in Export Image Structure (PR #62)
 
-## Stable release gates and safety
+Choose **Files > Pack > [ISO-WCX association] > Configure... >
+Export Image Structure...** and select the source image and a TXT output.
+The plugin exports **metadata only**, in UTF-8: detected container,
+directory/file tree, sizes, attributes, extent offsets and counts. For
+raw ISO/UDF it also reports ISO9660 descriptors, PVD label, Joliet,
+El Torito, candidate UDF anchors, the first 32-KiB system-area flag,
+and alternate ISO9660/Joliet directory views where relevant.
 
-The Stable distribution means **tested packaging and core** and still contains
-explicitly bounded experimental writers, not generic filesystem editing.
-Back up important images. VHDX writes are only available for the fixed,
-fully allocated, 512-byte-sector FAT case described above.
+The report uses the same in-process reader as Total Commander and requires
+no `disc_inspect.exe`. The image is opened for reading; no payloads are
+extracted and no image data is modified. Export the report only to a
+destination you control, and review potentially sensitive filenames before
+sharing the report.
 
-The Stable GitHub Actions workflow gates publication on:
-- VS2026 Win32/x64 C++26 complete builds, CTest and WCX DLL smoke tests.
-- VS2026 Win32/x64 C++20 compatibility and Linux GCC14/Clang19 C++26 checks.
-- Linux C++20, sanitizers, independent QEMU fixed VHDX FAT write/readback
-  and dynamic VHD tests, real UDF/over-4-GiB SHA256, WIM/ESD/SWM,
-  CHD, MDS/MDX, safe rollback and package integrity.
+### WIM validation groundwork (PR #63 and #64)
 
-The `ISO-WCX-v0.20.0.zip` installer consists of both tested WCX DLLs,
-`pluginst.inf` and documentation, without any external runtime helper EXE,
-third-party parser DLL, QEMU, mounts or drivers. `SHA256SUMS.txt` is
-verified before publication.
+A bounded **read-only** WIM metadata preflight and internal tree decoder
+validate selected uncompressed resource-table layouts, directory records,
+UTF-16 names, metadata streams, offsets and security references. Malformed
+and cyclic fixtures have regression tests. The decoder is development/test
+infrastructure, **not a new WIM writer or UI feature**. Most real Windows
+WIMs use compressed metadata and require future work.
 
-Only a fully passing `main` run can create the **unique** v0.20.0 GitHub
-release and tag. Previously published v0.19.0 files and tag are immutable
-and will never be overwritten.
+Creating/deleting folders in ordinary unsplit WIMs **still invokes Windows
+WIMGAPI Apply/Capture**, even though v0.20.0 already improved stage
+progress and selective post-edit readback. Creating an empty folder in a
+multi-gigabyte WIM is therefore **not instantaneous**. ESD and SWM editing
+are not enabled. No extra WIM DLLs or external extractors are shipped.
+
+## What is deliberately NOT included
+
+- Experimental boot-preserving ISO/Joliet file deletion (PR #65) is not
+  included in v0.21.0. It remains in a separate Preview pending validation
+  with real bootable ISO images; the release refuses unsupported hybrid
+  directory changes to avoid silently breaking boot sectors or UDF metadata.
+- General ISO/UDF Bridge deletion, arbitrary Boot ISO remastering, generic
+  NTFS/ext4 writes, dynamically allocated VHDX editing, and metadata-only
+  WIM creation or deletion are not supported.
+- Existing bounded FAT/UDF/VHD/VHDX writer Preview modes retain their
+  documented limitations. Back up important images before any edit.
+
+## Build verification and distribution
+
+All release steps require successful Visual Studio 2026 x86/x64 C++26
+draft builds and CTest, independent C++20 compatibility checks, Linux
+GCC14/Clang19 C++26, Linux C++20, sanitizer tests, WIM/ISO/UDF and
+virtual-disk tests, independent QEMU/UDF/7-Zip interoperability and
+installer ZIP/SHA256 verification. A check of matching version strings
+guards CMake, the Total Commander installer, release metadata and
+documentation against partial version bumps.
+
+Only a fully passing **main** workflow may create the immutable
+`v0.21.0` release and tag. Existing v0.20.0 packages stay unchanged.
 
 ## Install
 
-After publication, download the ZIP from
-https://github.com/sgennadi/ISO-WCX/releases/tag/v0.20.0
-and open it directly in Total Commander. Confirm and restart TC.
-The integrated updater can perform verified HTTPS checks/downloads and
-offer the ZIP to TC; it never overwrites an in-use plugin DLL.
+After publication, get `ISO-WCX-v0.21.0.zip` and `SHA256SUMS.txt` from:
+https://github.com/sgennadi/ISO-WCX/releases/tag/v0.21.0
+
+Open the ZIP in Total Commander, confirm its WCX installation request,
+then restart Total Commander. The integrated updater checks only
+published Stable releases and may offer the verified ZIP; it never
+overwrites a loaded DLL.

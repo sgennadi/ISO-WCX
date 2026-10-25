@@ -1,11 +1,11 @@
-ISO-WCX v0.20.0 Stable Core + VS2026 C++26, fixed VHDX FAT Preview and Updater - Total Commander WCX plugin
+ISO-WCX v0.21.0 Stable: Image Structure, WIM diagnostics, VS2026 C++26 - Total Commander WCX plugin
 ================================================================
 
 Installation (no additional tools)
 ----------------------------------
 1. Open https://github.com/sgennadi/ISO-WCX/releases/latest and download
-   ISO-WCX-v0.20.0.zip from the published Stable release.
-2. Open ISO-WCX-v0.20.0.zip in Total Commander. Confirm the plugin
+   ISO-WCX-v0.21.0.zip from the published Stable release.
+2. Open ISO-WCX-v0.21.0.zip in Total Commander. Confirm the plugin
    installation requested by pluginst.inf.
 3. Verify the plugin directory contains ISO-WCX.wcx and ISO-WCX.wcx64.
    These are the 32-bit and 64-bit versions of the same WCX plugin.
@@ -16,7 +16,7 @@ disk mount, driver, or standalone disk extraction program is necessary.
 The WCX binaries include ISO/UDF, supported virtual-disk readers and
 native ISZ/DAA optical compressed-stream decoding.
 
-Export Image Structure (development Preview after v0.20.0)
+Export Image Structure (Stable v0.21.0)
 ---------------------------------------------------
 In Total Commander choose Files > Pack, select an ISO-WCX extension,
 click Configure... > Export Image Structure..., choose the source image,
@@ -26,10 +26,9 @@ attributes, extents, and, for raw ISO/UDF, PVD/Joliet/UDF/El Torito
 metadata plus a nonzero system-area warning. Image data is never
 copied or modified. No disc_inspect.exe or other utility is required.
 The report is saved transactionally and can be shared for diagnosis.
-**Published Stable v0.20.0 does not contain this new button.** Use a
-newer tested Preview or a future Stable release with the feature.
+**Stable v0.21.0 includes this button.** Stable v0.20.0 does not.
 
-Updater (introduced in v0.19.0, included in v0.20.0)
+Updater (introduced in v0.19.0, included in v0.21.0)
 ------------------------------------------------------------
 In Files > Pack select an ISO-WCX extension and click Configure...
 to reach Update Settings. Manual Check now always works.

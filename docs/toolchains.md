@@ -1,6 +1,6 @@
 # ISO-WCX modern build toolchains
 
-## Stable v0.20.0 and Development Preview
+## Stable v0.21.0 and Development Preview
 
 - Windows runner: `windows-2025`, GitHub-hosted Visual Studio 2026 (v18).
 - CMake generator: `Visual Studio 18 2026`, platform `Win32` or `x64`.
@@ -21,8 +21,8 @@ or finalized ISO C++26 implementation. Microsoft describes the mode as
 
 ## Stable release reproducibility
 
-Published **v0.19.0** and its SHA-256 manifest remain immutable. The
-v0.20.0 Stable workflow uses the same validated VS2026/C++26 draft configuration
+Published **v0.19.0/v0.20.0** and their SHA-256 manifests remain immutable. The
+v0.21.0 Stable workflow uses the same validated VS2026/C++26 draft configuration
 as the Preview for **both Win32 and x64**. It also requires Win32/x64
 C++20 compatibility, GCC14/Clang19 C++26, Linux C++20, Windows WCX ABI,
 QEMU VHDX, WIM/ESD, UDF, CHD, optical and sanitizer regressions.

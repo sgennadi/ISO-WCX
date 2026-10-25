@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.21.0 — 2026-10-25 — in-process image structure export and read-only WIM metadata checks
+
+- Add the built-in **Export Image Structure** button under Total Commander
+  WCX Configure... for UTF-8, read-only image tree and ISO/UDF boot metadata
+  reports without `disc_inspect.exe` or an external helper (PR #62).
+- Read-only WIM resource-table preflight plus bounded uncompressed
+  metadata directory/security/stream tree decoding with malformed-fixture
+  tests (PR #63, #64). This is **not** a fast WIM writer.
+- Keep Windows WIMGAPI Apply/Capture for WIM editing; improvements to
+  WIM progress/cancellation and verification from v0.20.0 remain.
+- Explicitly exclude bootable hybrid ISO/Joliet deletion (PR #65) pending
+  real-image validation; do not enable dangerous writes in Stable.
+- Package VS2026 Win32/x64 C++26 draft binaries only after complete CI,
+  SHA256 package verification and a release-metadata version-consistency gate.
+- Preserve v0.20.0 release tag and original assets without modification.
+
 ## v0.20.0 — 2026-10-25 — VS2026 C++26, fixed VHDX FAT and WIMGAPI safety
 
 - Native WCX Win32/x64 compiled with Visual Studio 2026, MSVC 19.50+

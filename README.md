@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.20.0 Stable Core + VS2026 C++26 draft, fixed VHDX FAT Preview, WIMGAPI safety fix and updater** — a native Total Commander WCX
+**ISO-WCX v0.21.0 Stable Core + Export Image Structure, WIM diagnostics and VS2026 C++26 draft** — a native Total Commander WCX
 plugin for optical ISO/UDF, WIM/ESD/SWM and virtual HDD images.
 Core browsing/extraction and packaging are verified in Windows x86/x64 and
 Linux CI. **Advanced readers and write modes explicitly marked experimental
@@ -9,7 +9,7 @@ remain limited; this is not full NTFS/ext4/UDF compatibility.**
 ## Install into Total Commander
 
 1. Open the [latest Stable release](https://github.com/sgennadi/ISO-WCX/releases/latest).
-2. Download **ISO-WCX-v0.20.0.zip** and open it in Total Commander.
+2. Download **ISO-WCX-v0.21.0.zip** and open it in Total Commander.
 3. Let `pluginst.inf` install `ISO-WCX.wcx` (32-bit) and `ISO-WCX.wcx64` (64-bit).
 4. Restart Total Commander and open a supported image with Ctrl+PgDn.
 
@@ -27,7 +27,7 @@ association that prevents its DLL from loading in the first place.
 
 For installation see [INSTALL_EN.txt](INSTALL_EN.txt) and
 [INSTALL_RU.txt](INSTALL_RU.txt); [PREVIEW.md](PREVIEW.md) describes
-experimental support. See [v0.20.0 release notes](RELEASE_NOTES.md).
+experimental support. See [v0.21.0 release notes](RELEASE_NOTES.md).
 
 ## Fixed VHDX FAT write (bounded v0.20.0 Preview)
 
@@ -42,7 +42,7 @@ helper executables or mounts. See [VHDX implementation](docs/vhdx-native.md).
 
 ## Modern Windows build toolchain (development Preview)
 
-The **v0.20.0 Stable and development Preview** are compiled with **Visual Studio 2026 (v18),
+The **v0.21.0 Stable and development Preview** are compiled with **Visual Studio 2026 (v18),
 MSVC v145, and experimental C++26 (`/std:c++latest`)** for Win32 and
 x64. Both WCX architectures must pass all CTest and Total Commander ABI
 smoke checks; GitHub also runs a VS2026 C++20 compatibility baseline.
@@ -55,12 +55,11 @@ Published **Stable v0.19.0 remains unchanged** on its original tested
 VS2022/C++20 toolchain. Stable v0.20.0 instead uses VS2026/C++26 after
 the full release-quality checks pass.
 
-## Export Image Structure (post-v0.20.0 Preview)
+## Export Image Structure (Stable v0.21.0 and newer)
 
-**Availability:** This feature was added after the published v0.20.0
-Stable ZIP. It is in newer development/Preview builds and will be
-included in a future versioned Stable release. Installing the existing
-v0.20.0 release alone will **not** show the export button.
+**Availability:** This feature is included in Stable v0.21.0 and newer
+development builds. The previously published v0.20.0 ZIP does **not**
+have the export button.
 
 In Total Commander choose **Files > Pack**, select an extension configured
 for ISO-WCX and click **Configure... > Export Image Structure...**.
@@ -86,6 +85,19 @@ destination; cancelled dialogs do not create files. Works **without**
 button is available after installing a build that contains this change;
 published older Stable builds remain unchanged. If Configure... is missing,
 reassociate the WCX plugin so Total Commander refreshes its capability flags.
+
+## WIM read-only metadata validation (v0.21.0)
+
+v0.21.0 adds strict read-only development-side WIM metadata preflight,
+including bounds, UTF-16 names, security references, directory records
+and alternate stream checks. It **does not** replace the native WIMGAPI
+Apply/Capture WIM editing path and does not promise instant folder
+creation in a large `install.wim`. This fast-writer groundwork is not
+a visible WCX command. See [WIM metadata research](docs/wim-metadata-tree.md).
+
+**Hybrid-boot ISO/Joliet deletion (PR #65) is still Preview-only**, not
+in the v0.21.0 Stable release. Real bootable ISO verification is needed
+before the safety gate can be relaxed.
 
 ## Built-in update checker (introduced in v0.19.0)
 
