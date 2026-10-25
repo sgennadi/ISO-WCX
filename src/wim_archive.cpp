@@ -11,8 +11,11 @@
 #include <windows.h>
 // Public Windows WIMGAPI ABI; no optional ADK wimgapi.h header required.
 // This structure starts with WIN32_FIND_DATAW, followed by WIM metadata.
-// Match the Windows ADK WIM_FIND_DATA ABI: the original definition
-// *inherits* WIN32_FIND_DATAW rather than embedding it as a member.
+// The public WIMGAPI ABI inherits WIN32_FIND_DATAW. On the tested
+// Windows Server 2025 native API, WIMFindFirstImageFile writes 16 bytes
+// beyond the published layout on both Win32 and x64. Reserve that exact
+// observed extension inside the object, then guard against future overruns.
+// No external ADK DLL/header is needed in the distributed WCX binaries.
 struct WimFindData : WIN32_FIND_DATAW {
     BYTE hash[20];
     SECURITY_DESCRIPTOR* security_descriptor;
@@ -20,10 +23,12 @@ struct WimFindData : WIN32_FIND_DATAW {
     BYTE* reparse_data;
     DWORD reparse_length;
     ULARGE_INTEGER resource_size;
+    std::array<std::uint8_t,16> observed_wimgapi_tail{};
 };
+static_assert(sizeof(WimFindData)==(sizeof(void*)==4 ? 656u : 672u),
+              "Unexpected Windows WIM_FIND_DATA ABI layout");
 
 
-#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -175,13 +180,10 @@ struct WimArchive::Impl {
 
 WimArchive::WimArchive(const std::filesystem::path& image)
     : api_(std::make_unique<Impl>()) {
-    std::fprintf(stderr,"[WIM-OPEN] ctor-enter\n"); std::fflush(stderr);
     require(std::filesystem::is_regular_file(image) &&
             !std::filesystem::is_symlink(image),
             "WIM input must be a regular non-symlink file");
-    std::fprintf(stderr,"[WIM-OPEN] pre-resolve\n"); std::fflush(stderr);
     const auto parts = resolve_wim_parts(image);
-    std::fprintf(stderr,"[WIM-OPEN] post-resolve\n"); std::fflush(stderr);
     const auto input = parts.front().wstring();
     require(!input.empty(), "invalid WIM archive path");
 
@@ -189,7 +191,6 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     api_->archive = api_->create(input.c_str(), GENERIC_READ, OPEN_EXISTING,
                                    0, 0u, &opened);
     if (!is_valid(api_->archive)) fail_windows("cannot open WIM archive");
-    std::fprintf(stderr,"[WIM-OPEN] wimfile-opened\n"); std::fflush(stderr);
 
     // WIMGAPI expands internal image metadata in Windows' temporary directory
     // as part of WIMLoadImage. No WIM is mounted and no helper is executed.
@@ -200,7 +201,6 @@ WimArchive::WimArchive(const std::filesystem::path& image)
             "Windows temporary directory is unavailable");
     if (!api_->set_temp(api_->archive, temporary.data()))
         fail_windows("WIMSetTemporaryPath failed");
-    std::fprintf(stderr,"[WIM-OPEN] temp-set\n"); std::fflush(stderr);
 
     for (std::size_t i = 1; i < parts.size(); ++i) {
         // WIM_REFERENCE_APPEND, register exact validated paths before loading metadata.
@@ -209,7 +209,6 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     }
 
     const DWORD count = api_->count(api_->archive);
-    std::fprintf(stderr,"[WIM-OPEN] count=%lu\n",static_cast<unsigned long>(count)); std::fflush(stderr);
     require(count > 0 && count <= 256,
             "WIM has no image indexes or too many images");
     format_ = "WIM / Windows Imaging API / " + std::to_string(count) +
@@ -221,9 +220,7 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     // Every WIM image index is represented under a separate top-level folder.
     // Iterate rather than recurse: malformed WIMs cannot exhaust the stack.
     for (DWORD index = 1; index <= count; ++index) {
-        std::fprintf(stderr,"[WIM-OPEN] index-load-call=%lu\n",static_cast<unsigned long>(index)); std::fflush(stderr);
         HANDLE himage = api_->load(api_->archive, index);
-        std::fprintf(stderr,"[WIM-OPEN] index-load-return=%lu\n",static_cast<unsigned long>(index)); std::fflush(stderr);
         if (!is_valid(himage)) fail_windows("WIMLoadImage failed");
         api_->images.push_back(himage);
         std::string prefix = "image" + std::to_string(index);
@@ -242,32 +239,19 @@ WimArchive::WimArchive(const std::filesystem::path& image)
             require(current.depth <= 128,
                     "WIM directory depth exceeds safe limit");
             const auto pattern = current.path + L"\\*.*";
-            struct GuardedFind {
+            struct BufferedFind {
                 WimFindData data{};
-                std::array<std::uint32_t,128> trailing{};
-                GuardedFind() {trailing.fill(0xa55a5aa5u);}
-                void validate() const {
-                    std::size_t first=trailing.size(),last=0,changed=0;
-                    for(std::size_t i=0;i<trailing.size();++i)
-                        if(trailing[i]!=0xa55a5aa5u){
-                            if(first==trailing.size())first=i;
-                            last=i;
-                            ++changed;
-                        }
-                    if(changed){
-                        std::fprintf(stderr,
-                            "[WIM-OPEN] WIMGAPI overrun: first_word=%zu last_word=%zu changed_words=%zu sizeof_record=%zu\n",
-                            first,last,changed,sizeof(data));
-                        std::fflush(stderr);
-                        throw std::runtime_error("WIMGAPI wrote beyond WIM_FIND_DATA buffer");
-                    }
+                std::array<std::uint32_t,64> boundary{};
+                BufferedFind(){boundary.fill(0xa55a5aa5u);}
+                void check_boundary() const {
+                    for(const auto word:boundary)
+                        require(word==0xa55a5aa5u,
+                                "WIMGAPI wrote beyond extended WIM_FIND_DATA");
                 }
-            } record;
-            auto& data=record.data;
-            std::fprintf(stderr,"[WIM-OPEN] find-first-call; sizeof=%zu\n",sizeof(data)); std::fflush(stderr);
+            } result;
+            auto& data=result.data;
             HANDLE found = api_->first(himage, pattern.c_str(), &data);
-            record.validate();
-            std::fprintf(stderr,"[WIM-OPEN] find-first-return\n"); std::fflush(stderr);
+            result.check_boundary();
             if (!is_valid(found)) {
                 if (end_of_find(GetLastError())) continue;
                 fail_windows("WIMFindFirstImageFile failed");
@@ -305,12 +289,10 @@ WimArchive::WimArchive(const std::filesystem::path& image)
                             stack.push_back({source, relative, current.depth + 1});
                     }
                 }
-                std::fprintf(stderr,"[WIM-OPEN] find-next-call\n"); std::fflush(stderr);
-                const BOOL found_next = api_->next(found, &data);
-                record.validate();
-                std::fprintf(stderr,"[WIM-OPEN] find-next-return=%d\n",int(found_next)); std::fflush(stderr);
-                if (!found_next) {
-                    const DWORD error = GetLastError();
+                const BOOL more=api_->next(found, &data);
+                const DWORD error=more ? ERROR_SUCCESS : GetLastError();
+                result.check_boundary();
+                if (!more) {
                     if (!end_of_find(error))
                         fail_windows("WIMFindNextImageFile failed");
                     break;
@@ -318,7 +300,6 @@ WimArchive::WimArchive(const std::filesystem::path& image)
             }
         }
     }
-    std::fprintf(stderr,"[WIM-OPEN] ctor-complete\n"); std::fflush(stderr);
 }
 
 WimArchive::~WimArchive() = default;
