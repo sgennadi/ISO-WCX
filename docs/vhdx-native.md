@@ -3,8 +3,10 @@
 Independently authored C++20, with **no libvhdi, Rust runtime, .NET,
 ReFS block cloning, VirtDisk mount, or third-party disk DLL**.
 The native VHDX reader is now also linked into ISO-WCX and is registered
-as a **read-only Total Commander WCX format** for clean base images that
-contain supported FAT12/16/32 partitions. Standalone inspector tools are
+as a **Total Commander WCX format** for clean base images that
+contain supported FAT12/16/32 partitions. Browsing and extraction are
+available across validated formats; write operations are restricted to
+the fully allocated fixed 512-byte-sector FAT Preview below. Standalone inspector tools are
 optional development tests; the optical ISO/UDF reader remains available.
 
 ## Implemented

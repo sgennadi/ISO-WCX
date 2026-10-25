@@ -143,7 +143,7 @@ QEMU interop checks are test-only, not WCX dependencies.
   partitions and the fixed VHD footer are preserved byte-for-byte.
 - Dynamic base VHD FAT partition writes are available only through a distinct
   full logical-image + physical-clone Preview (1 GiB x64 / 512 MiB Win32).
-  Differencing VHD and all VHDX, nonmirrored FAT32, damaged FAT,
+  Differencing VHD and all unsupported VHDX modes (sparse/dynamic/4K/parent), nonmirrored FAT32, damaged FAT,
   encrypted/compressed disks and oversized images remain read-only. Changes
   stage, sync, independently re-parse and commit atomically.
 - Independent tests verify Unicode names, root and directory allocation,
