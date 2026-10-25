@@ -1,5 +1,5 @@
-// Transactional, in-process FAT12 floppy editor: native C++20, no helpers.
-// Write preview: unpartitioned images with validated FAT12 and DOS 8.3 paths.
+// Transactional native FAT12/16/32 raw-volume editor; no helpers, mounts or DLLs.
+// FAT16/32 preview is restricted to validated, nonpartitioned images <= 256 MiB.
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/fat_volume.hpp"
 #include "iso_wcx/partition_map.hpp"
@@ -118,7 +118,7 @@ std::array<std::uint8_t, 11> dos_encode(std::string_view name) {
 }
 struct Node {
     std::size_t at;
-    std::uint16_t first;
+    std::uint32_t first;
     std::uint32_t size;
     std::uint8_t attrs;
     std::vector<std::size_t> long_name_slots;
@@ -130,17 +130,18 @@ class Editor {
 public:
     explicit Editor(const std::filesystem::path& image) {
         check(std::filesystem::is_regular_file(image) && !std::filesystem::is_symlink(image),
-              "FAT12 source image is not a regular file");
+              "FAT source image is not a regular file");
         const auto size = std::filesystem::file_size(image);
-        check(size >= 512 && size <= 32u * 1024u * 1024u,
-              "FAT12 write mode limited to 32 MiB");
+        check(size >= 512 && size <= 256u * 1024u * 1024u,
+              "FAT editing preview limited to 256 MiB");
         bytes_.resize(static_cast<std::size_t>(size));
         std::ifstream input(image, std::ios::binary);
         check(bool(input) && bool(input.read(reinterpret_cast<char*>(bytes_.data()),
                                              static_cast<std::streamsize>(bytes_.size()))),
-              "cannot read FAT12 image");
+              "cannot read FAT raw image");
         setup();
-        walk("", 0, 0);
+        dirs_.at("") = kind_ == FatKind::fat32 ? root_cluster_ : 0u;
+        walk("", dirs_.at(""), 0);
     }
 
     void apply(const ArchiveChange& c) {
@@ -214,9 +215,10 @@ public:
             std::fill_n(bytes_.begin() + static_cast<std::ptrdiff_t>(at), cluster_bytes_, 0);
             std::copy_n(data.data() + first, count_here, bytes_.data() + at);
         }
-        const auto first = allocated.empty() ? std::uint16_t{} : allocated.front();
+        const auto first = allocated.empty() ? std::uint32_t{} : allocated.front();
         if (existing != nodes_.end()) {
-            wr16(bytes_, slot + 26, first);
+            wr16(bytes_, slot + 20, static_cast<std::uint16_t>(first >> 16));
+            wr16(bytes_, slot + 26, static_cast<std::uint16_t>(first));
             wr32(bytes_, slot + 28, static_cast<std::uint32_t>(data.size()));
             existing->second.first = first;
             existing->second.size = static_cast<std::uint32_t>(data.size());
@@ -229,13 +231,15 @@ public:
         }
     }
 
-    void commit(const std::filesystem::path& image, const EditProgress& progress) const {
+    void commit(const std::filesystem::path& image, const EditProgress& progress) {
         if (progress && !progress()) throw EditCancelled();
+        // Update FAT32 free-cluster accounting only after every edit succeeds.
+        if (kind_ == FatKind::fat32) update_fsinfo();
         std::filesystem::path stage;
         std::random_device random;
         for (unsigned i = 0; i < 20; ++i) {
             auto attempt = image;
-            attempt += ".iso-wcx-fat12-" + std::to_string(
+            attempt += ".iso-wcx-fat-" + std::to_string(
                 (std::uint64_t(random()) << 32) | random()) + ".tmp";
             if (!std::filesystem::exists(attempt)) { stage = attempt; break; }
         }
@@ -264,14 +268,14 @@ public:
             (void)audit;
             VirtualDiskReader virtual_disk(stage);
             FatVolume filesystem(virtual_disk, 0, virtual_disk.size());
-            check(filesystem.kind() == FatKind::fat12, "written FAT12 staging image invalid");
+            check(filesystem.kind() == kind_, "written staged FAT kind mismatch");
             (void)filesystem.list();
         } // Close read handles before the Windows atomic replacement.
         if (progress && !progress()) throw EditCancelled();
 #ifdef _WIN32
         if (!MoveFileExW(stage.c_str(), image.c_str(),
                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-            throw EditUnsupported("atomic FAT12 image replace failed");
+            throw EditUnsupported("atomic FAT image replace failed");
 #else
         std::filesystem::rename(stage, image);
 #endif
@@ -282,71 +286,179 @@ private:
     std::vector<std::uint8_t> bytes_;
     std::size_t fat_at_{}, fat_length_{}, root_at_{}, data_at_{};
     std::size_t cluster_bytes_{}, root_entries_{};
-    std::uint32_t clusters_{}, fats_{};
+    std::uint32_t clusters_{}, fats_{}, root_cluster_{};
+    FatKind kind_ = FatKind::fat12;
+    std::size_t sector_bytes_{}, fsinfo_at_{}, backup_fsinfo_at_{};
+    bool fsinfo_enabled_ = false, backup_fsinfo_enabled_ = false;
     std::map<std::string, Node> nodes_;
-    std::map<std::string, std::uint16_t> dirs_{{"", 0}};
+    std::map<std::string, std::uint32_t> dirs_{{"", 0}};
     std::map<std::string, std::string> aliases_;
     std::unordered_set<std::uint32_t> claimed_;
 
     void setup() {
         check(bytes_[0] == 0xe9 || (bytes_[0] == 0xeb && bytes_[2] == 0x90),
-              "invalid FAT12 boot jump");
-        check(bytes_[510] == 0x55 && bytes_[511] == 0xaa, "missing FAT12 boot signature");
+              "invalid FAT boot jump");
+        check(bytes_[510] == 0x55 && bytes_[511] == 0xaa,
+              "missing FAT boot sector signature");
         const auto bps = rd16(bytes_, 11);
         const auto spc = bytes_[13];
         const auto reserved = rd16(bytes_, 14);
         fats_ = bytes_[16];
         root_entries_ = rd16(bytes_, 17);
-        const auto total = rd16(bytes_, 19) ? rd16(bytes_, 19) : rd32(bytes_, 32);
-        const auto fat_sectors = rd16(bytes_, 22);
-        check(bps >= 512 && bps <= 4096 && (bps & (bps - 1)) == 0 &&
-              spc && (spc & (spc - 1)) == 0 && spc <= 128 && reserved &&
-              (fats_ == 1 || fats_ == 2) && root_entries_ &&
-              total && fat_sectors && (bytes_[21] == 0xf0 || bytes_[21] >= 0xf8),
-              "unsupported FAT12 BPB");
-        cluster_bytes_ = static_cast<std::size_t>(bps) * spc;
-        check(cluster_bytes_ <= 1024u * 1024u, "FAT12 clusters too large");
-        const auto root_sectors = (root_entries_ * 32u + bps - 1) / bps;
-        const auto system_sectors = reserved + fats_ * fat_sectors + root_sectors;
-        check(system_sectors < total, "FAT12 BPB has no data area");
-        clusters_ = (total - system_sectors) / spc;
-        check(clusters_ >= 1 && clusters_ < 4085, "image is not writable FAT12");
-        check(static_cast<std::uint64_t>(total) * bps == bytes_.size(),
-              "FAT12 editing requires exact raw image length");
-        fat_at_ = static_cast<std::size_t>(reserved) * bps;
-        fat_length_ = static_cast<std::size_t>(fat_sectors) * bps;
-        root_at_ = (reserved + fats_ * fat_sectors) * static_cast<std::size_t>(bps);
-        data_at_ = static_cast<std::size_t>(system_sectors) * bps;
-        check((static_cast<std::uint64_t>(clusters_) + 2) * 3 <=
-              static_cast<std::uint64_t>(fat_length_) * 2 &&
-              fat_at_ + fats_ * fat_length_ <= root_at_ &&
-              root_at_ + root_entries_ * 32 <= data_at_ &&
-              data_at_ <= bytes_.size(), "FAT12 regions overlap");
-        check((bytes_[fat_at_] & 0xf0u) == (bytes_[21] & 0xf0u) &&
-              bytes_[fat_at_ + 1] == 0xff && bytes_[fat_at_ + 2] == 0xff,
-              "FAT12 reserved entries damaged");
-        for (std::uint32_t i = 1; i < fats_; ++i)
-            check(std::equal(bytes_.begin() + static_cast<std::ptrdiff_t>(fat_at_),
-                             bytes_.begin() + static_cast<std::ptrdiff_t>(fat_at_ + fat_length_),
-                             bytes_.begin() + static_cast<std::ptrdiff_t>(fat_at_ + i * fat_length_)),
-                  "FAT12 mirror copies differ");
+        const auto total = rd16(bytes_,19) ? rd16(bytes_,19) : rd32(bytes_,32);
+        const auto fat16_sectors = rd16(bytes_,22);
+        check(bps >= 512 && bps <= 4096 && (bps & (bps-1)) == 0 &&
+              spc && (spc & (spc-1)) == 0 && spc <= 128 &&
+              reserved && (fats_ == 1 || fats_ == 2) && total &&
+              (bytes_[21] == 0xf0 || bytes_[21] >= 0xf8),
+              "unsupported FAT BPB");
+        sector_bytes_ = bps;
+        cluster_bytes_ = static_cast<std::size_t>(bps)*spc;
+        check(cluster_bytes_ <= 1024u*1024u, "FAT cluster exceeds 1 MiB");
+        const bool is_fat32_bpb = root_entries_ == 0 && fat16_sectors == 0;
+        const auto fat_sectors = is_fat32_bpb ? rd32(bytes_,36) : fat16_sectors;
+        check(fat_sectors && fat_sectors <= 65536,
+              "unsupported FAT sectors-per-table count");
+        const auto root_sectors = (root_entries_*32u + bps - 1)/bps;
+        const std::uint64_t system_sectors =
+            std::uint64_t(reserved)+std::uint64_t(fats_)*fat_sectors+root_sectors;
+        check(system_sectors<total, "FAT BPB has no data clusters");
+        clusters_ = static_cast<std::uint32_t>((total-system_sectors)/spc);
+        kind_ = clusters_ < 4085 ? FatKind::fat12 :
+                clusters_ < 65525 ? FatKind::fat16 : FatKind::fat32;
+        check((kind_ == FatKind::fat32) == is_fat32_bpb &&
+              (kind_ == FatKind::fat32 || root_entries_>0),
+              "FAT type contradicts BPB root directory layout");
+        check(static_cast<std::uint64_t>(total)*bps == bytes_.size(),
+              "FAT editor requires exact-size unpartitioned raw image");
+        fat_at_ = static_cast<std::size_t>(reserved)*bps;
+        fat_length_ = static_cast<std::size_t>(fat_sectors)*bps;
+        root_at_ = static_cast<std::size_t>(
+            std::uint64_t(reserved)+std::uint64_t(fats_)*fat_sectors)*bps;
+        data_at_ = static_cast<std::size_t>(system_sectors)*bps;
+        const std::uint64_t needed = kind_ == FatKind::fat12 ?
+            ((std::uint64_t(clusters_)+2)*3+1)/2 :
+            (std::uint64_t(clusters_)+2)*(kind_ == FatKind::fat16 ? 2 : 4);
+        check(needed<=fat_length_ &&
+              fat_at_+fats_*fat_length_<=root_at_ &&
+              root_at_+root_entries_*32<=data_at_ &&
+              data_at_<=bytes_.size(), "FAT data and allocation regions overlap");
+        if(kind_==FatKind::fat32) {
+            check(rd16(bytes_,40)==0 && rd16(bytes_,42)==0,
+                  "FAT32 active-FAT mode/version is unsupported for writing");
+            root_cluster_=rd32(bytes_,44)&0x0fffffffu;
+            check(root_cluster_>=2 && root_cluster_<clusters_+2,
+                  "invalid FAT32 root cluster");
+            const auto fsinfo=rd16(bytes_,48), backup=rd16(bytes_,50);
+            check(fsinfo==0xffffu || (fsinfo>0 && fsinfo<reserved),
+                  "invalid FAT32 FSInfo location");
+            check(backup==0xffffu || (backup>0 && backup<reserved),
+                  "invalid FAT32 backup boot sector");
+            if(fsinfo!=0xffffu) {
+                fsinfo_at_=static_cast<std::size_t>(fsinfo)*bps;
+                validate_fsinfo(fsinfo_at_);
+                fsinfo_enabled_=true;
+            }
+            if(backup!=0xffffu) {
+                const auto boot_at=static_cast<std::size_t>(backup)*bps;
+                check(boot_at<=bytes_.size() && bps<=bytes_.size()-boot_at &&
+                      std::equal(bytes_.begin(),bytes_.begin()+static_cast<std::ptrdiff_t>(bps),
+                                 bytes_.begin()+static_cast<std::ptrdiff_t>(boot_at)),
+                      "FAT32 backup boot sector differs from primary");
+                if(fsinfo_enabled_) {
+                    check(std::uint32_t(backup)+fsinfo<reserved,
+                          "FAT32 backup FSInfo sector outside reserved area");
+                    backup_fsinfo_at_=static_cast<std::size_t>(backup+fsinfo)*bps;
+                    validate_fsinfo(backup_fsinfo_at_);
+                    backup_fsinfo_enabled_=true;
+                }
+            }
+        } else {
+            check(fat16_sectors>0 && root_entries_>0,
+                  "FAT12/16 requires a fixed root directory");
+        }
+        if(kind_==FatKind::fat12) {
+            check(bytes_[fat_at_] == bytes_[21] &&
+                  bytes_[fat_at_+1]==0xff && bytes_[fat_at_+2]==0xff,
+                  "invalid FAT12 reserved cluster entries");
+        } else if(kind_==FatKind::fat16) {
+            check(rd16(bytes_,fat_at_) == (0xff00u|bytes_[21]) &&
+                  rd16(bytes_,fat_at_+2)>=0xfff8u,
+                  "invalid FAT16 reserved cluster entries");
+        } else {
+            check((rd32(bytes_,fat_at_)&0x0fffffffu)==(0x0fffff00u|bytes_[21]) &&
+                  (rd32(bytes_,fat_at_+4)&0x0fffffffu)>=0x0ffffff8u,
+                  "invalid FAT32 reserved cluster entries");
+        }
+        for (std::uint32_t fat=1;fat<fats_;++fat)
+            check(std::equal(bytes_.begin()+static_cast<std::ptrdiff_t>(fat_at_),
+                             bytes_.begin()+static_cast<std::ptrdiff_t>(fat_at_+fat_length_),
+                             bytes_.begin()+static_cast<std::ptrdiff_t>(fat_at_+fat*fat_length_)),
+                  "FAT mirror copies disagree; refusing write");
     }
-    std::uint16_t value(std::uint32_t c) const {
-        check(c <= clusters_ + 1, "FAT12 cluster index out of range");
-        const auto raw = rd16(bytes_, fat_at_ + c * 3 / 2);
-        return static_cast<std::uint16_t>(c & 1u ? raw >> 4 : raw & 0xfffu);
+    void validate_fsinfo(std::size_t at) const {
+        check(at<=bytes_.size() && sector_bytes_<=bytes_.size()-at &&
+              rd32(bytes_,at)==0x41615252u &&
+              rd32(bytes_,at+484)==0x61417272u &&
+              rd32(bytes_,at+508)==0xaa550000u,
+              "FAT32 FSInfo signature is missing or damaged");
+        const auto free_count=rd32(bytes_,at+488);
+        const auto next_free=rd32(bytes_,at+492);
+        check((free_count==0xffffffffu || free_count<=clusters_) &&
+              (next_free==0xffffffffu ||
+               (next_free>=2 && next_free<=clusters_+1)),
+              "invalid FAT32 FSInfo allocation hints");
     }
-    void set(std::uint32_t c, std::uint16_t next) {
-        check(c >= 2 && c <= clusters_ + 1 && next <= 0xfff,
-              "invalid FAT12 allocation change");
-        for (std::uint32_t f = 0; f < fats_; ++f) {
-            const auto at = fat_at_ + f * fat_length_ + c * 3 / 2;
-            if (c & 1u) {
-                bytes_[at] = std::uint8_t((bytes_[at] & 0x0fu) | ((next & 15u) << 4));
-                bytes_[at + 1] = std::uint8_t(next >> 4);
+    void update_fsinfo() {
+        if(!fsinfo_enabled_)return;
+        std::uint32_t free_count=0, next_free=0xffffffffu;
+        for(std::uint32_t c=2;c<=clusters_+1;++c) {
+            if(value(c)==0) {
+                ++free_count;
+                if(next_free==0xffffffffu)next_free=c;
+            }
+        }
+        for(const auto at:{fsinfo_at_,backup_fsinfo_enabled_?backup_fsinfo_at_:fsinfo_at_}) {
+            wr32(bytes_,at+488,free_count);
+            wr32(bytes_,at+492,next_free);
+        }
+    }
+    std::uint32_t eoc() const {
+        return kind_==FatKind::fat12 ? 0xfffu :
+               kind_==FatKind::fat16 ? 0xffffu : 0x0fffffffu;
+    }
+    std::uint32_t eoc_threshold() const {
+        return kind_==FatKind::fat12 ? 0xff8u :
+               kind_==FatKind::fat16 ? 0xfff8u : 0x0ffffff8u;
+    }
+    std::uint32_t value(std::uint32_t c) const {
+        check(c<=clusters_+1, "FAT cluster index out of range");
+        if(kind_==FatKind::fat12) {
+            const auto raw=rd16(bytes_,fat_at_+c*3/2);
+            return c&1u ? raw>>4 : raw&0xfffu;
+        }
+        if(kind_==FatKind::fat16) return rd16(bytes_,fat_at_+c*2);
+        return rd32(bytes_,fat_at_+c*4)&0x0fffffffu;
+    }
+    void set(std::uint32_t c,std::uint32_t next) {
+        check(c>=2 && c<=clusters_+1 && next<=eoc(),
+              "invalid FAT allocation change");
+        for (std::uint32_t f=0;f<fats_;++f) {
+            const auto at=fat_at_+f*fat_length_;
+            if(kind_==FatKind::fat12) {
+                const auto position=at+c*3/2;
+                if(c&1u) {
+                    bytes_[position]=std::uint8_t((bytes_[position]&0x0f)|((next&15u)<<4));
+                    bytes_[position+1]=std::uint8_t(next>>4);
+                } else {
+                    bytes_[position]=std::uint8_t(next);
+                    bytes_[position+1]=std::uint8_t((bytes_[position+1]&0xf0)|(next>>8));
+                }
+            } else if(kind_==FatKind::fat16) {
+                wr16(bytes_,at+c*2,static_cast<std::uint16_t>(next));
             } else {
-                bytes_[at] = std::uint8_t(next);
-                bytes_[at + 1] = std::uint8_t((bytes_[at + 1] & 0xf0u) | (next >> 8));
+                const auto position=at+c*4;
+                wr32(bytes_,position,(rd32(bytes_,position)&0xf0000000u)|next);
             }
         }
     }
@@ -357,35 +469,35 @@ private:
               "FAT12 data cluster outside image");
         return at;
     }
-    std::vector<std::uint16_t> chain(std::uint32_t first) const {
+    std::vector<std::uint32_t> chain(std::uint32_t first) const {
         check(first >= 2 && first <= clusters_ + 1, "invalid FAT12 chain head");
         std::unordered_set<std::uint32_t> seen;
-        std::vector<std::uint16_t> result;
+        std::vector<std::uint32_t> result;
         auto c = first;
         for (;;) {
             check(seen.insert(c).second && seen.size() <= clusters_,
                   "cyclic FAT12 chain");
             (void)offset(c);
-            result.push_back(static_cast<std::uint16_t>(c));
+            result.push_back(c);
             const auto next = value(c);
-            if (next >= 0xff8) return result;
+            if (next >= eoc_threshold()) return result;
             check(next >= 2 && next <= clusters_ + 1, "FAT12 chain has invalid link");
             c = next;
         }
     }
-    std::vector<std::uint16_t> allocate(std::size_t count) {
-        std::vector<std::uint16_t> result;
+    std::vector<std::uint32_t> allocate(std::size_t count) {
+        std::vector<std::uint32_t> result;
         for (std::uint32_t c = 2; c <= clusters_ + 1 && result.size() < count; ++c)
-            if (value(c) == 0) result.push_back(static_cast<std::uint16_t>(c));
-        check(result.size() == count, "FAT12 disk is full");
+            if (value(c) == 0) result.push_back(c);
+        check(result.size() == count, "FAT disk is full");
         for (std::size_t i = 0; i < result.size(); ++i)
-            set(result[i], i + 1 < result.size() ? result[i + 1] : 0xfffu);
+            set(result[i], i + 1 < result.size() ? result[i + 1] : eoc());
         return result;
     }
-    void release(std::uint16_t first) {
+    void release(std::uint32_t first) {
         if (first) for (const auto c : chain(first)) set(c, 0);
     }
-    std::vector<std::size_t> slots(std::uint16_t folder) const {
+    std::vector<std::size_t> slots(std::uint32_t folder) const {
         std::vector<std::size_t> result;
         if (!folder) {
             for (std::size_t i = 0; i < root_entries_; ++i)
@@ -400,7 +512,7 @@ private:
     // Reserve adjacent logical directory records, including entries across
     // non-contiguous data clusters. Long-name entries must immediately precede
     // their short-name entry in the directory stream.
-    std::vector<std::size_t> reserve_slots(std::uint16_t folder, std::size_t count) {
+    std::vector<std::size_t> reserve_slots(std::uint32_t folder, std::size_t count) {
         check(count >= 1 && count <= 21, "invalid VFAT directory reservation");
         for (;;) {
             const auto positions = slots(folder);
@@ -492,15 +604,16 @@ private:
         throw EditUnsupported("FAT12 short-name namespace exhausted");
     }
     void write_entry(std::size_t at, const std::array<std::uint8_t,11>& name,
-                     std::uint8_t attrs, std::uint16_t first, std::uint32_t size) {
+                     std::uint8_t attrs, std::uint32_t first, std::uint32_t size) {
         check(at <= bytes_.size() && bytes_.size() - at >= 32, "FAT12 directory out of bounds");
         std::fill_n(bytes_.begin() + static_cast<std::ptrdiff_t>(at), 32, 0);
         std::copy(name.begin(), name.end(), bytes_.begin() + static_cast<std::ptrdiff_t>(at));
         bytes_[at + 11] = attrs;
-        wr16(bytes_, at + 26, first);
+        wr16(bytes_, at + 20, static_cast<std::uint16_t>(first >> 16));
+        wr16(bytes_, at + 26, static_cast<std::uint16_t>(first));
         wr32(bytes_, at + 28, size);
     }
-    void walk(const std::string& parent, std::uint16_t folder, unsigned depth) {
+    void walk(const std::string& parent, std::uint32_t folder, unsigned depth) {
         check(depth <= 32, "FAT12 directory nesting too deep");
         if (folder) for (const auto c : chain(folder))
             check(claimed_.insert(c).second, "cross-linked FAT12 directories");
@@ -538,10 +651,14 @@ private:
                   !aliases_.contains(path) && !aliases_.contains(dos_path) &&
                   !nodes_.contains(dos_path),
                   "duplicate FAT12 name or ambiguous 8.3 alias");
-            const auto first = rd16(bytes_, at + 26);
+            const auto first = (std::uint32_t(rd16(bytes_,at+20))<<16) |
+                               rd16(bytes_,at+26);
             const auto size = rd32(bytes_, at + 28);
             const bool directory = (attrs & 0x10u) != 0;
-            check(rd16(bytes_, at + 20) == 0, "FAT12 high cluster word set");
+            check(kind_==FatKind::fat32 || rd16(bytes_,at+20)==0,
+                  "FAT12/16 high cluster word set");
+            check(kind_!=FatKind::fat32 || (first&0xf0000000u)==0,
+                  "invalid FAT32 high cluster bits");
             check(directory ? (size == 0 && first >= 2) :
                   (size == 0 ? first == 0 : first >= 2),
                   "invalid FAT12 directory entry");
@@ -587,12 +704,13 @@ private:
 };
 } // namespace
 
-void edit_fat12(const std::filesystem::path& image,
+void edit_fat(const std::filesystem::path& image,
                 const std::vector<ArchiveChange>& changes,
                 const EditProgress& progress) {
     const auto ext = upper(image.extension().string());
     check(ext == ".IMA" || ext == ".IMG" || ext == ".BIF" ||
-          ext == ".VFD" || ext == ".FLP", "unsupported floppy image extension");
+          ext == ".VFD" || ext == ".FLP" || ext == ".RAW",
+          "unsupported raw FAT image extension");
     {
         VirtualDiskReader disk(image);
         check(disk.format() == VirtualDiskFormat::raw_image,
@@ -603,7 +721,9 @@ void edit_fat12(const std::filesystem::path& image,
         } catch (const EditUnsupported&) { throw; }
           catch (const std::exception&) { /* A floppy is not an MBR. */ }
         FatVolume reader(disk, 0, disk.size());
-        check(reader.kind() == FatKind::fat12, "FAT12 write mode refuses FAT16/32");
+        check(reader.kind() == FatKind::fat12 ||
+              reader.kind() == FatKind::fat16 || reader.kind() == FatKind::fat32,
+              "FAT write preview requires FAT12, FAT16 or FAT32");
         (void)reader.list();
     } // The original must not be held open during an atomic replacement.
     Editor editor(image);
