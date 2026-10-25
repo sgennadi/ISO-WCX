@@ -117,6 +117,11 @@ def extend_two_partitions(raw: pathlib.Path, kind: str):
         f.truncate((second + total + 2048) * SECTOR)
         f.seek(second * SECTOR)
         f.write(volume)
+        # This read-only FAT16 fixture intentionally uses 0xFFFF in entry 0.
+        # The transactional writer requires the media descriptor (0xF8) in
+        # the low byte, as specified by FAT16: normalize only partition #2.
+        f.seek((second + FAT_CONFIG["fat16"][1]) * SECTOR)
+        f.write(b"\xf8\xff")
         f.seek(462 + 4)
         f.write(bytes([ptype]))
         f.seek(462 + 8)
