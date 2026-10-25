@@ -106,15 +106,21 @@ public:
             unsigned in_list=0;
             for(;;) {
                 ensure(within(cursor,8,data_.size()),"unterminated WIM directory list");
-                const auto length=u64(data_,cursor);
-                if(length==0) {
+                const auto encoded_length=u64(data_,cursor);
+                // WIM writers may store an unaligned logical record length,
+                // while the following record starts after 8-byte padding.
+                // A zero or length-eight slot terminates a sibling list.
+                if(encoded_length==0 || encoded_length==8) {
                     occupy(cursor,cursor+8);
                     if(node.root) ensure(in_list==1,"WIM root list is not singular");
                     break;
                 }
-                ensure(length>=102 && length%8==0 &&
-                       within(cursor,length,data_.size()),
+                ensure(encoded_length>=102 &&
+                       encoded_length<=data_.size(),
                        "malformed WIM directory entry length");
+                const auto length=(encoded_length+7u)&~std::uint64_t{7};
+                ensure(within(cursor,length,data_.size()),
+                       "WIM directory record exceeds metadata");
                 ++in_list;
                 ensure(in_list<=1000000 && stats_.entries<1000000,
                        "too many WIM directory entries");
@@ -128,7 +134,7 @@ public:
                        "WIM security descriptor reference is outside table");
                 ensure(stream_count<=64 && name_length<=510 &&
                        short_length<=24 &&
-                       102u+name_length+2u+short_length<=length,
+                       102u+name_length+2u+short_length<=encoded_length,
                        "unsupported WIM name or stream record length");
                 ensure(u16(data_,cursor+102u+name_length)==0,
                        "WIM filename is missing NUL terminator");
@@ -151,13 +157,17 @@ public:
                 for(unsigned j=0;j<stream_count;++j) {
                     ensure(within(next,38,data_.size()),
                            "truncated WIM alternate-stream entry");
-                    const auto stream_length=u64(data_,next);
+                    const auto encoded_stream_length=u64(data_,next);
                     const auto stream_name_length=u16(data_,next+36);
-                    ensure(stream_length>=38 && stream_length%8==0 &&
-                           within(next,stream_length,data_.size()) &&
-                           38u+stream_name_length<=stream_length &&
+                    ensure(encoded_stream_length>=38 &&
+                           encoded_stream_length<=data_.size() &&
+                           38u+stream_name_length<=encoded_stream_length &&
                            stream_name_length<=510,
                            "invalid WIM alternate-stream entry");
+                    const auto stream_length=
+                        (encoded_stream_length+7u)&~std::uint64_t{7};
+                    ensure(within(next,stream_length,data_.size()),
+                           "truncated padded WIM stream record");
                     utf16(data_,next+38,stream_name_length);
                     occupy(next,next+stream_length);
                     next+=stream_length;
