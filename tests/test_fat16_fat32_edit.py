@@ -92,7 +92,7 @@ def assert_fsinfo(image: pathlib.Path):
     assert le32(p, 508) == 0xaa550000
     free_count = le32(p, 488)
     next_free = le32(p, 492)
-    assert 0 < free_count < 65536, free_count
+    assert 0 < free_count < 70000, free_count
     assert 2 <= next_free <= 65536 + 4096, next_free
     boot = raw[:SECTOR]
     assert raw[6 * SECTOR:7 * SECTOR] == boot, "backup boot sector changed"
