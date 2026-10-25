@@ -19,6 +19,7 @@ class EditTransaction {
     std::filesystem::path image_;
     std::uintmax_t size_;
     std::filesystem::file_time_type time_;
+    bool preserve_workspace_ = false;
 public:
     std::filesystem::path workspace, output;
     explicit EditTransaction(const std::filesystem::path& image):image_(std::filesystem::absolute(image)),
@@ -34,7 +35,15 @@ public:
         output=workspace/(image_.filename());
     }
     EditTransaction(const EditTransaction&)=delete;
-    ~EditTransaction() { std::error_code ec;std::filesystem::remove_all(workspace,ec); }
+    // If a Windows WIM mount cannot be safely unmounted, do not recursively
+    // remove the mount point or its backing WIM. An administrator can recover
+    // the retained workspace and discard the mount explicitly.
+    void preserve() noexcept { preserve_workspace_ = true; }
+    ~EditTransaction() {
+        if(preserve_workspace_)return;
+        std::error_code ec;
+        std::filesystem::remove_all(workspace,ec);
+    }
     void commit(const EditProgress& progress) {
         edit_tick(progress);
         if(std::filesystem::file_size(image_)!=size_ || std::filesystem::last_write_time(image_)!=time_)
