@@ -271,7 +271,7 @@ if(WIN32)
     ISO_WCX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
     ISO_WCX_VERSION_PATCH=${PROJECT_VERSION_PATCH})
   if(MSVC)
-    target_compile_options(ISO-WCX PRIVATE /W4 /EHsc)
+    target_compile_options(ISO-WCX PRIVATE /W4 /EHsc /utf-8)
   else()
     target_compile_options(ISO-WCX PRIVATE -Wall -Wextra -Wpedantic)
   endif()
