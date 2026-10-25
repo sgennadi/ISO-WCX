@@ -29,7 +29,8 @@ permissions:
 
 concurrency:
   group: iso-wcx-v0.20.0-stable-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  # Superseded PR checks can be cancelled; main release publishing cannot.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   ISO_WCX_RELEASE_TAG: v0.20.0
