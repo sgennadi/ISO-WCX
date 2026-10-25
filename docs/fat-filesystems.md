@@ -1,6 +1,6 @@
 # FAT12 / FAT16 / FAT32 virtual disk filesystems
 
-The filesystem *reader* is an independently developed, read-only native C++ module. A separate in-process transactional editor supports validated FAT12/16/32 superfloppies and a selected MBR/GPT FAT `partitionN/` in RAW/IMG or **fixed** VHD, using an OS demand-paged same-directory image clone. Safety limits are 64 GiB (x64) / 512 MiB (Win32); more than 256 MiB no longer requires an equally large RAM allocation. Dynamic/differencing VHD and all VHDX remain read-only. The original MBR/GPT, VHD footer and other partitions must remain intact. Its
+The filesystem *reader* is an independently developed, read-only native C++ module. A separate in-process transactional editor supports validated FAT12/16/32 superfloppies and a selected MBR/GPT FAT `partitionN/` in RAW/IMG or **fixed** VHD, using an OS demand-paged same-directory image clone. Safety limits are 64 GiB (x64) / 512 MiB (Win32); more than 256 MiB no longer requires an equally large RAM allocation. Dynamic VHD v1 base images can now be browsed using the read-only native sparse BAT/bitmap reader, but **dynamic/differencing VHD and all VHDX remain read-only for writes**. The original MBR/GPT, VHD footer and other partitions must remain intact. Its
 layered design was informed by the official 7-Zip FatHandler.cpp and
 HandlerCont interfaces (https://github.com/ip7z/7zip). No 7-Zip source
 has been copied or linked.
