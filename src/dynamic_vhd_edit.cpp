@@ -43,7 +43,6 @@
 namespace iso_wcx {
 namespace {
 
-constexpr std::uint64_t sector = 512;
 constexpr std::size_t buffer_limit = 1024u*1024u;
 constexpr std::uint64_t x64_logical_limit = 1024ull*1024ull*1024ull;
 constexpr std::uint64_t x86_logical_limit = 512ull*1024ull*1024ull;
