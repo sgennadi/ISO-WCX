@@ -96,9 +96,9 @@ std::string decode(const Bytes& name,bool joliet,bool directory) {
 }
 struct Node {
     std::string name,logical;
-    Bytes record,identifier,joliet_identifier;
+    Bytes record,identifier,joliet_identifier,joliet_record;
     bool directory=false;
-    std::uint32_t lba=0,size=0;
+    std::uint32_t lba=0,size=0,joliet_lba=0,joliet_size=0;
     std::filesystem::path source;
     Node* parent=nullptr;
     std::vector<std::unique_ptr<Node>> children;
@@ -114,11 +114,16 @@ public:
     std::unique_ptr<Node> root;
     bool joliet=false;
     bool udf_bridge=false;
+    bool system_nonzero=false;
     std::size_t items=0;
-    explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false)
+    explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false,
+                   bool allow_system_area=false)
         :file(p,std::ios::binary),size(std::filesystem::file_size(p)) {
         need(file.good()&&size>=18*block&&size%block==0&&size/block<0xffffffffu,"unsupported ISO size/layout");
-        auto system=read(0,16*block);need(std::all_of(system.begin(),system.end(),[](auto c){return c==0;}),"hybrid/system-area ISO editing is not supported");
+        auto system=read(0,16*block);
+        system_nonzero=std::any_of(system.begin(),system.end(),[](auto c){return c!=0;});
+        need(allow_system_area || !system_nonzero,
+             "hybrid/system-area ISO editing requires isolated boot-preserving unlink");
         // Detect UDF bridges. General directory rebuilding is still
         // forbidden: only a separately validated equal-length data edit
         // may leave both on-disc ISO and UDF namespaces unchanged.
@@ -188,7 +193,11 @@ public:
         }return n;
     }
     void pair(Node& a,const Node& b) {
-        a.joliet_identifier=b.identifier;a.logical=b.logical;
+        a.joliet_identifier=b.identifier;
+        a.joliet_record=b.record;
+        a.joliet_lba=b.lba;
+        a.joliet_size=b.size;
+        a.logical=b.logical;
         need(a.children.size()==b.children.size(),"ISO and Joliet trees differ");std::set<const Node*> used;
         for(auto& x:a.children){std::vector<const Node*> found;
             for(const auto& y:b.children)if(!used.count(y.get())&&x->directory==y->directory&&x->size==y->size&&(x->directory||x->lba==y->lba))found.push_back(y.get());
@@ -473,11 +482,166 @@ void edit_iso_udf_bridge_equal_length(
     }
     tx.commit(progress);
 }
+
+// Boot-preserving ISO9660+Joliet "unlink": remove ONLY file directory records.
+// This is deliberately not the general ISO re-master. In a hybrid-boot image
+// the system area can contain MBR/GPT/isohybrid offsets and the boot catalog
+// refers to original LBAs. Preserve all sectors and file payload bytes except
+// the exact directory sectors holding the removed records. Do not reclaim.
+void unlink_boot_iso_files(const std::filesystem::path& path,
+                           Image& iso,const std::vector<ArchiveChange>& changes,
+                           const EditProgress& progress) {
+    need(iso.system_nonzero && !iso.udf_bridge,
+         "boot-preserving unlink requires ISO9660 without a UDF bridge");
+    need(!changes.empty() && changes.size()<=256,
+         "boot-preserving ISO unlink supports 1..256 file deletions");
+    struct Cut {std::size_t at{},length{};};
+    std::map<std::uint64_t,std::vector<Cut>> cuts;
+    std::set<const Node*> deleted_nodes;
+    std::vector<std::string> removed_paths;
+    for(const auto& change:changes) {
+        edit_tick(progress);
+        need(change.remove && !change.directory,
+             "hybrid-boot ISO supports file deletion only (no add, mkdir or resize)");
+        const auto key=edit_path(change.path);
+        std::istringstream split(key);
+        std::string component;
+        Node* target=iso.root.get();
+        while(std::getline(split,component,'/')) {
+            const auto wanted=upper(component);
+            const auto it=std::find_if(target->children.begin(),target->children.end(),
+                [&](const auto& candidate){return upper(candidate->logical)==wanted;});
+            need(it!=target->children.end(),"ISO file to unlink is not present");
+            target=it->get();
+        }
+        need(target!=iso.root.get() && !target->directory && target->parent,
+             "boot-preserving unlink refuses directories and root");
+        need(deleted_nodes.insert(target).second,"duplicate ISO file deletion");
+        protect_boot(*target,iso.boot_lbas);
+        removed_paths.push_back(key);
+        const Node& parent=*target->parent;
+        for(unsigned view=0;view<(iso.joliet?2u:1u);++view) {
+            const auto lba=view?parent.joliet_lba:parent.lba;
+            const auto bytes=view?parent.joliet_size:parent.size;
+            const Bytes& expected=view?target->joliet_record:target->record;
+            need(bytes!=0 && bytes%block==0 && !expected.empty() &&
+                 std::uint64_t(lba)*block<=iso.size &&
+                 bytes<=iso.size-std::uint64_t(lba)*block,
+                 "unrecognized ISO directory geometry");
+            auto directory=iso.read(std::uint64_t(lba)*block,bytes);
+            unsigned matches=0;
+            for(std::size_t offset=0;offset<directory.size();) {
+                const auto length=directory[offset];
+                if(!length) {
+                    offset=(offset/block+1)*block;
+                    continue;
+                }
+                need(length>=34 && length<=directory.size()-offset &&
+                     offset%block+length<=block,
+                     "malformed ISO directory sector");
+                if(length==expected.size() &&
+                   std::equal(expected.begin(),expected.end(),
+                              directory.begin()+static_cast<std::ptrdiff_t>(offset))) {
+                    const auto sector=std::uint64_t(lba)*block+(offset/block)*block;
+                    need(std::none_of(iso.boot_lbas.begin(),iso.boot_lbas.end(),
+                          [&](std::uint32_t boot){return sector==std::uint64_t(boot)*block;}),
+                         "ISO directory intersects an El Torito boot sector");
+                    cuts[sector].push_back({offset%block,length});
+                    ++matches;
+                }
+                offset+=length;
+            }
+            need(matches==1,"ISO/Joliet file record is missing or ambiguous");
+        }
+    }
+    need(!cuts.empty() && cuts.size()<=512,"too many ISO directory sectors");
+    // Prepare every edited sector in memory, then stage a full sibling copy.
+    // Higher offsets are removed first so offsets of earlier records remain
+    // stable. Changes in the same directory sector are combined atomically.
+    std::map<std::uint64_t,Bytes> sectors;
+    for(auto& [position,list]:cuts) {
+        auto sector=iso.read(position,block);
+        std::sort(list.begin(),list.end(),
+                  [](const Cut& a,const Cut& b){return a.at>b.at;});
+        auto next=std::size_t(block);
+        for(const auto& cut:list) {
+            need(cut.length>=34 && cut.at+cut.length<=next,
+                 "overlapping ISO file unlink records");
+            next=cut.at;
+            std::memmove(sector.data()+cut.at,sector.data()+cut.at+cut.length,
+                         block-cut.at-cut.length);
+            std::fill(sector.end()-static_cast<std::ptrdiff_t>(cut.length),
+                      sector.end(),0);
+        }
+        sectors.emplace(position,std::move(sector));
+    }
+    const auto preserved_system=iso.read(0,16*block);
+    std::map<std::uint32_t,Bytes> preserved_boot;
+    for(const auto lba:iso.boot_lbas)
+        preserved_boot.emplace(lba,iso.read(std::uint64_t(lba)*block,block));
+    EditTransaction tx(path);
+    std::fstream output(tx.output,std::ios::in|std::ios::out|
+                       std::ios::binary|std::ios::trunc);
+    need(bool(output),"cannot create staged bootable ISO");
+    iso.file.clear();
+    iso.file.seekg(0);
+    copy_bytes(iso.file,output,iso.size,progress);
+    for(const auto& [position,sector]:sectors) {
+        edit_tick(progress);
+        output.seekp(static_cast<std::streamoff>(position),std::ios::beg);
+        need(bool(output),"cannot seek staged ISO directory");
+        write(output,sector);
+    }
+    output.flush();
+    need(bool(output),"cannot flush staged hybrid-boot ISO");
+    output.close();
+    iso.file.close();
+    {
+        // Independently reparse BOTH optical namespaces after editing.
+        Image verified(tx.output,true,true);
+        need(verified.size==iso.size && verified.system_nonzero &&
+             !verified.udf_bridge && verified.joliet==iso.joliet,
+             "staged ISO changed its geometry or filesystem layout");
+        need(verified.read(0,16*block)==preserved_system,
+             "hybrid MBR/GPT/system area changed");
+        for(const auto& [lba,original]:preserved_boot)
+            need(verified.read(std::uint64_t(lba)*block,block)==original,
+                 "El Torito catalog or boot image sector changed");
+        for(const auto& [position,expected]:sectors)
+            need(verified.read(position,block)==expected,
+                 "staged ISO directory patch readback failed");
+        for(const auto& key:removed_paths) {
+            std::istringstream split(key);
+            std::string component;
+            const Node* node=verified.root.get();
+            bool still_present=true;
+            while(std::getline(split,component,'/')) {
+                const auto match=std::find_if(node->children.begin(),node->children.end(),
+                    [&](const auto& candidate) {
+                        return upper(candidate->logical)==upper(component);
+                    });
+                if(match==node->children.end()) {
+                    still_present=false;
+                    break;
+                }
+                node=match->get();
+            }
+            need(!still_present,"ISO file remains visible after unlink");
+        }
+    }
+    tx.commit(progress);
+}
 }
 void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
-    edit_tick(progress);Image image(path,true);
+    edit_tick(progress);Image image(path,true,true);
+    if(image.system_nonzero && image.udf_bridge)
+        throw EditUnsupported("hybrid ISO/UDF Bridge editing remains unsupported");
     if(image.udf_bridge) {
         edit_iso_udf_bridge_equal_length(path,image,changes,progress);
+        return;
+    }
+    if(image.system_nonzero) {
+        unlink_boot_iso_files(path,image,changes,progress);
         return;
     }
     for(const auto& change:changes){auto p=edit_path(change.path);std::istringstream split(p);std::string name;Node* parent=image.root.get();

@@ -124,6 +124,10 @@ if(BUILD_TESTING)
   target_include_directories(archive_edit_fixture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME iso_transactional_edit COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iso_edit.py" "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  add_test(NAME boot_preserving_hybrid_iso_joliet_file_unlink
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iso_hybrid_boot_unlink.py"
+      "$<TARGET_FILE:archive_edit_fixture>")
+  set_tests_properties(boot_preserving_hybrid_iso_joliet_file_unlink PROPERTIES TIMEOUT 180)
   add_test(NAME udf_bridge_same_length_edit
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_bridge_edit.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
