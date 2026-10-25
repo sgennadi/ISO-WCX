@@ -1,6 +1,6 @@
 [plugininstall]
-description=ISO-WCX v0.19.0 Stable Core + FAT/VHD and updater Preview - ISO/UDF, WIM, optical/virtual/floppy images
-version=0.19.0
+description=ISO-WCX v0.20.0 Stable Core + fixed VHDX FAT Preview, WIM fix, VS2026 C++26, updater
+version=0.20.0
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX
