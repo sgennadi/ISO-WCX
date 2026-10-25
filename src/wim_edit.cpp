@@ -238,11 +238,19 @@ void fast_mount_folder_edit(
         original=tree_snapshot(existing);
     }
     // Skip an expensive transaction entirely if each folder already exists.
+    // WIM can encode two names which Windows treats as the same path,
+    // and NTFS is usually case-insensitive. Reject ambiguous aliases before
+    // cloning any multi-gigabyte WIM or making a mount point.
     std::unordered_map<std::string,bool> known;
+    std::unordered_map<std::string,std::string> case_aliases;
     known.reserve(original.size());
-    for(const auto& item:original)
-        if(!known.emplace(item.path,item.directory).second)
-            throw EditUnsupported("ambiguous WIM directory metadata");
+    case_aliases.reserve(original.size());
+    for(const auto& item:original) {
+        if(!known.emplace(item.path,item.directory).second ||
+           !case_aliases.emplace(
+               wim_detail::ascii_case_key(item.path),item.path).second)
+            throw EditUnsupported("ambiguous or case-colliding WIM paths");
+    }
     const std::string prefix="image"+std::to_string(plan.index)+"/";
     bool all_exist=true;
     for(const auto& relative:plan.paths) {
@@ -251,6 +259,10 @@ void fast_mount_folder_edit(
             const auto slash=relative.find('/',start);
             const auto end=slash==std::string::npos?relative.size():slash;
             const auto key=prefix+relative.substr(0,end);
+            const auto alias=case_aliases.find(wim_detail::ascii_case_key(key));
+            if(alias!=case_aliases.end() && alias->second!=key)
+                throw EditUnsupported(
+                    "WIM folder spelling differs from an existing NTFS name");
             const auto hit=known.find(key);
             if(hit!=known.end() && !hit->second)
                 throw EditUnsupported("cannot create WIM folder beneath an existing file");
