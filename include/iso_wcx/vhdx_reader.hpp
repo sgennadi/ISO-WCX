@@ -21,6 +21,7 @@ struct VhdxFixedEditLayout {
     std::uint32_t block_bytes = 0;
     std::uint64_t capacity = 0;
     std::uint64_t active_sequence = 0;
+    std::uint64_t active_header_offset = 0;
     std::vector<std::uint64_t> physical_blocks;
 };
 
@@ -69,8 +70,10 @@ private:
     std::uint32_t block_size_ = 0;
     std::uint32_t sector_size_ = 0;
     bool paired_headers_valid_ = false;
+    bool paired_region_tables_valid_ = false;
     bool fixed_file_parameters_ = false;
     std::uint64_t active_header_sequence_ = 0;
+    std::uint64_t active_header_offset_ = 0;
 };
 
 } // namespace iso_wcx
