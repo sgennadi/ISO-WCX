@@ -70,6 +70,10 @@ std::string load(const fs::path& filename) {
 int wmain(int argc,wchar_t** argv) {
     if(argc!=2) return 1;
     try {
+        const auto mark=[](const char* stage) {
+            std::cerr<<"[WIM-DIAG] "<<stage<<std::endl;
+        };
+        mark("started");
         const auto root=fs::temp_directory_path()/
             (L"iso-wcx-wim-smoke-"+std::to_wstring(GetCurrentProcessId())+L"-"+
              std::to_wstring(GetTickCount64()));
@@ -100,6 +104,7 @@ int wmain(int argc,wchar_t** argv) {
         if(!create||!set_temp||!capture||!close_wim)return 3;
         const auto split=bind<WimSplitFn>(system,"WIMSplitFile");
         if(!split)return 13;
+        mark("fixtures-written");
         const auto original=root/L"test.wim";
         DWORD creation=0;
         HANDLE archive=create(original.c_str(),GENERIC_READ|GENERIC_WRITE,
@@ -116,6 +121,7 @@ int wmain(int argc,wchar_t** argv) {
         }
         close_wim(archive);
 
+        mark("wimgapi-capture-complete");
         const HMODULE dll=LoadLibraryW(argv[1]);
         if(!dll)return 7;
         const auto open=bind<OpenFn>(dll,"OpenArchiveW");
@@ -174,14 +180,18 @@ int wmain(int argc,wchar_t** argv) {
                 if(load(root/L"extracted"/L"image1"/(L"payload"+std::to_wstring(n)+L".bin"))!=payloads[n])return false;
             return true;
         };
+        mark("native-original-verify-start");
         if(!verify(original))return 9;
+        mark("native-original-verify-complete");
         // The .esd association must recognize WIM-compatible containers.
         const auto esd=root/L"test.esd";
         fs::copy_file(original,esd);
         if(!verify(esd))return 10;
+        mark("esd-verify-complete");
         // Generate real split resources, then open both first and later parts.
         const auto swm=root/L"split"/L"install.swm";
         fs::create_directories(swm.parent_path());
+        mark("swm-split-start");
         archive=create(original.c_str(),GENERIC_READ,OPEN_EXISTING,0,0,&creation);
         if(!archive||archive==INVALID_HANDLE_VALUE)return 14;
         LARGE_INTEGER size{};size.QuadPart=512*1024;
@@ -192,6 +202,7 @@ int wmain(int argc,wchar_t** argv) {
         close_wim(archive);
         const auto later=swm.parent_path()/L"install2.swm";
         if(!fs::exists(later)||!verify(swm)||!verify(later))return 16;
+        mark("swm-verify-complete");
         auto reject=[&](const fs::path& p) {
             std::wstring name=p.wstring();OpenW a{};a.ArcName=name.data();
             const auto h=open(&a);if(h){close(h);return false;}return a.OpenResult!=0;
@@ -208,6 +219,8 @@ int wmain(int argc,wchar_t** argv) {
         const auto renamed=swm.parent_path()/L"renamed.SWM";
         fs::rename(later,renamed);
         if(!verify(renamed)||!verify(swm.parent_path()/L"RENAMED.swm"))return 19;
+        mark("swm-renames-complete");
+        mark("wim-write-start");
         // Transactional WIM changes through the real WCX ABI.
         auto pack=bind<PackFn>(dll,"PackFilesW");auto erase=bind<DeleteFn>(dll,"DeleteFilesW");
         auto set_progress=bind<SetProgressFn>(dll,"SetProcessDataProcW");
@@ -223,6 +236,7 @@ int wmain(int argc,wchar_t** argv) {
         worker.join();
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";return 21;}
+        mark("wim-pack-complete");
         if(!pack_progress_calls.load())return 26;
         auto content=[&](const std::wstring& wanted,std::string& data){
             OpenW a{};a.ArcName=packed.data();HANDLE h=open(&a);if(!h)return false;
@@ -234,6 +248,7 @@ int wmain(int argc,wchar_t** argv) {
         if(!content(L"image1\\HELLO.TXT",data)||data!="replacement"||
            !content(L"image1\\ADDED.TXT",data)||data!="new-file"||
            !content(L"image2\\HELLO.TXT",data)||data!="hello-two")return 22;
+        mark("wim-readback-complete");
         wchar_t delete_list[]=L"image1\\ADDED.TXT\0\0";
         if(erase(packed.data(),delete_list)||content(L"image1\\ADDED.TXT",data))return 23;
         // A rejected traversal must not change one byte of the original.
@@ -249,8 +264,10 @@ int wmain(int argc,wchar_t** argv) {
         args.ArcName=badpath.data();
         HANDLE broken=open(&args);
         if(broken){close(broken);return 11;}
+        mark("wim-actions-complete");
         std::error_code ec;
         fs::remove_all(root,ec);
+        mark("cleanup-complete");
         std::cout<<"PASS: Windows WIMGAPI multi-index LZX WIM, ESD and split SWM through WCX x86/x64 API\n";
         return 0;
     }catch(const std::exception& e){
