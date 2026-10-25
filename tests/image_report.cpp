@@ -107,7 +107,7 @@ int main() {
         {
             std::ifstream in(image,std::ios::binary);
             const std::vector<std::uint8_t> unchanged(
-                std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>());
+                (std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>{});
             need(unchanged==bytes,"Image changed during metadata report");
         }
         fs::remove_all(directory);
