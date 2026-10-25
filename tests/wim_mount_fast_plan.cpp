@@ -26,12 +26,16 @@ int main() {
               "insufficient 256 MiB reserve accepted");
         check(enough_staging_space(64*mib,320*mib),
               "exact 256 MiB workspace reserve rejected");
-        check(!enough_staging_space(16ull*1024ull*mib,
-                                   16ull*1024ull*mib+799*mib),
-              "large WIM was accepted below 5% reserve");
-        check(enough_staging_space(16ull*1024ull*mib,
-                                  16ull*1024ull*mib+819*mib+200000),
-              "large WIM above the 5% reserve was rejected");
+        // A 16-GiB WIM needs 819.2 MiB, NOT 819.19 MiB. Compute
+        // the exact integer threshold to avoid a misleading failed test.
+        constexpr std::uint64_t large_wim=16ull*1024ull*mib;
+        constexpr std::uint64_t large_reserve=large_wim/20u;
+        check(!enough_staging_space(large_wim,large_wim+large_reserve-1),
+              "large WIM was accepted one byte below 5% reserve");
+        check(enough_staging_space(large_wim,large_wim+large_reserve),
+              "large WIM rejected with exact 5% staging reserve");
+        check(enough_staging_space(large_wim,large_wim+large_reserve+1),
+              "large WIM rejected above 5% staging reserve");
         check(!enough_staging_space(UINT64_MAX-20u,UINT64_MAX),
               "overflow-boundary staging budget accepted");
         ArchiveChange one;
