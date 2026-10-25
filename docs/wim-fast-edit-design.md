@@ -36,6 +36,15 @@ offsets and supported compression algorithms. Reject unsupported extensions
 and encrypted/solid/delta/spanned/read-only WIMs. Add independent tests using
 genuine WIM images created by Windows WIMGAPI plus mutation/fuzz cases.
 
+## Experimental Windows mount-and-commit Preview (after v0.21.0)
+
+A separate, opt-in folder-only writer uses the system WIMGAPI mount driver on
+a transactional sibling clone. It avoids the full WIMApplyImage/WIMCaptureImage
+pipeline for a batch of directory creations within one index. It is **not**
+a custom WIM metadata serializer and is **disabled by default** until real
+privileged Windows mount recovery and content-integrity verification finish.
+See [WIM mount fast Preview](wim-mount-fast-preview.md).
+
 ## Stage 3: transactional fast writer
 
 On a private staged copy, append a rebuilt metadata resource and update
