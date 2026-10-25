@@ -127,6 +127,23 @@ int main() {
              "El Torito not detected");
         need(report.find("Joliet present: yes")!=std::string::npos,
              "Bootable ISO Joliet descriptor not detected");
+        // Selected Joliet has the Hebrew name, while the PVD only carries
+        // HELLO.TXT. Export both to expose cross-namespace divergence.
+        need(report.find("SECONDARY ISO9660 PRIMARY NAMESPACE")!=std::string::npos,
+             "Primary ISO namespace omitted from Joliet report");
+        need(report.find("ISO9660 primary parser format: ISO 9660")!=std::string::npos,
+             "Primary ISO namespace was not independently parsed");
+        const auto selected=report.find("DIRECTORY TREE (selected by Total Commander");
+        const auto secondary=report.find("SECONDARY ISO9660 PRIMARY NAMESPACE");
+        need(selected!=std::string::npos && secondary>selected,
+             "Selected and secondary tree sections not ordered");
+        need(report.find("HELLO.TXT",secondary)!=std::string::npos,
+             "Primary ISO namespace lost its file");
+        const std::u8string hebrew_name=u8"\u05E9\u05DC\u05D5\u05DD.TXT";
+        const std::string hebrew(hebrew_name.begin(),hebrew_name.end());
+        need(report.substr(secondary).find(hebrew)==std::string::npos,
+             "ISO primary tree incorrectly reused the Joliet namespace");
+
         const std::u8string expected_hebrew=u8"\u05E9\u05DC\u05D5\u05DD.TXT";
         need(report.find(std::string(expected_hebrew.begin(),expected_hebrew.end()))!=
                  std::string::npos,"Joliet Unicode file path missing");

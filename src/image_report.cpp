@@ -109,8 +109,14 @@ std::string pvd_volume_id(const Sector& data) {
                      std::string_view{}:
                      std::string_view(raw).substr(0,last+1));
 }
-void probe_optical(Report& report,const std::filesystem::path& image,
-                   std::uint64_t size) {
+struct OpticalProbeInfo {
+    bool iso_primary=false;
+    bool joliet=false;
+    bool udf_signature=false;
+    bool boot_descriptor=false;
+};
+OpticalProbeInfo probe_optical(Report& report,
+        const std::filesystem::path& image,std::uint64_t size) {
     const auto extension=image.extension().wstring();
     std::wstring ext(extension);
     std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){
@@ -118,7 +124,7 @@ void probe_optical(Report& report,const std::filesystem::path& image,
     });
     if(ext!=L".iso" && ext!=L".udf"){
         report.append("Raw ISO9660/UDF sector probe: not applicable to this container");
-        return;
+        return {};
     }
     std::ifstream input(image,std::ios::binary);
     if(!input)throw std::runtime_error("cannot open image for read-only metadata probe");
@@ -202,30 +208,25 @@ void probe_optical(Report& report,const std::filesystem::path& image,
     if(el_torito)report.append("- El Torito: boot catalog and boot image locations must be preserved");
     if(nsr02||nsr03||candidate_anchor)
         report.append("- UDF detected: modifying ISO9660 alone may damage UDF metadata");
+    if(pvd && (nsr02||nsr03||candidate_anchor)) {
+        report.append("- ISO/UDF Bridge candidate: adding/deleting/resizing "
+                      "can require coordinated changes to both namespaces; "
+                      "the current editor does not support these operations");
+        if(el_torito)
+            report.append("- Bootable ISO/UDF Bridge: the current editor also "
+                          "rejects equal-size in-place replacement");
+    }
     report.append("- This is NOT a write-permission check. Readability does not imply safe deletion");
+    return {pvd,joliet,nsr02||nsr03||candidate_anchor,el_torito};
 }
-
-} // namespace
-
-std::string build_image_structure_report(const std::filesystem::path& image){
-    const auto bytes=std::filesystem::file_size(image);
-    Disc disc(image); // Same parser and Unicode paths as Total Commander.
-    Report report;
-    report.append("ISO-WCX IMAGE STRUCTURE REPORT 1.0 (READ ONLY)");
-    report.append_kv("Image filename",safe_text(filename_utf8(image)));
-    report.append_kv("Image size bytes",std::to_string(bytes));
-    report.append_kv("Detected filesystem / container",safe_text(disc.format()));
-    report.append_kv("Files and directories listed",std::to_string(disc.items().size()));
-    report.append("Image payloads copied: no");
-    report.append("Image modified: no");
-    report.append("");
-    probe_optical(report,image,bytes);
-    report.append("");
-    report.append("DIRECTORY TREE (metadata only; UTF-8)");
+// The extent positions exposed by the common Disc API refer to the decoder's
+// backing stream. In a compressed image they are NOT necessarily byte offsets
+// in the physical image on disk. Keep paths as the last column for easy grep.
+void append_tree(Report& report,const std::vector<Item>& items) {
     report.append("TYPE\tSIZE_BYTES\tATTR_HEX\tEXTENTS\tSOURCE_OFFSET_BYTES\tPATH");
-    std::size_t listed=0;
     constexpr char hex[]="0123456789ABCDEF";
-    for(const auto& item:disc.items()) {
+    std::size_t listed=0;
+    for(const auto& item:items) {
         if(report.truncated())break;
         std::string row=item.directory?"DIR":"FILE";
         row+='\t';
@@ -247,6 +248,79 @@ std::string build_image_structure_report(const std::filesystem::path& image){
         ++listed;
     }
     report.append("Directory entries emitted: "+std::to_string(listed));
+    report.append("Offsets above refer to the image parser's logical backing "
+                  "stream; compressed containers may not use physical offsets");
+    report.append("EXTENT DETAILS (for multi-extent files; logical backing stream)");
+    report.append("PATH\tEXTENT_INDEX\tOFFSET_BYTES\tLENGTH_BYTES\tSPARSE");
+    for(const auto& item:items) {
+        if(report.truncated())break;
+        if(item.extents.size()<=1)continue;
+        const auto path=safe_text(item.path);
+        for(std::size_t i=0;i<item.extents.size();++i) {
+            const auto& extent=item.extents[i];
+            report.append(path+"\t"+std::to_string(i)+"\t"+
+                          std::to_string(extent.offset)+"\t"+
+                          std::to_string(extent.length)+"\t"+
+                          (extent.sparse?"yes":"no"));
+            if(report.truncated())break;
+        }
+    }
+}
+
+} // namespace
+
+std::string build_image_structure_report(const std::filesystem::path& image){
+    const auto bytes=std::filesystem::file_size(image);
+    Disc disc(image); // Same parser and Unicode paths as Total Commander.
+    Report report;
+    report.append("ISO-WCX IMAGE STRUCTURE REPORT 1.0 (READ ONLY)");
+    report.append_kv("Image filename",safe_text(filename_utf8(image)));
+    report.append_kv("Image size bytes",std::to_string(bytes));
+    report.append_kv("Detected filesystem / container",safe_text(disc.format()));
+    report.append_kv("Files and directories listed",std::to_string(disc.items().size()));
+    report.append("Image payloads copied: no");
+    report.append("Image modified: no");
+    report.append("");
+    const auto optical=probe_optical(report,image,bytes);
+    report.append("");
+    report.append("DIRECTORY TREE (selected by Total Commander; metadata only; UTF-8)");
+    append_tree(report,disc.items());
+
+    // UDF takes priority over ISO when both are present. Exporting only the
+    // selected UDF tree would hide ISO-only entries (or the inverse) and
+    // conceal precisely why safe deletion of a bootable bridge is blocked.
+    // Joliet takes priority over the ISO9660 PVD in non-UDF optical images.
+    const bool udf_selected=disc.format().rfind("UDF",0)==0;
+    if(optical.iso_primary && (optical.joliet||udf_selected) &&
+       !report.truncated()) {
+        report.append("");
+        report.append("SECONDARY ISO9660 PRIMARY NAMESPACE (independent parser)");
+        try {
+            const auto primary=inspect_iso_namespace(image,true);
+            report.append_kv("ISO9660 primary parser format",safe_text(primary.format));
+            report.append_kv("ISO9660 primary entries listed",
+                             std::to_string(primary.items.size()));
+            append_tree(report,primary.items);
+        }catch(const std::exception& ex){
+            report.append("ISO9660 primary namespace could not be read: "+
+                          safe_text(ex.what()));
+        }
+    }
+    if(optical.joliet && udf_selected && !report.truncated()) {
+        report.append("");
+        report.append("SECONDARY JOLIET / ROCK RIDGE NAMESPACE "
+                      "(independent ISO parser)");
+        try {
+            const auto alternative=inspect_iso_namespace(image,false);
+            report.append_kv("ISO alternate parser format",safe_text(alternative.format));
+            report.append_kv("ISO alternate entries listed",
+                             std::to_string(alternative.items.size()));
+            append_tree(report,alternative.items);
+        }catch(const std::exception& ex){
+            report.append("ISO alternate namespace could not be read: "+
+                          safe_text(ex.what()));
+        }
+    }
     return report.finish();
 }
 } // namespace iso_wcx

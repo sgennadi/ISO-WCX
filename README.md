@@ -59,6 +59,12 @@ the full release-quality checks pass.
 
 In Total Commander choose **Files > Pack**, select an extension configured
 for ISO-WCX and click **Configure... > Export Image Structure...**.
+For Joliet discs the report contains **both the displayed Joliet tree and
+the independent ISO9660 primary tree**. ISO/UDF Bridge discs include
+separate UDF and ISO9660 (and Joliet, when present) namespaces, plus
+El Torito boot information and a specific warning about unsupported deletion.
+The report includes file names and extents, not file contents; review paths
+for sensitive information before sharing.
 Choose the source ISO/UDF/WIM/VHD/VHDX or other supported image, then choose
 where to save the UTF-8 `-ISO-WCX-Structure.txt` report. The report contains
 the format reported by the **same in-process parser** as Total Commander,
