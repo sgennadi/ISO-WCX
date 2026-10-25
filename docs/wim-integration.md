@@ -41,6 +41,21 @@ verified before the original archive path is replaced. Cancellation,
 rejected input or processing failure before final commit does not change
 the original archive. Space usage can be substantial.
 
+## Windows 2025 WIMGAPI output compatibility
+
+Native x86 and x64 interop checks on Windows Server 2025 detected a
+16-byte extension written by `WIMFindFirstImageFile` beyond the public
+`WIM_FIND_DATA` layout. Without reserved storage, a Win32 caller could
+experience heap corruption. ISO-WCX reserves **exactly 16 additional bytes**
+after the standard Windows ABI fields and keeps a separate canary-checked
+boundary around every enumeration buffer. Both the initial and subsequent
+`WIMFindNextImageFile` results are checked. The extension is not interpreted
+as untrusted filesystem metadata; the plugin still validates names, paths,
+sizes, and entries before exposing files to Total Commander.
+
+This compatibility buffer changes neither the WIM format nor the installed
+WCX ABI, and adds no external runtime dependency.
+
 ## Dependencies and validation
 
 No DISM or wimlib-imagex executable, added libwim DLL, mounted image,

@@ -11,7 +11,16 @@ endif()
 if(ISO_WCX_CXX_STANDARD STREQUAL "26" AND CMAKE_VERSION VERSION_LESS 3.25)
   message(FATAL_ERROR "The experimental C++26 lane requires CMake 3.25 or newer")
 endif()
-set(CMAKE_CXX_STANDARD ${ISO_WCX_CXX_STANDARD})
+# VS2026 MSVC implements /std:c++latest, but CMake's VS generator
+# currently lacks a CXX26 language standard mapping. Keep the CMake
+# language metadata at CXX20 only for this experimental MSVC lane;
+# pass the actual draft mode flags explicitly below and verify them.
+if(MSVC AND ISO_WCX_CXX_STANDARD STREQUAL "26")
+  set(CMAKE_CXX_STANDARD 20)
+  message(STATUS "MSVC C++26 draft uses /std:c++latest")
+else()
+  set(CMAKE_CXX_STANDARD ${ISO_WCX_CXX_STANDARD})
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -19,7 +28,19 @@ if(ISO_WCX_CXX_STANDARD STREQUAL "26")
   # CMake/Clang/MSVC support for C++26 is still evolving. Explicit flags avoid
   # quietly compiling in C++23 via CMake's standard-level fallback.
   if(MSVC)
-    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++latest>")
+    if(MSVC_VERSION LESS 1950)
+      message(FATAL_ERROR "C++26 requires the Visual Studio 2026 MSVC 19.50+ toolchain")
+    endif()
+    # MSVC currently exposes C++26 draft features under /std:c++latest,
+    # not a finalized /std:c++26 switch. /Zc:__cplusplus makes the active
+    # language level observable to our code and test fixtures.
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++latest>"
+                        "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>")
+    # Real build targets are checked instead of CMake's try_compile,
+    # because Visual Studio's CXX20 metadata can override the temporary
+    # /std:c++latest flags in CMake-generated configure checks. The
+    # msvc_cxx26_dialect_probe target checks the effective compiler flags.
+
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-std=c++26>")
   elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -487,3 +508,10 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/binary_reader_tes
   add_test(NAME binary_reader_tests COMMAND binary_reader_tests)
 endif()
 
+
+# A real compiler target probes MSVC draft mode after CMake generation.
+if(BUILD_TESTING AND MSVC AND ISO_WCX_CXX_STANDARD STREQUAL "26")
+  add_executable(msvc_cxx26_dialect_probe tests/msvc_cxx26_dialect_probe.cpp)
+  add_test(NAME msvc_cxx26_dialect_verified
+           COMMAND "$<TARGET_FILE:msvc_cxx26_dialect_probe>")
+endif()

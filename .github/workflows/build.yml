@@ -14,13 +14,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-2025]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Configure C++20 compatibility baseline (VS2026 on Windows)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DISO_WCX_CXX_STANDARD=20
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+  windows-cxx20-win32:
+    name: VS2026 Win32 C++20 legacy compatibility
+    runs-on: windows-2025
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Win32 C++20 baseline using VS2026
+        run: cmake -S . -B build-win32 -G "Visual Studio 18 2026" -A Win32 -DISO_WCX_CXX_STANDARD=20
+      - name: Build all Win32 native and WCX targets
+        run: cmake --build build-win32 --config Release --parallel 2
+      - name: Run full Win32 regression suite
+        run: ctest --test-dir build-win32 -C Release --output-on-failure

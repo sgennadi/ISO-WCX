@@ -9,21 +9,29 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <array>
+#include <cstdint>
 // Public Windows WIMGAPI ABI; no optional ADK wimgapi.h header required.
 // This structure starts with WIN32_FIND_DATAW, followed by WIM metadata.
-struct WimFindData {
-    WIN32_FIND_DATAW find_data;
+// The public WIMGAPI ABI inherits WIN32_FIND_DATAW. On the tested
+// Windows Server 2025 native API, WIMFindFirstImageFile writes 16 bytes
+// beyond the published layout on both Win32 and x64. Reserve that exact
+// observed extension inside the object, then guard against future overruns.
+// No external ADK DLL/header is needed in the distributed WCX binaries.
+struct WimFindData : WIN32_FIND_DATAW {
     BYTE hash[20];
     SECURITY_DESCRIPTOR* security_descriptor;
     wchar_t** alternate_names;
     BYTE* reparse_data;
     DWORD reparse_length;
     ULARGE_INTEGER resource_size;
+    std::array<std::uint8_t,16> observed_wimgapi_tail{};
 };
+static_assert(sizeof(WimFindData)==(sizeof(void*)==4 ? 656u : 672u),
+              "Unexpected Windows WIM_FIND_DATA ABI layout");
 
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cwctype>
 #include <limits>
@@ -232,23 +240,34 @@ WimArchive::WimArchive(const std::filesystem::path& image)
             require(current.depth <= 128,
                     "WIM directory depth exceeds safe limit");
             const auto pattern = current.path + L"\\*.*";
-            WimFindData data{};
+            struct BufferedFind {
+                WimFindData data{};
+                std::array<std::uint32_t,64> boundary{};
+                BufferedFind(){boundary.fill(0xa55a5aa5u);}
+                void check_boundary() const {
+                    for(const auto word:boundary)
+                        require(word==0xa55a5aa5u,
+                                "WIMGAPI wrote beyond extended WIM_FIND_DATA");
+                }
+            } result;
+            auto& data=result.data;
             HANDLE found = api_->first(himage, pattern.c_str(), &data);
+            result.check_boundary();
             if (!is_valid(found)) {
                 if (end_of_find(GetLastError())) continue;
                 fail_windows("WIMFindFirstImageFile failed");
             }
             Impl::CloseHandle find_guard(api_.get(), found);
             for (;;) {
-                const std::wstring name(data.find_data.cFileName);
+                const std::wstring name(data.cFileName);
                 if (name != L"." && name != L"..") {
                     require(safe_name(name),
                             "WIM contains unsafe Windows filename");
                     const bool directory =
-                        (data.find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                        (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
                     // Do not expose junctions/reparse points as regular files
                     // or follow them into a different path tree.
-                    if (!(data.find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                    if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
                         const auto relative = current.relative + "/" + utf8(name);
                         const auto source = current.path + L"\\" + name;
                         require(relative.size() <= 2048 && source.size() <= 2048,
@@ -261,18 +280,20 @@ WimArchive::WimArchive(const std::filesystem::path& image)
                         item.path = relative;
                         item.directory = directory;
                         item.size = directory ? 0 :
-                           (std::uint64_t(data.find_data.nFileSizeHigh) << 32) |
-                            std::uint64_t(data.find_data.nFileSizeLow);
-                        item.dos_time = dos_time(data.find_data.ftLastWriteTime);
-                        item.attributes = data.find_data.dwFileAttributes;
+                           (std::uint64_t(data.nFileSizeHigh) << 32) |
+                            std::uint64_t(data.nFileSizeLow);
+                        item.dos_time = dos_time(data.ftLastWriteTime);
+                        item.attributes = data.dwFileAttributes;
                         entries_.push_back(std::move(item));
                         locations_.push_back({index, source});
                         if (directory)
                             stack.push_back({source, relative, current.depth + 1});
                     }
                 }
-                if (!api_->next(found, &data)) {
-                    const DWORD error = GetLastError();
+                const BOOL more=api_->next(found, &data);
+                const DWORD error=more ? ERROR_SUCCESS : GetLastError();
+                result.check_boundary();
+                if (!more) {
                     if (!end_of_find(error))
                         fail_windows("WIMFindNextImageFile failed");
                     break;
