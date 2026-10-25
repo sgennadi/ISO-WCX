@@ -95,11 +95,13 @@ sectors are retained and modifications overlapping them are rejected.
 ISO/UDF Bridge has limited, byte-only replacement of existing equal-size
 files when both filesystems point at one identical physical extent. Bootable
 Bridge images, add/delete, resize and UDF metadata edits are refused.
-**UDF-only Type-1** (single 2048-byte physical partition): replace/resize
-existing regular FE/EFE/ShortAD files within their preallocated blocks;
-logical FID deletion hides a file but does not free its space. New files,
-new directories and block reallocation are not yet supported. Hybrid
-system-area and Rock Ridge rewrites remain unsupported. Important media
-should be edited as copies. System wimgapi.dll runs inside the WCX;
+**UDF-only Type-1** (validated nonhybrid single 2048-byte physical
+partition): atomic batches of new regular files and nested directories,
+bounded replacement/resize, logical FID deletion, multi-ShortAD allocation
+including files beyond 4 GiB, safe exclusive-ownership file-block reclaim
+and deleted FID slot reuse. Verified bitmap/LVID and staged readback are
+required. VAT/Metadata/Sparable partitions, AED chain creation, ISO/UDF
+Bridge rebuilding, symlinks/hard links, hybrid system-area and Rock Ridge
+rewrites remain unsupported. Important media should be edited as copies. System wimgapi.dll runs inside the WCX;
 no additional DLL, EXE, mount or driver is required. NTFS alternate
 streams and reparse points are not restored by individual-file extraction.
