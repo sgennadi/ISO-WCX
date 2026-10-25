@@ -137,14 +137,22 @@ std::vector<std::uint8_t> http_get(const std::wstring& url,
             u.nScheme==INTERNET_SCHEME_HTTPS && u.dwHostNameLength,
             "invalid HTTPS release URL");
     const std::wstring host(u.lpszHostName,u.dwHostNameLength);
-    const std::wstring resource=std::wstring(u.lpszUrlPath,u.dwUrlPathLength) +
-                                std::wstring(u.lpszExtraInfo,u.dwExtraInfoLength);
+    std::wstring resource(u.lpszUrlPath,u.dwUrlPathLength);
+    if(u.dwExtraInfoLength && u.lpszExtraInfo)
+        resource.append(u.lpszExtraInfo,u.dwExtraInfoLength);
+    if(resource.empty()) resource=L"/";
     Internet session(WinHttpOpen(L"ISO-WCX-Update/1.0",
                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                    WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0),
                    WinHttpCloseHandle);
     require(bool(session),"WinHTTP session unavailable");
     WinHttpSetTimeouts(session.get(),5000,5000,10000,10000);
+    // Allow GitHub's HTTPS release-asset redirects, but never downgrade to
+    // unencrypted HTTP (including an attacker-controlled redirect chain).
+    DWORD policy=WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+    require(WinHttpSetOption(session.get(),WINHTTP_OPTION_REDIRECT_POLICY,
+              &policy,sizeof(policy))!=FALSE,
+            "cannot enforce HTTPS-only update redirects");
     Internet conn(WinHttpConnect(session.get(),host.c_str(),
                   u.nPort,0),WinHttpCloseHandle);
     require(bool(conn),"cannot connect to release host");
