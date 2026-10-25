@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.19.0 — 2026-10-25 — Built-in updater, FAT16/32 and dynamic VHD Preview
+
+- Built-in optional automatic Stable update checks and manual Check now,
+  secure HTTPS ZIP/SHA256 verification, never replacing a loaded WCX DLL.
+- Native transactional FAT12/16/32 Unicode VFAT editing with cloned,
+  disk-backed staging in standalone floppy and MBR/GPT RAW/IMG partitions.
+- Validated FAT partition edits in fixed VHD without modifying unrelated
+  partitions, sector map or end footer.
+- Strict checksummed native dynamic sparse VHD reader with physical BAT,
+  per-sector bitmap and zero-filled unallocated regions.
+- **Preview:** FAT partition editing in clean dynamic base VHD v1 through
+  full logical-RAW staging, changed-sector BAT/bitmap allocation, complete
+  independently verified logical readback and atomic replacement.
+- Stricter clean VHDX metadata/region/payload validation; VHDX remains
+  read-only, as do differencing virtual disks and non-FAT volume writes.
+- CI: Windows x86/x64, Linux/Clang sanitizers, QEMU/Microsoft interop,
+  FAT rollback and independent large UDF validations required for Stable.
+
 ## v0.18.0 — 2026-10-25 — Stable Core + Floppy VFAT/IMZ Preview
 
 - Raw IMA/IMG/VFD/FLP floppy reading with native FAT12/16/32 superfloppy

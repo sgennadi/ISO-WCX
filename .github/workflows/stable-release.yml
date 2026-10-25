@@ -1,4 +1,4 @@
-name: ISO-WCX Stable v0.18.0
+name: ISO-WCX Stable v0.19.0
 
 on:
   push:
@@ -13,12 +13,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: iso-wcx-v0.18.0-stable
+  group: iso-wcx-v0.19.0-stable
   cancel-in-progress: false
 
 env:
-  ISO_WCX_RELEASE_TAG: v0.18.0
-  ISO_WCX_RELEASE_FILE: ISO-WCX-v0.18.0.zip
+  ISO_WCX_RELEASE_TAG: v0.19.0
+  ISO_WCX_RELEASE_FILE: ISO-WCX-v0.19.0.zip
 
 jobs:
   windows:
@@ -134,9 +134,37 @@ jobs:
       - name: Verify clone/fallback SHA256 and report timings
         run: python3 tests/test_udf_stage_performance.py build/archive_edit_fixture build/disc_inspect --benchmark
 
+  native-qemu-vhd:
+    name: Stable independent QEMU VHDX and dynamic VHD write interoperability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU only as independent CI validator
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-utils
+          qemu-img --version
+      - name: Build native reader, FAT and dynamic VHD writer fixtures
+        run: |
+          cmake -S . -B build-qemu -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-qemu --target virtual_partition_inspect virtual_fat_inspect dynamic_vhd_read_fixture archive_edit_fixture --parallel 2
+      - name: Check independently created VHDX and QEMU dynamic VHD read/write
+        run: |
+          python3 tests/test_qemu_vhdx_interop.py \
+            "$(command -v qemu-img)" \
+            ./build-qemu/virtual_partition_inspect \
+            ./build-qemu/virtual_fat_inspect
+          python3 tests/test_qemu_dynamic_vhd_interop.py \
+            "$(command -v qemu-img)" \
+            ./build-qemu/virtual_partition_inspect \
+            ./build-qemu/virtual_fat_inspect \
+            ./build-qemu/dynamic_vhd_read_fixture \
+            ./build-qemu/archive_edit_fixture
+
   package:
     name: Verify Stable installable ZIP
-    needs: [windows, linux, sanitizer, real-udf, large-udf, stage-benchmark]
+    needs: [windows, linux, sanitizer, real-udf, large-udf, stage-benchmark, native-qemu-vhd]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -149,10 +177,10 @@ jobs:
       - name: Build and verify ZIP and SHA256
         run: |
           set -euo pipefail
-          grep -Fxq 'version=0.18.0' pluginst.inf
+          grep -Fxq 'version=0.19.0' pluginst.inf
           grep -Fq 'defaultextension=iso,udf,' pluginst.inf
           grep -Fq 'flp,bif,imz' pluginst.inf
-          grep -Fq 'VERSION 0.18.0' CMakeLists.txt
+          grep -Fq 'VERSION 0.19.0' CMakeLists.txt
           test -s binaries/ISO-WCX.wcx
           test -s binaries/ISO-WCX.wcx64
           if find binaries -maxdepth 1 -type f \( -iname '*.dll' -o -iname '*.exe' -o -iname '*.so*' -o -iname '*.dylib' \) | grep -q .; then
@@ -175,15 +203,15 @@ jobs:
       - name: Upload Stable installer
         uses: actions/upload-artifact@v4
         with:
-          name: ISO-WCX-Installable-v0.18.0-Stable
+          name: ISO-WCX-Installable-v0.19.0-Stable
           path: |
-            ISO-WCX-v0.18.0.zip
+            ISO-WCX-v0.19.0.zip
             SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 90
 
   release:
-    name: Publish Stable v0.18.0 only after all checks succeed
+    name: Publish Stable v0.19.0 only after all checks succeed
     needs: [package]
     if: github.ref == 'refs/heads/main' && github.repository == 'sgennadi/ISO-WCX'
     runs-on: ubuntu-24.04
@@ -193,7 +221,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: ISO-WCX-Installable-v0.18.0-Stable
+          name: ISO-WCX-Installable-v0.19.0-Stable
           path: release-asset
       - name: Publish unique tagged GitHub Stable release
         env:
@@ -214,7 +242,7 @@ jobs:
             "release-asset/${ISO_WCX_RELEASE_FILE}" \
             release-asset/SHA256SUMS.txt \
             --target "${GITHUB_SHA}" \
-            --title "ISO-WCX v0.18.0 - Native FAT12 VFAT and WinImage IMZ" \
+            --title "ISO-WCX v0.19.0 - Native FAT, dynamic VHD Preview and updater" \
             --notes-file RELEASE_NOTES.md \
             --latest
           gh release view "${ISO_WCX_RELEASE_TAG}" --json url,tagName,isPrerelease
