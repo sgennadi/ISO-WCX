@@ -333,6 +333,7 @@ void fast_mount_folder_edit(
         Callback callback{progress,status};
         Registered registration(dll,container.h,callback);
         bool mounted=false;
+        bool unmount_attempted=false;
         try {
             // FAST flag supports lazy Windows WIM mounts. No fallback after
             // invoking mount: failed mounts must be diagnosed/cleaned explicitly.
@@ -369,6 +370,9 @@ void fast_mount_folder_edit(
             // folder-only performance. Independently verify the resulting tree.
             checked(commit(image.h,0,nullptr),"commit mounted WIM metadata");
             report(L"Unmount fast WIM edit",83);
+            // WIMGAPI may have partially released the mount on failure.
+            // Never invoke Unmount twice on a possibly stale image handle.
+            unmount_attempted=true;
             if(!unmount(image.h,0)) {
                 const DWORD error=GetLastError();
                 tx.preserve();
@@ -378,7 +382,8 @@ void fast_mount_folder_edit(
             }
             mounted=false;
         }catch(...) {
-            if(mounted) {
+            if(mounted && !unmount_attempted) {
+                unmount_attempted=true;
                 if(!unmount(image.h,0)) {
                     tx.preserve();
                     throw std::runtime_error(
