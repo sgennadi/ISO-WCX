@@ -108,7 +108,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install C++26 compiler and Ninja
         run: |
-          sudo apt-get update -qq
+          bash .github/scripts/prepare-ubuntu-apt.sh
           sudo apt-get install -y --no-install-recommends g++-14 clang-19 ninja-build python3-venv
           "${{ matrix.cxx }}" --version
       - name: Pin CMake for C++26 Ninja support (CI only)
@@ -135,7 +135,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install independent test fixtures
         run: |
-          sudo apt-get update -qq
+          bash .github/scripts/prepare-ubuntu-apt.sh
           sudo apt-get install -y --no-install-recommends mame-tools libarchive-dev
           command -v chdman
       - name: Configure
@@ -171,7 +171,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install reference utilities only for validation
         run: |
-          sudo apt-get update -qq
+          bash .github/scripts/prepare-ubuntu-apt.sh
           sudo apt-get install -y --no-install-recommends udftools p7zip-full libarchive-dev
           command -v mkudffs
           command -v udfinfo
@@ -193,7 +193,7 @@ jobs:
         run: df -h .
       - name: Install independent UDF verification tools
         run: |
-          sudo apt-get update -qq
+          bash .github/scripts/prepare-ubuntu-apt.sh
           sudo apt-get install -y --no-install-recommends udftools p7zip-full
       - name: Build native edit and inspection tools
         run: |
@@ -223,7 +223,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install QEMU only as independent CI validator
         run: |
-          sudo apt-get update -qq
+          bash .github/scripts/prepare-ubuntu-apt.sh
           sudo apt-get install -y --no-install-recommends qemu-utils
           qemu-img --version
       - name: Build native reader, FAT and dynamic VHD writer fixtures
@@ -313,8 +313,8 @@ jobs:
           test -s release-asset/"${ISO_WCX_RELEASE_FILE}"
           test -s release-asset/SHA256SUMS.txt
           if gh release view "${ISO_WCX_RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "Release already exists. Refusing to overwrite existing assets." >&2
-            exit 1
+            echo "::notice::${ISO_WCX_RELEASE_TAG} is already published and immutable; tested source changes will ship in a later version."
+            exit 0
           fi
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${ISO_WCX_RELEASE_TAG}" >/dev/null 2>&1; then
             echo "Version tag exists without a release; refusing to overwrite it." >&2

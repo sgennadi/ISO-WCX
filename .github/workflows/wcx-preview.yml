@@ -64,7 +64,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install MAME CHD fixture generator for CI only
         run: |
-          sudo apt-get update -qq
+          bash .github/scripts/prepare-ubuntu-apt.sh
           sudo apt-get install -y --no-install-recommends mame-tools
           command -v chdman
           # chdman help prints usage and may return nonzero on valid builds.
