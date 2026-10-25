@@ -469,9 +469,13 @@ void write_structure_atomically(const std::filesystem::path& image,
                                 const std::filesystem::path& dest,
                                 const std::string& report) {
     std::error_code ec;
-    if(std::filesystem::exists(dest,ec) && !ec &&
-       std::filesystem::equivalent(image,dest,ec) && !ec)
-        throw std::runtime_error("report destination is the source image");
+    const bool target_exists=std::filesystem::exists(dest,ec);
+    if(ec)throw std::runtime_error("cannot inspect report destination");
+    if(target_exists) {
+        const bool same=std::filesystem::equivalent(image,dest,ec);
+        if(ec)throw std::runtime_error("cannot verify report destination identity");
+        if(same)throw std::runtime_error("report destination is the source image");
+    }
     const std::string payload=std::string("\xEF\xBB\xBF",3)+report;
     if(payload.size()>static_cast<std::size_t>(MAXDWORD))
         throw std::runtime_error("image structure report too large");
@@ -515,6 +519,8 @@ void export_structure_dialog(HWND dlg,bool ru) {
         if(!image)return;
         const auto destination=choose_structure_output(dlg,*image);
         if(!destination)return;
+        const auto image_size=std::filesystem::file_size(*image);
+        const auto image_modified=std::filesystem::last_write_time(*image);
         put_status(dlg,tr(ru,L"Inspecting image (read-only)...",
                             L"Проверка образа (только чтение)..."));
         const HCURSOR previous=SetCursor(LoadCursorW(nullptr,IDC_WAIT));
@@ -526,6 +532,9 @@ void export_structure_dialog(HWND dlg,bool ru) {
             throw;
         }
         SetCursor(previous);
+        if(std::filesystem::file_size(*image)!=image_size ||
+           std::filesystem::last_write_time(*image)!=image_modified)
+            throw std::runtime_error("source image changed during export; report discarded");
         write_structure_atomically(*image,*destination,report);
         put_status(dlg,tr(ru,L"Structure report exported.",
                             L"Структура образа сохранена."));
@@ -540,7 +549,10 @@ void export_structure_dialog(HWND dlg,bool ru) {
                                 nullptr,SW_SHOWNORMAL);
         }
     }catch(const std::exception& ex) {
-        const auto reason=from_utf8(ex.what());
+        // Diagnostics must never throw while handling an exception from the
+        // file picker or report writer (filesystem what() may be non-UTF-8).
+        std::wstring reason;
+        try{reason=from_utf8(ex.what());}catch(...){reason=L"Error detail unavailable";}
         const auto message=std::wstring(tr(ru,
                  L"Image structure export failed:\n",
                  L"Не удалось сохранить структуру образа:\n"))+reason;
