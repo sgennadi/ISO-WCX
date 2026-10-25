@@ -2,6 +2,7 @@
 #ifdef _WIN32
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/archive_edit.hpp"
+#include "iso_wcx/wcx_updater.hpp"
 #include <mutex>
 #include <atomic>
 #include <type_traits>
@@ -275,6 +276,9 @@ WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
 }
 WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
     try{if(!archive)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
+}
+WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
+    try { iso_wcx::configure_updates(parent,module); } catch(...) {}
 }
 WCX_EXPORT int __stdcall GetPackerCaps() {return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT|2|4|8;}
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
