@@ -33,6 +33,9 @@ int main(int argc,char** argv) {
             case iso_wcx::VirtualDiskFormat::fixed_vhd:
                 container="fixed VHD";
                 break;
+            case iso_wcx::VirtualDiskFormat::dynamic_vhd:
+                container="dynamic VHD (native read-only)";
+                break;
             case iso_wcx::VirtualDiskFormat::vhdx:
                 container="VHDX (native read-only)";
                 break;
