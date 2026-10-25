@@ -259,7 +259,18 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         const auto progress=[&]{if(pw)return pw(wide.data(),0)!=0;if(pa)return pa(ansi.data(),0)!=0;return true;};
         if(ext==L".iso"||ext==L".udf")
              iso_wcx::edit_optical(image,changes,progress);
-        else if(ext==L".wim") iso_wcx::edit_wim(image,changes,progress);
+        else if(ext==L".wim") {
+            const auto status=[&](const wchar_t* stage,unsigned percent){
+                // WCX expects the percentage as a negative Size value.
+                // Snapshot callbacks outside the WIMGAPI callback threads.
+                (void)stage;
+                const int pct=-static_cast<int>(std::min(percent,100u));
+                if(pw)return pw(wide.data(),pct)!=0;
+                if(pa)return pa(ansi.data(),pct)!=0;
+                return true;
+            };
+            iso_wcx::edit_wim(image,changes,progress,status);
+        }
         else iso_wcx::edit_fat(image,changes,progress);
         return 0;
     }catch(const iso_wcx::EditCancelled&){return E_EABORTED;}
