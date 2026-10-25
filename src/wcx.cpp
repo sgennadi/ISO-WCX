@@ -9,6 +9,7 @@
 #include <cwctype>
 #include <windows.h>
 #include <algorithm>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -146,15 +147,22 @@ int do_process(State* state,int operation,const wchar_t* dest_path,const wchar_t
 
 #define WCX_EXPORT extern "C" __declspec(dllexport)
 WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
+    std::fprintf(stderr,"[WIM-WCX] open-entry\n"); std::fflush(stderr);
     iso_wcx::schedule_update_check();
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
     try {
         if(!d->ArcName)return nullptr;
+        std::fprintf(stderr,"[WIM-WCX] state-create\n"); std::fflush(stderr);
         auto state=std::make_unique<State>(std::filesystem::path(d->ArcName));
+        std::fprintf(stderr,"[WIM-WCX] state-ready\n"); std::fflush(stderr);
         d->OpenResult=0;
+        std::fprintf(stderr,"[WIM-WCX] return-handle\n"); std::fflush(stderr);
         return reinterpret_cast<HANDLE>(state.release());
-    }catch(...){return nullptr;}
+    }catch(...) {
+        std::fprintf(stderr,"[WIM-WCX] open-exception\n"); std::fflush(stderr);
+        return nullptr;
+    }
 }
 WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
     iso_wcx::schedule_update_check();
