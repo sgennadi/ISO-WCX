@@ -110,6 +110,20 @@ Support statements below describe their respective releases; see **v0.14** at th
 - 2448-byte physical sectors are accepted for unswizzled raw MODE1/MODE2 Form 1 data, including supported MDS v1 subchannel layouts. Extra subchannel bytes are not exposed as ISO data.
 - Does not support `.isz`, `.daa`, `.mdx`, `.chd`, proprietary encryption, mixed audio extraction or all vendor MDF sector patterns. The bchunk and mdf2iso projects are useful test references; their GPL source is not included.
 
+## Fixed VHDX FAT12/16/32 write (development Preview, after v0.19.0)
+
+A bounded C++20 editor now targets only complete 512-byte-sector fixed VHDX
+base images. The entire BAT is checked for unique fully allocated payload
+blocks and for overlaps with metadata/log/optional regions. FAT changes
+are staged through logical RAW plus a private physical clone; changed sectors
+are patched and dual headers receive fresh write GUIDs, sequence and CRC32C.
+A native independent readback of **every logical byte**, then atomic rename,
+protects the original. Win32 limit: 512 MiB logical/physical. x64 limit:
+1 GiB logical / 2 GiB physical. Dynamic/sparse/4K-sector VHDX, parent
+snapshots, logs requiring replay and non-FAT editing remain read-only.
+This is **not included in v0.19.0 Stable**; wait for all Preview CI checks.
+QEMU interop checks are test-only, not WCX dependencies.
+
 ## FAT12/16/32 transactional raw-volume writer Preview (v0.19.0)
 
 - Shared FAT12/16/32 in-process writer with UTF-8/UTF-16 VFAT, checked DOS 8.3

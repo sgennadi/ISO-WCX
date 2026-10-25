@@ -130,6 +130,10 @@ if(BUILD_TESTING)
   add_test(NAME native_imz_zip_deflate_floppy
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_imz.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  add_test(NAME native_fixed_vhdx_fat_transactional_write
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fixed_vhdx_edit.py"
+      "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  set_tests_properties(native_fixed_vhdx_fat_transactional_write PROPERTIES TIMEOUT 420)
   add_test(NAME native_dynamic_vhd_fat_transactional_write
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dynamic_vhd_edit.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
@@ -157,11 +161,11 @@ if(BUILD_TESTING AND NOT ISO_WCX_BUILD_DEV_TOOLS)
 endif()
 
 find_package(Threads REQUIRED)
-add_library(iso_disc STATIC src/archive_edit.cpp src/floppy_edit.cpp src/dynamic_vhd_edit.cpp src/fat_mapped_image.cpp src/iso_edit.cpp src/udf_edit.cpp src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/mds_v2.cpp src/mds_v2_tracks.cpp src/cd_audio_wav.cpp third_party/tiny_aes/mds_aes.c src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
+add_library(iso_disc STATIC src/archive_edit.cpp src/floppy_edit.cpp src/dynamic_vhd_edit.cpp src/vhdx_edit.cpp src/fat_mapped_image.cpp src/iso_edit.cpp src/udf_edit.cpp src/disc.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/mds_v2.cpp src/mds_v2_tracks.cpp src/cd_audio_wav.cpp third_party/tiny_aes/mds_aes.c src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET} chdr-static Threads::Threads)
 if(WIN32)
   target_sources(iso_disc PRIVATE src/wim_archive.cpp src/wim_edit.cpp)
-  target_link_libraries(iso_disc PUBLIC advapi32 ole32 oleaut32 uuid)
+  target_link_libraries(iso_disc PUBLIC advapi32 ole32 oleaut32 uuid bcrypt)
 endif()
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 if(BUILD_TESTING)

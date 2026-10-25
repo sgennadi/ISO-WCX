@@ -22,7 +22,12 @@ void edit_udf(const std::filesystem::path&, const std::vector<ArchiveChange>&, c
 void edit_dynamic_vhd(const std::filesystem::path&,
                       const std::vector<ArchiveChange>&,
                       const EditProgress& = {});
-// Transactional native FAT12/16/32 editor, including dynamic VHD dispatch.
+// Native fixed/fully-allocated VHDX FAT write Preview: physical block
+// mapping, independent full logical readback and atomic source replacement.
+void edit_fixed_vhdx(const std::filesystem::path&,
+                     const std::vector<ArchiveChange>&,
+                     const EditProgress& = {});
+// Transactional native FAT12/16/32 editor, including VHD/VHDX dispatch.
 void edit_fat(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
 // Content-based ISO/Joliet, ISO/UDF Bridge and UDF-only dispatch.
 void edit_optical(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});

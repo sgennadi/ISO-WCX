@@ -154,7 +154,8 @@ jobs:
           python3 tests/test_qemu_vhdx_interop.py \
             "$(command -v qemu-img)" \
             ./build-qemu/virtual_partition_inspect \
-            ./build-qemu/virtual_fat_inspect
+            ./build-qemu/virtual_fat_inspect \
+            ./build-qemu/archive_edit_fixture
           python3 tests/test_qemu_dynamic_vhd_interop.py \
             "$(command -v qemu-img)" \
             ./build-qemu/virtual_partition_inspect \

@@ -1,4 +1,4 @@
-# Native VHDX read-only core (experimental)
+# Native VHDX reader and fixed FAT write Preview (experimental)
 
 Independently authored C++20, with **no libvhdi, Rust runtime, .NET,
 ReFS block cloning, VirtDisk mount, or third-party disk DLL**.
@@ -27,6 +27,34 @@ Examples after compiling:
 The cat operation writes raw file bytes to stdout, not to a path supplied
 by an untrusted image. Check its exit code before accepting extraction.
 
+## FAT12/16/32 edits in fully allocated fixed VHDX (post-v0.19.0 Preview)
+
+The separate native editor in src/vhdx_edit.cpp supports FAT partition
+`partitionN/` add/replace/delete and directory changes in **fixed VHDX**
+images with every payload BAT entry fully present (state 6) and logical
+512-byte sectors. The physical source remains byte-identical until the
+private staged VHDX passes all checks. This feature is only in the
+development Preview, **not** in published Stable v0.19.0.
+
+- Validates both CRC32C header copies, clean active log, fixed File Parameters,
+  every payload BAT entry, uniquely owned non-overlapping physical blocks,
+  metadata/optional/log region ownership and valid FAT partition geometry.
+- Bounded to **1 GiB logical / 2 GiB physical on x64** and
+  **512 MiB logical / physical on Win32**. Requires extra disk space for
+  logical RAW, the FAT transaction clone, and the physical VHDX clone.
+- Edits the extracted logical disk using the existing native FAT writer;
+  only changed 512-byte payload sectors are transferred to a physical clone.
+- Advances header sequence, changes FileWriteGuid and DataWriteGuid via
+  OS cryptographic random generation, rewrites CRC32C on both header copies;
+  BAT, optional regions, metadata and logs stay unchanged.
+- Reopens the staged image with an independent native reader, verifies
+  the complete logical disk against the edited RAW and checks the partition
+  table before atomic replacement. Cancellation/corruption leaves original
+  unchanged, and temporary files are removed.
+- QEMU is invoked by CI as an **independent test-only implementation**
+  to create fixed VHDX and decode a native-edited image back to RAW.
+  QEMU is never loaded or installed as a WCX runtime component.
+
 ## Rejected until separately implemented and tested
 
 - Parent/differencing/snapshot chains and missing parents.
@@ -37,7 +65,8 @@ by an untrusted image. Check its exit code before accepting extraction.
 - Duplicate/overlapping BAT payload physical owners encountered during a
   logical read; unknown optional regions that alias payload/structural bytes;
   overlapping region-table and metadata item extents.
-- Writes, mounts, host devices, filesystem repair, NTFS/exFAT extraction.
+- Writes to dynamic/sparse/partial VHDX, 4096-byte-sector VHDX, mounted/live
+  disks, NTFS/exFAT/ext filesystems; mounts, host devices and filesystem repair.
 - VHDX bytes renamed as .img do not silently fall through as raw IMG.
 
 ## Verification

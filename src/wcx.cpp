@@ -240,7 +240,8 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         std::filesystem::path image(archive);auto ext=image.extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return std::towlower(c);});
         if(ext!=L".iso"&&ext!=L".udf"&&ext!=L".wim"&&
            ext!=L".ima"&&ext!=L".img"&&ext!=L".vfd"&&
-           ext!=L".flp"&&ext!=L".bif"&&ext!=L".raw"&&ext!=L".vhd")return E_NOT_SUPPORTED;
+           ext!=L".flp"&&ext!=L".bif"&&ext!=L".raw"&&
+           ext!=L".vhd"&&ext!=L".vhdx")return E_NOT_SUPPORTED;
         if(!std::filesystem::exists(image))return E_NOT_SUPPORTED;
         std::vector<iso_wcx::ArchiveChange> changes;
         for(auto name:names){
