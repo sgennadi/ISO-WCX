@@ -34,7 +34,26 @@ inline std::optional<MountFolderPlan> plan_mounted_folders(
         if (!change.directory || change.remove || change.path.empty() ||
             change.path.front()=='/' || change.path.back()=='/' ||
             change.path.size()>2048 ||
-            change.path.find("//")!=std::string::npos) return std::nullopt;
+            change.path.find("//")!=std::string::npos ||
+            change.path.find('\\')!=std::string::npos)
+            return std::nullopt;
+        // Double-check traversal and invalid host-path tokens before entering
+        // the Windows mount. Upstream edit_path() remains authoritative.
+        std::size_t offset=0;
+        while(offset<change.path.size()) {
+            const auto end=change.path.find('/',offset);
+            const auto stop=end==std::string::npos?change.path.size():end;
+            const auto segment=change.path.substr(offset,stop-offset);
+            if(segment.empty() || segment=="." || segment==".." ||
+               segment.back()=='.' || segment.back()==' ')
+                return std::nullopt;
+            for(const unsigned char ch:segment)
+                if(ch<32 || ch==127 || ch==':' || ch=='*' || ch=='?' ||
+                   ch=='"' || ch=='<' || ch=='>' || ch=='|')
+                    return std::nullopt;
+            if(end==std::string::npos) break;
+            offset=end+1;
+        }
         if (!paths.insert(change.path).second) return std::nullopt;
         plan.paths.push_back(change.path);
     }
