@@ -12,6 +12,7 @@
 #include <winhttp.h>
 #include <shellapi.h>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -388,6 +389,55 @@ void download_and_offer(HWND dlg,State& state) {
     }
     EnableWindow(GetDlgItem(dlg,id_install),TRUE);
 }
+// The WCX host calls GetPackerCaps while loading its packer associations.
+// Do not block that path on DNS, HTTP, a modal dialog or file downloads.
+// Background checks only run in the real Total Commander process.
+std::atomic_bool background_started{false};
+
+bool has_notified(const std::wstring& tag) {
+    std::array<wchar_t,64> saved{};
+    DWORD bytes=static_cast<DWORD>(saved.size()*sizeof(wchar_t));
+    return RegGetValueW(HKEY_CURRENT_USER,registry_path,L"LastNotifiedTag",
+               RRF_RT_REG_SZ,nullptr,saved.data(),&bytes)==ERROR_SUCCESS &&
+           saved.back()==L'\0' && tag==saved.data();
+}
+void record_notified(const std::wstring& tag) {
+    const DWORD bytes=static_cast<DWORD>((tag.size()+1)*sizeof(wchar_t));
+    write_reg(L"LastNotifiedTag",REG_SZ,tag.c_str(),bytes);
+}
+
+DWORD WINAPI background_worker(LPVOID argument) {
+    HMODULE module=static_cast<HMODULE>(argument);
+    try {
+        const auto tag=latest_release();
+        const auto parsed=update::parse_version(narrow(tag));
+        if(parsed && update::newer(*parsed,installed) && !has_notified(tag) &&
+           read_dword(L"AutoCheck",1)) {
+            // Notify only once per version, and only after a complete
+            // successful HTTPS check. The dialog is not part of archive I/O.
+            record_notified(tag);
+            const auto ru=russian();
+            const auto prompt=std::wstring(tr(ru,
+                L"A newer Stable version of ISO-WCX is available: ",
+                L"Доступна новая Stable-версия ISO-WCX: ")) + tag +
+                tr(ru,
+                L"\nDownload the official ZIP and verify SHA-256?\n"
+                L"Installation will require confirmation in Total Commander.",
+                L"\nСкачать официальный ZIP с проверкой SHA-256?\n"
+                L"Установка потребует подтверждения в Total Commander.");
+            if(MessageBoxW(nullptr,prompt.c_str(),L"ISO-WCX Update",
+                     MB_YESNO|MB_ICONINFORMATION|MB_SETFOREGROUND)==IDYES) {
+                const auto checked=save_verified_archive(tag);
+                open_in_totalcmd(nullptr,checked);
+            }
+        }
+    }catch(const std::exception&) {
+        // Never affect file browsing or host startup on a network failure.
+    }
+    FreeLibraryAndExitThread(module,0);
+    return 0;
+}
+
 INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
     auto* state=reinterpret_cast<State*>(GetWindowLongPtrW(dlg,DWLP_USER));
     switch(msg) {
@@ -441,6 +491,34 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
     return FALSE;
 }
 } // namespace
+
+
+void schedule_update_check() {
+    // With a non-TC host (e.g. the DLL loader smoke test), never start an
+    // update worker or show unsolicited user-interface dialogs.
+    std::array<wchar_t,32768> executable{};
+    const DWORD length=GetModuleFileNameW(nullptr,executable.data(),
+                                          static_cast<DWORD>(executable.size()));
+    if(!length || length>=executable.size() ||
+       !totalcmd_path(std::wstring_view(executable.data(),length)) ||
+       !read_dword(L"AutoCheck",1) || !due_today() ||
+       background_started.exchange(true))
+        return;
+
+    HMODULE module=nullptr;
+    // Keep the WCX DLL resident until its own asynchronous code returns.
+    // Otherwise a user could unload the plugin during an HTTP request.
+    if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            reinterpret_cast<LPCWSTR>(&background_started),&module))
+        return;
+    save_last_check(); // Throttle even failed/offline GitHub checks.
+    HANDLE thread=CreateThread(nullptr,0,background_worker,module,0,nullptr);
+    if(!thread) {
+        FreeLibrary(module);
+        return;
+    }
+    CloseHandle(thread);
+}
 
 void configure_updates(HWND parent,HINSTANCE instance) {
     // Zero-child dialog template; dynamically created controls scale with the
