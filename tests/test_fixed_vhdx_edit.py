@@ -51,6 +51,17 @@ def test_regular(editor: pathlib.Path, reader: pathlib.Path,
     original_raw = logical.read_bytes()
     image = root / f"{kind}-full-fixed.vhdx"
     image.write_bytes(make_image(original_raw, fixed=True, sector=512))
+    if kind == "fat32":
+        # Header B is the active one, with a clean but different valid log
+        # geometry. A correct writer must copy this header, not stale A.
+        special = bytearray(image.read_bytes())
+        newer = bytearray(special[HEADER_B:HEADER_B + 4096])
+        struct.pack_into("<Q", newer, 8, 4)
+        struct.pack_into("<I", newer, 68, 0)
+        struct.pack_into("<Q", newer, 72, 0)
+        seal(newer)
+        special[HEADER_B:HEADER_B + 4096] = newer
+        image.write_bytes(special)
     before = image.read_bytes()
     old_a = header(image, HEADER_A)
     old_b = header(image, HEADER_B)
@@ -78,6 +89,9 @@ def test_regular(editor: pathlib.Path, reader: pathlib.Path,
     assert hdr_a[16:32] != old_a[16:32], "FileWriteGuid not updated"
     assert hdr_a[32:48] != old_a[32:48], "DataWriteGuid not updated"
     assert hdr_a[48:64] == b"\0" * 16, "VHDX log unexpectedly dirty"
+    if kind == "fat32":
+        assert struct.unpack_from("<I", hdr_a, 68)[0] == 0, (
+            "writer copied stale VHDX log geometry, not active header")
     after = image.read_bytes()
     assert len(after) == len(before), "fixed VHDX changed physical length"
     assert after[BAT:BAT + MIB] == block0, "fixed VHDX BAT was modified"
@@ -132,6 +146,14 @@ def test_refusals(editor: pathlib.Path, root: pathlib.Path, raw: bytes):
     one_bad[HEADER_A + 80] = 1
     bad = root / "single-good-header.vhdx"
     bad.write_bytes(one_bad)
+    must_reject(editor, bad, payload, logical, root)
+
+    # A reader may fall back to one surviving region table, but a writer
+    # must require both matching independently checksummed copies.
+    invalid_region = bytearray(src)
+    invalid_region[0x30000 + 127] ^= 1
+    bad = root / "single-valid-region.vhdx"
+    bad.write_bytes(invalid_region)
     must_reject(editor, bad, payload, logical, root)
 
     # Fixed image must not declare unsupported logical 4K sectors.
