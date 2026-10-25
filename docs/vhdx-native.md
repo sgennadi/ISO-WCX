@@ -27,14 +27,14 @@ Examples after compiling:
 The cat operation writes raw file bytes to stdout, not to a path supplied
 by an untrusted image. Check its exit code before accepting extraction.
 
-## FAT12/16/32 edits in fully allocated fixed VHDX (post-v0.19.0 Preview)
+## FAT12/16/32 edits in fully allocated fixed VHDX (v0.20.0 bounded Preview)
 
 The separate native editor in src/vhdx_edit.cpp supports FAT partition
 `partitionN/` add/replace/delete and directory changes in **fixed VHDX**
 images with every payload BAT entry fully present (state 6) and logical
 512-byte sectors. The physical source remains byte-identical until the
-private staged VHDX passes all checks. This feature is only in the
-development Preview, **not** in published Stable v0.19.0.
+private staged VHDX passes all checks. This bounded Preview is **included
+in Stable v0.20.0**; it was absent from Stable v0.19.0.
 
 - Validates both CRC32C header copies, clean active log, fixed File Parameters,
   every payload BAT entry, uniquely owned non-overlapping physical blocks,

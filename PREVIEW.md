@@ -1,8 +1,8 @@
-# ISO-WCX v0.19.0 Stable Core + Native FAT/VHD and UDF Writer Preview
+# ISO-WCX v0.20.0 Stable Core + Fixed VHDX FAT and UDF Writer Preview
 
-Modern Total Commander WCX plugin with a Stable installation channel and explicitly restricted ISO/WIM/UDF editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
+Modern Total Commander WCX plugin with a Stable installation channel and explicitly restricted ISO/WIM/UDF editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2026, MSVC C++26 draft (Windows Win32/x64).
 
-The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.19.0, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
+The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.20.0, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
 
 ## If Total Commander says `File iso.wcx not found!`
 
@@ -31,9 +31,9 @@ This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.
 
 ## Build and verify
 
-Visual Studio 2022 x64:
+Visual Studio 2026 experimental C++26 x64:
 
-    cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+    cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DISO_WCX_CXX_STANDARD=26
     cmake --build build --config Release
     ctest --test-dir build -C Release --output-on-failure
 
@@ -110,7 +110,7 @@ Support statements below describe their respective releases; see **v0.14** at th
 - 2448-byte physical sectors are accepted for unswizzled raw MODE1/MODE2 Form 1 data, including supported MDS v1 subchannel layouts. Extra subchannel bytes are not exposed as ISO data.
 - Does not support `.isz`, `.daa`, `.mdx`, `.chd`, proprietary encryption, mixed audio extraction or all vendor MDF sector patterns. The bchunk and mdf2iso projects are useful test references; their GPL source is not included.
 
-## Fixed VHDX FAT12/16/32 write (development Preview, after v0.19.0)
+## Fixed VHDX FAT12/16/32 write (included as bounded Preview in v0.20.0)
 
 A bounded C++20 editor now targets only complete 512-byte-sector fixed VHDX
 base images. The entire BAT is checked for unique fully allocated payload
@@ -121,7 +121,7 @@ A native independent readback of **every logical byte**, then atomic rename,
 protects the original. Win32 limit: 512 MiB logical/physical. x64 limit:
 1 GiB logical / 2 GiB physical. Dynamic/sparse/4K-sector VHDX, parent
 snapshots, logs requiring replay and non-FAT editing remain read-only.
-This is **not included in v0.19.0 Stable**; wait for all Preview CI checks.
+This bounded Preview **is included in v0.20.0 Stable Core** after the release CI gate; it was absent from Stable v0.19.0.
 QEMU interop checks are test-only, not WCX dependencies.
 
 ## FAT12/16/32 transactional raw-volume writer Preview (v0.19.0)

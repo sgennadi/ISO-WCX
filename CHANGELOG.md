@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.20.0 — 2026-10-25 — VS2026 C++26, fixed VHDX FAT and WIMGAPI safety
+
+- Native WCX Win32/x64 compiled with Visual Studio 2026, MSVC 19.50+
+  and experimental C++26 draft flags, with compiled dialect enforcement.
+- Add bounded FAT12/16/32 `partitionN/` writes in fully mapped fixed VHDX:
+  private physical clone, CRC32C paired headers and full bytewise readback.
+- Guard WIM/ESD enumeration from Win32 WIMGAPI's observed extra 16-byte
+  output; preserve native system-WIMGAPI backend and unchanged WCX ABI.
+- Gate Stable publication on VS2026 C++26 and C++20 compatibility Win32/x64,
+  Linux GCC14/Clang19 C++26, QEMU FAT VHDX/VHD, >4-GiB UDF, sanitizers,
+  WIM, CHD, MDS/MDX and integrity checks.
+- Preserve immutable existing v0.19.0 release and updater opt-out.
+
 ## v0.19.0 — 2026-10-25 — Built-in updater, FAT16/32 and dynamic VHD Preview
 
 - Built-in optional automatic Stable update checks and manual Check now,
