@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <span>
@@ -84,7 +85,8 @@ public:
             const auto size=u64(data_,8+i*8);
             ensure(size <= table_length-offset,"invalid security descriptor size");
             if(size!=0) {
-                ensure(size>=20 && data_[static_cast<std::size_t>(offset)]==1,
+                ensure(size>=20 && data_[static_cast<std::size_t>(offset)]==1 &&
+                       (u16(data_,offset+2)&0x8000u)!=0,
                        "invalid self-relative security descriptor");
             }
             offset+=size;
@@ -140,8 +142,8 @@ public:
                 }
                 const bool directory=(attr&0x10u)!=0;
                 const bool reparse=(attr&0x400u)!=0;
-                ensure((directory && !reparse) || child==0,
-                       "non-directory WIM entry has child offset");
+                ensure((directory && !reparse) ? child!=0 : child==0,
+                       "inconsistent WIM directory child offset");
                 if(directory) ++stats_.directories;
                 ++stats_.entries;
                 occupy(cursor,cursor+length);
@@ -153,7 +155,8 @@ public:
                     const auto stream_name_length=u16(data_,next+36);
                     ensure(stream_length>=38 && stream_length%8==0 &&
                            within(next,stream_length,data_.size()) &&
-                           38u+stream_name_length<=stream_length,
+                           38u+stream_name_length<=stream_length &&
+                           stream_name_length<=510,
                            "invalid WIM alternate-stream entry");
                     utf16(data_,next+38,stream_name_length);
                     occupy(next,next+stream_length);
