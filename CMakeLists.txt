@@ -36,20 +36,11 @@ if(ISO_WCX_CXX_STANDARD STREQUAL "26")
     # language level observable to our code and test fixtures.
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++latest>"
                         "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>")
-    include(CheckCXXSourceCompiles)
-    set(CMAKE_REQUIRED_FLAGS "/std:c++latest /Zc:__cplusplus")
-    check_cxx_source_compiles("
-      #if !defined(_MSVC_LANG) || _MSVC_LANG < 202400L
-      #error MSVC did not enable draft C++26 mode
-      #endif
-      #if __cplusplus < 202400L
-      #error MSVC did not report its latest C++ draft standard
-      #endif
-      int main() { return 0; }" ISO_WCX_HAS_MSVC_CXX26_DRAFT)
-    unset(CMAKE_REQUIRED_FLAGS)
-    if(NOT ISO_WCX_HAS_MSVC_CXX26_DRAFT)
-      message(FATAL_ERROR "MSVC /std:c++latest draft dialect verification failed")
-    endif()
+    # Real build targets are checked instead of CMake's try_compile,
+    # because Visual Studio's CXX20 metadata can override the temporary
+    # /std:c++latest flags in CMake-generated configure checks. The
+    # msvc_cxx26_dialect_probe target checks the effective compiler flags.
+
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-std=c++26>")
   elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
