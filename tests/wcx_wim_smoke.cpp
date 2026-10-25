@@ -134,7 +134,9 @@ int wmain(int argc,wchar_t** argv) {
             std::wstring path=file.wstring();
             OpenW args{};
             args.ArcName=path.data();
+            mark("verify-open-call");
             const HANDLE handle=open(&args);
+            mark("verify-open-return");
             if(!handle||args.OpenResult!=0) {
                 std::cerr<<"WCX cannot open WIM "<<GetLastError()<<"\n";
                 return false;
@@ -142,7 +144,9 @@ int wmain(int argc,wchar_t** argv) {
             std::set<std::wstring> names;
             for(unsigned i=0;i<100000;i++) {
                 HeaderExW header{};
+                if(i<4)mark("verify-read-call");
                 const int status=read(handle,&header);
+                if(i<4)mark("verify-read-return");
                 if(status==10)break;
                 if(status!=0){close(handle);return false;}
                 const std::wstring name(header.FileName);
@@ -156,15 +160,19 @@ int wmain(int argc,wchar_t** argv) {
                     const fs::path output=root/L"extracted"/fs::path(name);
                     fs::create_directories(output.parent_path());
                     std::wstring target=output.wstring();
+                    if(i<12)mark("verify-extract-call");
                     if(process(handle,2,nullptr,target.data())!=0){
                         std::cerr<<"WCX WIM extraction failed for file\n";
                         close(handle);return false;
                     }
+                    if(i<12)mark("verify-extract-return");
                 }else if(process(handle,0,nullptr,nullptr)!=0){
                     close(handle);return false;
                 }
             }
+            mark("verify-close-call");
             close(handle);
+            mark("verify-close-return");
             if(names.count(L"image1")==0 || names.count(L"image2")==0 ||
                names.count(L"image1\\Empty")==0 ||
                names.count(L"image1\\Nested\\folder.bin")==0 ||
