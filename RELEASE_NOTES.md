@@ -1,70 +1,73 @@
-# ISO-WCX v0.17.0 — Stable Core + Transactional UDF Preview
+# ISO-WCX v0.18.0 — Stable Core + Native Floppy VFAT/IMZ Preview
 
-ISO-WCX is a native C++20 Total Commander WCX plugin for Windows x86/x64.
-The installable ZIP contains two self-contained WCX binaries, installer
-metadata and documentation, without external unpackers, disk drivers or
-parser DLLs. The verified core is distributed as Stable; advanced UDF writing
-and some optical/virtual-disk decoding remain explicitly experimental.
+Native C++20 Total Commander WCX plugin for Windows Win32/x64. The downloadable
+ZIP installs two self-contained WCX binaries with Total Commander plugin
+registration and English/Russian documentation. **No external unpackers, extra
+parser DLLs, virtual disk drivers, mounts, or helper EXEs are required.**
 
-## Highlights since v0.16.0
+## Highlights since v0.17.0
 
-- **UDF Type-1 transactional writes (Preview):** create files and empty
-  subdirectories, including nested paths, in one batch; mix creation, bounded
-  in-place replacement and logical deletion; update FE/EFE, ShortAD, FID,
-  bitmap and LVID consistently and commit the entire operation atomically.
-- **UDF reclaimed space (Preview):** scrub and release exclusively owned
-  deleted-file FE and recorded ShortAD sectors, reject stale/aliased references,
-  and reuse that space on a later transaction. Reuse safe deleted FID slots
-  to prevent unbounded directory growth across repeated add/delete cycles.
-- **UDF files larger than 4 GiB:** multi-ShortAD data allocation and
-  independent 7-Zip streaming SHA-256 readback; bounded extension into the
-  final already allocated ShortAD sector with strict overflow rejection.
-- **Faster UDF staging:** optional same-filesystem COW reflink on Linux and
-  aligned native block cloning on supported Windows filesystems. Unsupported
-  filesystems automatically fall back to the existing sparse buffered copy.
-  All paths retain full staged verification and atomic replacement. Benchmark
-  results are environment-dependent; no guaranteed speedup is claimed.
-- **CHD v5 native CDDA extraction:** audio-only and mixed-mode CHD tracks
-  available as WAV (RIFF) or RF64 for audio beyond 4 GiB, decoded within
-  the plugin. Parallel CHD hunk reads are synchronized. Full >4-GiB RF64
-  output was checked with an independent streaming SHA-256 test.
-- **MDS v2 / MDX Preview:** native metadata decode and supported plain or
-  compressed data-track extraction, with real-image interoperability tests.
+- **IMA/IMG/VFD/FLP floppy browsing:** native FAT12/16/32 superfloppy detection
+  when the filesystem boot sector starts at byte zero, without requiring
+  an MBR/GPT partition table. Existing partitioned HDD IMG/RAW support remains.
+- **Transactional FAT12 write Preview:** add/replace/delete files; create nested
+  directories and delete directory trees. Uses DOS 8.3 aliases with collision
+  checks and long VFAT names encoded as strict UTF-8/UTF-16 (including Cyrillic,
+  Hebrew and supplementary Unicode characters). Handles long-name directory
+  slots spanning FAT directory-cluster boundaries. Changes are staged and
+  independently verified before atomic replacement. Invalid FAT mirrors,
+  damaged allocation chains, unsupported geometries and unsafe paths are
+  rejected; edit backup copies of valuable images.
+- **WinImage IMZ reading:** integrated single-file ZIP Stored/Deflate decoder
+  uses statically linked zlib. Verifies ZIP headers, CRC32 and size bounds;
+  rejects encrypted archives, multi-member archives, ZIP64 and malformed data.
+  FAT12/16/32 files inside valid IMZ are browsable and extractable without a
+  temporary decompressed disk image. IMZ writing is **not supported**.
+- **BIF boot images:** valid FAT-backed BIF extracts browse as filesystems;
+  opaque BIOS/El Torito boot data is exposed byte-for-byte as
+  `boot-image.bin` and remains read-only.
+- **Installer associations:** IMA, VFD, FLP, BIF and IMZ are registered along
+  with existing ISO/UDF, IMG/RAW, VHD/VHDX, WIM/ESD/SWM and optical formats.
 
-## Validation
+## Quality gates
 
-Release gates cover Visual Studio 2022 Win32 and x64 WCX loading/extraction
-and CTest, Linux C++20 CTest, Clang ASan/UBSan, independent mkudffs/udfinfo/
-7-Zip UDF interoperability, >4-GiB UDF write and complete streaming readback,
-and SHA256-verified installable ZIP packaging. Dedicated Preview CI adds
-C++26 compiler compatibility, CHD RF64, VHDX/QEMU and MDS/MDX interop.
+- Visual Studio 2022 **Win32 and x64** builds, WCX DLL loading/extraction and
+  comprehensive CTest regression suite.
+- Linux C++20 CTest, Clang ASan/UBSan checks.
+- Independent mkudffs/udfinfo/7-Zip UDF interoperability, full >4-GiB UDF
+  mutation with SHA256 readback and UDF staging parity/rollback tests.
+- Strict IMA/IMG/BIF/IMZ regression fixtures: Unicode VFAT, 8.3 alias
+  collisions, nested directories, valid and corrupt ZIP/CRC32, truncated
+  metadata and rollback behavior.
+- SHA256-checked ZIP packaging: only `ISO-WCX.wcx` and
+  `ISO-WCX.wcx64` binaries plus text documentation and plugin metadata.
+
+The release is only published by the automated workflow after all required
+validation jobs succeed.
 
 ## Install
 
-Download **ISO-WCX-v0.17.0.zip** from this release and open it directly in
-Total Commander. Accept the plugin installation prompt. Keep
-`ISO-WCX.wcx` and `ISO-WCX.wcx64` together and check `SHA256SUMS.txt`
-when verifying a downloaded ZIP.
-
-If an old missing `iso.wcx` registration persists, remove only that obsolete
-association in Total Commander packer configuration and associate the new
-`ISO-WCX.wcx`. Installation instructions are included in English/Russian.
+Download **ISO-WCX-v0.18.0.zip** from this release and open it directly in
+Total Commander. Accept the `pluginst.inf` installation prompt. Keep both WCX
+files together. To verify integrity, use the accompanying `SHA256SUMS.txt`.
+See `INSTALL_EN.txt` or `INSTALL_RU.txt` for repairing old associations.
 
 ## Write safety and limitations
 
-UDF writing is still **experimental**, not a universal UDF editor. It applies
-only to validated nonhybrid UDF-only images using writable physical Type-1
-2048-byte partitions. Unsupported: ISO/UDF Bridge rebuilding; metadata,
-VAT and sparable partition writes; unrecorded/sparse AED chain creation;
-arbitrary hard links, symlinks and directory deletion; rebuilding bootable
-media; mixed delete-and-recreate of the same path. Directory/FID allocation
-and known extents are bounded; an unsupported image is refused rather than
-modified. Disk space is required for a sibling staging file when a COW clone
-is unavailable.
+This is a Stable distribution of the verified core, **not** a declaration that
+all filesystem writers are mature or fully feature-complete.
 
-WIM/ESD/SWM, optical formats and NTFS/ext4 remain subject to the documented
-read/write limits; password-protected optical image data tracks remain
-unsupported. GUI tests in Total Commander and broader real optical media
-coverage remain outstanding. Edit backup copies of important images.
+FAT12 writes require an independently validated standalone, exact-length raw
+image (up to 32 MiB); unsupported FAT metadata and unsafe paths are rejected.
+**FAT16/32, IMZ, opaque BIF, partitioned HDD filesystems, ESD and SWM remain
+read-only.** Real-world floppy/boot-image compatibility still benefits from
+manual validation beyond the synthetic CI corpus.
 
-The v0.16.0 tag and published assets are preserved unchanged.
+UDF Type-1 editing remains an experimental, bounded implementation for
+compatible UDF-only physical 2048-byte partitions. It supports transactional
+addition/deletion and allocation only for layouts validated by the writer.
+UDF metadata/VAT/sparable partitions, arbitrary ISO/UDF Bridge rebuilding and
+general bootable media rewriting are not supported. Existing WIM, CHD, MDX,
+NTFS/ext and ISO/Joliet limitations are documented in README.md and PREVIEW.md.
+
+This release does not modify or replace previous Stable tags or assets.
