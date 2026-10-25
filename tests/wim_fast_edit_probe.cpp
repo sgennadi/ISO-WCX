@@ -64,6 +64,15 @@ int main() {
         make_fixture(file);
         {
             std::fstream io(file,std::ios::binary|std::ios::in|std::ios::out);
+            io.seekp(336+7);
+            const char flags=static_cast<char>(0x0a); // metadata + spanned
+            io.write(&flags,1);
+        }
+        require(!probe_fast_edit_metadata(file).header_and_lookup_valid,
+                "spanned/unknown metadata resource flags accepted");
+        make_fixture(file);
+        {
+            std::fstream io(file,std::ios::binary|std::ios::in|std::ios::out);
             io.seekp(48+8);
             std::array<std::uint8_t,8> corrupt{};
             le64(corrupt.data(),0xfffffffffffffff0ull);
