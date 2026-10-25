@@ -30,7 +30,7 @@ int main(int argc,char** argv) {
            size>4u*1024u*1024u ||
            size>std::numeric_limits<std::size_t>::max())
             throw std::runtime_error("invalid bounded read length");
-        iso_wcx::VirtualDiskReader disk(std::filesystem::path(argv[1]));
+        iso_wcx::VirtualDiskReader disk{std::filesystem::path(argv[1])};
         if(disk.format()!=iso_wcx::VirtualDiskFormat::dynamic_vhd)
             throw std::runtime_error("fixture requires a dynamic VHD");
         const auto bytes=disk.read(offset,static_cast<std::size_t>(size));
