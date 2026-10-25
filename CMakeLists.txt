@@ -235,6 +235,12 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
   target_link_libraries(ntfs_inspect PRIVATE iso_virtual_fat)
 endif()
 if(BUILD_TESTING)
+  add_executable(update_policy_tests tests/update_policy.cpp)
+  target_include_directories(update_policy_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME native_updater_release_metadata_validation COMMAND update_policy_tests)
+endif()
+
+if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME fat12_fat16_fat32_virtual_disk_filesystems
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_virtual_fat.py"
