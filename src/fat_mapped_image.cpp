@@ -290,10 +290,47 @@ void FatMappedImage::replace_source() {
             std::filesystem::last_write_time(source_path_)==original_write_time_,
             "original FAT image was modified during editing; refusing overwrite");
 #ifdef _WIN32
+    const auto attributes=GetFileAttributesW(source_path_.c_str());
+    require(attributes!=INVALID_FILE_ATTRIBUTES &&
+            !(attributes&FILE_ATTRIBUTE_READONLY),
+            "FAT source is read-only or its attributes are inaccessible");
+    // Same-directory clone-and-rename would otherwise replace a file's
+    // custom access restrictions with whatever permissions are inherited by
+    // our new temporary file. Copy the original DACL before replacement.
+    DWORD required=0;
+    (void)GetFileSecurityW(source_path_.c_str(),DACL_SECURITY_INFORMATION,
+                           nullptr,0,&required);
+    require(GetLastError()==ERROR_INSUFFICIENT_BUFFER &&
+            required && required<=1024u*1024u,
+            "cannot inspect original FAT file permissions");
+    std::vector<BYTE> security(required);
+    require(GetFileSecurityW(source_path_.c_str(),DACL_SECURITY_INFORMATION,
+               reinterpret_cast<PSECURITY_DESCRIPTOR>(security.data()),
+               required,&required)!=FALSE,
+            "cannot read original FAT file DACL");
+    require(SetFileSecurityW(stage_path_.c_str(),DACL_SECURITY_INFORMATION,
+               reinterpret_cast<PSECURITY_DESCRIPTOR>(security.data()))!=FALSE,
+            "cannot preserve original FAT file DACL on staging copy");
+    const auto portable_attributes=attributes &
+        (FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM|FILE_ATTRIBUTE_ARCHIVE|
+         FILE_ATTRIBUTE_NOT_CONTENT_INDEXED);
+    require(SetFileAttributesW(stage_path_.c_str(),
+               portable_attributes ? portable_attributes : FILE_ATTRIBUTE_NORMAL)!=FALSE,
+            "cannot preserve original FAT file attributes");
     require(MoveFileExW(stage_path_.c_str(),source_path_.c_str(),
             MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,
             "cannot atomically replace FAT image");
 #else
+    // A private staging file starts 0600 to protect image contents. Preserve
+    // the original POSIX mode *only after* edits are flushed and verified.
+    const auto original_permissions=std::filesystem::status(source_path_).permissions();
+    constexpr auto write_bits=std::filesystem::perms::owner_write|
+                              std::filesystem::perms::group_write|
+                              std::filesystem::perms::others_write;
+    require((original_permissions&write_bits)!=std::filesystem::perms::none,
+            "FAT source has no write permission bits");
+    std::filesystem::permissions(stage_path_,original_permissions,
+                                 std::filesystem::perm_options::replace);
     std::filesystem::rename(stage_path_,source_path_);
     // The rename is atomic even without this durability fsync. Do not report
     // a successful durable commit until the parent directory metadata syncs.
