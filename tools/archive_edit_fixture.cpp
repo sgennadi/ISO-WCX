@@ -31,7 +31,8 @@ static void route_edit(const std::filesystem::path& image,
     auto ext = image.extension().string();
     for (auto& c : ext) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
     if (ext == ".ima" || ext == ".img" || ext == ".bif" ||
-        ext == ".vfd" || ext == ".flp" || ext == ".raw" || ext == ".vhd")
+        ext == ".vfd" || ext == ".flp" || ext == ".raw" ||
+        ext == ".vhd" || ext == ".vhdx")
         iso_wcx::edit_fat(image, changes, progress);
     else iso_wcx::edit_optical(image, changes, progress);
 }

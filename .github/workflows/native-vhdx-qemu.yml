@@ -5,6 +5,9 @@ on:
     paths:
       - 'src/virtual_disk.cpp'
       - 'src/vhdx_reader.cpp'
+      - 'src/vhdx_edit.cpp'
+      - 'src/floppy_edit.cpp'
+      - 'tests/test_fixed_vhdx_edit.py'
       - 'src/dynamic_vhd_reader.cpp'
       - 'include/iso_wcx/virtual_disk.hpp'
       - 'include/iso_wcx/vhdx_reader.hpp'
@@ -32,14 +35,15 @@ jobs:
           qemu-img --version
       - name: Configure native CLI without disk DLLs
         run: cmake -S . -B build-qemu -DCMAKE_BUILD_TYPE=Release
-      - name: Build native read-only tools
+      - name: Build native readers and bounded FAT writers
         run: cmake --build build-qemu --target virtual_partition_inspect virtual_fat_inspect dynamic_vhd_read_fixture archive_edit_fixture --parallel 2
       - name: Verify FAT extraction from QEMU-created VHDX
         run: |
           python3 tests/test_qemu_vhdx_interop.py \
             "$(command -v qemu-img)" \
             ./build-qemu/virtual_partition_inspect \
-            ./build-qemu/virtual_fat_inspect
+            ./build-qemu/virtual_fat_inspect \
+            ./build-qemu/archive_edit_fixture
       - name: Verify FAT extraction from QEMU-created dynamic VHD
         run: |
           python3 tests/test_qemu_dynamic_vhd_interop.py \

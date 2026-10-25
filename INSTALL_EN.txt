@@ -31,6 +31,12 @@ restart TC. The prior v0.18.0 Stable release did not contain this
 updater. After upgrading, reinstall the WCX association if TC has
 cached the older plugin capability flags and Configure... is absent.
 
+Development Preview after v0.19.0: native FAT12/16/32 editing is being
+added for fully allocated fixed VHDX with 512-byte logical sectors.
+All writes are staged and reverified; other VHDX stays read-only.
+This support is NOT included in the published v0.19.0 Stable ZIP.
+See PREVIEW.md and docs/vhdx-native.md for strict limitations.
+
 Preview floppy support: IMA/IMG/VFD/FLP raw images with no partition map
 open directly into the FAT12/16/32 root. BIF images open as FAT when valid;
 otherwise their original bytes appear as boot-image.bin (read-only).

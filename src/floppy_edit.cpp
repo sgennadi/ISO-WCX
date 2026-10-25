@@ -690,8 +690,9 @@ void edit_fat(const std::filesystem::path& image,
               const EditProgress& progress) {
     const auto ext=upper(image.extension().string());
     check(ext==".IMA" || ext==".IMG" || ext==".BIF" ||
-          ext==".VFD" || ext==".FLP" || ext==".RAW" || ext==".VHD",
-          "FAT writer only accepts raw images and validated base VHD");
+          ext==".VFD" || ext==".FLP" || ext==".RAW" ||
+          ext==".VHD" || ext==".VHDX",
+          "FAT writer only accepts raw images and validated VHD/VHDX");
     if(changes.empty())return;
     if(ext==".VHD") {
         bool is_dynamic_vhd=false;
@@ -706,6 +707,12 @@ void edit_fat(const std::filesystem::path& image,
             edit_dynamic_vhd(image,changes,progress);
             return;
         }
+    }
+    if(ext==".VHDX") {
+        // Do not hold a format-probe stream across the Windows atomic commit.
+        // The writer itself strictly rejects sparse/partial/4K/differencing.
+        edit_fixed_vhdx(image,changes,progress);
+        return;
     }
     std::uint64_t volume_start=0,volume_length=0;
     std::vector<ArchiveChange> ordered=changes;

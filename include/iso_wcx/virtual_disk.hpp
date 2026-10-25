@@ -29,6 +29,9 @@ public:
     [[nodiscard]] const DynamicVhdReader* dynamic_vhd_layout() const noexcept {
         return dynamic_vhd_.get();
     }
+    [[nodiscard]] VhdxReader* vhdx_layout() noexcept {
+        return vhdx_.get();
+    }
 
     // Logical bytes: fixed VHD footer, dynamic VHD BAT/metadata, and VHDX
     // allocation metadata are hidden.

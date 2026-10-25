@@ -29,6 +29,17 @@ For installation see [INSTALL_EN.txt](INSTALL_EN.txt) and
 [INSTALL_RU.txt](INSTALL_RU.txt); [PREVIEW.md](PREVIEW.md) describes
 experimental support. See [v0.19.0 release notes](RELEASE_NOTES.md).
 
+## Upcoming VHDX fixed FAT write Preview (not in v0.19.0)
+
+Development branch supports verified FAT12/16/32 `partitionN/` changes in
+**fully allocated fixed VHDX** images with 512-byte logical sectors only.
+It uses private logical RAW editing, sector-precise physical VHDX staging,
+CRC32C-updated dual headers, complete independent logical readback, and atomic
+replace. Limits: 1 GiB logical and 2 GiB physical on x64; 512 MiB each on
+Win32. Dynamic/sparse VHDX, 4K-sector VHDX, differencing/dirty-log images and
+NTFS/exFAT/ext writes remain strictly read-only. No additional runtime DLLs,
+helper executables or mounts. See [VHDX implementation](docs/vhdx-native.md).
+
 ## Built-in update checker (included in v0.19.0)
 
 ISO-WCX v0.19.0 includes an in-process updater.

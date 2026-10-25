@@ -186,6 +186,8 @@ void VhdxReader::parse() {
               one->contents!=two->contents),
             "VHDX header copies conflict at identical sequence");
     const Header& active=(one && (!two || one->seq>=two->seq))?*one:*two;
+    paired_headers_valid_ = bool(one && two);
+    active_header_sequence_ = active.seq;
     require(!active.log_dirty,"VHDX log replay required; clean base images only");
     if(active.log_length || active.log_offset) {
         require(active.log_length && active.log_offset>=MiB &&
@@ -267,6 +269,7 @@ void VhdxReader::parse() {
             const auto params_flags=u32(val.data()+4);
             require((params_flags&~3u)==0 && !(params_flags&2u),
                     "VHDX has unsupported file parameter flags or parent");
+            fixed_file_parameters_ = (params_flags&1u)!=0;
         } else if(id==SizeId) {
             require(!virtual_size && len==8,"duplicate/corrupt VHDX Virtual Disk Size");
             const auto val=file_read(metadata_offset_+offset,len);
@@ -374,6 +377,65 @@ std::vector<std::uint8_t> VhdxReader::read(
         done+=count;
     }
     return out;
+}
+
+VhdxFixedEditLayout VhdxReader::fully_mapped_fat_edit_layout(
+        std::uint64_t maximum_logical_bytes,
+        std::uint64_t maximum_physical_bytes) {
+    require(paired_headers_valid_ && fixed_file_parameters_ &&
+            sector_size_==512 && logical_size_<=maximum_logical_bytes &&
+            file_size_<=maximum_physical_bytes &&
+            active_header_sequence_<=UINT64_MAX-2,
+            "VHDX write Preview requires bounded fixed 512-byte-sector image "
+            "with two valid clean headers");
+    const auto blocks=(logical_size_+block_size_-1)/block_size_;
+    require(blocks>0 && blocks<=4096,
+            "too many VHDX payload blocks for bounded fixed write");
+    VhdxFixedEditLayout layout{block_size_,logical_size_,
+                               active_header_sequence_,{}};
+    layout.physical_blocks.reserve(static_cast<std::size_t>(blocks));
+    std::map<std::uint64_t,std::uint64_t> physical_owners;
+    for(std::uint64_t block=0;block<blocks;++block) {
+        // All bitmap slots must be unused on a fixed, fully-present disk.
+        // Index immediately preceding each new chunk is its bitmap slot.
+        if(block && (block%chunk_ratio_)==0) {
+            const auto bitmap_index=block+block/chunk_ratio_-1;
+            const auto bitmap=file_read(bat_offset_+bitmap_index*8,8);
+            require(u64(bitmap.data())==0,
+                    "fixed VHDX has an unsupported sector-bitmap BAT entry");
+        }
+        const auto bat_index=block+block/chunk_ratio_;
+        require(bat_index<bat_length_/8,
+                "fixed VHDX BAT entry lies beyond allocated table");
+        const auto item=file_read(bat_offset_+bat_index*8,8);
+        const auto entry=u64(item.data());
+        require((entry&0xffff8u)==0 && (entry&7u)==6u,
+                "fixed VHDX payload BAT is missing or not fully present");
+        const auto physical=(entry>>20)*MiB;
+        require(physical>=MiB && physical<=file_size_ &&
+                block_size_<=file_size_-physical &&
+                !overlap(physical,block_size_,0,MiB) &&
+                !overlap(physical,block_size_,bat_offset_,bat_length_) &&
+                !overlap(physical,block_size_,metadata_offset_,metadata_length_) &&
+                (!log_length_ ||
+                 !overlap(physical,block_size_,log_offset_,log_length_)),
+                "fixed VHDX payload aliases metadata or goes out of bounds");
+        for(const auto& region:optional_regions_)
+            require(!overlap(physical,block_size_,region.offset,region.size),
+                    "fixed VHDX payload aliases optional region");
+        const auto next=physical_owners.lower_bound(physical);
+        if(next!=physical_owners.end())
+            require(!overlap(physical,block_size_,next->first,block_size_),
+                    "fixed VHDX BAT contains aliased/overlapping payload");
+        if(next!=physical_owners.begin()) {
+            const auto prev=std::prev(next);
+            require(!overlap(physical,block_size_,prev->first,block_size_),
+                    "fixed VHDX BAT contains aliased/overlapping payload");
+        }
+        physical_owners.emplace(physical,block);
+        layout.physical_blocks.push_back(physical);
+    }
+    return layout;
 }
 
 } // namespace iso_wcx
