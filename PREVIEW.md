@@ -1,8 +1,8 @@
-# ISO-WCX v0.17.0 Stable Core + Transactional UDF Writer Preview
+# ISO-WCX v0.19.0 Stable Core + Native FAT/VHD and UDF Writer Preview
 
 Modern Total Commander WCX plugin with a Stable installation channel and explicitly restricted ISO/WIM/UDF editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2022 (Windows x86/x64).
 
-The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.18.0, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
+The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.19.0, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
 
 ## If Total Commander says `File iso.wcx not found!`
 
@@ -55,7 +55,7 @@ CI builds both Windows WCX architectures, runs parser and extraction tests, and 
 
 ## Native HDD images inside WCX (v0.13 preview)
 
-The plugin opens partitioned raw HDD IMG/RAW, fixed/dynamic VHD and clean fixed/dynamic base VHDX through native C++20 MBR/GPT and filesystem readers. Read-only FAT12/16/32, exFAT and experimental ext2/3/4 and NTFS subsets appear under partition1/, partition2/, etc. NTFS covers basic MFT and $I30 directory indexes, Unicode names and ordinary resident/fragmented/sparse uncompressed files, with deliberate feature refusals. Extraction uses the same staging, rollback and progress controls as ISO/UDF. Unsupported/unknown partitions are skipped. Dynamic VHD **base images** now have a native sparse BAT/bitmap reader; in PR #56 selected FAT12/16/32 partitions have bounded **transactional write Preview** (max 1 GiB logical x64 / 512 MiB Win32, sufficient disk staging space); differencing VHD parents, VHDX parent/dirty-log images, complex NTFS attribute-list/compression/encryption layouts and journal recovery are not supported. No external tools, drivers or disk-parser DLLs are needed.
+The plugin opens partitioned raw HDD IMG/RAW, fixed/dynamic VHD and clean fixed/dynamic base VHDX through native C++20 MBR/GPT and filesystem readers. Read-only FAT12/16/32, exFAT and experimental ext2/3/4 and NTFS subsets appear under partition1/, partition2/, etc. NTFS covers basic MFT and $I30 directory indexes, Unicode names and ordinary resident/fragmented/sparse uncompressed files, with deliberate feature refusals. Extraction uses the same staging, rollback and progress controls as ISO/UDF. Unsupported/unknown partitions are skipped. Dynamic VHD **base images** now have a native sparse BAT/bitmap reader; in v0.19.0 selected FAT12/16/32 partitions have bounded **transactional write Preview** (max 1 GiB logical x64 / 512 MiB Win32, sufficient disk staging space); differencing VHD parents, VHDX parent/dirty-log images, complex NTFS attribute-list/compression/encryption layouts and journal recovery are not supported. No external tools, drivers or disk-parser DLLs are needed.
 
 ## Experimental native MDS v2 / MDX archive handler
 
@@ -110,7 +110,7 @@ Support statements below describe their respective releases; see **v0.14** at th
 - 2448-byte physical sectors are accepted for unswizzled raw MODE1/MODE2 Form 1 data, including supported MDS v1 subchannel layouts. Extra subchannel bytes are not exposed as ISO data.
 - Does not support `.isz`, `.daa`, `.mdx`, `.chd`, proprietary encryption, mixed audio extraction or all vendor MDF sector patterns. The bchunk and mdf2iso projects are useful test references; their GPL source is not included.
 
-## FAT16/FAT32 transactional raw-volume writer Preview (post-v0.18.0)
+## FAT12/16/32 transactional raw-volume writer Preview (v0.19.0)
 
 - Shared FAT12/16/32 in-process writer with UTF-8/UTF-16 VFAT, checked DOS 8.3
   aliases, file replacement/addition/removal and recursive folder changes.
@@ -127,12 +127,14 @@ Support statements below describe their respective releases; see **v0.14** at th
   inside validated MBR/GPT RAW/IMG and **fixed VHD** are writable. Only one
   partition may be edited per transaction. Original MBR/GPT, unrelated
   partitions and the fixed VHD footer are preserved byte-for-byte.
-- Dynamic and differencing VHD, all VHDX, nonmirrored FAT32, damaged FAT,
+- Dynamic base VHD FAT partition writes are available only through a distinct
+  full logical-image + physical-clone Preview (1 GiB x64 / 512 MiB Win32).
+  Differencing VHD and all VHDX, nonmirrored FAT32, damaged FAT,
   encrypted/compressed disks and oversized images remain read-only. Changes
   stage, sync, independently re-parse and commit atomically.
 - Independent tests verify Unicode names, root and directory allocation,
   FAT mirrors, high-word cluster indexes, FSInfo bookkeeping and unchanged
-  originals after failed edits. Stable v0.18.0 does not include this preview.
+  originals after failed edits. The v0.19.0 Stable distribution includes this bounded Preview.
 
 ## Native FAT12 VFAT + WinImage IMZ preview
 

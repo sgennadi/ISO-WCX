@@ -50,7 +50,7 @@ correct checksums and BAT extents, sector bitmap ownership and sparse zero
 fill. It rejects corrupted/overlapping blocks and differencing VHD parents.
 The WCX reader does not mount disks or enumerate physical drives.
 Transactional FAT **writes** remain supported in RAW/IMG and fixed VHD.
-A separate **development Preview (PR #56)** now adds controlled edits to
+The bounded **v0.19.0 FAT Preview writer** adds controlled edits to
 validated dynamic VHD base images, via a logical raw clone, physical VHD
 copy-on-write, BAT/bitmap patching and complete logical readback before
 atomic replacement. This initial implementation is capped at **1 GiB

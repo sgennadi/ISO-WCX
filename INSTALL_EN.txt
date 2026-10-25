@@ -1,11 +1,11 @@
-ISO-WCX v0.18.0 Stable Core + FAT12 VFAT/IMZ Preview - Total Commander WCX plugin
+ISO-WCX v0.19.0 Stable Core + FAT/VHD Write Preview and Updater - Total Commander WCX plugin
 ================================================================
 
 Installation (no additional tools)
 ----------------------------------
 1. Open https://github.com/sgennadi/ISO-WCX/releases/latest and download
-   ISO-WCX-v0.18.0.zip from the published Stable release.
-2. Open ISO-WCX-v0.18.0.zip in Total Commander. Confirm the plugin
+   ISO-WCX-v0.19.0.zip from the published Stable release.
+2. Open ISO-WCX-v0.19.0.zip in Total Commander. Confirm the plugin
    installation requested by pluginst.inf.
 3. Verify the plugin directory contains ISO-WCX.wcx and ISO-WCX.wcx64.
    These are the 32-bit and 64-bit versions of the same WCX plugin.
@@ -16,7 +16,7 @@ disk mount, driver, or standalone disk extraction program is necessary.
 The WCX binaries include ISO/UDF, supported virtual-disk readers and
 native ISZ/DAA optical compressed-stream decoding.
 
-Updater (available in newer Preview builds after v0.18.0)
+Updater (included in v0.19.0 Stable Core)
 ------------------------------------------------------------
 In Files > Pack select an ISO-WCX extension and click Configure...
 to reach Update Settings. Manual Check now always works.
@@ -27,14 +27,14 @@ When a newer Stable release is found, the updater can download the
 official ZIP and SHA256SUMS.txt over HTTPS, verify SHA256 with Windows
 BCrypt and offer to open the checked ZIP in Total Commander.
 It does not replace the loaded WCX DLL; confirm installation and
-restart TC. The initial v0.18.0 Stable release does not contain this
+restart TC. The prior v0.18.0 Stable release did not contain this
 updater. After upgrading, reinstall the WCX association if TC has
 cached the older plugin capability flags and Configure... is absent.
 
 Preview floppy support: IMA/IMG/VFD/FLP raw images with no partition map
 open directly into the FAT12/16/32 root. BIF images open as FAT when valid;
 otherwise their original bytes appear as boot-image.bin (read-only).
-Preview builds after v0.18.0 add FAT12/FAT16/FAT32 file and folder
+Stable v0.19.0 includes Preview FAT12/FAT16/FAT32 file and folder
 editing for exact-size raw superfloppies and validated FAT `partitionN/`
 inside RAW/IMG or fixed VHD. Demand-paged staged writes support source
 images up to 64 GiB on x64 (512 MiB Win32). Unicode VFAT creation/replacement/deletion (UTF-8/UTF-16),
@@ -42,14 +42,14 @@ checked 8.3 aliases and staged atomic commits are built in. FAT16 fixed
 roots and FAT32 FSInfo + mirrored FATs + backup boot sectors are checked.
 MBR/GPT FAT volumes can be modified only using the exact path prefix
 `partition1/`, `partition2/`, etc. No batch may span two partitions.
-In development Preview #56, **clean dynamic base VHD v1** can also
+In v0.19.0 Preview, **clean dynamic base VHD v1** can also
 be edited at selected FAT12/16/32 partitionN/ paths. It stages a complete
 logical disk, checks FAT changes, updates only modified sectors in an
 atomic physical VHD clone and independently verifies all logical bytes.
 Maximum logical size: 1 GiB (x64) / 512 MiB (Win32). Reserve sufficient
 scratch disk space for several copies. Differencing/snapshot VHD, all VHDX,
-oversized or damaged FAT, and opaque BIF remain read-only. This is NOT
-included in published Stable v0.18.0. The original image and unrelated partitions are never
+oversized or damaged FAT, and opaque BIF remain read-only. This writer
+is included as an experimental feature in Stable v0.19.0. The original image and unrelated partitions are never
 modified in place; verify adequate free disk space for a full staged clone. Original Stable v0.18.0 had FAT12 writes only. WinImage IMZ is browse/extract-only:
 one ZIP stored/deflated floppy image is decompressed in memory with CRC32
 validation and a strict 32 MiB image-size limit, without external tools.
@@ -58,8 +58,8 @@ The integrated HDD reader supports MBR/GPT partitions containing FAT12/16/32,
 exFAT and experimental subsets of ext2/3/4 and NTFS in raw IMG/RAW, fixed
 VHD and clean base fixed/dynamic VHDX. Files appear under partition1/, etc.
 Modern ext4 optional features and complex NTFS layouts (attribute lists,
-compressed/encrypted files, journal recovery) are not supported. All virtual
-HDD filesystem browsing is strictly read-only.
+compressed/encrypted files, journal recovery) are not supported. Other unsupported virtual
+HDD filesystems remain read-only.
 
 Fixing an old broken ISO.WCX association
 ----------------------------------------

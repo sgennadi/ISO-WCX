@@ -1,73 +1,62 @@
-# ISO-WCX v0.18.0 — Stable Core + Native Floppy VFAT/IMZ Preview
+# ISO-WCX v0.19.0 — Stable Core + Native FAT/VHD Writer Preview and Built-in Updater
 
-Native C++20 Total Commander WCX plugin for Windows Win32/x64. The downloadable
-ZIP installs two self-contained WCX binaries with Total Commander plugin
-registration and English/Russian documentation. **No external unpackers, extra
-parser DLLs, virtual disk drivers, mounts, or helper EXEs are required.**
+Native C++20 Total Commander WCX plugin for Windows x86 and x64. The installable
+ZIP contains only ISO-WCX.wcx, ISO-WCX.wcx64, pluginst.inf and human-readable
+documentation. No helper EXE, external parser DLL, mount, Hyper-V driver,
+libvhdi, Python, Rust or Go runtime is needed by Total Commander.
 
-## Highlights since v0.17.0
+## Changes since v0.18.0
 
-- **IMA/IMG/VFD/FLP floppy browsing:** native FAT12/16/32 superfloppy detection
-  when the filesystem boot sector starts at byte zero, without requiring
-  an MBR/GPT partition table. Existing partitioned HDD IMG/RAW support remains.
-- **Transactional FAT12 write Preview:** add/replace/delete files; create nested
-  directories and delete directory trees. Uses DOS 8.3 aliases with collision
-  checks and long VFAT names encoded as strict UTF-8/UTF-16 (including Cyrillic,
-  Hebrew and supplementary Unicode characters). Handles long-name directory
-  slots spanning FAT directory-cluster boundaries. Changes are staged and
-  independently verified before atomic replacement. Invalid FAT mirrors,
-  damaged allocation chains, unsupported geometries and unsafe paths are
-  rejected; edit backup copies of valuable images.
-- **WinImage IMZ reading:** integrated single-file ZIP Stored/Deflate decoder
-  uses statically linked zlib. Verifies ZIP headers, CRC32 and size bounds;
-  rejects encrypted archives, multi-member archives, ZIP64 and malformed data.
-  FAT12/16/32 files inside valid IMZ are browsable and extractable without a
-  temporary decompressed disk image. IMZ writing is **not supported**.
-- **BIF boot images:** valid FAT-backed BIF extracts browse as filesystems;
-  opaque BIOS/El Torito boot data is exposed byte-for-byte as
-  `boot-image.bin` and remains read-only.
-- **Installer associations:** IMA, VFD, FLP, BIF and IMZ are registered along
-  with existing ISO/UDF, IMG/RAW, VHD/VHDX, WIM/ESD/SWM and optical formats.
+- **Built-in update checker:** Total Commander WCX ConfigurePacker interface,
+  manual Check now, nonblocking automatic Stable checks at most daily,
+  persistent Do not check for updates automatically option in EN/RU.
+  Downloads are obtained over HTTPS and verified with SHA-256 before a
+  user-confirmed Total Commander installation. Never overwrites a loaded DLL.
+  The previous v0.18.0 release did not contain the updater.
+- **FAT12/16/32 transactional editing (Preview):** UTF-8/UTF-16 VFAT long
+  filenames, add/replace/delete, directory operations, FAT mirroring,
+  FAT32 FSInfo/backup checks and independent readback. Disk-backed, temporary
+  staging replaces the previous 256-MiB in-RAM strategy. Maximum raw or
+  fixed-VHD physical source size: 64 GiB (x64) or 512 MiB (Win32). Edits
+  require available temporary disk space.
+- **Partitioned RAW/IMG and fixed VHD:** a validated FAT partition may be
+  edited under its exact partitionN/ path, one partition per transaction.
+  Unchanged partitions and fixed-VHD footer bytes are preserved.
+- **Native sparse dynamic VHD reader:** independent C++ BAT/bitmap decoder
+  validates checksums, paired VHD footers, allocation extents and sparse
+  zero-filled sectors. MBR/GPT partitions can be browsed and extracted.
+- **Dynamic base VHD FAT writes (Preview):** for validated non-differencing
+  dynamic VHD v1, stage a complete logical RAW view; update changed sectors
+  only in a physical VHD clone, extending BAT/bitmaps where needed; reopen,
+  verify the entire logical image, and atomically commit. Maximum *logical*
+  VHD size: 1 GiB (x64) or 512 MiB (Win32); requires substantial scratch
+  space. No write to live or mounted VHDs. This writer is experimental and
+  more limited than raw/fixed-VHD FAT editing.
+- **VHDX parser hardening:** strict metadata/region and payload-overlap
+  validation with clean base fixed/dynamic VHDX read support. VHDX writing,
+  dirty-log recovery and AVHDX/differencing chains are not available.
+- Existing ISO/UDF, WIM/ESD/SWM, IMA/IMG/BIF/IMZ, CHD, MDSv2/MDX and other
+  reader limitations remain documented in PREVIEW.md and README.md.
 
-## Quality gates
+## Release quality gate
 
-- Visual Studio 2022 **Win32 and x64** builds, WCX DLL loading/extraction and
-  comprehensive CTest regression suite.
-- Linux C++20 CTest, Clang ASan/UBSan checks.
-- Independent mkudffs/udfinfo/7-Zip UDF interoperability, full >4-GiB UDF
-  mutation with SHA256 readback and UDF staging parity/rollback tests.
-- Strict IMA/IMG/BIF/IMZ regression fixtures: Unicode VFAT, 8.3 alias
-  collisions, nested directories, valid and corrupt ZIP/CRC32, truncated
-  metadata and rollback behavior.
-- SHA256-checked ZIP packaging: only `ISO-WCX.wcx` and
-  `ISO-WCX.wcx64` binaries plus text documentation and plugin metadata.
+The automated Stable workflow must pass Visual Studio 2022 Win32/x64 builds,
+the full CTest suites and WCX ABI smoke checks, Linux C++20, Clang ASan/UBSan,
+independent UDF interoperability and >4-GiB checks, disk staging rollback,
+and **QEMU-created VHDX / independent dynamic VHD FAT editing/readback**.
+Only then can the version-tagged ZIP and SHA256SUMS.txt be published.
+The publication job never overwrites an existing tag or release.
 
-The release is only published by the automated workflow after all required
-validation jobs succeed.
+## Install and update
 
-## Install
+Download ISO-WCX-v0.19.0.zip from the published v0.19.0 Stable release and
+open it directly in Total Commander. Verify SHA256SUMS.txt if required.
+Restart Total Commander after installation. An upgrade from v0.18.0 may
+require re-creating the WCX extension association if Total Commander has
+cached capability flags and the Configure button does not appear.
 
-Download **ISO-WCX-v0.18.0.zip** from this release and open it directly in
-Total Commander. Accept the `pluginst.inf` installation prompt. Keep both WCX
-files together. To verify integrity, use the accompanying `SHA256SUMS.txt`.
-See `INSTALL_EN.txt` or `INSTALL_RU.txt` for repairing old associations.
-
-## Write safety and limitations
-
-This is a Stable distribution of the verified core, **not** a declaration that
-all filesystem writers are mature or fully feature-complete.
-
-FAT12 writes require an independently validated standalone, exact-length raw
-image (up to 32 MiB); unsupported FAT metadata and unsafe paths are rejected.
-**FAT16/32, IMZ, opaque BIF, partitioned HDD filesystems, ESD and SWM remain
-read-only.** Real-world floppy/boot-image compatibility still benefits from
-manual validation beyond the synthetic CI corpus.
-
-UDF Type-1 editing remains an experimental, bounded implementation for
-compatible UDF-only physical 2048-byte partitions. It supports transactional
-addition/deletion and allocation only for layouts validated by the writer.
-UDF metadata/VAT/sparable partitions, arbitrary ISO/UDF Bridge rebuilding and
-general bootable media rewriting are not supported. Existing WIM, CHD, MDX,
-NTFS/ext and ISO/Joliet limitations are documented in README.md and PREVIEW.md.
-
-This release does not modify or replace previous Stable tags or assets.
+This is a stable **distribution channel and verified core**, not a claim of
+unrestricted FAT, UDF, NTFS or VHD writers. For important disks retain a
+separate backup; only compatible FAT configurations may be modified.
+Opaque BIF, IMZ, compressed/vendor images, WIM splits/ESD, non-FAT HDDs,
+differencing VHD/AVHDX, and all VHDX remain read-only for disk editing.
