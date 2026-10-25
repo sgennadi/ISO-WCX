@@ -52,6 +52,7 @@ static std::atomic<unsigned> pack_progress_calls{0};
 static std::atomic<unsigned> wim_percent_calls{0};
 static std::atomic<unsigned> wim_stage_calls{0};
 static std::atomic<unsigned> wim_fast_mount_stages{0};
+static std::atomic<bool> cancel_fast_mounted_edit{false};
 static std::atomic<bool> cancel_next_wim{false};
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
@@ -65,6 +66,10 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
             ++wim_fast_mount_stages;
         if(cancel_next_wim.load() && stage &&
            std::wstring_view(stage).find(L"Extract WIM image")!=std::wstring_view::npos)
+            return 0;
+        if(cancel_fast_mounted_edit.load() && stage &&
+           std::wstring_view(stage).find(L"Create WIM folders without applying image")!=
+               std::wstring_view::npos)
             return 0;
     }
     return 1;
@@ -355,6 +360,38 @@ int wmain(int argc,wchar_t** argv) {
             close(mounted_check);
             if(!folder_found || !content(L"image1\\HELLO.TXT",data) ||
                data!="hello-two")return 49;
+
+            // Cancellation AFTER WIMMountImageHandle succeeds but BEFORE
+            // a folder is created must unmount and leave the source intact.
+            fs::create_directories(incoming/L"FAST_CANCEL_MOUNT");
+            wchar_t cancel_fast_list[]=L"FAST_CANCEL_MOUNT\0\0";
+            const auto before_cancel_fast=load(original);
+            cancel_fast_mounted_edit.store(true);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"1");
+            const int cancelled_fast=pack(packed.data(),index_sub.data(),
+                                          src.data(),cancel_fast_list,0);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            cancel_fast_mounted_edit.store(false);
+            if(cancelled_fast!=21 || load(original)!=before_cancel_fast)
+                return 50;
+            for(const auto& item:fs::directory_iterator(root)) {
+                const auto name=item.path().filename().wstring();
+                if(name.starts_with(L".iso-wcx-edit-"))return 51;
+            }
+
+            // Idempotency: making an already existing folder must not mount
+            // or rewrite the WIM, and its bytes must remain identical.
+            const auto before_noop=load(original);
+            wim_fast_mount_stages.store(0);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"1");
+            const int no_op=pack(packed.data(),index_sub.data(),
+                                 src.data(),fast_list,0);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+            if(no_op!=0 || load(original)!=before_noop ||
+               wim_fast_mount_stages.load()!=0)
+                return 52;
         }
         fs::remove_all(root,ec);
         std::cout<<"PASS: Windows WIMGAPI multi-index LZX WIM, ESD and split SWM through WCX x86/x64 API\n";
