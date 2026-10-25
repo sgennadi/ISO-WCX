@@ -147,15 +147,6 @@ DiskMetadata read_metadata_only(const fs::path& path) {
     return result;
 }
 
-void must_reject_native(const fs::path& path) {
-    try {
-        iso_wcx::VirtualDiskReader reader(path);
-        (void)reader;
-    } catch(const std::exception&) {
-        return;
-    }
-    throw std::runtime_error("unsupported dynamic VHD was accepted as a native fixed disk");
-}
 } // namespace
 
 int main() {
@@ -185,7 +176,18 @@ int main() {
                 dynamicMetadata.format==VIRTUAL_STORAGE_TYPE_DEVICE_VHD &&
                 dynamicMetadata.provider==3,
                 "Windows reported unexpected dynamic-VHD reference metadata");
-        must_reject_native(dynamic);
+        // Microsoft VirtDisk builds the dynamic image; our own parser must
+        // independently agree about capacity and zero-filled sparse blocks.
+        // No AttachVirtualDisk, mounts or Windows filesystem APIs involved.
+        iso_wcx::VirtualDiskReader nativeDynamic(dynamic);
+        require(nativeDynamic.format()==iso_wcx::VirtualDiskFormat::dynamic_vhd &&
+                nativeDynamic.size()==dynamicMetadata.capacity,
+                "native dynamic-VHD size/type disagrees with Microsoft VirtDisk");
+        const auto blank=nativeDynamic.read(capacity-512,512);
+        require(blank.size()==512 &&
+                std::all_of(blank.begin(),blank.end(),
+                    [](std::uint8_t byte){return byte==0;}),
+                "sparse Microsoft-generated dynamic VHD returned nonzero data");
 
         create_reference_image(vhdx,VIRTUAL_STORAGE_TYPE_DEVICE_VHDX,false,capacity);
         const auto vhdxMetadata=read_metadata_only(vhdx);
@@ -205,8 +207,8 @@ int main() {
                             [](std::uint8_t byte){return byte==0;}),
                 "unallocated Microsoft VHDX block did not return zeroes");
 
-        std::cout<<"PASS: Windows VirtDisk metadata-only cross-check for fixed "
-                    "VHD and dynamic VHDX; unsupported dynamic VHD refused; "
+        std::cout<<"PASS: Windows VirtDisk metadata-only cross-check for fixed and "
+                    "dynamic VHD and dynamic VHDX sparse blocks; "
                     "no attach/mount or external disk DLLs\n";
         return 0;
     } catch(const WindowsFailure& error) {
