@@ -17,6 +17,7 @@
 #include <iostream>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 namespace fs = std::filesystem;
 
@@ -224,6 +225,29 @@ int wmain(int argc,wchar_t** argv) {
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";return 21;}
         if(!pack_progress_calls.load())return 26;
+        // Regression: Total Commander creates an *empty folder* through the
+        // same PackFilesW API as a file. Verify the index survives correctly.
+        fs::create_directories(incoming/L"NEW_EMPTY_FOLDER");
+        wchar_t mkdir_list[]=L"NEW_EMPTY_FOLDER\0\0";
+        if(pack(packed.data(),sub.data(),src.data(),mkdir_list,0)!=0)
+            return 27;
+        {
+            OpenW args{};args.ArcName=packed.data();
+            HANDLE h=open(&args);
+            if(!h)return 28;
+            bool seen_folder=false;
+            for(;;){
+                HeaderExW item{};
+                const int result=read(h,&item);
+                if(result==10)break;
+                if(result){close(h);return 29;}
+                if(std::wstring_view(item.FileName)==L"image1\\NEW_EMPTY_FOLDER")
+                    seen_folder=(item.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
+                if(process(h,0,nullptr,nullptr)){close(h);return 30;}
+            }
+            close(h);
+            if(!seen_folder)return 31;
+        }
         auto content=[&](const std::wstring& wanted,std::string& data){
             OpenW a{};a.ArcName=packed.data();HANDLE h=open(&a);if(!h)return false;
             for(;;){HeaderExW head{};const int r=read(h,&head);if(r==10){close(h);return false;}if(r){close(h);return false;}
