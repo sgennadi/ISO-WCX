@@ -16,6 +16,21 @@ disk mount, driver, or standalone disk extraction program is necessary.
 The WCX binaries include ISO/UDF, supported virtual-disk readers and
 native ISZ/DAA optical compressed-stream decoding.
 
+Updater (available in newer Preview builds after v0.18.0)
+------------------------------------------------------------
+In Files > Pack select an ISO-WCX extension and click Configure...
+to reach Update Settings. Manual Check now always works.
+Automatic checks happen at most once daily in the background;
+enable "Do not check for updates automatically" to opt out.
+The setting is stored per user under HKCU\\Software\\ISO-WCX\\Updates.
+When a newer Stable release is found, the updater can download the
+official ZIP and SHA256SUMS.txt over HTTPS, verify SHA256 with Windows
+BCrypt and offer to open the checked ZIP in Total Commander.
+It does not replace the loaded WCX DLL; confirm installation and
+restart TC. The initial v0.18.0 Stable release does not contain this
+updater. After upgrading, reinstall the WCX association if TC has
+cached the older plugin capability flags and Configure... is absent.
+
 Preview floppy support: IMA/IMG/VFD/FLP raw images with no partition map
 open directly into the FAT12/16/32 root. BIF images open as FAT when valid;
 otherwise their original bytes appear as boot-image.bin (read-only).

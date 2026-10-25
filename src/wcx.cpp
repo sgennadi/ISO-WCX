@@ -2,6 +2,7 @@
 #ifdef _WIN32
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/archive_edit.hpp"
+#include "iso_wcx/wcx_updater.hpp"
 #include <mutex>
 #include <atomic>
 #include <type_traits>
@@ -145,6 +146,7 @@ int do_process(State* state,int operation,const wchar_t* dest_path,const wchar_t
 
 #define WCX_EXPORT extern "C" __declspec(dllexport)
 WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
+    iso_wcx::schedule_update_check();
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
     try {
@@ -155,6 +157,7 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
     }catch(...){return nullptr;}
 }
 WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
+    iso_wcx::schedule_update_check();
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
     try {
@@ -276,12 +279,20 @@ WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
 WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
     try{if(!archive)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
 }
-WCX_EXPORT int __stdcall GetPackerCaps() {return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT|2|4|8;}
+WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
+    try { iso_wcx::configure_updates(parent,module); } catch(...) {}
+}
+WCX_EXPORT int __stdcall GetPackerCaps() {
+    iso_wcx::schedule_update_check();
+    return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT|2|4|8|16; // 16=PK_CAPS_OPTIONS
+}
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
+    iso_wcx::schedule_update_check();
     if(!path)return 0;
     try{iso_wcx::Disc test{std::filesystem::path(path)};return 1;}catch(...){return 0;}
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFile(char* path) {
+    iso_wcx::schedule_update_check();
     if(!path)return 0;
     try{iso_wcx::Disc test{std::filesystem::path(from_bytes(path,CP_ACP))};return 1;}catch(...){return 0;}
 }

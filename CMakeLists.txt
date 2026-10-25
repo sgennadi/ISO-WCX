@@ -235,6 +235,12 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
   target_link_libraries(ntfs_inspect PRIVATE iso_virtual_fat)
 endif()
 if(BUILD_TESTING)
+  add_executable(update_policy_tests tests/update_policy.cpp)
+  target_include_directories(update_policy_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME native_updater_release_metadata_validation COMMAND update_policy_tests)
+endif()
+
+if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME fat12_fat16_fat32_virtual_disk_filesystems
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_virtual_fat.py"
@@ -258,11 +264,14 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
 endif()
 
 if(WIN32)
-  add_library(ISO-WCX MODULE src/wcx.cpp)
-  target_link_libraries(ISO-WCX PRIVATE iso_disc)
-  target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp)
+  target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32)
+  target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
+    ISO_WCX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    ISO_WCX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    ISO_WCX_VERSION_PATCH=${PROJECT_VERSION_PATCH})
   if(MSVC)
-    target_compile_options(ISO-WCX PRIVATE /W4 /EHsc)
+    target_compile_options(ISO-WCX PRIVATE /W4 /EHsc /utf-8)
   else()
     target_compile_options(ISO-WCX PRIVATE -Wall -Wextra -Wpedantic)
   endif()

@@ -142,6 +142,21 @@ def make_image(raw: bytes, *, fixed: bool = True, sector: int = 512) -> bytearra
     return image
 
 
+
+def add_optional_region(image: bytearray, offset: int, *,
+                        required: bool = False) -> None:
+    """Add an unknown vendor-defined region with valid checksums to both tables."""
+    guid = bytes.fromhex("00112233445566778899aabbccddeeff")
+    for base in (REGION_A, REGION_B):
+        table = bytearray(image[base:base + 65536])
+        struct.pack_into("<I", table, 8, 3)
+        at = 16 + 2 * 32
+        table[at:at + 16] = guid
+        struct.pack_into("<QII", table, at + 16, offset, MIB,
+                         int(required))
+        seal(table)
+        image[base:base + len(table)] = table
+
 def write(path: pathlib.Path, image: bytearray) -> None:
     path.write_bytes(image)
 
@@ -173,6 +188,31 @@ def main(partition_inspector: pathlib.Path,
             assert "TESTDIR/NESTED.TXT" in fat_files, fat_files
             for name, content in expected_files.items():
                 assert run(fat_inspector, "cat", image, 1, name) == content
+
+        # Optional, non-overlapping vendor regions are legal; protect their
+        # physical extents against malicious BAT payload mappings.
+        vendor = bytearray(fixed)
+        vendor_start = len(vendor)
+        assert vendor_start % MIB == 0
+        vendor.extend(b"\0" * MIB)
+        add_optional_region(vendor, vendor_start)
+        vendor_path = root / "vendor-region.vhdx"
+        write(vendor_path, vendor)
+        assert "VHDX" in run(partition_inspector, vendor_path).decode("utf-8")
+        for name, content in expected_files.items():
+            assert run(fat_inspector, "cat", vendor_path, 1, name) == content
+
+        # Forensic BAT alias regression: two independently mapped logical
+        # payload blocks claim one physical block. Raw data is all zeros so
+        # merely reading the wrong block would incorrectly look successful.
+        twin = make_image(bytes(4 * MIB), fixed=True)
+        struct.pack_into("<Q", twin, BAT + 8, (PAYLOAD // MIB) << 20 | 6)
+        duplicate_bat = root / "aliased-payload.vhdx"
+        write(duplicate_bat, twin)
+        run(reader_test, duplicate_bat, BLOCK - 128, 256, 0, ok=False)
+        twin_good = root / "unaliased-payload.vhdx"
+        write(twin_good, make_image(bytes(4 * MIB), fixed=True))
+        run(reader_test, twin_good, BLOCK - 128, 256, 0)
 
         # Fully allocated block zero, sparse/unmapped/zero second block.
         run(reader_test, dynamic_path, 3 * MIB, 4096, 0)
@@ -221,12 +261,49 @@ def main(partition_inspector: pathlib.Path,
         changed = bytearray(fixed)
         changed[METADATA + 32:METADATA + 48] = b"X" * 16
         invalid_samples["unknown-required-metadata"] = changed
+        changed = bytearray(fixed)
+        add_optional_region(changed, METADATA)  # Overlaps known Metadata region.
+        invalid_samples["overlapping-optional-region"] = changed
+        changed = bytearray(fixed)
+        add_optional_region(changed, BAT, required=True)
+        invalid_samples["unknown-required-region"] = changed
+        changed = bytearray(fixed)
+        add_optional_region(changed, PAYLOAD)  # Aliases present BAT payload.
+        invalid_samples["optional-overlaps-payload"] = changed
+        changed = bytearray(fixed)
+        struct.pack_into("<I", changed, METADATA + 32 + 3 * 32 + 16, 65536)
+        invalid_samples["overlapping-metadata-item"] = changed
+        changed = bytearray(fixed)
+        for at in (HEADER_A, HEADER_B):
+            header = bytearray(changed[at:at + 4096])
+            struct.pack_into("<H", header, 64, 1)  # Invalid log version.
+            seal(header)
+            changed[at:at + len(header)] = header
+        invalid_samples["invalid-log-version"] = changed
+        changed = bytearray(fixed)
+        for at in (HEADER_A, HEADER_B):
+            header = bytearray(changed[at:at + 4096])
+            header[80] = 1  # Reserved header byte.
+            seal(header)
+            changed[at:at + len(header)] = header
+        invalid_samples["reserved-header-byte"] = changed
+        changed = bytearray(fixed)
+        for at in (REGION_A, REGION_B):
+            table = bytearray(changed[at:at + 65536])
+            struct.pack_into("<I", table, 12, 1)
+            seal(table)
+            changed[at:at + len(table)] = table
+        invalid_samples["reserved-region-header"] = changed
+        changed = bytearray(fixed)
+        changed[METADATA + 12] = 1
+        invalid_samples["reserved-metadata-header"] = changed
+
 
         for name, sample in invalid_samples.items():
             write(corrupted_path, sample)
             # BAT damage may be discovered only when a mapped block is read.
             if name in ("partial-block", "reserved-bat", "out-of-bounds-payload",
-                        "payload-overlaps-log"):
+                        "payload-overlaps-log", "optional-overlaps-payload"):
                 run(reader_test, corrupted_path, 0, 512, 0, ok=False)
             else:
                 run(partition_inspector, corrupted_path, ok=False)

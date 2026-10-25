@@ -29,6 +29,33 @@ For installation see [INSTALL_EN.txt](INSTALL_EN.txt) and
 [INSTALL_RU.txt](INSTALL_RU.txt); [PREVIEW.md](PREVIEW.md) describes
 experimental support. See [v0.18.0 release notes](RELEASE_NOTES.md).
 
+## Built-in update checker (Preview)
+
+Beginning with the next preview build, ISO-WCX includes an in-process updater.
+It requires **no standalone updater EXE, downloaded DLL or administrator rights**
+to check release information. The update package itself is installed only by
+Total Commander after user confirmation.
+
+- **Manual:** In Total Commander, open **Files → Pack**, choose a packer
+  extension associated with ISO-WCX, then **Configure... → Check now**.
+- **Automatic:** Once per day, on plugin initialization, a background WinHTTP
+  request checks the **latest Stable release** on our GitHub repository.
+  A new version is shown only once; browsing/extraction never wait for the network.
+- **Disable automatic checks:** Choose **Do not check for updates automatically**
+  (Russian: **Не проверять обновления автоматически**). Stored per user at
+  `HKCU\\Software\\ISO-WCX\\Updates\\AutoCheck` with `0` meaning off.
+  The **Check now** button still works when automatic checking is disabled.
+- **Download:** The updater obtains the official ZIP and `SHA256SUMS.txt`
+  using HTTPS/WinHTTP and checks SHA-256 with built-in Windows BCrypt.
+  It stages the ZIP in a random temporary directory and offers to open it in
+  Total Commander. It **never overwrites a loaded WCX DLL**; finish the
+  install and restart Total Commander to activate the updated plugin.
+
+**Upgrading from v0.18.0:** Total Commander can cache packer capability flags.
+After installing a build with updater support, reinstall the WCX association
+or update its cached flags if the **Configure...** button is missing, then
+restart TC. This updater is not present in the original v0.18.0 Stable build.
+
 ## Format coverage (experimental subsets identified separately)
 
 | Format/layout | Coverage |
