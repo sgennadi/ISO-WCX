@@ -3,6 +3,7 @@
 #include "iso_wcx/edit_transaction.hpp"
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/wim_parts.hpp"
+#include "iso_wcx/wim_mount_fast_plan.hpp"
 #include <msxml6.h>
 #include <map>
 #include <mutex>
@@ -14,6 +15,8 @@
 #include <fstream>
 #include <string>
 #include <utility>
+#include <vector>
+#include <unordered_map>
 #include <cstdint>
 
 namespace iso_wcx { namespace {
@@ -171,6 +174,224 @@ void remove_tree(const std::filesystem::path& path){
     checked(SetFileAttributesW(path.c_str(),attr&~FILE_ATTRIBUTE_READONLY),"clear temporary read-only flag");
     checked((attr&FILE_ATTRIBUTE_DIRECTORY)?RemoveDirectoryW(path.c_str()):DeleteFileW(path.c_str()),"remove WIM entry");
 }
+
+// The fast folder-only path is deliberately opt-in during initial field
+// validation. No untested driver mount is attempted in existing Stable builds.
+// WIM_GENERIC_MOUNT == GENERIC_EXECUTE; this uses the Windows system WIMGAPI,
+// never DISM.EXE, wimlib-imagex, a runtime DLL or a separate worker EXE.
+bool fast_mount_requested() {
+    wchar_t setting[16]{};
+    const DWORD n=GetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",setting,16);
+    return n==1 && setting[0]==L'1';
+}
+std::vector<wim_detail::WimTreeItem> tree_snapshot(const WimArchive& archive) {
+    std::vector<wim_detail::WimTreeItem> result;
+    result.reserve(archive.items().size());
+    for(const auto& item:archive.items())
+        result.push_back({item.path,item.size,item.attributes,item.dos_time,
+                          item.directory});
+    return result;
+}
+struct WimStageCopy {
+    const EditProgress& progress;
+    const WimEditStatus& status;
+    ULONGLONG last_signal=0;
+    bool cancelled=false;
+};
+DWORD CALLBACK wim_stage_copy_callback(
+    LARGE_INTEGER total,LARGE_INTEGER transferred,LARGE_INTEGER,
+    LARGE_INTEGER,DWORD,DWORD,HANDLE,HANDLE,LPVOID opaque) noexcept {
+    auto& state=*static_cast<WimStageCopy*>(opaque);
+    try {
+        const auto now=GetTickCount64();
+        if(now-state.last_signal>=200u || transferred.QuadPart==total.QuadPart) {
+            state.last_signal=now;
+            const auto bytes=total.QuadPart>0 ?
+                std::clamp<LONGLONG>(transferred.QuadPart,0,total.QuadPart) : 0;
+            const unsigned percent=total.QuadPart>0 ?
+                6u+static_cast<unsigned>(20ull*static_cast<std::uint64_t>(bytes)/
+                                          static_cast<std::uint64_t>(total.QuadPart)) : 6u;
+            if((state.status && !state.status(L"Clone WIM (fast folder edit)",percent)) ||
+               (state.progress && !state.progress())) {
+                state.cancelled=true;
+                return PROGRESS_CANCEL;
+            }
+        }
+        return PROGRESS_CONTINUE;
+    }catch(...) {
+        state.cancelled=true;
+        return PROGRESS_CANCEL;
+    }
+}
+void fast_mount_folder_edit(
+        const std::filesystem::path& path,
+        const wim_detail::MountFolderPlan& plan,
+        const EditProgress& progress,const WimEditStatus& status) {
+    auto report=[&](const wchar_t* label,unsigned percent) {
+        if(status && !status(label,percent))throw EditCancelled();
+        edit_tick(progress);
+    };
+    report(L"Validate WIM for fast folder edit",2);
+    std::vector<wim_detail::WimTreeItem> original;
+    {
+        const WimArchive existing(path);
+        original=tree_snapshot(existing);
+    }
+    // Skip an expensive transaction entirely if each folder already exists.
+    std::unordered_map<std::string,bool> known;
+    known.reserve(original.size());
+    for(const auto& item:original)
+        if(!known.emplace(item.path,item.directory).second)
+            throw EditUnsupported("ambiguous WIM directory metadata");
+    const std::string prefix="image"+std::to_string(plan.index)+"/";
+    bool all_exist=true;
+    for(const auto& relative:plan.paths) {
+        const auto key=prefix+relative;
+        const auto hit=known.find(key);
+        if(hit!=known.end() && !hit->second)
+            throw EditUnsupported("cannot create folder over an existing WIM file");
+        if(hit==known.end())all_exist=false;
+    }
+    if(all_exist) {
+        report(L"WIM folders already exist",99);
+        return;
+    }
+
+    // Keep a recoverable sibling clone. Even a failed mount must never
+    // touch the original WIM or delete a still-mounted Windows directory.
+    Privileges privileges;
+    EditTransaction tx(path);
+    const auto folder=tx.workspace/L"mounted";
+    const auto scratch=tx.workspace/L"scratch";
+    const auto mount_name=folder.wstring();
+    if(mount_name.size()>=MAX_PATH || scratch.wstring().size()>=MAX_PATH)
+        throw EditUnsupported("WIM fast mount path exceeds Windows MAX_PATH");
+    wchar_t volume[MAX_PATH]{},filesystem[MAX_PATH]{};
+    checked(GetVolumePathNameW(tx.workspace.c_str(),volume,MAX_PATH),
+            "inspect mount workspace volume");
+    checked(GetVolumeInformationW(volume,nullptr,0,nullptr,nullptr,nullptr,
+                                  filesystem,MAX_PATH),
+            "inspect mount workspace filesystem");
+    if(_wcsicmp(filesystem,L"NTFS")!=0)
+        throw EditUnsupported("WIM mount fast path requires an NTFS volume");
+    std::filesystem::create_directory(folder);
+    std::filesystem::create_directory(scratch);
+    report(L"Stage WIM before mounting",6);
+    WimStageCopy copy{progress,status};
+    BOOL aborted=FALSE;
+    const BOOL cloned=CopyFileExW(path.c_str(),tx.output.c_str(),
+                                 &wim_stage_copy_callback,&copy,&aborted,
+                                 COPY_FILE_FAIL_IF_EXISTS);
+    if(!cloned) {
+        if(copy.cancelled || GetLastError()==ERROR_REQUEST_ABORTED)
+            throw EditCancelled();
+        checked(false,"clone WIM into private edit workspace");
+    }
+    checked(std::filesystem::file_size(tx.output)==std::filesystem::file_size(path),
+            "WIM staged clone changed length");
+    wim_detail::Header stage_header{};
+    if(!wim_detail::read_header(tx.output,stage_header))
+        throw EditUnsupported("cloned WIM header is invalid");
+    wim_detail::validate(stage_header);
+    report(L"Mount selected WIM image",28);
+
+    // WIMGAPI's mount driver may not be installed on every Windows host.
+    // This Preview mode refuses and preserves the original if unavailable.
+    Library library;
+    HMODULE dll=library.h;
+    using Mount=BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD);
+    using Commit=BOOL(WINAPI*)(HANDLE,DWORD,PHANDLE);
+    using Unmount=BOOL(WINAPI*)(HANDLE,DWORD);
+    auto mount=api<Mount>(dll,"WIMMountImageHandle");
+    auto commit=api<Commit>(dll,"WIMCommitImageHandle");
+    auto unmount=api<Unmount>(dll,"WIMUnmountImageHandle");
+    auto create=api<HANDLE(WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD)>(
+        dll,"WIMCreateFile");
+    auto close=api<Close>(dll,"WIMCloseHandle");
+    auto temp=api<BOOL(WINAPI*)(HANDLE,PCWSTR)>(dll,"WIMSetTemporaryPath");
+    auto load=api<HANDLE(WINAPI*)(HANDLE,DWORD)>(dll,"WIMLoadImage");
+    {
+        // Windows WIMGAPI mount access is the GENERIC_EXECUTE bit. Keep
+        // READ|WRITE as well so WIMCommitImageHandle can update the staged WIM.
+        Handle container(create(tx.output.c_str(),
+                          GENERIC_READ|GENERIC_WRITE|GENERIC_EXECUTE,
+                          OPEN_EXISTING,0,0,nullptr),close);
+        checked(temp(container.h,scratch.c_str()),
+                "configure WIM fast mount scratch directory");
+        Handle image(load(container.h,plan.index),close);
+        Callback callback{progress,status};
+        Registered registration(dll,container.h,callback);
+        bool mounted=false;
+        try {
+            // FAST flag supports lazy Windows WIM mounts. No fallback after
+            // invoking mount: failed mounts must be diagnosed/cleaned explicitly.
+            constexpr DWORD WIM_FLAG_MOUNT_FAST=0x00000400u;
+            constexpr DWORD WIM_FLAG_NO_RP_FIX=0x00000100u;
+            if(!mount(image.h,folder.c_str(),
+                      WIM_FLAG_MOUNT_FAST|WIM_FLAG_NO_RP_FIX)) {
+                const DWORD error=GetLastError();
+                // A failed mount might still leave a registered reparse point.
+                // Preserve its staged WIM and path for administrator recovery.
+                tx.preserve();
+                throw std::runtime_error("WIM fast mount failed (Win32 "+
+                    std::to_string(error)+"); staged workspace: "+
+                    tx.workspace.string());
+            }
+            mounted=true;
+            report(L"Create WIM folders without applying image",39);
+            for(const auto& relative_name:plan.paths) {
+                const auto relative=relative_path(relative_name);
+                no_reparse(folder,relative);
+                const auto destination=folder/relative;
+                std::filesystem::create_directories(destination);
+                no_reparse(folder,relative);
+                const auto attrs=GetFileAttributesW(destination.c_str());
+                checked(attrs!=INVALID_FILE_ATTRIBUTES &&
+                        (attrs&FILE_ATTRIBUTE_DIRECTORY)!=0 &&
+                        (attrs&FILE_ATTRIBUTE_REPARSE_POINT)==0,
+                        "verify new WIM directory attributes");
+                callback.tick();
+            }
+            report(L"Commit fast WIM metadata",60);
+            // 0 updates the selected index in place, never adds a new index.
+            // Do not request VERIFY here; a full stream re-read would defeat
+            // folder-only performance. Independently verify the resulting tree.
+            checked(commit(image.h,0,nullptr),"commit mounted WIM metadata");
+            report(L"Unmount fast WIM edit",83);
+            if(!unmount(image.h,0)) {
+                const DWORD error=GetLastError();
+                tx.preserve();
+                throw std::runtime_error("WIM fast unmount failed (Win32 "+
+                    std::to_string(error)+"); recover mounted workspace: "+
+                    tx.workspace.string());
+            }
+            mounted=false;
+        }catch(...) {
+            if(mounted) {
+                if(!unmount(image.h,0)) {
+                    tx.preserve();
+                    throw std::runtime_error(
+                        "WIM mounted workspace could not be discarded; "
+                        "do NOT delete or rename its image before recovery: "+
+                        tx.workspace.string());
+                }
+            }
+            throw;
+        }
+    }
+    // The mount and all WIMGAPI handles must be closed before independent
+    // metadata enumeration and before attempting to replace the source WIM.
+    report(L"Verify WIM folder changes",87);
+    {
+        const WimArchive updated(tx.output);
+        const auto newer=tree_snapshot(updated);
+        std::string failure;
+        if(!wim_detail::verify_mounted_folder_tree(original,newer,plan,failure))
+            throw EditUnsupported("fast WIM change verification failed: "+failure);
+    }
+    report(L"Commit verified fast WIM",99);
+    tx.commit(progress);
+}
 }
 void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,
               const EditProgress& progress,const WimEditStatus& status){
@@ -188,6 +409,14 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         auto digits=top.substr(5);if(digits.empty()||digits.size()>3||digits[0]=='0'||digits.find_first_not_of("0123456789")!=std::string::npos)throw EditUnsupported("invalid WIM index");unsigned index=static_cast<unsigned>(std::stoul(digits));if(!index||index>images)throw EditUnsupported("creating WIM indexes is not supported yet");
         if(slash==std::string::npos){if(!c.remove)throw EditUnsupported("cannot replace an image index");deleted.insert(index);}else{c.path=p.substr(slash+1);edits[index].push_back(std::move(c));}}
     if(deleted.size()==images)throw EditUnsupported("cannot delete the last WIM image");
+    // Strict experimental opt-in until real machine WIM mount and crash
+    // recovery have been validated. Normal users retain Apply/Capture.
+    if(fast_mount_requested()) {
+        if(const auto plan=wim_detail::plan_mounted_folders(edits,deleted)) {
+            fast_mount_folder_edit(path,*plan,progress,status);
+            return;
+        }
+    }
     report(L"Prepare NTFS staging",3);
     Privileges privileges;Apartment apartment;EditTransaction tx(path);Library library;auto m=library.h;
     // Native Windows capture/apply preserve security and alternate streams on NTFS.
