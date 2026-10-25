@@ -202,6 +202,18 @@ def main(partition_inspector: pathlib.Path,
         for name, content in expected_files.items():
             assert run(fat_inspector, "cat", vendor_path, 1, name) == content
 
+        # Forensic BAT alias regression: two independently mapped logical
+        # payload blocks claim one physical block. Raw data is all zeros so
+        # merely reading the wrong block would incorrectly look successful.
+        twin = make_image(bytes(4 * MIB), fixed=True)
+        struct.pack_into("<Q", twin, BAT + 8, (PAYLOAD // MIB) << 20 | 6)
+        duplicate_bat = root / "aliased-payload.vhdx"
+        write(duplicate_bat, twin)
+        run(reader_test, duplicate_bat, BLOCK - 128, 256, 0, ok=False)
+        twin_good = root / "unaliased-payload.vhdx"
+        write(twin_good, make_image(bytes(4 * MIB), fixed=True))
+        run(reader_test, twin_good, BLOCK - 128, 256, 0)
+
         # Fully allocated block zero, sparse/unmapped/zero second block.
         run(reader_test, dynamic_path, 3 * MIB, 4096, 0)
         run(reader_test, fixed_path, len(raw_bytes) - 32, 32, 0)
