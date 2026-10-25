@@ -185,9 +185,11 @@ void VhdxReader::parse() {
     require(!(one && two && one->seq==two->seq &&
               one->contents!=two->contents),
             "VHDX header copies conflict at identical sequence");
-    const Header& active=(one && (!two || one->seq>=two->seq))?*one:*two;
+    const bool first_is_active=one && (!two || one->seq>=two->seq);
+    const Header& active=first_is_active?*one:*two;
     paired_headers_valid_ = bool(one && two);
     active_header_sequence_ = active.seq;
+    active_header_offset_ = first_is_active?0x10000u:0x20000u;
     require(!active.log_dirty,"VHDX log replay required; clean base images only");
     if(active.log_length || active.log_offset) {
         require(active.log_length && active.log_offset>=MiB &&
@@ -205,6 +207,7 @@ void VhdxReader::parse() {
     require(regions1 || regions2,"both VHDX region tables invalid");
     if(regions1 && regions2) require(*regions1==*regions2,
                                    "conflicting valid VHDX region tables");
+    paired_region_tables_valid_ = bool(regions1 && regions2);
     const auto regions=regions1?*regions1:*regions2;
     // VHDX region tables may include optional vendor-defined areas. Do not
     // allow payload BAT entries to alias them as ordinary disk contents.
@@ -382,8 +385,8 @@ std::vector<std::uint8_t> VhdxReader::read(
 VhdxFixedEditLayout VhdxReader::fully_mapped_fat_edit_layout(
         std::uint64_t maximum_logical_bytes,
         std::uint64_t maximum_physical_bytes) {
-    require(paired_headers_valid_ && fixed_file_parameters_ &&
-            sector_size_==512 && logical_size_<=maximum_logical_bytes &&
+    require(paired_headers_valid_ && paired_region_tables_valid_ &&
+            fixed_file_parameters_ && sector_size_==512 && logical_size_<=maximum_logical_bytes &&
             file_size_<=maximum_physical_bytes &&
             active_header_sequence_<=UINT64_MAX-2,
             "VHDX write Preview requires bounded fixed 512-byte-sector image "
@@ -392,7 +395,8 @@ VhdxFixedEditLayout VhdxReader::fully_mapped_fat_edit_layout(
     require(blocks>0 && blocks<=4096,
             "too many VHDX payload blocks for bounded fixed write");
     VhdxFixedEditLayout layout{block_size_,logical_size_,
-                               active_header_sequence_,{}};
+                               active_header_sequence_,
+                               active_header_offset_,{}};
     layout.physical_blocks.reserve(static_cast<std::size_t>(blocks));
     std::map<std::uint64_t,std::uint64_t> physical_owners;
     for(std::uint64_t block=0;block<blocks;++block) {
