@@ -43,21 +43,28 @@ data region; the footer can never be interpreted as a partition or file.
     virtual_partition_inspect path/to/windows-fixed.vhd
 
 Synthetic regression tests cover fixed VHD partition enumeration, byte reads,
-invalid footer checksum, corrupt capacity, incomplete footer, saved-state
-images; dynamic VHD is rejected, while clean base VHDX is supported by the
-native reader. This module is part of WCX and developer CLIs. It does not mount
-disks, enumerate physical drives, perform writes or follow differencing
-parents. The existing optical ISO/BIN/IMG parsers are not changed.
+invalid footer checksum, corrupt capacity, incomplete footer and saved-state
+images. The newer Preview includes a separate, native **dynamic base VHD v1**
+reader: it requires matching first/last footers, the `cxsparse` header,
+correct checksums and BAT extents, sector bitmap ownership and sparse zero
+fill. It rejects corrupted/overlapping blocks and differencing VHD parents.
+The WCX reader does not mount disks or enumerate physical drives.
+Transactional FAT **writes** remain restricted to RAW/IMG and **fixed** VHD;
+dynamic VHD and all VHDX are **read-only**. Optical ISO/BIN/IMG parsing is
+unchanged.
 
 ## Native-only disk readers (no libvhdi)
 
 ISO-WCX no longer contains the experimental Linux-only libvhdi adapter.
 The CMake option, linkage, source conditionals and dedicated CI job were
 removed. No `libvhdi.dll`, `libvhdi.so` or .NET dependency is needed.
-Raw HDD IMG and fixed VHD are implemented independently in C++.
+Raw HDD IMG and fixed/dynamic VHD v1 are implemented independently in C++.
 
-Native dynamic VHD is not yet implemented. A new experimental C++20
-VHDX v1 reader handles clean, non-differencing fixed/dynamic base images
+The experimental native C++20 **dynamic VHD** reader supports read-only
+MBR/GPT filesystem traversal through its bounded 32-bit big-endian BAT,
+MSB-first sector bitmaps and absent-block zero fill; it refuses unsupported
+differencing images. An independent experimental C++20 VHDX v1
+reader handles clean, non-differencing fixed/dynamic base images
 with CRC32C-validated headers, required metadata and BAT-mapped payload
 reads, including sparse blocks. See [VHDX details](vhdx-native.md).
 Differencing parents and log replay are deliberately unsupported.
@@ -69,9 +76,12 @@ format handler code.
 
 ## Stage 3–5 (not yet implemented)
 
-1. Complete independent QEMU/Microsoft interop and hostile-image tests
-   for the experimental native VHDX reader, then implement dynamic VHD v1
-   (footer, BAT, bitmap, sparse blocks) with independent tests.
+1. Extend independent QEMU/Microsoft interop and hostile-image tests
+   for the VHD and VHDX readers. Dynamic VHD **read-only** footer/BAT/bitmap
+   parsing is implemented and tested using independent FAT16/FAT32 synthetic
+   fixtures; safe dynamic **write** requires a separate transactional
+   allocator that updates physical blocks, BAT, bitmaps, both footers and
+   checks external-drive interoperability before enabling WCX PackFiles.
 2. GPT GUID names and labels, metadata consistency reporting; CRC-verified
    backup fallback and linked EBR are implemented with mutation tests.
 3. FAT12/16/32 is available both in WCX and a developer-only bounded reader

@@ -1,5 +1,6 @@
 #include "iso_wcx/virtual_disk.hpp"
 #include "iso_wcx/vhdx_reader.hpp"
+#include "iso_wcx/dynamic_vhd_reader.hpp"
 #include "iso_wcx/imz_reader.hpp"
 
 #include <algorithm>
@@ -120,7 +121,10 @@ VirtualDiskReader::VirtualDiskReader(const std::filesystem::path& image) {
             capacity_=info.logical_size;
             format_=VirtualDiskFormat::fixed_vhd;
         }else if(info.disk_type==3u) {
-            throw std::runtime_error("dynamic VHD requires a future native BAT reader");
+            dynamic_vhd_=std::make_unique<DynamicVhdReader>(
+                image,info.logical_size,physical_length,be64(footer.data()+16),footer);
+            capacity_=info.logical_size;
+            format_=VirtualDiskFormat::dynamic_vhd;
         }else {
             throw std::runtime_error(
                 "differencing VHD parent chains are deliberately unsupported");
@@ -143,6 +147,7 @@ std::vector<std::uint8_t> VirtualDiskReader::read(
     require(offset<=static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()),
             "virtual disk offset exceeds supported seek range");
     if(vhdx_)return vhdx_->read(offset,length);
+    if(dynamic_vhd_)return dynamic_vhd_->read(offset,length);
     std::vector<std::uint8_t> output(length);
     if(length==0)return output;
     if(format_==VirtualDiskFormat::compressed_floppy) {

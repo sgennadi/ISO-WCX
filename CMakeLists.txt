@@ -173,7 +173,7 @@ endif()
 # Native partition mapping is part of the WCX in-process virtual HDD reader.
 # It remains read-only and has no external disk DLL dependencies.
 add_library(iso_virtual_partitions STATIC
-  src/partition_map.cpp src/virtual_disk.cpp src/vhdx_reader.cpp src/imz_reader.cpp)
+  src/partition_map.cpp src/virtual_disk.cpp src/dynamic_vhd_reader.cpp src/vhdx_reader.cpp src/imz_reader.cpp)
 target_include_directories(iso_virtual_partitions PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(iso_virtual_partitions PUBLIC ${ISO_WCX_ZLIB_TARGET})
 target_compile_features(iso_virtual_partitions PUBLIC cxx_std_20)
@@ -185,15 +185,23 @@ else()
 endif()
 
 if(BUILD_TESTING)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_executable(virtual_partition_tests tests/partition_map.cpp)
   target_link_libraries(virtual_partition_tests PRIVATE iso_virtual_partitions)
   add_test(NAME raw_virtual_disk_mbr_gpt COMMAND virtual_partition_tests)
   add_executable(virtual_disk_tests tests/virtual_disk.cpp)
   target_link_libraries(virtual_disk_tests PRIVATE iso_virtual_partitions)
   add_test(NAME raw_fixed_vhd_read_only COMMAND virtual_disk_tests)
+  add_executable(dynamic_vhd_read_fixture tests/dynamic_vhd_read_fixture.cpp)
+  target_link_libraries(dynamic_vhd_read_fixture PRIVATE iso_virtual_partitions)
+  add_test(NAME native_dynamic_vhd_sparse_bat_and_fat
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dynamic_vhd.py"
+            "$<TARGET_FILE:virtual_fat_inspect>"
+            "$<TARGET_FILE:virtual_partition_inspect>"
+            "$<TARGET_FILE:dynamic_vhd_read_fixture>")
+  set_tests_properties(native_dynamic_vhd_sparse_bat_and_fat PROPERTIES TIMEOUT 180)
   add_executable(vhdx_read_fixture tests/vhdx_read_fixture.cpp)
   target_link_libraries(vhdx_read_fixture PRIVATE iso_virtual_partitions)
-  find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME native_vhdx_container_bat_crc32c
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_vhdx.py"
             "$<TARGET_FILE:virtual_partition_inspect>" "$<TARGET_FILE:virtual_fat_inspect>"

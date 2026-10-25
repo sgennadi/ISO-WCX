@@ -78,6 +78,7 @@ const char* disk_name(VirtualDiskFormat type) {
     case VirtualDiskFormat::raw_image: return "Raw HDD";
     case VirtualDiskFormat::compressed_floppy: return "IMZ compressed floppy";
     case VirtualDiskFormat::fixed_vhd: return "Fixed VHD";
+    case VirtualDiskFormat::dynamic_vhd: return "Dynamic VHD";
     case VirtualDiskFormat::vhdx: return "VHDX";
     }
     return "Virtual HDD";
