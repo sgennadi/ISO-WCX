@@ -183,6 +183,10 @@ if(BUILD_TESTING)
   add_executable(wim_fast_edit_probe_tests tests/wim_fast_edit_probe.cpp)
   target_include_directories(wim_fast_edit_probe_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME wim_fast_edit_read_only_preflight COMMAND wim_fast_edit_probe_tests)
+  # No runtime write capability: validate uncompressed on-disk WIM metadata.
+  add_executable(wim_metadata_tree_tests tests/wim_metadata_tree.cpp)
+  target_include_directories(wim_metadata_tree_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME wim_uncompressed_metadata_tree_read_only COMMAND wim_metadata_tree_tests)
 endif()
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
 # runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
