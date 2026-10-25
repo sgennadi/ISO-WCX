@@ -6,9 +6,11 @@
 #define NOMINMAX
 #endif
 #include "iso_wcx/wcx_updater.hpp"
+#include "iso_wcx/image_report.hpp"
 #include "iso_wcx/update_policy.hpp"
 
 #include <bcrypt.h>
+#include <commdlg.h>
 #include <winhttp.h>
 #include <shellapi.h>
 #include <algorithm>
@@ -37,7 +39,7 @@ namespace {
 constexpr wchar_t registry_path[] = L"Software\\ISO-WCX\\Updates";
 constexpr wchar_t github_api[] =
     L"https://api.github.com/repos/sgennadi/ISO-WCX/releases/latest";
-constexpr int id_never=4101, id_check=4102, id_install=4103, id_status=4104;
+constexpr int id_never=4101, id_check=4102, id_install=4103, id_status=4104, id_export=4105;
 constexpr UINT check_later=WM_APP+191;
 constexpr std::size_t max_response=64u*1024u;
 constexpr std::size_t max_package=64u*1024u*1024u;
@@ -398,6 +400,160 @@ void download_and_offer(HWND dlg,State& state) {
     EnableWindow(GetDlgItem(dlg,id_install),TRUE);
 }
 // The WCX host calls GetPackerCaps while loading its packer associations.
+// User-invoked, in-process metadata export. Both dialogs are owned by
+// ConfigurePacker; neither an EXE, service, mount nor helper DLL is needed.
+// No image bytes are ever written; only a user-selected TXT destination.
+std::wstring from_utf8(std::string_view value) {
+    if(value.empty())return {};
+    if(value.size()>static_cast<std::size_t>(INT_MAX))
+        throw std::runtime_error("text is too long");
+    const int length=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,
+                    value.data(),static_cast<int>(value.size()),nullptr,0);
+    if(length<=0)throw std::runtime_error("invalid UTF-8");
+    std::wstring result(static_cast<std::size_t>(length),L'\0');
+    if(!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value.data(),
+            static_cast<int>(value.size()),result.data(),length))
+        throw std::runtime_error("invalid UTF-8 conversion");
+    return result;
+}
+std::optional<std::filesystem::path> choose_structure_image(HWND owner) {
+    std::array<wchar_t,32768> name{};
+    constexpr wchar_t filter[] =
+        L"Disk images (*.iso;*.udf;*.wim;*.esd;*.swm;*.vhd;*.vhdx;*.img;*.ima)\0"
+        L"*.iso;*.udf;*.wim;*.esd;*.swm;*.vhd;*.vhdx;*.img;*.ima;*.bif;*.mds;*.ccd;*.nrg;*.cue;*.cso;*.zso;*.chd\0"
+        L"All files (*.*)\0*.*\0\0";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize=sizeof(ofn);
+    ofn.hwndOwner=owner;
+    ofn.lpstrFile=name.data();
+    ofn.nMaxFile=static_cast<DWORD>(name.size());
+    ofn.lpstrFilter=filter;
+    ofn.lpstrTitle=L"ISO-WCX - Select image to inspect";
+    ofn.Flags=OFN_EXPLORER|OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|
+              OFN_NOCHANGEDIR|OFN_HIDEREADONLY;
+    if(!GetOpenFileNameW(&ofn)) {
+        if(CommDlgExtendedError()!=0)
+            throw std::runtime_error("Windows Open File dialog failed");
+        return std::nullopt; // User cancelled.
+    }
+    return std::filesystem::path(name.data());
+}
+std::optional<std::filesystem::path> choose_structure_output(
+        HWND owner,const std::filesystem::path& image) {
+    std::array<wchar_t,32768> name{};
+    const auto suggested=image.parent_path()/
+                         (image.stem().wstring()+L"-ISO-WCX-Structure.txt");
+    const auto txt=suggested.wstring();
+    if(txt.size()>=name.size()-1)
+        throw std::runtime_error("suggested report path is too long");
+    std::copy(txt.begin(),txt.end(),name.begin());
+    constexpr wchar_t filter[]=L"Text report (*.txt)\0*.txt\0All files (*.*)\0*.*\0\0";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize=sizeof(ofn);
+    ofn.hwndOwner=owner;
+    ofn.lpstrFile=name.data();
+    ofn.nMaxFile=static_cast<DWORD>(name.size());
+    ofn.lpstrFilter=filter;
+    ofn.lpstrDefExt=L"txt";
+    ofn.lpstrTitle=L"ISO-WCX - Export Image Structure";
+    ofn.Flags=OFN_EXPLORER|OFN_OVERWRITEPROMPT|OFN_PATHMUSTEXIST|
+              OFN_NOCHANGEDIR;
+    if(!GetSaveFileNameW(&ofn)) {
+        if(CommDlgExtendedError()!=0)
+            throw std::runtime_error("Windows Save File dialog failed");
+        return std::nullopt;
+    }
+    return std::filesystem::path(name.data());
+}
+void write_structure_atomically(const std::filesystem::path& image,
+                                const std::filesystem::path& dest,
+                                const std::string& report) {
+    std::error_code ec;
+    if(std::filesystem::exists(dest,ec) && !ec &&
+       std::filesystem::equivalent(image,dest,ec) && !ec)
+        throw std::runtime_error("report destination is the source image");
+    const std::string payload=std::string("\xEF\xBB\xBF",3)+report;
+    if(payload.size()>static_cast<std::size_t>(MAXDWORD))
+        throw std::runtime_error("image structure report too large");
+    static std::atomic<unsigned> serial{0};
+    std::filesystem::path staged;
+    HANDLE file=INVALID_HANDLE_VALUE;
+    for(unsigned n=0;n<20;++n) {
+        staged=dest;
+        staged+=L".iso-wcx-"+
+                std::to_wstring(GetCurrentProcessId())+L"-"+
+                std::to_wstring(GetTickCount64())+L"-"+
+                std::to_wstring(serial.fetch_add(1))+L".tmp";
+        file=CreateFileW(staged.c_str(),GENERIC_WRITE,0,nullptr,
+                         CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(file!=INVALID_HANDLE_VALUE)break;
+        const auto code=GetLastError();
+        if(code!=ERROR_FILE_EXISTS && code!=ERROR_ALREADY_EXISTS)
+            throw std::runtime_error("cannot create report staging file");
+    }
+    if(file==INVALID_HANDLE_VALUE)
+        throw std::runtime_error("cannot reserve a unique report staging file");
+    DWORD written=0;
+    const bool success=WriteFile(file,payload.data(),
+                     static_cast<DWORD>(payload.size()),&written,nullptr)!=FALSE &&
+                     written==payload.size() &&
+                     FlushFileBuffers(file)!=FALSE;
+    CloseHandle(file);
+    if(!success) {
+        (void)DeleteFileW(staged.c_str());
+        throw std::runtime_error("cannot write/flush image structure report");
+    }
+    if(!MoveFileExW(staged.c_str(),dest.c_str(),
+                    MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+        (void)DeleteFileW(staged.c_str());
+        throw std::runtime_error("cannot atomically finalize structure report");
+    }
+}
+void export_structure_dialog(HWND dlg,bool ru) {
+    try {
+        const auto image=choose_structure_image(dlg);
+        if(!image)return;
+        const auto destination=choose_structure_output(dlg,*image);
+        if(!destination)return;
+        put_status(dlg,tr(ru,L"Inspecting image (read-only)...",
+                            L"Проверка образа (только чтение)..."));
+        const HCURSOR previous=SetCursor(LoadCursorW(nullptr,IDC_WAIT));
+        std::string report;
+        try {
+            report=build_image_structure_report(*image);
+        }catch(...) {
+            SetCursor(previous);
+            throw;
+        }
+        SetCursor(previous);
+        write_structure_atomically(*image,*destination,report);
+        put_status(dlg,tr(ru,L"Structure report exported.",
+                            L"Структура образа сохранена."));
+        const std::wstring message=std::wstring(tr(ru,
+            L"Structure exported (UTF-8). Image unchanged:\n",
+            L"Структура сохранена (UTF-8). Образ не изменён:\n"))+
+            destination->wstring()+L"\n\n"+
+            tr(ru,L"Open report?",L"Открыть отчёт?");
+        if(MessageBoxW(dlg,message.c_str(),L"ISO-WCX Export Image Structure",
+                       MB_ICONINFORMATION|MB_YESNO)==IDYES) {
+            (void)ShellExecuteW(dlg,L"open",destination->c_str(),nullptr,
+                                nullptr,SW_SHOWNORMAL);
+        }
+    }catch(const std::exception& ex) {
+        const auto reason=from_utf8(ex.what());
+        const auto message=std::wstring(tr(ru,
+                 L"Image structure export failed:\n",
+                 L"Не удалось сохранить структуру образа:\n"))+reason;
+        put_status(dlg,tr(ru,L"Structure export failed.",
+                            L"Ошибка экспорта структуры."));
+        MessageBoxW(dlg,message.c_str(),L"ISO-WCX",MB_ICONERROR|MB_OK);
+    }catch(...) {
+        put_status(dlg,L"Structure export failed.");
+        MessageBoxW(dlg,L"Unexpected error while exporting image structure.",
+                    L"ISO-WCX",MB_ICONERROR|MB_OK);
+    }
+}
+
 // Do not block that path on DNS, HTTP, a modal dialog or file downloads.
 // Background checks only run in the real Total Commander process.
 std::atomic_bool background_started{false};
@@ -467,6 +623,9 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
              id_install,125,81,117,25);
         add_control(dlg,L"BUTTON",tr(state->russian,L"Close",L"Закрыть"),
              BS_DEFPUSHBUTTON|WS_TABSTOP,IDCANCEL,252,81,100,25);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Export Image Structure...",L"Экспорт структуры образа..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_export,12,113,340,26);
         CheckDlgButton(dlg,id_never,
               state->automatic?BST_UNCHECKED:BST_CHECKED);
         EnableWindow(GetDlgItem(dlg,id_install),FALSE);
@@ -490,6 +649,7 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         }
         if(cmd==id_check) {check_release(dlg,*state,true);return TRUE;}
         if(cmd==id_install) {download_and_offer(dlg,*state);return TRUE;}
+        if(cmd==id_export) {export_structure_dialog(dlg,state->russian);return TRUE;}
         if(cmd==IDCANCEL || cmd==IDOK) {EndDialog(dlg,0);return TRUE;}
         break;
     }
@@ -540,8 +700,8 @@ void configure_updates(HWND parent,HINSTANCE instance) {
     const auto store16=[&](std::size_t at,WORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
     store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER);
     store32(4,0);store16(8,0);store16(10,0);store16(12,0);
-    store16(14,367);store16(16,119);store16(18,0);store16(20,0);
-    constexpr wchar_t caption[]=L"ISO-WCX Update Settings";
+    store16(14,367);store16(16,152);store16(18,0);store16(20,0);
+    constexpr wchar_t caption[]=L"ISO-WCX Settings";
     std::memcpy(raw.data()+22,caption,sizeof(caption));
     State state{};
     (void)DialogBoxIndirectParamW(instance,

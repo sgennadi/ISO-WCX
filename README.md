@@ -55,6 +55,27 @@ Published **Stable v0.19.0 remains unchanged** on its original tested
 VS2022/C++20 toolchain. New Stable releases will use VS2026/C++26 only
 after release-quality gates pass.
 
+## Export Image Structure (built into the WCX plugin)
+
+In Total Commander choose **Files > Pack**, select an extension configured
+for ISO-WCX and click **Configure... > Export Image Structure...**.
+Choose the source ISO/UDF/WIM/VHD/VHDX or other supported image, then choose
+where to save the UTF-8 `-ISO-WCX-Structure.txt` report. The report contains
+the format reported by the **same in-process parser** as Total Commander,
+the complete supported directory tree (filename, file/dir, byte size,
+attributes, extents, offsets), and read-only ISO metadata when applicable:
+2048-byte volume descriptors, PVD label, Joliet, El Torito boot catalog,
+UDF recognition/anchor candidates and the first 32 KiB system-area flag.
+
+The report exports **metadata only, never file payloads**. The source is
+opened read-only and is not mounted, changed, repacked or copied. A private
+temporary report is flushed and atomically replaced at the selected TXT
+destination; cancelled dialogs do not create files. Works **without**
+`disc_inspect.exe`, additional runtimes or separate utilities. The new
+button is available after installing a build that contains this change;
+published older Stable builds remain unchanged. If Configure... is missing,
+reassociate the WCX plugin so Total Commander refreshes its capability flags.
+
 ## Built-in update checker (included in v0.19.0)
 
 ISO-WCX v0.19.0 includes an in-process updater.
