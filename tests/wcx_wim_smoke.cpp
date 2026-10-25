@@ -53,6 +53,7 @@ static std::atomic<unsigned> wim_percent_calls{0};
 static std::atomic<unsigned> wim_stage_calls{0};
 static std::atomic<unsigned> wim_fast_mount_stages{0};
 static std::atomic<bool> cancel_fast_mounted_edit{false};
+static std::atomic<bool> cancel_fast_after_commit{false};
 static std::atomic<bool> cancel_next_wim{false};
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
@@ -69,6 +70,10 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
             return 0;
         if(cancel_fast_mounted_edit.load() && stage &&
            std::wstring_view(stage).find(L"Create WIM folders without applying image")!=
+               std::wstring_view::npos)
+            return 0;
+        if(cancel_fast_after_commit.load() && stage &&
+           std::wstring_view(stage).find(L"Verify WIM folder changes")!=
                std::wstring_view::npos)
             return 0;
     }
@@ -379,6 +384,27 @@ int wmain(int argc,wchar_t** argv) {
             for(const auto& item:fs::directory_iterator(root)) {
                 const auto name=item.path().filename().wstring();
                 if(name.starts_with(L".iso-wcx-edit-"))return 51;
+            }
+
+            // Cancellation AFTER WIMCommitImageHandle and unmount, but
+            // BEFORE EditTransaction::commit replaces the original, must
+            // discard the edited staging copy and preserve original bytes.
+            fs::create_directories(incoming/L"FAST_ABORT_COMMITTED");
+            wchar_t abort_committed_list[]=L"FAST_ABORT_COMMITTED\0\0";
+            const auto before_abort_committed=load(original);
+            cancel_fast_after_commit.store(true);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"1");
+            const int late_cancel=pack(packed.data(),index_sub.data(),
+                                      src.data(),abort_committed_list,0);
+            SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            cancel_fast_after_commit.store(false);
+            if(late_cancel!=21 || load(original)!=before_abort_committed)
+                return 53;
+            for(const auto& item:fs::directory_iterator(root)) {
+                const auto name=item.path().filename().wstring();
+                if(name.starts_with(L".iso-wcx-edit-"))return 54;
             }
 
             // Idempotency: making an already existing folder must not mount
