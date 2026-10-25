@@ -14,6 +14,7 @@
 #ifdef _WIN32
 #include "iso_wcx/wim_archive.hpp"
 #endif
+#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -1185,10 +1186,15 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
     if(extension == L".wim" || extension == L".esd" || extension == L".swm") {
 #ifdef _WIN32
         // WIMGAPI is a Windows system component, not an external helper.
+        std::fprintf(stderr,"[WIM-DISC] make-archive-call\n");std::fflush(stderr);
         auto archive = std::make_shared<WimArchive>(image_);
+        std::fprintf(stderr,"[WIM-DISC] make-archive-return\n");std::fflush(stderr);
         entries_ = archive->items();
+        std::fprintf(stderr,"[WIM-DISC] entries-copied\n");std::fflush(stderr);
         format_ = archive->format();
+        std::fprintf(stderr,"[WIM-DISC] format-copied\n");std::fflush(stderr);
         wim_archive_ = std::move(archive);
+        std::fprintf(stderr,"[WIM-DISC] return-to-WCX\n");std::fflush(stderr);
         return;
 #else
         throw std::runtime_error("WIM/ESD browsing requires Windows WIMGAPI");
