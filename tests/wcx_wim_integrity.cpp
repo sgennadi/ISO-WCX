@@ -9,6 +9,7 @@
 // This developer-only executable is never bundled with the WCX ZIP.
 #include <windows.h>
 #include <sddl.h>
+#include <aclapi.h>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -69,10 +70,23 @@ static void set_protected_dacl(const fs::path& file) {
     require(ConvertStringSecurityDescriptorToSecurityDescriptorW(
                sddl,SDDL_REVISION_1,&descriptor,nullptr)!=FALSE,
             "convert protected DACL fixture");
-    const BOOL ok=SetFileSecurityW(file.c_str(),DACL_SECURITY_INFORMATION,
-                                   descriptor);
+    BOOL present=FALSE,defaulted=FALSE;
+    PACL acl=nullptr;
+    const BOOL extracted=GetSecurityDescriptorDacl(
+        descriptor,&present,&acl,&defaulted);
+    require(extracted!=FALSE && present && acl!=nullptr,
+            "protected ACL fixture does not contain a DACL");
+    // SetFileSecurityW is obsolete and does not reliably propagate the
+    // protected DACL control bit on all NTFS versions. Explicitly use the
+    // documented PROTECTED_DACL_SECURITY_INFORMATION setter.
+    auto filename=file.wstring();
+    const DWORD error=SetNamedSecurityInfoW(
+        filename.data(),SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,nullptr,acl,nullptr);
     LocalFree(descriptor);
-    require(ok!=FALSE,"assign protected file DACL");
+    SetLastError(error);
+    require(error==ERROR_SUCCESS,"assign protected file DACL");
 }
 static std::wstring dacl(const fs::path& file) {
     DWORD bytes=0;
