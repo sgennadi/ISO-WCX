@@ -86,11 +86,13 @@ def exercise(editor: pathlib.Path, inspector: pathlib.Path,
     header,_=bat(image)
     payload=root / ("dynamic-"+kind+".dat")
     payload.write_bytes((b"Dynamic sparse VHD content: " * 220000) + b"end")
+    small=root / ("nested-"+kind+".dat")
+    small.write_bytes(b"nested content, independent of the large sparse BAT file")
     filename="partition1/新しい файл שלום 📂.bin"
     longdir="partition1/КАТАЛОГ"
     run(editor,image,"mkdir",longdir)
     run(editor,image,"add",filename,payload)
-    run(editor,image,"add",longdir+"/SECOND.DAT",payload)
+    run(editor,image,"add",longdir+"/SECOND.DAT",small)
     run(editor,image,"delete",longdir+"/SECOND.DAT")
     run(editor,image,"delete",longdir)
     readback(inspector,image,{filename:payload.read_bytes()},
