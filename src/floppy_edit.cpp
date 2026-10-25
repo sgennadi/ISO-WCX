@@ -683,43 +683,84 @@ private:
 } // namespace
 
 void edit_fat(const std::filesystem::path& image,
-                const std::vector<ArchiveChange>& changes,
-                const EditProgress& progress) {
-    const auto ext = upper(image.extension().string());
-    check(ext == ".IMA" || ext == ".IMG" || ext == ".BIF" ||
-          ext == ".VFD" || ext == ".FLP" || ext == ".RAW",
-          "unsupported raw FAT image extension");
+              const std::vector<ArchiveChange>& changes,
+              const EditProgress& progress) {
+    const auto ext=upper(image.extension().string());
+    check(ext==".IMA" || ext==".IMG" || ext==".BIF" ||
+          ext==".VFD" || ext==".FLP" || ext==".RAW" || ext==".VHD",
+          "FAT writer only accepts raw image or fixed VHD");
+    if(changes.empty())return;
+    std::uint64_t volume_start=0,volume_length=0;
+    std::vector<ArchiveChange> ordered=changes;
     {
+        // Preflight the original with the independent read-only virtual disk
+        // layer. An MBR/GPT partition must be explicitly targeted using the
+        // exact partitionN/path shown to the user by VirtualArchive.
         VirtualDiskReader disk(image);
-        check(disk.format() == VirtualDiskFormat::raw_image,
-              "FAT12 editor only accepts raw floppy images");
+        check(disk.format()==VirtualDiskFormat::raw_image ||
+              disk.format()==VirtualDiskFormat::fixed_vhd,
+              "FAT writer refuses compressed, dynamic or differencing disks");
+        volume_length=disk.size();
+        std::vector<PartitionEntry> partitions;
         try {
-            const auto partitions = inspect_partition_table(disk, disk.logical_sector_size());
-            check(partitions.empty(), "partitioned HDD is not editable as a floppy");
-        } catch (const EditUnsupported&) { throw; }
-          catch (const std::exception&) { /* A floppy is not an MBR. */ }
-        FatVolume reader(disk, 0, disk.size());
-        check(reader.kind() == FatKind::fat12 ||
-              reader.kind() == FatKind::fat16 || reader.kind() == FatKind::fat32,
-              "FAT write preview requires FAT12, FAT16 or FAT32");
-        (void)reader.list();
-    } // The original must not be held open during an atomic replacement.
-    Editor editor(image);
-    std::vector<ArchiveChange> ordered = changes;
-    std::stable_sort(ordered.begin(), ordered.end(),
-                     [](const ArchiveChange& a, const ArchiveChange& b) {
-        if (a.remove != b.remove) return !a.remove;
-        auto depth = [](const std::string& s) {
-            return std::count(s.begin(), s.end(), '/');
+            partitions=inspect_partition_table(disk,disk.logical_sector_size());
+        } catch(const std::exception&) {
+            // A FAT superfloppy has no partition table. The FatVolume check
+            // below is mandatory, so an arbitrary invalid HDD cannot match.
+        }
+        if(!partitions.empty()) {
+            std::optional<std::size_t> selected;
+            for(auto& change:ordered) {
+                bool matched=false;
+                for(std::size_t i=0;i<partitions.size();++i) {
+                    const auto prefix="partition"+std::to_string(i+1)+"/";
+                    if(change.path.rfind(prefix,0)==0) {
+                        check(!selected || *selected==i,
+                              "a FAT write batch cannot span multiple partitions");
+                        selected=i;
+                        change.path=change.path.substr(prefix.size());
+                        check(!change.path.empty(),
+                              "cannot edit the partition directory itself");
+                        matched=true;
+                        break;
+                    }
+                }
+                check(matched,"partitioned image requires partitionN/filename");
+            }
+            check(selected.has_value(),"no FAT partition selected");
+            const auto& part=partitions[*selected];
+            const auto sector=disk.logical_sector_size();
+            check(part.first_lba<=disk.size()/sector &&
+                  part.sector_count<=disk.size()/sector-part.first_lba,
+                  "FAT partition address exceeds disk capacity");
+            volume_start=part.first_lba*sector;
+            volume_length=part.sector_count*sector;
+        } else {
+            // A fixed VHD without partitions was previously not exposed by
+            // VirtualArchive. Do not create a write-only/invisible view.
+            check(disk.format()==VirtualDiskFormat::raw_image,
+                  "fixed VHD editing requires a validated MBR/GPT partition");
+        }
+        FatVolume reader(disk,volume_start,volume_length);
+        (void)reader.list(); // Bounded native structure and chain validation.
+    }
+    // Independent preflight handles are now closed; the original remains
+    // untouched through the complete stage-write/audit transaction.
+    Editor editor(image,volume_start,volume_length,true);
+    std::stable_sort(ordered.begin(),ordered.end(),
+                     [](const ArchiveChange& a,const ArchiveChange& b) {
+        if(a.remove!=b.remove)return !a.remove;
+        const auto depth=[](const std::string& p) {
+            return std::count(p.begin(),p.end(),'/');
         };
-        if (a.remove) return depth(a.path) > depth(b.path);
-        if (a.directory != b.directory) return a.directory;
-        return depth(a.path) < depth(b.path);
+        if(a.remove)return depth(a.path)>depth(b.path);
+        if(a.directory!=b.directory)return a.directory;
+        return depth(a.path)<depth(b.path);
     });
-    for (const auto& change : ordered) {
-        if (progress && !progress()) throw EditCancelled();
+    for(const auto& change:ordered) {
+        if(progress && !progress())throw EditCancelled();
         editor.apply(change);
     }
-    if (!ordered.empty()) editor.commit(progress);
+    editor.commit(progress);
 }
 } // namespace iso_wcx
