@@ -350,6 +350,10 @@ void fast_mount_folder_edit(
     }
     checked(std::filesystem::file_size(tx.output)==std::filesystem::file_size(path),
             "WIM staged clone changed length");
+    // Fail before invoking the privileged mount driver if another process
+    // modified/replaced the source while we copied the multi-gigabyte WIM.
+    // The commit repeats this check after unmount and verification.
+    tx.assert_source_unchanged();
     wim_detail::Header stage_header{};
     if(!wim_detail::read_header(tx.output,stage_header))
         throw EditUnsupported("cloned WIM header is invalid");
