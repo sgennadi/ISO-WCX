@@ -172,6 +172,7 @@ int main() {
         {
             iso_wcx::EditTransaction tx(archive);
             write_bytes(tx.output, "VERIFIED-NEW-ARCHIVE");
+            tx.assert_source_unchanged();
             tx.commit({});
         }
         need(read_bytes(archive) == "VERIFIED-NEW-ARCHIVE",
@@ -242,6 +243,15 @@ int main() {
             need(fs::file_size(archive) == original.size() &&
                  fs::last_write_time(archive) == previous_time,
                  "unable to set up same-size restored-mtime mutation");
+            bool detected_before_mount = false;
+            try {
+                tx.assert_source_unchanged();
+            } catch (const std::runtime_error& ex) {
+                detected_before_mount = std::string_view(ex.what()).find(
+                    "archive changed during edit") != std::string_view::npos;
+            }
+            need(detected_before_mount,
+                 "same-size mutation escaped early pre-mount validation");
             bool rejected = false;
             try {
                 tx.commit({});
@@ -276,6 +286,15 @@ int main() {
             need(fs::file_size(archive) == original_content.size() &&
                  fs::last_write_time(archive) == original_time,
                  "unable to set up same-size same-time path replacement");
+            bool detected_before_mount = false;
+            try {
+                tx.assert_source_unchanged();
+            } catch (const std::runtime_error& ex) {
+                detected_before_mount = std::string_view(ex.what()).find(
+                    "archive changed during edit") != std::string_view::npos;
+            }
+            need(detected_before_mount,
+                 "same-size path replacement escaped early pre-mount validation");
             bool rejected = false;
             try {
                 tx.commit({});
