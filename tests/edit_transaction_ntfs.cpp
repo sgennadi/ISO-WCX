@@ -315,8 +315,9 @@ int main() {
         // The user's archive filename may equal our internal backup name.
         // In this case the replacement and backup must still be distinct,
         // so both the new bytes and source protection survive.
-        {
-            const auto colliding_name = root / "original-archive.backup";
+        for (const auto* filename : {"original-archive.backup",
+                                     "ORIGINAL-ARCHIVE.BACKUP"}) {
+            const auto colliding_name = root / filename;
             write_bytes(colliding_name, "BACKUP-NAMED-SOURCE");
             write_bytes(named_stream(colliding_name), "BACKUP-NAMED-ADS");
             set_protected_dacl(colliding_name);
