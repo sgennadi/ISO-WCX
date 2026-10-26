@@ -52,6 +52,8 @@ static std::atomic<unsigned> pack_progress_calls{0};
 static std::atomic<unsigned> wim_percent_calls{0};
 static std::atomic<unsigned> wim_stage_calls{0};
 static std::atomic<unsigned> wim_fast_mount_stages{0};
+static std::atomic<unsigned> wim_recovery_notes_seen{0};
+static fs::path wim_recovery_test_root;
 static std::atomic<bool> cancel_fast_mounted_edit{false};
 static std::atomic<bool> cancel_fast_after_commit{false};
 static std::atomic<bool> cancel_next_wim{false};
@@ -107,8 +109,37 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
             ++wim_stage_calls;
         if(stage && std::wstring_view(stage).find(
                 L"Create WIM folders without applying image") !=
-                std::wstring_view::npos)
+                std::wstring_view::npos) {
             ++wim_fast_mount_stages;
+            // The callback runs AFTER native WIMMountImageHandle, allowing
+            // a direct assertion that the recovery note was made durable
+            // before the Windows driver began mounting the image.
+            if(!wim_recovery_test_root.empty()) {
+                try {
+                    for(const auto& item:fs::directory_iterator(
+                            wim_recovery_test_root)) {
+                        if(!item.path().filename().wstring().starts_with(
+                                L".iso-wcx-edit-"))continue;
+                        const auto note=item.path()/L"WIM-MOUNT-RECOVERY.txt";
+                        if(!fs::is_regular_file(note))continue;
+                        std::ifstream in(note,std::ios::binary);
+                        const std::string contents{
+                            std::istreambuf_iterator<char>(in),
+                            std::istreambuf_iterator<char>()};
+                        if(contents.find("Original WIM: ")!=std::string::npos &&
+                           contents.find("Staged WIM: ")!=std::string::npos &&
+                           contents.find("Mount directory: ")!=std::string::npos &&
+                           contents.find("dism /Get-MountedImageInfo")!=
+                               std::string::npos) {
+                            ++wim_recovery_notes_seen;
+                            break;
+                        }
+                    }
+                }catch(...) {
+                    // C callbacks must never let C++ exceptions escape.
+                }
+            }
+        }
         if(cancel_next_wim.load() && stage &&
            std::wstring_view(stage).find(L"Extract WIM image")!=std::wstring_view::npos)
             return 0;
@@ -147,6 +178,10 @@ int wmain(int argc,wchar_t** argv) {
             (L"iso-wcx-wim-smoke-"+std::to_wstring(GetCurrentProcessId())+L"-"+
              std::to_wstring(GetTickCount64()));
         fs::create_directories(root);
+        if(fast_mount_test) {
+            wim_recovery_test_root=root;
+            wim_recovery_notes_seen.store(0);
+        }
         const auto first=root/L"first";
         const auto second=root/L"second";
         write(first/L"HELLO.TXT","hello-one");
@@ -437,6 +472,13 @@ int wmain(int argc,wchar_t** argv) {
             }
             if(wim_fast_mount_stages.load()==0)
                 return 45; // Must actually reach the mount edit stage.
+            if(wim_recovery_notes_seen.load()==0)
+                return 68; // Recovery note must exist while WIM is mounted.
+            for(const auto& item:fs::directory_iterator(root)) {
+                if(item.path().filename().wstring().starts_with(
+                       L".iso-wcx-edit-"))
+                    return 69; // Successful unmount must remove workspace.
+            }
             std::wstring verify_path=original.wstring();
             OpenW check_open{};
             check_open.ArcName=verify_path.data();
