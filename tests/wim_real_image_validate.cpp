@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -32,15 +34,26 @@ using Pack = int(__stdcall*)(wchar_t*, wchar_t*, wchar_t*, wchar_t*, int);
 using Progress = int(__stdcall*)(wchar_t*, int);
 using SetProgress = void(__stdcall*)(HANDLE, Progress);
 
-static bool saw_fast_mount = false;
+static std::atomic<bool> saw_fast_mount{false};
 
 static int __stdcall report(wchar_t* stage, int percent) {
-    // TC uses a negative value for the stage label, and nonnegative values
-    // for percent. Do not claim a fast mount based on ordinary pack progress.
-    if (stage && percent < 0 &&
-        std::wstring_view(stage).find(
-            L"Create WIM folders without applying image") != std::wstring_view::npos)
-        saw_fast_mount = true;
+    // ISO-WCX follows the WCX convention: a negative Size conveys the
+    // positive overall percentage, with a WIM stage in the filename field.
+    if (!stage || percent >= 0) return 1;
+    const std::wstring_view label(stage);
+    if (label.find(L"Create WIM folders without applying image") !=
+        std::wstring_view::npos)
+        saw_fast_mount.store(true);
+    static std::mutex output_mutex;
+    static std::wstring last_stage;
+    static unsigned last_percentage = 0;
+    std::lock_guard lock(output_mutex);
+    const unsigned pct = static_cast<unsigned>(-percent);
+    if (last_stage != label || pct >= last_percentage + 10) {
+        last_stage.assign(label);
+        last_percentage = pct;
+        std::wcout << L"[WIM " << pct << L"%] " << label << L'\n';
+    }
     return 1;
 }
 
@@ -300,7 +313,7 @@ int wmain(int argc, wchar_t** argv) {
         require(SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT", L"1") != FALSE,
                 "cannot activate controlled WIM fast-mount test");
         std::cout << "Creating folder on a DISPOSABLE WIM copy...\n";
-        saw_fast_mount = false;
+        saw_fast_mount.store(false);
         set_progress(INVALID_HANDLE_VALUE, &report);
         const int rc = pack(archive_arg.data(), index_arg.data(),
                             input_arg.data(), list.data(), 0);
@@ -308,7 +321,7 @@ int wmain(int argc, wchar_t** argv) {
         SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT", nullptr);
         FreeLibrary(dll);
         require(rc == 0, "WCX PackFilesW failed: code " + std::to_string(rc));
-        require(saw_fast_mount, "fast mount was not exercised; legacy fallback detected");
+        require(saw_fast_mount.load(), "fast mount was not exercised; legacy fallback detected");
 
         // The reader owns native WIMGAPI handles. Close every handle on the
         // disposable archive before deleting its workspace on Windows.
