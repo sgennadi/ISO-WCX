@@ -78,6 +78,17 @@ public:
     // remove the mount point or its backing WIM. An administrator can recover
     // the retained workspace and discard the mount explicitly.
     void preserve() noexcept { preserve_workspace_ = true; }
+    // Cheap early rejection after a multi-GB stage clone, and again just
+    // before replacement. It must not be mistaken for an atomic file lock.
+    void assert_source_unchanged() const {
+        if(std::filesystem::file_size(image_)!=size_ ||
+           std::filesystem::last_write_time(image_)!=time_)
+            throw std::runtime_error("archive changed during edit (size/mtime)");
+#ifdef _WIN32
+        if(!(read_source_identity(image_) == source_identity_))
+            throw std::runtime_error("archive changed during edit (identity/change time)");
+#endif
+    }
     ~EditTransaction() {
         if(preserve_workspace_)return;
         std::error_code ec;
@@ -93,10 +104,7 @@ public:
         // Revalidate immediately before replacement. NTFS ChangeTime is
         // distinct from LastWriteTime; the latter can be set back by a writer.
         edit_tick(progress);
-        if(std::filesystem::file_size(image_) != size_ ||
-           std::filesystem::last_write_time(image_) != time_ ||
-           !(read_source_identity(image_) == source_identity_))
-            throw std::runtime_error("archive changed during edit (identity/change time)");
+        assert_source_unchanged();
         // MoveFileExW drops the old file's NTFS DACL and any named streams
         // absent from the replacement. ReplaceFileW merges those properties,
         // including protected DACLs, and still performs a same-volume rename.
@@ -115,6 +123,25 @@ public:
             // only if that pathname is absent; never overwrite another file.
             if(original_attrs==INVALID_FILE_ATTRIBUTES &&
                backup_attrs!=INVALID_FILE_ATTRIBUTES) {
+                // Never restore an unrelated replacement as the original.
+                // Rename may update ChangeTime, so compare the stable NTFS
+                // volume/file ID rather than the full pre-edit snapshot.
+                SourceIdentity candidate{};
+                try {
+                    candidate=read_source_identity(backup);
+                }catch(...) {
+                    preserve();
+                    throw;
+                }
+                if(candidate.volume!=source_identity_.volume ||
+                   candidate.id_high!=source_identity_.id_high ||
+                   candidate.id_low!=source_identity_.id_low) {
+                    preserve();
+                    throw std::runtime_error(
+                        "archive replacement failed (Win32 "+std::to_string(error)+
+                        "); backup file ID differs from original; keep "+
+                        backup.string());
+                }
                 if(!MoveFileExW(backup.c_str(),image_.c_str(),
                                 MOVEFILE_WRITE_THROUGH)) {
                     preserve();
@@ -134,9 +161,7 @@ public:
                 "; close other users of the image)");
         }
 #else
-        if(std::filesystem::file_size(image_)!=size_ ||
-           std::filesystem::last_write_time(image_)!=time_)
-            throw std::runtime_error("archive changed during edit");
+        assert_source_unchanged();
         std::filesystem::rename(output,image_);
 #endif
     }
