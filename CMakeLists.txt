@@ -373,6 +373,16 @@ if(WIN32)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
     add_executable(wcx_wim_smoke tests/wcx_wim_smoke.cpp)
+    # A small WIM-independent NTFS transaction regression on every Windows
+    # architecture, not just the privileged mount/commit integration lane.
+    add_executable(edit_transaction_ntfs tests/edit_transaction_ntfs.cpp)
+    target_include_directories(edit_transaction_ntfs PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(edit_transaction_ntfs PRIVATE advapi32)
+    add_test(NAME ntfs_atomic_replace_acl_ads_and_rollback
+      COMMAND edit_transaction_ntfs)
+    set_tests_properties(ntfs_atomic_replace_acl_ads_and_rollback
+      PROPERTIES TIMEOUT 60)
     add_test(NAME wcx_wim_multi_image_lzx_esd
       COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>")
     set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 240)
