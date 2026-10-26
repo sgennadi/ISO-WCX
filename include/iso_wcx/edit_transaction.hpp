@@ -53,8 +53,42 @@ public:
         if(f==INVALID_HANDLE_VALUE)throw std::runtime_error("cannot flush edited archive");
         const BOOL flushed=FlushFileBuffers(f);CloseHandle(f);
         if(!flushed)throw std::runtime_error("cannot flush edited archive");
-        if(!MoveFileExW(output.c_str(),image_.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
-            throw std::runtime_error("cannot replace archive (close other users of the image)");
+        // MoveFileExW drops the old file's NTFS DACL and any named streams
+        // absent from the replacement. ReplaceFileW merges those properties,
+        // including protected DACLs, and still performs a same-volume rename.
+        // Do not use IGNORE_MERGE_ERRORS / IGNORE_ACL_ERRORS: a successful edit
+        // must never silently weaken the original archive's permissions.
+        // The private backup costs no extra data copy on NTFS, and protects
+        // the original even if Windows fails between the rename operations.
+        const auto backup=workspace/"original-archive.backup";
+        if(!ReplaceFileW(image_.c_str(),output.c_str(),backup.c_str(),
+                         0,nullptr,nullptr)) {
+            const DWORD error=GetLastError();
+            const auto original_attrs=GetFileAttributesW(image_.c_str());
+            const auto backup_attrs=GetFileAttributesW(backup.c_str());
+            // ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 may leave the ORIGINAL
+            // at the backup path rather than its usual pathname. Restore
+            // only if that pathname is absent; never overwrite another file.
+            if(original_attrs==INVALID_FILE_ATTRIBUTES &&
+               backup_attrs!=INVALID_FILE_ATTRIBUTES) {
+                if(!MoveFileExW(backup.c_str(),image_.c_str(),
+                                MOVEFILE_WRITE_THROUGH)) {
+                    preserve();
+                    throw std::runtime_error(
+                        "archive replacement failed (Win32 "+std::to_string(error)+
+                        "); original may be at "+backup.string()+
+                        "; keep workspace for manual recovery");
+                }
+            }else if(original_attrs==INVALID_FILE_ATTRIBUTES ||
+                     backup_attrs!=INVALID_FILE_ATTRIBUTES) {
+                // An ambiguous partial replacement must retain its backup
+                // and edited stage for inspection; never delete evidence.
+                preserve();
+            }
+            throw std::runtime_error(
+                "cannot safely replace archive (Win32 "+std::to_string(error)+
+                "; close other users of the image)");
+        }
 #else
         std::filesystem::rename(output,image_);
 #endif
