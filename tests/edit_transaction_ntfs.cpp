@@ -34,7 +34,10 @@ static void write_bytes(const fs::path& path, const std::string& value) {
 
 static std::string read_bytes(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
-    need(bool(in), "read transaction fixture");
+    // Include the actual filename/stream in CI failures: a failed open of
+    // the default data stream and a lost named ADS have different causes.
+    if (!in)
+        throw std::runtime_error("cannot open transaction stream: " + path.string());
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>{}};
 }
 
@@ -136,6 +139,10 @@ int main() {
         write_bytes(archive, "ORIGINAL");
         write_bytes(named_stream(archive), "ORIGINAL-ADS");
         set_protected_dacl(archive);
+        need(read_bytes(archive) == "ORIGINAL",
+             "original data stream is unreadable before replacement");
+        need(read_bytes(named_stream(archive)) == "ORIGINAL-ADS",
+             "named stream fixture is unreadable before replacement");
         const auto expected_acl = dacl_sddl(archive);
         need(expected_acl.find(L"D:P") != std::wstring::npos,
              "fixture DACL is not protected");
