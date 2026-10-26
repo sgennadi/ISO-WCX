@@ -116,12 +116,18 @@ static std::array<unsigned char, 32> sha_file(const fs::path& path) {
 static std::array<unsigned char, 32> sha_item(iso_wcx::WimArchive& archive,
                                               std::size_t index) {
     Sha256 sha;
+    std::uint64_t bytes_read = 0;
+    const auto expected_size = archive.items().at(index).size;
     const bool ok = archive.read(index,
         [&](const std::uint8_t* data, std::size_t count) {
+            require(count <= expected_size - bytes_read,
+                    "WIM stream exceeded its declared length");
             sha.add(data, count);
+            bytes_read += count;
             return true;
         });
-    require(ok, "WIM resource hash read was cancelled");
+    require(ok && bytes_read == expected_size,
+            "WIM resource hash read was incomplete");
     return sha.finish();
 }
 
@@ -266,6 +272,8 @@ int wmain(int argc, wchar_t** argv) {
         fs::copy_file(source, disposable, fs::copy_options::none);
         require(fs::file_size(disposable) == input_size,
                 "initial disposable WIM copy was truncated");
+        require(sha_file(disposable) == source_hash,
+                "initial disposable WIM does not match original SHA-256");
 
         const auto folder_name = L"ISO_WCX_PROBE_" +
             std::to_wstring(GetTickCount64());
