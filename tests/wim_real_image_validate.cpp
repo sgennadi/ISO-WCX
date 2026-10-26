@@ -300,17 +300,21 @@ int wmain(int argc, wchar_t** argv) {
         require(rc == 0, "WCX PackFilesW failed: code " + std::to_string(rc));
         require(saw_fast_mount, "fast mount was not exercised; legacy fallback detected");
 
-        iso_wcx::WimArchive modified(disposable);
-        compare_tree(before, snapshot(modified), selected_folder);
-        std::map<std::string, std::size_t> modified_indices;
-        for (std::size_t i = 0; i < modified.items().size(); ++i)
-            modified_indices.emplace(modified.items()[i].path, i);
-        for (const auto& [name, expected] : expected_hashes) {
-            const auto at = modified_indices.find(name);
-            require(at != modified_indices.end(),
-                    "sampled WIM resource missing after commit: " + name);
-            require(sha_item(modified, at->second) == expected,
-                    "SHA-256 of unchanged WIM resource differs: " + name);
+        // The reader owns native WIMGAPI handles. Close every handle on the
+        // disposable archive before deleting its workspace on Windows.
+        {
+            iso_wcx::WimArchive modified(disposable);
+            compare_tree(before, snapshot(modified), selected_folder);
+            std::map<std::string, std::size_t> modified_indices;
+            for (std::size_t i = 0; i < modified.items().size(); ++i)
+                modified_indices.emplace(modified.items()[i].path, i);
+            for (const auto& [name, expected] : expected_hashes) {
+                const auto at = modified_indices.find(name);
+                require(at != modified_indices.end(),
+                        "sampled WIM resource missing after commit: " + name);
+                require(sha_item(modified, at->second) == expected,
+                        "SHA-256 of unchanged WIM resource differs: " + name);
+            }
         }
         require(fs::file_size(source) == input_size &&
                 fs::last_write_time(source) == input_time &&
