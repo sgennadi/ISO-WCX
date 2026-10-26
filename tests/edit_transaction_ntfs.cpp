@@ -14,6 +14,7 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -212,8 +213,9 @@ int main() {
             bool rejected = false;
             try {
                 tx.commit({});
-            } catch (const std::runtime_error&) {
-                rejected = true;
+            } catch (const std::runtime_error& ex) {
+                rejected = std::string_view(ex.what()).find(
+                    "archive changed during edit") != std::string_view::npos;
             }
             need(rejected, "concurrent original modification was overwritten");
         }
@@ -231,6 +233,9 @@ int main() {
             const auto previous_time = fs::last_write_time(archive);
             iso_wcx::EditTransaction tx(archive);
             write_bytes(tx.output, "STALE-SAME-SIZE-EDIT");
+            // Force a distinct NTFS ChangeTime even on machines with coarse
+            // clock resolution. The test remains fast (only 32 ms).
+            Sleep(32);
             overwrite_existing_data(archive,
                                     std::string(original.size(), 'X'));
             fs::last_write_time(archive, previous_time);
@@ -240,8 +245,9 @@ int main() {
             bool rejected = false;
             try {
                 tx.commit({});
-            } catch (const std::runtime_error&) {
-                rejected = true;
+            } catch (const std::runtime_error& ex) {
+                rejected = std::string_view(ex.what()).find(
+                    "archive changed during edit") != std::string_view::npos;
             }
             need(rejected, "same-size rewrite with restored mtime was overwritten");
         }
@@ -273,8 +279,9 @@ int main() {
             bool rejected = false;
             try {
                 tx.commit({});
-            } catch (const std::runtime_error&) {
-                rejected = true;
+            } catch (const std::runtime_error& ex) {
+                rejected = std::string_view(ex.what()).find(
+                    "archive changed during edit") != std::string_view::npos;
             }
             need(rejected, "path swap with equal size and mtime was overwritten");
             need(read_bytes(archive) == original_content,
