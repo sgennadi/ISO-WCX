@@ -232,6 +232,15 @@ int wmain(int argc,wchar_t** argv) {
             require(close(image)!=FALSE,"cannot close captured image index");
         }
         require(close(container)!=FALSE,"close captured WIM");
+        // The WIM container itself may have restricted NTFS permissions
+        // and a named stream unrelated to its internal WIM metadata.
+        // A safe transactional replacement must preserve both.
+        const std::string archive_stream="Original WIM container named ADS";
+        save(ads(wim),archive_stream);
+        set_protected_dacl(wim);
+        const auto archive_acl=dacl(wim);
+        require(read(ads(wim))==archive_stream,
+                "cannot initialize NTFS ADS on WIM container");
 
         const auto unpack=[&](const fs::path& target,DWORD index) {
             fs::create_directories(target);
@@ -292,6 +301,10 @@ int wmain(int argc,wchar_t** argv) {
         SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
         require(result==0,"WCX fast WIM folder editing failed");
         require(used_fast_mount.load()>0,"edit bypassed the fast mounted path");
+        require(dacl(wim)==archive_acl,
+                "transaction changed protected NTFS DACL of the WIM container");
+        require(read(ads(wim))==archive_stream,
+                "transaction lost NTFS ADS attached to the WIM container");
         unpack(root/L"after",1);
         verify(root/L"after");
         require(fs::is_directory(root/L"after"/L"FAST_INTEGRITY_FOLDER"),
@@ -305,8 +318,9 @@ int wmain(int argc,wchar_t** argv) {
         preserve_on_failure=false;
         std::error_code ec;
         fs::remove_all(root,ec);
-        std::cout<<"PASS: "<<mib<<"-MiB LZX WIM fast mount preserved regular files, "
-                    "protected DACL, NTFS ADS, hardlinks and second index\n";
+        std::cout<<"PASS: "<<mib<<"-MiB LZX WIM mount preserved contents, "
+                    "internal ACL/ADS/hardlinks, second index, "
+                    "and external WIM-container ACL/ADS\n";
         return 0;
     }catch(const std::exception& e){
         SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
