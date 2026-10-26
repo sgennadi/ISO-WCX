@@ -15,6 +15,8 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cwchar>
+#include <limits>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -84,7 +86,7 @@ public:
     Sha256(const Sha256&) = delete;
     Sha256& operator=(const Sha256&) = delete;
     void add(const std::uint8_t* bytes, std::size_t size) {
-        require(size <= ULONG_MAX, "SHA-256 update too large");
+        require(size <= std::numeric_limits<ULONG>::max(), "SHA-256 update too large");
         nt_ok(BCryptHashData(hash_, const_cast<PUCHAR>(bytes),
                              static_cast<ULONG>(size), 0), "BCryptHashData");
     }
