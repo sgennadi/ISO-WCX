@@ -311,6 +311,28 @@ int main() {
         need(read_bytes(named_stream(archive)) == "ORIGINAL-ADS" &&
              dacl_sddl(archive) == expected_acl,
              "NTFS path replacement test failed to restore protected archive");
+
+        // The user's archive filename may equal our internal backup name.
+        // In this case the replacement and backup must still be distinct,
+        // so both the new bytes and source protection survive.
+        {
+            const auto colliding_name = root / "original-archive.backup";
+            write_bytes(colliding_name, "BACKUP-NAMED-SOURCE");
+            write_bytes(named_stream(colliding_name), "BACKUP-NAMED-ADS");
+            set_protected_dacl(colliding_name);
+            const auto old_acl = dacl_sddl(colliding_name);
+            {
+                iso_wcx::EditTransaction tx(colliding_name);
+                write_bytes(tx.output, "BACKUP-NAMED-EDIT");
+                tx.commit({});
+            }
+            need(read_bytes(colliding_name) == "BACKUP-NAMED-EDIT",
+                 "backup-named archive was not replaced");
+            need(read_bytes(named_stream(colliding_name)) == "BACKUP-NAMED-ADS" &&
+                 dacl_sddl(colliding_name) == old_acl,
+                 "backup-named archive lost ADS/DACL");
+            fs::remove(colliding_name);
+        }
         for (const auto& entry : fs::directory_iterator(root))
             need(entry.path() == archive, "transaction leaked workspace");
         fs::remove_all(root);
