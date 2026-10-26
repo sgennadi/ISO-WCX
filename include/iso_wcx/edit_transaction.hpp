@@ -112,7 +112,11 @@ public:
         // must never silently weaken the original archive's permissions.
         // The private backup costs no extra data copy on NTFS, and protects
         // the original even if Windows fails between the rename operations.
-        const auto backup=workspace/"original-archive.backup";
+        auto backup=workspace/"original-archive.backup";
+        // The input archive can legally have the same name as our backup.
+        // Never let the recovery pathname alias the edited output.
+        if(backup==output)
+            backup=workspace/"original-archive.backup-recovery";
         if(!ReplaceFileW(image_.c_str(),output.c_str(),backup.c_str(),
                          0,nullptr,nullptr)) {
             const DWORD error=GetLastError();
