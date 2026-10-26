@@ -96,3 +96,20 @@ original WIM size **plus** at least 256 MiB or 5% of the WIM size,
 whichever is greater. Insufficient space aborts before any cloning or
 mount operation. This is a conservative lower bound, not a guarantee that
 WIMGAPI will never require additional scratch on unusually large images.
+
+## Recovery after an interrupted Windows mount
+
+Before WIMMountImageHandle, ISO-WCX durably writes WIM-MOUNT-RECOVERY.txt
+into its private .iso-wcx-edit-* workspace, recording the source WIM,
+staged WIM, mount path and index. Successful cleanup removes the note.
+
+On a driver or process crash, do NOT delete the workspace blindly.
+An administrator should inspect dism /Get-MountedImageInfo, confirm the
+exact matching mount directory AND staged image, and discard only that
+mount if it remains registered. Re-check mount status before deleting
+the staging directory. The plugin does not run DISM or do a global
+mount-point cleanup, which could affect other tools' images.
+
+These instructions are passive. A catastrophic driver fault or OS
+crash still requires real Windows recovery testing before this feature
+can become the default.

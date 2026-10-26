@@ -1,4 +1,5 @@
 #include "iso_wcx/wim_mount_fast_plan.hpp"
+#include "iso_wcx/wim_mount_recovery.hpp"
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
@@ -19,6 +20,19 @@ static WimTreeItem dir(const char* name) {
 }
 int main() {
     try {
+        const auto note=make_mount_recovery_note(
+            std::filesystem::path("C:/original.wim"),
+            std::filesystem::path("C:/stage/clone.wim"),
+            std::filesystem::path("C:/stage/mounted"),2);
+        check(note.find("Image index: 2")!=std::string::npos &&
+              note.find("Staged WIM: C:/stage/clone.wim")!=std::string::npos &&
+              note.find("Mount directory: C:/stage/mounted")!=std::string::npos,
+              "WIM recovery note omitted exact staged image identity");
+        check(note.find("dism /Get-MountedImageInfo")!=std::string::npos &&
+              note.find("/Discard")!=std::string::npos &&
+              note.find("No recovery command is executed automatically")!=
+                  std::string::npos,
+              "WIM recovery note lacks manual, per-mount disposal guidance");
         constexpr std::uint64_t mib=1024ull*1024ull;
         check(!enough_staging_space(0,1ull<<40),
               "zero-size WIM must be rejected");

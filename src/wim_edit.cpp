@@ -4,6 +4,7 @@
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/wim_parts.hpp"
 #include "iso_wcx/wim_mount_fast_plan.hpp"
+#include "iso_wcx/wim_mount_recovery.hpp"
 #include <msxml6.h>
 #include <map>
 #include <mutex>
@@ -354,6 +355,22 @@ void fast_mount_folder_edit(
         throw EditUnsupported("cloned WIM header is invalid");
     wim_detail::validate(stage_header);
     report(L"Mount selected WIM image",28);
+    // The mount driver can outlive the process. Persist this private,
+    // operation-specific recovery note before registering the mount.
+    {
+        const auto note=wim_detail::make_mount_recovery_note(
+            std::filesystem::absolute(path),tx.output,folder,plan.index);
+        const auto marker=tx.workspace/L"WIM-MOUNT-RECOVERY.txt";
+        HANDLE handle=CreateFileW(marker.c_str(),GENERIC_WRITE,0,nullptr,
+                                  CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+        checked(handle!=INVALID_HANDLE_VALUE,"create WIM recovery note");
+        DWORD written=0;
+        const BOOL wrote=WriteFile(handle,note.data(),
+                                  static_cast<DWORD>(note.size()),&written,nullptr);
+        const BOOL durable=wrote && written==note.size() && FlushFileBuffers(handle);
+        CloseHandle(handle);
+        checked(durable,"flush WIM recovery note");
+    }
 
     // WIMGAPI's mount driver may not be installed on every Windows host.
     // This Preview mode refuses and preserves the original if unavailable.
