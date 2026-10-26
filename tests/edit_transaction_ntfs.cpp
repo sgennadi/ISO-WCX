@@ -32,6 +32,25 @@ static void write_bytes(const fs::path& path, const std::string& value) {
     need(bool(out), "write transaction fixture");
 }
 
+// Change only the unnamed data stream of an existing NTFS file. Opening
+// with CREATE_ALWAYS (std::ofstream/trunc) can reset file metadata or named
+// streams, which would make the external-change test invalid.
+static void overwrite_existing_data(const fs::path& path, const std::string& value) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    need(file != INVALID_HANDLE_VALUE, "open external mutation source");
+    DWORD written = 0;
+    const BOOL wrote = WriteFile(file, value.data(),
+                                 static_cast<DWORD>(value.size()), &written, nullptr);
+    const BOOL resized = wrote && written == value.size() && SetEndOfFile(file);
+    const BOOL flushed = resized && FlushFileBuffers(file);
+    const DWORD error = GetLastError();
+    CloseHandle(file);
+    SetLastError(error);
+    need(flushed != FALSE, "write external mutation without changing NTFS ADS");
+}
+
 static std::string read_bytes(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
     // Include the actual filename/stream in CI failures: a failed open of
@@ -187,7 +206,9 @@ int main() {
         {
             iso_wcx::EditTransaction tx(archive);
             write_bytes(tx.output, "STALE-EDIT");
-            write_bytes(archive, "EXTERNAL-CHANGE-WINS");
+            overwrite_existing_data(archive, "EXTERNAL-CHANGE-WINS");
+            need(read_bytes(named_stream(archive)) == "ORIGINAL-ADS",
+                 "external writer unexpectedly changed original named stream");
             bool rejected = false;
             try {
                 tx.commit({});
