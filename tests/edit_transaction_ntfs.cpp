@@ -223,11 +223,74 @@ int main() {
              "concurrent change lost original named stream");
         need(dacl_sddl(archive) == expected_acl,
              "concurrent change altered original ACL");
+        // A writer can restore the ordinary LastWriteTime after an in-place
+        // mutation. Size and LastWriteTime then match the transaction snapshot,
+        // but NTFS ChangeTime must still prevent committing stale content.
+        {
+            const auto original = read_bytes(archive);
+            const auto previous_time = fs::last_write_time(archive);
+            iso_wcx::EditTransaction tx(archive);
+            write_bytes(tx.output, "STALE-SAME-SIZE-EDIT");
+            overwrite_existing_data(archive,
+                                    std::string(original.size(), 'X'));
+            fs::last_write_time(archive, previous_time);
+            need(fs::file_size(archive) == original.size() &&
+                 fs::last_write_time(archive) == previous_time,
+                 "unable to set up same-size restored-mtime mutation");
+            bool rejected = false;
+            try {
+                tx.commit({});
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            need(rejected, "same-size rewrite with restored mtime was overwritten");
+        }
+        need(read_bytes(archive) == std::string(
+                     std::string("EXTERNAL-CHANGE-WINS").size(), 'X'),
+             "same-size external rewrite was lost");
+        need(read_bytes(named_stream(archive)) == "ORIGINAL-ADS" &&
+             dacl_sddl(archive) == expected_acl,
+             "same-size external rewrite changed ACL or ADS");
+
+        // Swap a distinct NTFS file under the original filename, keeping
+        // identical bytes, size and LastWriteTime. Only file-ID checking can
+        // reject this alternate inode. Restore the protected original before
+        // testing cleanup.
+        {
+            const auto displaced = root / "displaced-original.wim";
+            const auto replacement = root / "replacement-original.wim";
+            const auto original_content = read_bytes(archive);
+            const auto original_time = fs::last_write_time(archive);
+            write_bytes(replacement, original_content);
+            fs::last_write_time(replacement, original_time);
+            iso_wcx::EditTransaction tx(archive);
+            write_bytes(tx.output, "STALE-PATH-SWAP");
+            fs::rename(archive, displaced);
+            fs::rename(replacement, archive);
+            need(fs::file_size(archive) == original_content.size() &&
+                 fs::last_write_time(archive) == original_time,
+                 "unable to set up same-size same-time path replacement");
+            bool rejected = false;
+            try {
+                tx.commit({});
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            need(rejected, "path swap with equal size and mtime was overwritten");
+            need(read_bytes(archive) == original_content,
+                 "alternate path contents were unexpectedly overwritten");
+            fs::remove(archive);
+            fs::rename(displaced, archive);
+        }
+        need(read_bytes(named_stream(archive)) == "ORIGINAL-ADS" &&
+             dacl_sddl(archive) == expected_acl,
+             "NTFS path replacement test failed to restore protected archive");
         for (const auto& entry : fs::directory_iterator(root))
             need(entry.path() == archive, "transaction leaked workspace");
         fs::remove_all(root);
         std::cout << "PASS: archive replacement retained protected DACL, "
-                     "ADS, creation time; cancellation and stale edits rolled back\n";
+                     "ADS, creation time; cancellation, same-size restored-mtime "
+                     "rewrites and alternate-file path swaps rejected\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: NTFS archive transaction: " << error.what()
