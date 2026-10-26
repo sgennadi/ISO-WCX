@@ -373,6 +373,11 @@ if(WIN32)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
     add_executable(wcx_wim_smoke tests/wcx_wim_smoke.cpp)
+    # This compiles on both Windows architectures but is intentionally NOT
+    # registered as a CI test: it requires a user-supplied real install.wim.
+    # The developer-only executable is excluded from the WCX installer ZIP.
+    add_executable(wim_real_image_validate tests/wim_real_image_validate.cpp)
+    target_link_libraries(wim_real_image_validate PRIVATE iso_disc bcrypt)
     # A small WIM-independent NTFS transaction regression on every Windows
     # architecture, not just the privileged mount/commit integration lane.
     add_executable(edit_transaction_ntfs tests/edit_transaction_ntfs.cpp)
