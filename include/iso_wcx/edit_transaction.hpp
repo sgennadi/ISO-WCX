@@ -115,7 +115,9 @@ public:
         auto backup=workspace/"original-archive.backup";
         // The input archive can legally have the same name as our backup.
         // Never let the recovery pathname alias the edited output.
-        if(backup==output)
+        // NTFS is normally case-insensitive: lexical path comparison is
+        // insufficient for differently cased archive filenames.
+        if(_wcsicmp(backup.c_str(),output.c_str())==0)
             backup=workspace/"original-archive.backup-recovery";
         if(!ReplaceFileW(image_.c_str(),output.c_str(),backup.c_str(),
                          0,nullptr,nullptr)) {
