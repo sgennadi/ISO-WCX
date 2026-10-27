@@ -261,7 +261,7 @@ void fast_mount_folder_edit(
     for(const auto& item:original) {
         if(!known.emplace(item.path,item.directory).second ||
            !case_aliases.emplace(
-               wim_detail::ascii_case_key(item.path),item.path).second)
+               wim_detail::windows_case_key(item.path),item.path).second)
             throw EditUnsupported("ambiguous or case-colliding WIM paths");
     }
     const std::string prefix="image"+std::to_string(plan.index)+"/";
@@ -272,7 +272,7 @@ void fast_mount_folder_edit(
             const auto slash=relative.find('/',start);
             const auto end=slash==std::string::npos?relative.size():slash;
             const auto key=prefix+relative.substr(0,end);
-            const auto alias=case_aliases.find(wim_detail::ascii_case_key(key));
+            const auto alias=case_aliases.find(wim_detail::windows_case_key(key));
             if(alias!=case_aliases.end() && alias->second!=key)
                 throw EditUnsupported(
                     "WIM folder spelling differs from an existing NTFS name");
