@@ -232,18 +232,18 @@ int wmain(int argc,wchar_t** argv) {
 
         if(validate_preflight) {
             // Run both failure phases against a genuine two-index WIM:
-            // (1) invalid image index, before the large clone;
-            // (2) a valid index but a .wim (not a DLL) supplied as the
-            // plugin, AFTER the clone and SHA-256 comparison. Neither
-            // may leave a workspace or mutate the original WIM.
+            // (1) invalid image index, before a large clone;
+            // (2) a CI-only injected error immediately AFTER full byte-copy
+            // and SHA-256 readback, before WIMGAPI/DLL involvement. This
+            // isolates pre-WCX cleanup from native WIMGAPI read hangs.
+            // Neither may leave a workspace or mutate the original WIM.
             if(!fs::is_regular_file(validator))return 69;
             const auto pristine_bytes=load(original);
             const auto pristine_time=fs::last_write_time(original);
-            auto reject_cleanly=[&](const fs::path& plugin_file,
-                                   unsigned index)->int {
+            auto reject_cleanly=[&](const std::wstring& test_argument)->int {
                 auto command=L"\""+validator.wstring()+L"\" \""+
-                    original.wstring()+L"\" \""+plugin_file.wstring()+
-                    L"\" "+std::to_wstring(index);
+                    original.wstring()+L"\" \""+std::wstring(argv[1])+
+                    L"\" "+test_argument;
                 std::vector<wchar_t> command_line(command.begin(),command.end());
                 command_line.push_back(L'\0');
                 STARTUPINFOW startup{};
@@ -274,9 +274,9 @@ int wmain(int argc,wchar_t** argv) {
                         return 74; // Never leave a failed pre-WCX clone.
                 return 0;
             };
-            if(const int failure=reject_cleanly(fs::path(argv[1]),256))
+            if(const int failure=reject_cleanly(L"256"))
                 return failure;
-            if(const int failure=reject_cleanly(original,1))
+            if(const int failure=reject_cleanly(L"--test-fail-after-clone"))
                 return failure+5;
         }
 
