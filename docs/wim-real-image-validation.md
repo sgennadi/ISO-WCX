@@ -12,6 +12,37 @@ Use an elevated Developer PowerShell for the native WIMGAPI mount driver:
     cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DISO_WCX_CXX_STANDARD=26 -DBUILD_TESTING=ON
     cmake --build build --config Release --target ISO-WCX wim_real_image_validate
 
+## Read-only WIM audit before attempting an edit
+
+You can audit an existing WIM without administrator privileges, a mount
+driver, a WCX DLL, write access to the WIM, or space for a private copy.
+This is the recommended **first** verification on a new install.wim:
+
+    .\build\Release\wim_real_image_validate.exe "D:\Images\install.wim" --audit-only
+
+For an exhaustive read of all nonempty default regular-file streams in
+every WIM index (potentially many gigabytes), use:
+
+    .\build\Release\wim_real_image_validate.exe "D:\Images\install.wim" --audit-only --full
+
+Each stream is hashed incrementally through the system WIMGAPI and included
+in a deterministic SHA-256 manifest using its path, length and digest.
+The tool reports the current path and size and periodically prints bytes
+read for large streams. It rechecks the *original source file's* full SHA-256,
+length, and last-write timestamp before reporting PASS. No source writes,
+WCX packing, WIM mount, driver changes or large clones are performed.
+
+A SHA-256 manifest calculated this way is a **readback fingerprint**, not
+a proof against a reference image from a trusted publisher. Comparing the
+same manifest across runs can reveal changed WIM resource contents, but
+this audit does not itself verify bootability, NTFS ADS or full WIM security
+descriptor fidelity. It may stall if the underlying Windows WIMGAPI stalls;
+the small CI fixture uses an independent child-process watchdog to detect
+that condition rather than silently declaring success. The manual
+large-image command has no implicit timeout.
+
+## Opt-in disposable-copy edit test
+
 With a genuine local WIM on writable NTFS (do not use a system-mounted
 or production Windows installation image), run:
 
@@ -60,12 +91,17 @@ two-index LZX WIM with protected ACL, named ADS, file hardlink identity and
 incompressible payloads. These tests complement each other, but neither
 proves crash recovery or performance for arbitrary install.wim files.
 
-The helper prints a PASS line with image index, number of original WIM
-entries, number of sampled resources and elapsed wall-clock time.
+The edit test prints a PASS line with image index, number of original WIM
+entries, number of verified resources and elapsed wall-clock time.
+The read-only mode also prints the deterministic SHA-256 manifest and
+total decompressed bytes that were successfully read.
 
 ## On failure
 
-It prints the private test workspace path and retains it. **Never delete
+The read-only `--audit-only` mode creates **no private workspace**; if
+it cannot read or hash a resource, it exits with a failure rather than
+silently skipping it. The edit test prints the private test workspace
+path and retains it after WCX has been invoked. **Never delete
 a workspace while Windows still reports an active mount.** Follow the
 private WIM-MOUNT-RECOVERY.txt, if present, and inspect
 dism /Get-MountedImageInfo to identify the exact mount and staged image.
