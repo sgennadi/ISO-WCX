@@ -392,6 +392,14 @@ if(WIN32)
       COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>"
         "$<TARGET_FILE:wim_real_image_validate>")
     set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 240)
+    # Independent WIMGAPI decompressed-stream readback, with no WIM mount,
+    # archive edit, or third-party DLL. A synthetic two-index WIM tests
+    # both the sample audit and exhaustive --full path on each architecture.
+    add_test(NAME wcx_wim_read_only_sample_and_full_audit
+      COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>"
+        --audit-fixture "$<TARGET_FILE:wim_real_image_validate>")
+    set_tests_properties(wcx_wim_read_only_sample_and_full_audit
+      PROPERTIES TIMEOUT 120)
     option(ISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST
       "Test opt-in Windows WIMGAPI mount/commit on a disposable WIM" OFF)
     if(ISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST)
