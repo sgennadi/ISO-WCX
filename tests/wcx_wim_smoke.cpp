@@ -170,9 +170,15 @@ std::string load(const fs::path& filename) {
     return {std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
 }
 int wmain(int argc,wchar_t** argv) {
-    const bool fast_mount_test=argc==3 &&
+    const bool fast_mount_test=argc>=3 &&
         std::wstring_view(argv[2])==L"--fast-mount";
-    if(argc!=2 && !fast_mount_test) return 1;
+    // CTest can provide a second developer tool to verify cleanup on a
+    // genuine synthetic WIM without entering the privileged mount path.
+    const bool validate_preflight=(argc==3 && !fast_mount_test) ||
+        (argc==4 && fast_mount_test);
+    if(argc<2 || argc>4 || (argc==4 && !fast_mount_test))return 1;
+    const fs::path validator=validate_preflight ?
+        fs::path(argv[fast_mount_test?3:2]) : fs::path();
     try {
         const auto root=fs::temp_directory_path()/
             (L"iso-wcx-wim-smoke-"+std::to_wstring(GetCurrentProcessId())+L"-"+
@@ -223,6 +229,47 @@ int wmain(int argc,wchar_t** argv) {
             close_wim(image);
         }
         close_wim(archive);
+
+        if(validate_preflight) {
+            // Feed the real system-captured two-index WIM to the separate
+            // validator with the nonexistent index 256. The validator must
+            // reject before calling PackFilesW and remove its workspace.
+            // Check input bytes and timestamps to prove no mutation.
+            if(!fs::is_regular_file(validator))return 69;
+            const auto pristine_bytes=load(original);
+            const auto pristine_time=fs::last_write_time(original);
+            auto command=L"\""+validator.wstring()+L"\" \""+
+                original.wstring()+L"\" \""+std::wstring(argv[1])+L"\" 256";
+            std::vector<wchar_t> command_line(command.begin(),command.end());
+            command_line.push_back(L'\0');
+            STARTUPINFOW startup{};
+            startup.cb=sizeof(startup);
+            PROCESS_INFORMATION process{};
+            if(!CreateProcessW(validator.c_str(),command_line.data(),
+                               nullptr,nullptr,FALSE,0,nullptr,
+                               root.c_str(),&startup,&process))
+                return 70;
+            CloseHandle(process.hThread);
+            const DWORD wait=WaitForSingleObject(process.hProcess,60000);
+            if(wait!=WAIT_OBJECT_0) {
+                // A timed-out child must not survive the CTest fixture.
+                TerminateProcess(process.hProcess,71);
+                WaitForSingleObject(process.hProcess,5000);
+                CloseHandle(process.hProcess);
+                return 71;
+            }
+            DWORD exit_code=0;
+            const BOOL got_exit=GetExitCodeProcess(process.hProcess,&exit_code);
+            CloseHandle(process.hProcess);
+            if(!got_exit || exit_code!=2)return 72;
+            if(load(original)!=pristine_bytes ||
+               fs::last_write_time(original)!=pristine_time)
+                return 73;
+            for(const auto& entry:fs::directory_iterator(root))
+                if(entry.path().filename().wstring().starts_with(
+                       L".iso-wcx-real-validation-"))
+                    return 74; // Pre-WCX workspace must have been removed.
+        }
 
         const HMODULE dll=LoadLibraryW(argv[1]);
         if(!dll)return 7;
