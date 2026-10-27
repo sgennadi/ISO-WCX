@@ -231,44 +231,53 @@ int wmain(int argc,wchar_t** argv) {
         close_wim(archive);
 
         if(validate_preflight) {
-            // Feed the real system-captured two-index WIM to the separate
-            // validator with the nonexistent index 256. The validator must
-            // reject before calling PackFilesW and remove its workspace.
-            // Check input bytes and timestamps to prove no mutation.
+            // Run both failure phases against a genuine two-index WIM:
+            // (1) invalid image index, before the large clone;
+            // (2) a valid index but a .wim (not a DLL) supplied as the
+            // plugin, AFTER the clone and SHA-256 comparison. Neither
+            // may leave a workspace or mutate the original WIM.
             if(!fs::is_regular_file(validator))return 69;
             const auto pristine_bytes=load(original);
             const auto pristine_time=fs::last_write_time(original);
-            auto command=L"\""+validator.wstring()+L"\" \""+
-                original.wstring()+L"\" \""+std::wstring(argv[1])+L"\" 256";
-            std::vector<wchar_t> command_line(command.begin(),command.end());
-            command_line.push_back(L'\0');
-            STARTUPINFOW startup{};
-            startup.cb=sizeof(startup);
-            PROCESS_INFORMATION process{};
-            if(!CreateProcessW(validator.c_str(),command_line.data(),
-                               nullptr,nullptr,FALSE,0,nullptr,
-                               root.c_str(),&startup,&process))
-                return 70;
-            CloseHandle(process.hThread);
-            const DWORD wait=WaitForSingleObject(process.hProcess,60000);
-            if(wait!=WAIT_OBJECT_0) {
-                // A timed-out child must not survive the CTest fixture.
-                TerminateProcess(process.hProcess,71);
-                WaitForSingleObject(process.hProcess,5000);
+            auto reject_cleanly=[&](const fs::path& plugin_file,
+                                   unsigned index)->int {
+                auto command=L"\""+validator.wstring()+L"\" \""+
+                    original.wstring()+L"\" \""+plugin_file.wstring()+
+                    L"\" "+std::to_wstring(index);
+                std::vector<wchar_t> command_line(command.begin(),command.end());
+                command_line.push_back(L'\0');
+                STARTUPINFOW startup{};
+                startup.cb=sizeof(startup);
+                PROCESS_INFORMATION process{};
+                if(!CreateProcessW(validator.c_str(),command_line.data(),
+                                   nullptr,nullptr,FALSE,0,nullptr,
+                                   root.c_str(),&startup,&process))
+                    return 70;
+                CloseHandle(process.hThread);
+                const DWORD wait=WaitForSingleObject(process.hProcess,60000);
+                if(wait!=WAIT_OBJECT_0) {
+                    TerminateProcess(process.hProcess,71);
+                    WaitForSingleObject(process.hProcess,5000);
+                    CloseHandle(process.hProcess);
+                    return 71;
+                }
+                DWORD exit_code=0;
+                const BOOL got_exit=GetExitCodeProcess(process.hProcess,&exit_code);
                 CloseHandle(process.hProcess);
-                return 71;
-            }
-            DWORD exit_code=0;
-            const BOOL got_exit=GetExitCodeProcess(process.hProcess,&exit_code);
-            CloseHandle(process.hProcess);
-            if(!got_exit || exit_code!=2)return 72;
-            if(load(original)!=pristine_bytes ||
-               fs::last_write_time(original)!=pristine_time)
-                return 73;
-            for(const auto& entry:fs::directory_iterator(root))
-                if(entry.path().filename().wstring().starts_with(
-                       L".iso-wcx-real-validation-"))
-                    return 74; // Pre-WCX workspace must have been removed.
+                if(!got_exit || exit_code!=2)return 72;
+                if(load(original)!=pristine_bytes ||
+                   fs::last_write_time(original)!=pristine_time)
+                    return 73;
+                for(const auto& entry:fs::directory_iterator(root))
+                    if(entry.path().filename().wstring().starts_with(
+                           L".iso-wcx-real-validation-"))
+                        return 74; // Never leave a failed pre-WCX clone.
+                return 0;
+            };
+            if(const int failure=reject_cleanly(fs::path(argv[1]),256))
+                return failure;
+            if(const int failure=reject_cleanly(original,1))
+                return failure+5;
         }
 
         const HMODULE dll=LoadLibraryW(argv[1]);
