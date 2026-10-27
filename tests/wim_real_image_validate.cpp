@@ -246,6 +246,7 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
     fs::path root;
+    bool owns_workspace = false;
     // A failed metadata/hash preflight cannot have mounted a private WIM.
     // Cleanup is safe before PackFilesW is entered. Once WCX runs it may
     // have registered a Windows mount: preserve all recovery evidence.
@@ -375,8 +376,12 @@ int wmain(int argc, wchar_t** argv) {
         root = source.parent_path() /
             (L".iso-wcx-real-validation-" + std::to_wstring(GetCurrentProcessId()) +
              L"-" + std::to_wstring(GetTickCount64()));
+        // If this computed pathname already exists, NEVER delete it.
+        // A failed create_directory() is not proof of ownership and might
+        // refer to another process's workspace or a hostile reparse point.
         require(fs::create_directory(root),
-                "cannot create a private validation workspace");
+                "cannot create a unique private validation workspace");
+        owns_workspace = true;
 
         const auto start = std::chrono::steady_clock::now();
         std::cout << "Checking input SHA-256 and all WIM image indexes...\n";
@@ -495,7 +500,7 @@ int wmain(int argc, wchar_t** argv) {
     } catch (const std::exception& failure) {
         SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT", nullptr);
         std::cerr << "FAIL: real-image WIM validation: " << failure.what() << '\n';
-        if (!root.empty()) {
+        if (!root.empty() && owns_workspace) {
             if (!wcx_invoked) {
                 std::error_code ec;
                 fs::remove_all(root, ec);
