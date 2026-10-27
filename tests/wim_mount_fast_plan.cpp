@@ -106,13 +106,13 @@ int main() {
         // The NTFS mount target treats Cyrillic and many other Unicode case
         // pairs as aliases, even though their UTF-8 bytes are different.
         const auto unicode_upper=std::string(
-            reinterpret_cast<const char*>(u8"Папка"));
+            reinterpret_cast<const char*>(u8"\u041F\u0430\u043F\u043A\u0430"));
         const auto unicode_lower=std::string(
-            reinterpret_cast<const char*>(u8"папка"));
+            reinterpret_cast<const char*>(u8"\u043F\u0430\u043F\u043A\u0430"));
         const auto greek_upper=std::string(
-            reinterpret_cast<const char*>(u8"Δοκιμή"));
+            reinterpret_cast<const char*>(u8"\u0394\u03BF\u03BA\u03B9\u03BC\u03AE"));
         const auto greek_lower=std::string(
-            reinterpret_cast<const char*>(u8"δοκιμή"));
+            reinterpret_cast<const char*>(u8"\u03B4\u03BF\u03BA\u03B9\u03BC\u03AE"));
         check(windows_case_key(unicode_upper)==windows_case_key(unicode_lower),
               "Windows Unicode Cyrillic case aliases were not recognized");
         check(windows_case_key(greek_upper)==windows_case_key(greek_lower),
