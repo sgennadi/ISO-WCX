@@ -389,13 +389,15 @@ if(WIN32)
     set_tests_properties(ntfs_atomic_replace_acl_ads_and_rollback
       PROPERTIES TIMEOUT 60)
     add_test(NAME wcx_wim_multi_image_lzx_esd
-      COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>")
+      COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>"
+        "$<TARGET_FILE:wim_real_image_validate>")
     set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 240)
     option(ISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST
       "Test opt-in Windows WIMGAPI mount/commit on a disposable WIM" OFF)
     if(ISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST)
       add_test(NAME wcx_wim_fast_mount_real_windows
-        COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>" --fast-mount)
+        COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>" --fast-mount
+          "$<TARGET_FILE:wim_real_image_validate>")
       set_tests_properties(wcx_wim_fast_mount_real_windows PROPERTIES TIMEOUT 420)
       # Independent Windows system-WIMGAPI apply/readback on a 64-MiB
       # incompressible LZX WIM with protected DACL and NTFS ADS.
