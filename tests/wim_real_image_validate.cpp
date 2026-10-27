@@ -162,23 +162,29 @@ static std::map<std::string, Metadata> snapshot(const iso_wcx::WimArchive& wim) 
     return entries;
 }
 
-static std::vector<std::string> samples(const iso_wcx::WimArchive& archive) {
+static std::vector<std::string> samples(const iso_wcx::WimArchive& archive,
+                                        bool full_content) {
     std::map<std::string, unsigned> per_image;
     std::vector<std::string> selected;
-    // Small, deterministic samples from each index, plus one medium-size
-    // stream per index. This is not a substitute for a full-content audit.
+    // Fast mode chooses four small/medium streams per image. Full mode
+    // hashes every listed nonempty regular stream in every image index;
+    // no WIM resources are loaded into memory in their entirety.
     for (const auto& item : archive.items()) {
         if (item.directory || item.size == 0 ||
-            item.size > 64ull * 1024ull * 1024ull)
+            (!full_content && item.size > 64ull * 1024ull * 1024ull))
             continue;
         const auto slash = item.path.find('/');
         if (slash == std::string::npos) continue;
         const auto image = item.path.substr(0, slash);
         if (!image.starts_with("image")) continue;
-        auto& count = per_image[image];
-        if (count < 4) {
+        if (full_content) {
             selected.push_back(item.path);
-            ++count;
+        } else {
+            auto& count = per_image[image];
+            if (count < 4) {
+                selected.push_back(item.path);
+                ++count;
+            }
         }
     }
     return selected;
@@ -214,10 +220,10 @@ static std::wstring native_string(const fs::path& path) {
 }
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc < 3 || argc > 4) {
+    if (argc < 3 || argc > 5) {
         std::wcerr << L"Usage (Administrator):\n"
                    << L"  wim_real_image_validate.exe <install.wim> "
-                      L"<ISO-WCX.wcx64 or ISO-WCX.wcx> [image-index]\n"
+                      L"<ISO-WCX.wcx64 or ISO-WCX.wcx> [image-index] [--full]\n"
                    << L"WARNING: needs writable NTFS and >2x input size free. "
                       L"The original is never modified.\n";
         return 1;
@@ -226,11 +232,18 @@ int wmain(int argc, wchar_t** argv) {
     try {
         const fs::path source = fs::absolute(argv[1]);
         const fs::path plugin_path = fs::absolute(argv[2]);
+        const bool full_content =
+            (argc == 4 && std::wstring_view(argv[3]) == L"--full") ||
+            (argc == 5 && std::wstring_view(argv[4]) == L"--full");
+        const bool has_index = argc >= 4 &&
+            std::wstring_view(argv[3]) != L"--full";
+        require(argc != 5 || (full_content && has_index),
+                "use [image-index] [--full], in that order");
         wchar_t* index_end = nullptr;
-        const unsigned long parsed = argc == 4
+        const unsigned long parsed = has_index
             ? std::wcstoul(argv[3], &index_end, 10) : 1ul;
         require(parsed != 0 && parsed <= 256 &&
-                (argc == 3 || (index_end != argv[3] && *index_end == L'\0')),
+                (!has_index || (index_end != argv[3] && *index_end == L'\0')),
                 "image index must be a decimal integer in 1..256");
         const unsigned image_index = static_cast<unsigned>(parsed);
         require(fs::is_regular_file(fs::symlink_status(source)),
@@ -269,7 +282,10 @@ int wmain(int argc, wchar_t** argv) {
         const auto input_time = fs::last_write_time(source);
         iso_wcx::WimArchive original(source);
         const auto before = snapshot(original);
-        const auto selected = samples(original);
+        const auto selected = samples(original, full_content);
+        std::cout << (full_content
+            ? "Full WIM resource-stream audit enabled (may take a long time).\n"
+            : "Fast WIM resource-stream samples enabled.\n");
         const auto image_name = "image" + std::to_string(image_index);
         require(before.contains(image_name) && before.at(image_name).directory,
                 "specified WIM image index does not exist");
@@ -348,7 +364,9 @@ int wmain(int argc, wchar_t** argv) {
             std::chrono::steady_clock::now() - start).count();
         std::cout << "PASS: real WIM index " << image_index << ", "
                   << before.size() << " original metadata entries, "
-                  << expected_hashes.size() << " independently hashed streams, "
+                  << expected_hashes.size()
+                  << (full_content ? " fully audited" : " sampled")
+                  << " streams, "
                   << input_size << " source bytes unchanged; total "
                   << secs << " sec.\n";
         // The disposable archive and any potential temporary paths are released
