@@ -16,6 +16,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cwchar>
 #include <limits>
 #include <filesystem>
@@ -390,6 +391,15 @@ int wmain(int argc, wchar_t** argv) {
                               << root.string() << " (" << ec.message() << ")\n";
                 else
                     std::cerr << "Cleaned unmounted preflight workspace.\n";
+                // A failed preflight never invokes PackFilesW or mounts a WIM.
+                // Win32/Win64 hosted runners have been observed retaining
+                // WIMGAPI teardown threads after the last log line, causing
+                // the parent fixture to time out after 60 seconds. Flush
+                // diagnostics and bypass CRT/global destructor processing
+                // for this fatal developer-tool-only exit path.
+                std::cout.flush();
+                std::cerr.flush();
+                std::_Exit(2);
             } else {
                 std::cerr << "Retained developer workspace after WCX invocation "
                              "(inspect mount registry before deleting): "
