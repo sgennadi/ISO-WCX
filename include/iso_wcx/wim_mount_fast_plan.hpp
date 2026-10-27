@@ -9,6 +9,14 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
+#include <climits>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <unordered_map>
 #include <vector>
 
@@ -22,6 +30,51 @@ inline std::string ascii_case_key(std::string value) {
         if(ch>='A' && ch<='Z')
             ch=static_cast<char>(ch-'A'+'a');
     return value;
+}
+// Windows maps non-ASCII case variants when resolving NTFS paths. Before a
+// potentially multi-gigabyte mount, reject Unicode aliases as well as ASCII
+// aliases. Invariant Windows NLS casing is a conservative preflight; the
+// mounted WIM is independently checked again after commit.
+inline std::string windows_case_key(const std::string& path) {
+    bool ascii_only=true;
+    for(const unsigned char value:path)
+        if(value>=0x80u) { ascii_only=false;break; }
+    if(ascii_only)return ascii_case_key(path);
+#ifdef _WIN32
+    if(path.size()>static_cast<std::size_t>(INT_MAX))
+        throw EditUnsupported("WIM filename exceeds Windows Unicode conversion limit");
+    const int length=static_cast<int>(path.size());
+    const int chars=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,
+                                       path.data(),length,nullptr,0);
+    if(chars<=0)throw EditUnsupported("WIM contains an invalid UTF-8 filename");
+    std::wstring decoded(static_cast<std::size_t>(chars),L'\0');
+    if(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path.data(),length,
+                          decoded.data(),chars)!=chars)
+        throw EditUnsupported("WIM filename UTF-8 decode changed");
+    const int mapped=LCMapStringEx(LOCALE_NAME_INVARIANT,LCMAP_LOWERCASE,
+                                  decoded.data(),chars,nullptr,0,
+                                  nullptr,nullptr,0);
+    if(mapped<=0)throw EditUnsupported("Windows could not normalize WIM filename case");
+    std::wstring lowered(static_cast<std::size_t>(mapped),L'\0');
+    if(LCMapStringEx(LOCALE_NAME_INVARIANT,LCMAP_LOWERCASE,
+                     decoded.data(),chars,lowered.data(),mapped,
+                     nullptr,nullptr,0)!=mapped)
+        throw EditUnsupported("Windows filename case mapping changed");
+    const int bytes=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,
+                                       lowered.data(),mapped,nullptr,0,
+                                       nullptr,nullptr);
+    if(bytes<=0)throw EditUnsupported("Windows filename case mapping is invalid");
+    std::string result(static_cast<std::size_t>(bytes),'\0');
+    if(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,
+                          lowered.data(),mapped,result.data(),bytes,
+                          nullptr,nullptr)!=bytes)
+        throw EditUnsupported("Windows filename case mapping failed");
+    return result;
+#else
+    // This portable planner never mounts WIM on Linux. A Windows host always
+    // uses its own Unicode casemap rather than accepting this ASCII fallback.
+    return ascii_case_key(path);
+#endif
 }
 inline bool windows_device_name(const std::string& segment) {
     const auto base=ascii_case_key(segment.substr(0,segment.find('.')));
@@ -86,7 +139,7 @@ inline std::optional<MountFolderPlan> plan_mounted_folders(
             if(end==std::string::npos) break;
             offset=end+1;
         }
-        if (!paths.insert(ascii_case_key(change.path)).second)
+        if (!paths.insert(windows_case_key(change.path)).second)
             return std::nullopt;
         plan.paths.push_back(change.path);
     }
@@ -118,12 +171,12 @@ inline bool verify_mounted_folder_tree(
     std::set<std::string> old_ci,fresh_ci;
     for(const auto& item:before) {
         if(!old.emplace(item.path,&item).second ||
-           !old_ci.insert(ascii_case_key(item.path)).second)
+           !old_ci.insert(windows_case_key(item.path)).second)
             return fail("ambiguous original WIM path/case alias");
     }
     for(const auto& item:after) {
         if(!fresh.emplace(item.path,&item).second ||
-           !fresh_ci.insert(ascii_case_key(item.path)).second)
+           !fresh_ci.insert(windows_case_key(item.path)).second)
             return fail("ambiguous edited WIM path/case alias");
     }
     const std::string prefix="image"+std::to_string(plan.index);
