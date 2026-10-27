@@ -48,6 +48,15 @@ jobs:
       - name: Verify safe WCX association repair
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
+      # Build the developer-only real-WIM validator on both architectures,
+      # but ship it separately from the auto-installable Total Commander ZIP.
+      - name: Upload real-WIM validator (developer utility)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ISO-WCX-WIM-Validator-${{ matrix.arch }}
+          path: build/Release/wim_real_image_validate.exe
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload preview binaries
         uses: actions/upload-artifact@v4
         with:
