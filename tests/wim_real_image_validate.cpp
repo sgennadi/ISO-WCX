@@ -20,6 +20,7 @@
 #include <cwchar>
 #include <limits>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -130,7 +131,9 @@ static std::array<unsigned char, 32> sha_file(const fs::path& path) {
 }
 
 static std::array<unsigned char, 32> sha_item(iso_wcx::WimArchive& archive,
-                                              std::size_t index) {
+                                              std::size_t index,
+                                              const std::function<void(std::uint64_t)>&
+                                                  progress = {}) {
     Sha256 sha;
     std::uint64_t bytes_read = 0;
     const auto expected_size = archive.items().at(index).size;
@@ -140,11 +143,23 @@ static std::array<unsigned char, 32> sha_item(iso_wcx::WimArchive& archive,
                     "WIM stream exceeded its declared length");
             sha.add(data, count);
             bytes_read += count;
+            if (progress) progress(bytes_read);
             return true;
         });
     require(ok && bytes_read == expected_size,
             "WIM resource hash read was incomplete");
     return sha.finish();
+}
+
+static std::string sha_hex(const std::array<unsigned char,32>& hash) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(64);
+    for (unsigned char byte : hash) {
+        out.push_back(digits[byte >> 4]);
+        out.push_back(digits[byte & 15]);
+    }
+    return out;
 }
 
 struct Metadata {
@@ -222,11 +237,12 @@ static std::wstring native_string(const fs::path& path) {
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 3 || argc > 5) {
-        std::wcerr << L"Usage (Administrator):\n"
+        std::wcerr << L"Usage (Administrator for editing):\n"
                    << L"  wim_real_image_validate.exe <install.wim> "
                       L"<ISO-WCX.wcx64 or ISO-WCX.wcx> [image-index] [--full]\n"
-                   << L"WARNING: needs writable NTFS and >2x input size free. "
-                      L"The original is never modified.\n";
+                   << L"  wim_real_image_validate.exe <install.wim> --audit-only [--full]\n"
+                   << L"Editing needs writable NTFS and >2x input size free. "
+                      L"Read-only audit needs no WCX DLL or private WIM copy.\n";
         return 1;
     }
     fs::path root;
@@ -236,7 +252,9 @@ int wmain(int argc, wchar_t** argv) {
     bool wcx_invoked = false;
     try {
         const fs::path source = fs::absolute(argv[1]);
-        const fs::path plugin_path = fs::absolute(argv[2]);
+        const bool audit_only = std::wstring_view(argv[2]) == L"--audit-only";
+        const fs::path plugin_path = audit_only ?
+            fs::path{} : fs::absolute(argv[2]);
         // CI-only deterministic fault injection: exercise complete raw-WIM
         // copying and SHA-256 verification, then fail before WIMGAPI opens
         // image streams or a WCX DLL is loaded. This isolates cleanup from
@@ -248,8 +266,11 @@ int wmain(int argc, wchar_t** argv) {
             (argc == 5 && std::wstring_view(argv[4]) == L"--full");
         const bool has_index = argc >= 4 &&
             std::wstring_view(argv[3]) != L"--full" &&
-            !inject_post_clone_failure;
-        require(argc != 5 || (full_content && has_index),
+            !inject_post_clone_failure && !audit_only;
+        require(!audit_only || (argc == 3 ||
+                (argc == 4 && full_content)),
+                "audit mode accepts only --audit-only [--full]");
+        require(argc != 5 || (!audit_only && full_content && has_index),
                 "use [image-index] [--full], in that order");
         wchar_t* index_end = nullptr;
         const unsigned long parsed = has_index
@@ -260,10 +281,79 @@ int wmain(int argc, wchar_t** argv) {
         const unsigned image_index = static_cast<unsigned>(parsed);
         require(fs::is_regular_file(fs::symlink_status(source)),
                 "source must be an existing regular, non-symlink WIM");
-        require(fs::is_regular_file(fs::symlink_status(plugin_path)),
-                "specified WCX DLL is missing");
+        if (!audit_only)
+            require(fs::is_regular_file(fs::symlink_status(plugin_path)),
+                    "specified WCX DLL is missing");
         const auto input_size = fs::file_size(source);
         require(input_size > 0, "empty WIM source");
+
+        // First validate the original image without a mount driver, WCX DLL
+        // or large private clone. WIMGAPI reads file resources in 1 MiB
+        // chunks; --full visits every exposed nonempty regular stream.
+        // This mode works from a read-only source drive and needs no elevation.
+        if (audit_only) {
+            const auto started = std::chrono::steady_clock::now();
+            const auto source_time = fs::last_write_time(source);
+            const auto source_sha = sha_file(source);
+            std::uint64_t total_uncompressed = 0;
+            std::size_t stream_count = 0, tree_count = 0;
+            std::array<unsigned char,32> manifest_hash{};
+            {
+                iso_wcx::WimArchive archive(source);
+                tree_count = archive.items().size();
+                auto chosen = samples(archive, full_content);
+                require(!chosen.empty(), "no nonempty WIM file streams available to audit");
+                std::sort(chosen.begin(), chosen.end());
+                std::map<std::string, std::size_t> indices;
+                for (std::size_t i = 0; i < archive.items().size(); ++i)
+                    require(indices.emplace(archive.items()[i].path, i).second,
+                            "duplicate original WIM path");
+                Sha256 manifest;
+                for (const auto& name : chosen) {
+                    const auto index = indices.at(name);
+                    const auto size = archive.items()[index].size;
+                    require(size <= std::numeric_limits<std::uint64_t>::max() -
+                                    total_uncompressed,
+                            "WIM audit byte count overflow");
+                    std::cout << "AUDIT " << (stream_count + 1) << "/"
+                              << chosen.size() << " (" << size
+                              << " bytes): " << name << "\n" << std::flush;
+                    auto last = std::chrono::steady_clock::now();
+                    const auto digest = sha_item(archive, index,
+                        [&](std::uint64_t done) {
+                            const auto now = std::chrono::steady_clock::now();
+                            if (now - last >= std::chrono::seconds(5)) {
+                                std::cout << "  read " << done << "/" << size
+                                          << " bytes\n" << std::flush;
+                                last = now;
+                            }
+                        });
+                    const auto header = std::to_string(name.size()) + ":" +
+                        name + ":" + std::to_string(size) + ":";
+                    manifest.add(
+                        reinterpret_cast<const std::uint8_t*>(header.data()),
+                        header.size());
+                    manifest.add(digest.data(), digest.size());
+                    total_uncompressed += size;
+                    ++stream_count;
+                }
+                manifest_hash = manifest.finish();
+            } // close every WIMGAPI image handle before checking the source
+            require(fs::file_size(source) == input_size &&
+                    fs::last_write_time(source) == source_time &&
+                    sha_file(source) == source_sha,
+                    "source WIM changed during read-only audit");
+            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - started).count();
+            std::cout << "PASS: read-only WIM " <<
+                (full_content ? "full" : "sample") << " audit; "
+                << tree_count << " entries, " << stream_count
+                << " streams, " << total_uncompressed
+                << " decompressed bytes, " << seconds << " sec; "
+                << "manifest SHA-256 " << sha_hex(manifest_hash) << "\n";
+            return 0;
+        }
+
         wchar_t volume[MAX_PATH]{}, filesystem[MAX_PATH]{};
         require(GetVolumePathNameW(source.parent_path().c_str(), volume,
                                    MAX_PATH) != FALSE,
