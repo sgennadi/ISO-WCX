@@ -102,6 +102,45 @@ int main() {
         mixed.at(2).push_back(alias);
         check(!plan_mounted_folders(mixed,{}),
               "case-insensitive duplicate directory accepted");
+#ifdef _WIN32
+        // The NTFS mount target treats Cyrillic and many other Unicode case
+        // pairs as aliases, even though their UTF-8 bytes are different.
+        const auto unicode_upper=std::string(
+            reinterpret_cast<const char*>(u8"Папка"));
+        const auto unicode_lower=std::string(
+            reinterpret_cast<const char*>(u8"папка"));
+        const auto greek_upper=std::string(
+            reinterpret_cast<const char*>(u8"Δοκιμή"));
+        const auto greek_lower=std::string(
+            reinterpret_cast<const char*>(u8"δοκιμή"));
+        check(windows_case_key(unicode_upper)==windows_case_key(unicode_lower),
+              "Windows Unicode Cyrillic case aliases were not recognized");
+        check(windows_case_key(greek_upper)==windows_case_key(greek_lower),
+              "Windows Unicode Greek case aliases were not recognized");
+        mixed=edits;
+        mixed.at(2)[0].path=unicode_upper;
+        auto unicode_alias=one;
+        unicode_alias.path=unicode_lower;
+        mixed.at(2).push_back(unicode_alias);
+        check(!plan_mounted_folders(mixed,{}),
+              "Cyrillic case alias accepted in mounted WIM folder plan");
+        mixed=edits;
+        mixed.at(2)[0].path=greek_upper;
+        unicode_alias.path=greek_lower;
+        mixed.at(2).push_back(unicode_alias);
+        check(!plan_mounted_folders(mixed,{}),
+              "Greek case alias accepted in mounted WIM folder plan");
+        mixed=edits;
+        mixed.at(2)[0].path=std::string("unsafe/")+"\xC3\x28";
+        bool rejected_invalid_utf8=false;
+        try {
+            (void)plan_mounted_folders(mixed,{});
+        }catch(const EditUnsupported&) {
+            rejected_invalid_utf8=true;
+        }
+        check(rejected_invalid_utf8,
+              "invalid UTF-8 reached the native WIM mount planner");
+#endif
 
         const std::vector<WimTreeItem> before{
             dir("image1"),file("image1/untouched.bin"),
@@ -138,6 +177,20 @@ int main() {
         bad.push_back(dir("image2/new"));
         check(!verify_mounted_folder_tree(before,bad,*plan,why),
               "casefold directory collision accepted");
+#ifdef _WIN32
+        bad=after;
+        bad.push_back(dir(("image2/"+unicode_upper).c_str()));
+        bad.push_back(dir(("image2/"+unicode_lower).c_str()));
+        check(!verify_mounted_folder_tree(before,bad,*plan,why) &&
+              why=="ambiguous edited WIM path/case alias",
+              "Unicode NTFS aliases escaped post-mount tree validation");
+        auto unicode_before=before;
+        unicode_before.push_back(dir(("image2/"+greek_upper).c_str()));
+        unicode_before.push_back(dir(("image2/"+greek_lower).c_str()));
+        check(!verify_mounted_folder_tree(unicode_before,after,*plan,why) &&
+              why=="ambiguous original WIM path/case alias",
+              "Unicode NTFS aliases escaped pre-mount tree validation");
+#endif
         bad=before;
         check(!verify_mounted_folder_tree(before,bad,*plan,why),
               "missing requested folder accepted");
