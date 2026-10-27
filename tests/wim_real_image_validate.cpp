@@ -229,6 +229,10 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
     fs::path root;
+    // A failed metadata/hash preflight cannot have mounted a private WIM.
+    // Cleanup is safe before PackFilesW is entered. Once WCX runs it may
+    // have registered a Windows mount: preserve all recovery evidence.
+    bool wcx_invoked = false;
     try {
         const fs::path source = fs::absolute(argv[1]);
         const fs::path plugin_path = fs::absolute(argv[2]);
@@ -331,6 +335,7 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << "Creating folder on a DISPOSABLE WIM copy...\n";
         saw_fast_mount.store(false);
         set_progress(INVALID_HANDLE_VALUE, &report);
+        wcx_invoked = true;
         const int rc = pack(archive_arg.data(), index_arg.data(),
                             input_arg.data(), list.data(), 0);
         set_progress(INVALID_HANDLE_VALUE, nullptr);
@@ -377,8 +382,19 @@ int wmain(int argc, wchar_t** argv) {
         SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT", nullptr);
         std::cerr << "FAIL: real-image WIM validation: " << failure.what() << '\n';
         if (!root.empty()) {
-            std::cerr << "Retained developer workspace (check mount registry "
-                         "before deleting): " << root.string() << '\n';
+            if (!wcx_invoked) {
+                std::error_code ec;
+                fs::remove_all(root, ec);
+                if (ec)
+                    std::cerr << "Unable to remove unmounted preflight workspace: "
+                              << root.string() << " (" << ec.message() << ")\n";
+                else
+                    std::cerr << "Cleaned unmounted preflight workspace.\n";
+            } else {
+                std::cerr << "Retained developer workspace after WCX invocation "
+                             "(inspect mount registry before deleting): "
+                          << root.string() << '\n';
+            }
         }
         return 2;
     }
