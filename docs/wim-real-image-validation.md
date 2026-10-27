@@ -17,6 +17,20 @@ or production Windows installation image), run:
 
     .\build\Release\wim_real_image_validate.exe "D:\Images\install.wim" ".\build\Release\ISO-WCX.wcx64" 1
 
+For a much slower, exhaustive data-stream audit, append `--full`:
+
+    .\build\Release\wim_real_image_validate.exe "D:\Images\install.wim" ".\build\Release\ISO-WCX.wcx64" 1 --full
+
+The default command hashes only up to four nonempty regular file streams
+of at most 64 MiB from each WIM image index. The `--full` option hashes
+**every listed nonempty regular file stream** in every image index both
+before and after the edit, without extracting all files to disk. On large
+install.wim files this can take much longer and read many gigabytes.
+The audit covers the default file streams exposed by WIMGAPI; it does not
+by itself verify every alternate NTFS stream, hardlink relationship, or
+a boot test. The separate privileged Windows integrity test covers those
+metadata features on its own disposable two-index WIM fixture.
+
 For Win32, configure a separate -A Win32 build, use the matching Win32
 wim_real_image_validate.exe and the ISO-WCX.wcx DLL.
 
@@ -34,12 +48,13 @@ folder-only mount/commit on the clone. It validates:
 - All original paths, file sizes, attributes, timestamps and image indexes
   remain present (parent directory timestamps may change).
 - Exactly the requested new directory appears in the chosen image index.
-- Several small/medium resource streams from **every populated index**
-  are independently read through WIMGAPI and checked with SHA-256 before
-  and after the edit, including exact byte lengths.
+- By default, several small/medium regular file streams from **every
+  populated index** are independently read through WIMGAPI and checked
+  with SHA-256 before and after editing, including exact byte lengths.
+  With `--full`, **every listed nonempty regular file stream** is verified.
 - The source size, write time, and full-file SHA-256 are unchanged.
 
-The sample-stream check is **not** a full hash of every decompressed file.
+The default sample-stream check is **not** a full hash of every decompressed file.
 The separate Windows CI test covers actual WIMGAPI Mount/Commit of a
 two-index LZX WIM with protected ACL, named ADS, file hardlink identity and
 incompressible payloads. These tests complement each other, but neither
