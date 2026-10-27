@@ -237,11 +237,18 @@ int wmain(int argc, wchar_t** argv) {
     try {
         const fs::path source = fs::absolute(argv[1]);
         const fs::path plugin_path = fs::absolute(argv[2]);
+        // CI-only deterministic fault injection: exercise complete raw-WIM
+        // copying and SHA-256 verification, then fail before WIMGAPI opens
+        // image streams or a WCX DLL is loaded. This isolates cleanup from
+        // unrelated native WIMGAPI read/driver teardown delays.
+        const bool inject_post_clone_failure = argc == 4 &&
+            std::wstring_view(argv[3]) == L"--test-fail-after-clone";
         const bool full_content =
             (argc == 4 && std::wstring_view(argv[3]) == L"--full") ||
             (argc == 5 && std::wstring_view(argv[4]) == L"--full");
         const bool has_index = argc >= 4 &&
-            std::wstring_view(argv[3]) != L"--full";
+            std::wstring_view(argv[3]) != L"--full" &&
+            !inject_post_clone_failure;
         require(argc != 5 || (full_content && has_index),
                 "use [image-index] [--full], in that order");
         wchar_t* index_end = nullptr;
@@ -285,6 +292,22 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << "Checking input SHA-256 and all WIM image indexes...\n";
         const auto source_hash = sha_file(source);
         const auto input_time = fs::last_write_time(source);
+        if (inject_post_clone_failure) {
+            // Fail only AFTER the disposable copy has been fully created and
+            // independently SHA-256-verified. No Windows driver mount exists,
+            // so the catch handler must remove this entire workspace.
+            const auto stage = root / L"disposable.wim";
+            fs::copy_file(source, stage, fs::copy_options::none);
+            require(fs::file_size(stage) == input_size &&
+                    sha_file(stage) == source_hash,
+                    "injected preflight fixture clone verification failed");
+            require(fs::file_size(source) == input_size &&
+                    fs::last_write_time(source) == input_time &&
+                    sha_file(source) == source_hash,
+                    "injected preflight changed source WIM");
+            throw std::runtime_error(
+                "test-only injected failure after a verified private WIM clone");
+        }
         iso_wcx::WimArchive original(source);
         const auto before = snapshot(original);
         const auto selected = samples(original, full_content);
