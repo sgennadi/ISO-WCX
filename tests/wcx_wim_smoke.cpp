@@ -172,13 +172,15 @@ std::string load(const fs::path& filename) {
 int wmain(int argc,wchar_t** argv) {
     const bool fast_mount_test=argc>=3 &&
         std::wstring_view(argv[2])==L"--fast-mount";
-    // CTest can provide a second developer tool to verify cleanup on a
-    // genuine synthetic WIM without entering the privileged mount path.
+    const bool audit_fixture_test=argc==4 &&
+        std::wstring_view(argv[2])==L"--audit-fixture";
+    // CTest provides the developer tool for both WIM validation paths.
     const bool validate_preflight=(argc==3 && !fast_mount_test) ||
         (argc==4 && fast_mount_test);
-    if(argc<2 || argc>4 || (argc==4 && !fast_mount_test))return 1;
-    const fs::path validator=validate_preflight ?
-        fs::path(argv[fast_mount_test?3:2]) : fs::path();
+    if(argc<2 || argc>4 || (argc==4 && !fast_mount_test &&
+                             !audit_fixture_test))return 1;
+    const fs::path validator=(validate_preflight || audit_fixture_test) ?
+        fs::path(argv[(argc==4)?3:2]) : fs::path();
     try {
         const auto root=fs::temp_directory_path()/
             (L"iso-wcx-wim-smoke-"+std::to_wstring(GetCurrentProcessId())+L"-"+
@@ -229,6 +231,62 @@ int wmain(int argc,wchar_t** argv) {
             close_wim(image);
         }
         close_wim(archive);
+
+        if(audit_fixture_test) {
+            // Independent, READ-ONLY tests on a real system-captured
+            // two-index WIM, with no WCX DLL or WIM mount ever invoked.
+            // A child process gives a bounded timeout for a wedged WIMGAPI
+            // resource read rather than indefinitely blocking CI.
+            if(!fs::is_regular_file(validator))return 80;
+            const auto original_content=load(original);
+            const auto original_time=fs::last_write_time(original);
+            for(const bool full:{false,true}) {
+                const auto command=L"\"" + validator.wstring() +
+                    L"\" \"" + original.wstring() + L"\" --audit-only" +
+                    (full ? std::wstring(L" --full") : std::wstring());
+                std::vector<wchar_t> command_line(command.begin(),command.end());
+                command_line.push_back(L'\0');
+                STARTUPINFOW startup{};
+                startup.cb=sizeof(startup);
+                PROCESS_INFORMATION process{};
+                if(!CreateProcessW(validator.c_str(),command_line.data(),
+                                   nullptr,nullptr,FALSE,0,nullptr,
+                                   root.c_str(),&startup,&process))
+                    return 81;
+                CloseHandle(process.hThread);
+                const DWORD wait=WaitForSingleObject(process.hProcess,30000);
+                if(wait!=WAIT_OBJECT_0) {
+                    std::cerr << "WIM read-only " << (full ? "full" : "sample")
+                              << " audit timed out; inspect native WIMGAPI read"
+                              << " or process teardown\n";
+                    TerminateProcess(process.hProcess,82);
+                    WaitForSingleObject(process.hProcess,5000);
+                    CloseHandle(process.hProcess);
+                    return 82;
+                }
+                DWORD exit_code=0;
+                const BOOL got_exit=GetExitCodeProcess(process.hProcess,&exit_code);
+                CloseHandle(process.hProcess);
+                if(!got_exit || exit_code!=0) {
+                    std::cerr << "WIM read-only " << (full ? "full" : "sample")
+                              << " audit returned " << exit_code << "\n";
+                    return 83;
+                }
+                if(load(original)!=original_content ||
+                   fs::last_write_time(original)!=original_time)
+                    return 84; // Original bytes AND NTFS last-write unchanged
+                for(const auto& entry:fs::directory_iterator(root))
+                    if(entry.path().filename().wstring().starts_with(
+                           L".iso-wcx-real-validation-"))
+                        return 85; // Audit must never allocate a large clone
+            }
+            std::error_code cleanup_error;
+            fs::remove_all(root,cleanup_error);
+            if(cleanup_error)return 86;
+            std::cout << "PASS: synthetic two-index WIM read-only sample/full "
+                         "stream SHA-256 audit without WCX or private clone\n";
+            return 0;
+        }
 
         if(validate_preflight) {
             // Run both failure phases against a genuine two-index WIM:
