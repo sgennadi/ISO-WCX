@@ -55,7 +55,7 @@ def main(plugin):
 
         # Del/F8 from Total Commander uses a NUL-separated list, and
         # directory trees may be represented as a "folder\\*" item.
-        directory_delete = wchar_list(r"DOCS\*")
+        directory_delete = wchar_list(r"DOCS\ONE.TXT", r"DOCS\*")
         assert delete_w(str(image),
                         ctypes.cast(directory_delete, ctypes.c_void_p)) == 0
         after = read_image(image)
@@ -65,6 +65,9 @@ def main(plugin):
         # An already missing entry MUST NOT succeed without changing
         # anything: this was the reported "Delete does nothing" symptom.
         previous = image.read_bytes()
+        empty = wchar_list()
+        assert delete_w(str(image), ctypes.cast(empty, ctypes.c_void_p)) == 22
+        assert image.read_bytes() == previous
         missing = wchar_list("MISSING.TXT")
         assert delete_w(str(image),
                         ctypes.cast(missing, ctypes.c_void_p)) == 24
