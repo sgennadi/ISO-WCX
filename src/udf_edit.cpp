@@ -208,7 +208,8 @@ void bitmap_reserve(Bitmap& bitmap,std::uint32_t logical) {
 
 class Type1 {
 public:
-    explicit Type1(const std::filesystem::path& path)
+    explicit Type1(const std::filesystem::path& path,
+                   bool allow_iso_bridge_deletion=false)
         :file_(path,std::ios::binary),size_(std::filesystem::file_size(path)) {
         need(file_.good() && size_%block==0 && size_>=300*block &&
              size_<max_image,"unsupported UDF image size/sector geometry");
@@ -219,7 +220,8 @@ public:
         bool vrs=false;
         for(std::uint64_t i=16;i<256 && (i+1)*block<=size_;++i) {
             const auto b=read(i*block,8);
-            if(std::equal(b.begin()+1,b.begin()+6,"CD001"))
+            if(std::equal(b.begin()+1,b.begin()+6,"CD001") &&
+               !allow_iso_bridge_deletion)
                 throw EditUnsupported("ISO/UDF Bridge metadata rewriting unsupported");
             if(std::equal(b.begin()+1,b.begin()+6,"NSR02") ||
                std::equal(b.begin()+1,b.begin()+6,"NSR03"))
