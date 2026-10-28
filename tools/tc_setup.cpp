@@ -364,8 +364,15 @@ std::wstring run(const Options& opts) {
         if (existing.empty() || raw.empty()) reason = L"unassigned";
         else if (opts.force_iso && std::wstring(ext) == L"iso") reason = L"forced ISO selection";
         else if (installed_name(raw)) {
-            if (!same_path(fs::path(resolved_old_path(raw, tc_dir)), fs::path(new_path)))
+            if (!same_path(fs::path(resolved_old_path(raw, tc_dir)), fs::path(new_path))) {
                 reason = L"ISO-WCX path migration";
+            } else if (existing != L"222," + new_path) {
+                // A legacy 192 mask advertises content/search only, hiding
+                // pack/delete/options in some TC versions despite the WCX
+                // GetPackerCaps() implementation returning 222. Repair only
+                // an association that already targets THIS plugin DLL.
+                reason = L"refresh ISO-WCX capability flags to 222";
+            }
         } else if (legacy_name(raw)) {
             const auto legacy = resolved_old_path(raw, tc_dir);
             if (!exists_file(legacy)) reason = L"missing legacy iso.wcx";
@@ -374,7 +381,10 @@ std::wstring run(const Options& opts) {
             ++preserved;
             continue;
         }
-        updates.push_back({ext, L"192," + new_path, reason});
+        // Match the native GetPackerCaps() mask: modify(2), multiple(4),
+        // delete(8), options(16), by-content(64), search-text(128) = 222.
+        // Never apply this mask to an unrelated WCX association.
+        updates.push_back({ext, L"222," + new_path, reason});
     }
 
     if (!same_path(binary_source, destination))
