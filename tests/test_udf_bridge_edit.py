@@ -10,7 +10,7 @@ import tempfile
 from test_images import iso_image, iso_record, udf_image, B
 from test_iso_edit import both, read_image
 
-def descriptor_bridge(boot=False,shared=True,strict=False):
+def descriptor_bridge(boot=False,shared=True,strict=False,extra=False):
     if strict:
         from test_udf_edit import base_image
         data=bytearray(base_image(layout='short'))
@@ -30,9 +30,21 @@ def descriptor_bridge(boot=False,shared=True,strict=False):
     both(data,16*B+128,B,2)
     data[16*B+881]=1
     physical=303 if shared else 21
+    assert not extra or strict
     root=(iso_record(20,B,2,bytes([0]))+
           iso_record(20,B,2,bytes([1]))+
           iso_record(physical,5,0,b'hello;1'))
+    if extra:
+        root+=iso_record(305,5,0,b'other;1')
+        from test_udf_edit import fid,fe,p16,p32,checksum
+        fe(data,301,fid(302,'hello')+fid(304,'other'),directory=True)
+        fe(data,304,b'OTHER')
+        p16(data,304*B+34,0)
+        p32(data,304*B+172,8)
+        p32(data,304*B+176,5)
+        p32(data,304*B+180,5)
+        checksum(data,304*B)
+        data[305*B:305*B+5]=b'OTHER'
     data[20*B:21*B]=bytes(B)
     data[20*B:20*B+len(root)]=root
     fe=302*B
@@ -74,7 +86,10 @@ def main(editor,inspector):
         # Fully valid Type-1 metadata permits a synchronized logical
         # deletion on the same shared physical ISO/UDF file. No user data
         # is moved or reclaimed; no ISO volume geometry may change.
-        image.write_bytes(descriptor_bridge(strict=True))
+        # Keep a second correctly mirrored ISO+UDF file AFTER hello in
+        # the same 2048-byte ISO directory sector. This proves that record
+        # compaction does not hide later entries.
+        image.write_bytes(descriptor_bridge(strict=True,extra=True))
         original=image.read_bytes()
         run([editor,str(image),'delete','hello'])
         deleted=image.read_bytes()
@@ -84,12 +99,17 @@ def main(editor,inspector):
                 at=lba*B
                 assert deleted[at:at+B]==original[at:at+B],(
                     'dual delete touched unrelated ISO/UDF sector',lba)
-        assert 'hello' not in read_image(image),(
+        current_iso=read_image(image)
+        assert 'hello' not in current_iso,(
             'ISO file remains after synchronized Bridge deletion')
+        assert current_iso['other']==b'OTHER',(
+            'ISO sector compaction hid or damaged the following file')
         extracted=root/'udf-deleted'
         run([inspector,str(image),'--extract',str(extracted)])
         assert not (extracted/'hello').exists(),(
             'UDF FID still exposes deleted bridge file')
+        assert (extracted/'other').read_bytes()==b'OTHER',(
+            'UDF surviving file changed during bridge delete')
         assert not list(root.glob('.iso-wcx-edit-*')),(
             'successful bridge deletion leaked staging directory')
 
