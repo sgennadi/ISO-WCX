@@ -384,7 +384,20 @@ int wmain(int argc, wchar_t** argv) {
             {
                 // A selected index avoids loading and enumerating unrelated
                 // Windows editions, unlike a full multi-index install.wim audit.
-                iso_wcx::WimArchive archive(source, audit_index);
+                auto last_enumeration = Clock::now() -
+                    std::chrono::seconds(6);
+                iso_wcx::WimArchive archive(source, audit_index,
+                    [&](std::uint32_t image, std::size_t entries) {
+                        budget_check("WIMGAPI metadata enumeration");
+                        const auto now = Clock::now();
+                        if (now - last_enumeration >= std::chrono::seconds(5)) {
+                            std::cout << "ENUM: image" << image
+                                      << ", discovered " << entries
+                                      << " entries; elapsed " << elapsed()
+                                      << " sec\n" << std::flush;
+                            last_enumeration = now;
+                        }
+                    });
                 const auto& items = archive.items();
                 tree_count = items.size();
                 std::map<std::string, unsigned> per_image_samples;
