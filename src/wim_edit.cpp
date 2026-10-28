@@ -247,7 +247,10 @@ void fast_mount_folder_edit(
     report(L"Validate WIM for fast folder edit",2);
     std::vector<wim_detail::WimTreeItem> original;
     {
-        const WimArchive existing(path);
+        // Only the selected WIM index can gain folders. Enumerating every
+        // unrelated Windows edition here doubled the cost of both the
+        // preflight and the independent post-commit parity check.
+        const WimArchive existing(path,plan.index);
         original=tree_snapshot(existing);
     }
     // Skip an expensive transaction entirely if each folder already exists.
@@ -465,7 +468,10 @@ void fast_mount_folder_edit(
            wim_detail::u32(stage_header,120))
         throw EditUnsupported("fast WIM unexpectedly changed image count or boot index");
     {
-        const WimArchive updated(tx.output);
+        // Other indexes are preserved by the native in-place WIM commit.
+        // The header check above ensures image count and boot index remain
+        // intact; compare every entry and attribute in the modified index.
+        const WimArchive updated(tx.output,plan.index);
         const auto newer=tree_snapshot(updated);
         std::string failure;
         if(!wim_detail::verify_mounted_folder_tree(original,newer,plan,failure))
