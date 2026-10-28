@@ -113,6 +113,25 @@ def main(editor,inspector):
         assert not list(root.glob('.iso-wcx-edit-*')),(
             'successful bridge deletion leaked staging directory')
 
+        # Batch multi-file delete: both UDF FIDs share the same embedded
+        # root FE. The parent CRC must be correct after the LAST change.
+        image.write_bytes(descriptor_bridge(strict=True,extra=True))
+        batch_before=image.read_bytes()
+        run([editor,str(image),'batch','delete','hello','delete','other'])
+        batch_after=image.read_bytes()
+        assert batch_after!=batch_before and len(batch_after)==len(batch_before)
+        assert 'hello' not in read_image(image)
+        assert 'other' not in read_image(image)
+        batch_out=root/'udf-batch-deleted'
+        run([inspector,str(image),'--extract',str(batch_out)])
+        assert not (batch_out/'hello').exists()
+        assert not (batch_out/'other').exists()
+        for lba in range(len(batch_before)//B):
+            if lba not in (20,301):
+                at=lba*B
+                assert batch_after[at:at+B]==batch_before[at:at+B],(
+                    'multi-file deletion touched unrelated sector',lba)
+
         def rejected(operation,name,content=b'EARTH',boot=False,shared=True,
                      strict=False):
             image.write_bytes(descriptor_bridge(boot=boot,shared=shared,
