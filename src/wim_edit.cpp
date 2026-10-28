@@ -563,65 +563,91 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         }
         checked(api<BOOL(WINAPI*)(HANDLE,DWORD)>(m,"WIMSetBootImage")(output.h,new_boot),"preserve WIM boot index");
     }
-    // Reopen the rebuilt image, validate all index trees, and independently
-    // compare newly supplied streams. Do not re-decompress every unchanged
-    // file: this made creating even an empty directory take minutes longer.
+    // WIMExportImage already validated every unchanged index. The legacy
+    // verifier re-enumerated ALL trees after Apply/Capture (including hundreds
+    // of thousands of files in unrelated Windows editions) even though it
+    // only checked requested changes. Verify the header's index/boot mapping
+    // once, and enumerate/read back only indexes that were actually changed.
+    // This preserves full edited-file content comparison and cancellation.
     report(L"Verify WIM structure",85);
-    {
-        WimArchive verified(tx.output);
-        std::map<std::string,std::size_t> found;
+    wim_detail::Header result_header{};
+    if(!wim_detail::read_header(tx.output,result_header))
+        throw EditUnsupported("rebuilt WIM header is missing");
+    wim_detail::validate(result_header);
+    const unsigned expected_images=images-static_cast<unsigned>(deleted.size());
+    unsigned expected_boot=0;
+    if(boot!=0 && !deleted.contains(boot)) {
+        expected_boot=boot;
+        for(const auto removed_index:deleted)
+            if(removed_index<boot) --expected_boot;
+    }
+    if(wim_detail::u32(result_header,44)!=expected_images ||
+       wim_detail::u32(result_header,120)!=expected_boot)
+        throw EditUnsupported("rebuilt WIM image/boot index mapping changed");
+
+    unsigned output_index=0;
+    for(unsigned index=1;index<=images;++index) {
+        if(deleted.contains(index))continue;
+        ++output_index;
+        const auto at=edits.find(index);
+        if(at==edits.end())continue;
+        // WIMGAPI can enumerate one chosen index without loading other
+        // editions. The original full-image scan was proportional to the
+        // total combined file count, not the number of requested changes.
+        WimArchive verified(tx.output,output_index);
+        std::unordered_map<std::string,std::size_t> found;
         const auto& items=verified.items();
-        for(std::size_t i=0;i<items.size();++i){
-            // Metadata may contain hundreds of thousands of entries. Avoid
-            // a UI callback for each one; checking cancellation every 1024
-            // entries is responsive without monopolizing Total Commander.
+        found.reserve(items.size());
+        for(std::size_t i=0;i<items.size();++i) {
             if((i&1023u)==0u)callback.tick();
             if(!found.emplace(items[i].path,i).second)
                 throw EditUnsupported("duplicate WIM output path");
         }
-        unsigned new_index=0;
-        for(unsigned index=1;index<=images;++index){
-            if(deleted.count(index))continue;
-            ++new_index;
-            const auto prefix="image"+std::to_string(new_index);
-            if(!found.contains(prefix))throw EditUnsupported("missing output WIM image index");
-            if(!edits.contains(index))continue;
-            for(const auto& change:edits.at(index)){
-                callback.tick();
-                const auto key=prefix+"/"+change.path;
-                const auto entry=found.find(key);
-                if(change.remove){
-                    if(entry!=found.end())throw EditUnsupported("removed WIM entry still exists");
-                    continue;
-                }
-                if(entry==found.end())throw EditUnsupported("new WIM entry is missing");
-                const auto& item=items[entry->second];
-                if(item.directory!=change.directory)
-                    throw EditUnsupported("WIM edited entry has wrong type");
-                if(change.directory)continue;
-                const auto length=std::filesystem::file_size(change.source);
-                if(item.size!=length)throw EditUnsupported("WIM edited file size differs");
-                std::ifstream input(change.source,std::ios::binary);
-                if(!input)throw EditUnsupported("cannot verify WIM added file source");
-                bool mismatch=false;
-                std::array<char,64*1024> buffer{};
-                const bool read=verified.read(entry->second,[&](const std::uint8_t* data,std::size_t bytes){
+        const auto prefix="image"+std::to_string(output_index);
+        if(!found.contains(prefix))
+            throw EditUnsupported("missing rebuilt WIM image index");
+        for(const auto& change:at->second) {
+            callback.tick();
+            const auto key=prefix+"/"+change.path;
+            const auto entry=found.find(key);
+            if(change.remove) {
+                if(entry!=found.end())
+                    throw EditUnsupported("removed WIM entry still exists");
+                continue;
+            }
+            if(entry==found.end())
+                throw EditUnsupported("new WIM entry is missing");
+            const auto& item=items[entry->second];
+            if(item.directory!=change.directory)
+                throw EditUnsupported("WIM edited entry has wrong type");
+            if(change.directory)continue;
+            const auto length=std::filesystem::file_size(change.source);
+            if(item.size!=length)
+                throw EditUnsupported("WIM edited file size differs");
+            std::ifstream input(change.source,std::ios::binary);
+            if(!input)
+                throw EditUnsupported("cannot verify WIM added file source");
+            bool mismatch=false;
+            std::array<char,64*1024> buffer{};
+            const bool read=verified.read(entry->second,
+                [&](const std::uint8_t* data,std::size_t bytes) {
                     callback.tick();
                     std::size_t offset=0;
-                    while(offset<bytes){
+                    while(offset<bytes) {
                         const auto n=std::min(buffer.size(),bytes-offset);
                         input.read(buffer.data(),static_cast<std::streamsize>(n));
                         if(input.gcount()!=static_cast<std::streamsize>(n) ||
-                           std::memcmp(buffer.data(),data+offset,n)!=0){
-                            mismatch=true;return false;
+                           std::memcmp(buffer.data(),data+offset,n)!=0) {
+                            mismatch=true;
+                            return false;
                         }
                         offset+=n;
                     }
                     return true;
                 });
-                if(!read || mismatch || input.peek()!=std::char_traits<char>::eof())
-                    throw EditUnsupported("WIM edited file readback mismatch");
-            }
+            if(!read || mismatch ||
+               input.peek()!=std::char_traits<char>::eof())
+                throw EditUnsupported("WIM edited file readback mismatch");
         }
     }
     report(L"Commit verified WIM",99);
