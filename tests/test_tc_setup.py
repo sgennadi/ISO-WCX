@@ -143,18 +143,18 @@ def test_existing_iso_wcx_stale_capability_mask(binary: pathlib.Path):
         helper, tc, ini, target = setup_fixture(binary, pathlib.Path(tmp))
         filename = target / "ISO-WCX.wcx"
         ini.write_text(
-            "[Configuration]\\nButtonbar=C:\\\\Custom\\\\mybuttons.bar\\n"
-            "[PackerPlugins]\\n"
-            f"iso=192,{filename}\\n"
-            "rar=777,C:\\\\Other\\\\rar.wcx\\n"
-            "[PackerPlugins64]\\n$checksum$=3\\n",
+            "[Configuration]\nButtonbar=C:\\Custom\\mybuttons.bar\n"
+            "[PackerPlugins]\n"
+            f"iso=192,{filename}\n"
+            "rar=777,C:\\Other\\rar.wcx\n"
+            "[PackerPlugins64]\n$checksum$=3\n",
             encoding="utf-8",
         )
         invoke(helper, tc, ini, target)
         after = read_ini(ini)
         assert f"iso=222,{filename}" in after
-        assert "Buttonbar=C:\\\\Custom\\\\mybuttons.bar" in after
-        assert "rar=777,C:\\\\Other\\\\rar.wcx" in after
+        assert "Buttonbar=C:\\Custom\\mybuttons.bar" in after
+        assert "rar=777,C:\\Other\\rar.wcx" in after
         assert "$checksum$=" not in after
         assert len(backups(ini)) == 1
         snapshot = ini.read_bytes()
