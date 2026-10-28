@@ -106,22 +106,32 @@ $index = $isoRows[0]
 $m = $matches[0]
 $value = $m.Groups['value'].Value.Trim()
 $parts = [regex]::Match($value, '^(?<flags>\d+)\s*,\s*(?<path>.+)$')
-$flags = '192'
+# Match native GetPackerCaps: old mask 192 lacks modify/delete/options.
+# Only obsolete legacy ISO.WCX or ISO-WCX's own association is eligible.
+$flags = '222'
 $legacy = $value.Trim('"')
 if ($parts.Success) {
-    $flags = $parts.Groups['flags'].Value
     $legacy = $parts.Groups['path'].Value.Trim().Trim('"')
 }
-if ($legacy -match '(?i)(^|[\\/])ISO-WCX[\\/]ISO-WCX\.wcx$') {
-    Write-Host 'ISO already references ISO-WCX.wcx. No changes needed.'
-    return
-}
-if ($legacy -notmatch '(?i)(^|[\\/])ISO[\\/]iso\.wcx$') {
+$alreadyInstalled = $legacy -match '(?i)(^|[\\/])ISO-WCX[\\/]ISO-WCX\.wcx$'
+if ($alreadyInstalled) {
+    if ($parts.Success -and $parts.Groups['flags'].Value -eq '222') {
+        Write-Host 'ISO already references ISO-WCX.wcx with flags 222. No changes needed.'
+        return
+    }
+    if (-not $PluginDirectory) {
+        $current = Expand-TcPath $legacy
+        if (-not $current) {
+            throw 'Cannot resolve existing ISO-WCX directory; specify -PluginDirectory.'
+        }
+        $PluginDirectory = Split-Path -Parent $current
+    }
+} elseif ($legacy -notmatch '(?i)(^|[\\/])ISO[\\/]iso\.wcx$') {
     Write-Host "ISO is assigned to another plugin: $legacy"
     Write-Host 'Keeping this association unchanged. Use Packer settings to select ISO-WCX manually.'
     return
 }
-$expandedOld = Expand-TcPath $legacy
+$expandedOld = if ($alreadyInstalled) { $null } else { Expand-TcPath $legacy }
 if ($expandedOld -and (Test-Path -LiteralPath $expandedOld -PathType Leaf)) {
     throw "Old ISO.WCX still exists at $expandedOld. Refusing to replace a working handler."
 }
@@ -148,8 +158,9 @@ if ((Get-Item -LiteralPath $new32).Length -eq 0 -or
     throw 'One of the WCX plugin files is empty.'
 }
 
-# Preserve original numeric packer capability flags, comments, line endings,
-# whitespace and ANSI/UTF-8/UTF-16 BOM. Never edit [PackerPlugins64] manually.
+# Preserve unrelated plugin registrations, comments, line endings, whitespace
+# and ANSI/UTF-8/UTF-16 BOM; use ISO-WCX's native capability mask 222.
+# Never modify other [PackerPlugins] values or [PackerPlugins64] manually.
 $new32 = (Resolve-Path -LiteralPath $new32).ProviderPath
 $newValue = "$flags,$new32"
 $line = [string]$lines[$index]
