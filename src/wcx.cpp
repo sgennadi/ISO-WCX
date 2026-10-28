@@ -254,9 +254,10 @@ void report_delete_error(const char* description) noexcept {
         if(reason.size()>800) reason.resize(800);
         std::wstring text=L"The selected entry was NOT deleted.\n\n";
         text+=reason;
-        text+=L"\n\nThe original archive has not been committed. "
-              L"ISO/UDF Bridge, Rock Ridge and protected boot layouts "
-              L"require a compatible metadata writer.";
+        text+=L"\n\nNo successful edit was reported. Unsupported ISO/UDF "
+              L"Bridge, Rock Ridge and protected boot layouts need "
+              L"a synchronized metadata writer. If a WIM mount failed, "
+              L"inspect its recovery workspace before retrying.";
         MessageBoxW(nullptr,text.c_str(),L"ISO-WCX - Delete failed",
                     MB_OK|MB_ICONWARNING|MB_TASKMODAL);
     }catch(...) {
