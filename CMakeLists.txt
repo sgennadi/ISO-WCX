@@ -423,6 +423,14 @@ if(WIN32)
       endif()
     endif()
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
+    # Del/F8 regression against actual ISO-WCX WCX exports, not only the
+    # archive-edit fixture. Run for Windows x86 and x64 in Preview CI.
+    add_test(NAME wcx_delete_iso_unicode_ansi_and_bridge_safety
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_delete.py"
+        "$<TARGET_FILE:ISO-WCX>")
+    set_tests_properties(wcx_delete_iso_unicode_ansi_and_bridge_safety
+      PROPERTIES TIMEOUT 120)
   endif()
 endif()
 
