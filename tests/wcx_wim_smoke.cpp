@@ -240,10 +240,19 @@ int wmain(int argc,wchar_t** argv) {
             if(!fs::is_regular_file(validator))return 80;
             const auto original_content=load(original);
             const auto original_time=fs::last_write_time(original);
-            for(const bool full:{false,true}) {
+            // Audit every index and then exercise the selective-index
+            // optimization, metadata-only mode, and soft time-budget parser.
+            // Each subprocess must finish within the existing watchdog.
+            const std::vector<std::wstring> modes={
+                L"--audit-only",
+                L"--audit-only --full",
+                L"--audit-only --stats-only --index 1",
+                L"--audit-only --index 2",
+                L"--audit-only --full --index 1 --max-seconds 120"
+            };
+            for(const auto& mode:modes) {
                 const auto command=L"\"" + validator.wstring() +
-                    L"\" \"" + original.wstring() + L"\" --audit-only" +
-                    (full ? std::wstring(L" --full") : std::wstring());
+                    L"\" \"" + original.wstring() + L"\" " + mode;
                 std::vector<wchar_t> command_line(command.begin(),command.end());
                 command_line.push_back(L'\0');
                 STARTUPINFOW startup{};
@@ -256,9 +265,9 @@ int wmain(int argc,wchar_t** argv) {
                 CloseHandle(process.hThread);
                 const DWORD wait=WaitForSingleObject(process.hProcess,30000);
                 if(wait!=WAIT_OBJECT_0) {
-                    std::cerr << "WIM read-only " << (full ? "full" : "sample")
-                              << " audit timed out; inspect native WIMGAPI read"
-                              << " or process teardown\n";
+                    std::wcerr << L"WIM read-only " << mode
+                               << L" audit timed out; inspect native WIMGAPI read"
+                               << L" or process teardown\n";
                     TerminateProcess(process.hProcess,82);
                     WaitForSingleObject(process.hProcess,5000);
                     CloseHandle(process.hProcess);
@@ -268,8 +277,8 @@ int wmain(int argc,wchar_t** argv) {
                 const BOOL got_exit=GetExitCodeProcess(process.hProcess,&exit_code);
                 CloseHandle(process.hProcess);
                 if(!got_exit || exit_code!=0) {
-                    std::cerr << "WIM read-only " << (full ? "full" : "sample")
-                              << " audit returned " << exit_code << "\n";
+                    std::wcerr << L"WIM read-only " << mode
+                               << L" audit returned " << exit_code << L"\n";
                     return 83;
                 }
                 if(load(original)!=original_content ||
@@ -283,8 +292,9 @@ int wmain(int argc,wchar_t** argv) {
             std::error_code cleanup_error;
             fs::remove_all(root,cleanup_error);
             if(cleanup_error)return 86;
-            std::cout << "PASS: synthetic two-index WIM read-only sample/full "
-                         "stream SHA-256 audit without WCX or private clone\n";
+            std::cout << "PASS: synthetic two-index WIM metadata, per-index, "
+                         "sample/full streaming and soft-budget CLI audit "
+                         "without WCX or private clone\n";
             return 0;
         }
 
