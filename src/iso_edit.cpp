@@ -318,6 +318,184 @@ void copy_bytes(std::istream& in,std::fstream& out,std::uint64_t size,const Edit
     Bytes b(1024*1024);while(size){edit_tick(progress);auto count=std::min<std::uint64_t>(size,b.size());in.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(count));need(bool(in),"source shortened during ISO edit");out.write(reinterpret_cast<const char*>(b.data()),static_cast<std::streamsize>(count));if(!out)throw std::runtime_error("ISO output write failed");size-=count;}
 }
 
+struct BridgeIsoVisible {
+    bool directory=false;
+    std::uint64_t offset=0;
+    std::uint32_t length=0;
+    bool operator==(const BridgeIsoVisible&) const = default;
+};
+using BridgeIsoTree=std::map<std::string,BridgeIsoVisible>;
+// ISO/Joliet files remain at their original extents: bridge delete must not
+// alter any other file or directory location, size, or namespace spelling.
+BridgeIsoTree bridge_snapshot(const Image& image) {
+    BridgeIsoTree result;
+    std::vector<std::pair<const Node*,std::string>> pending{
+        {image.root.get(),std::string{}}};
+    for(std::size_t index=0;index<pending.size();++index) {
+        const auto& [parent,prefix]=pending[index];
+        for(const auto& child:parent->children) {
+            const auto key=prefix.empty()?child->logical:prefix+"/"+child->logical;
+            need(result.emplace(key,BridgeIsoVisible{
+                    child->directory,
+                    std::uint64_t(child->lba)*block,child->size}).second,
+                 "duplicate ISO/UDF Bridge visible path");
+            if(child->directory)pending.emplace_back(child.get(),key);
+        }
+    }
+    return result;
+}
+struct BridgeDirectoryEdit {
+    std::uint64_t offset=0;
+    std::uint32_t length=0;
+    std::set<std::uint64_t> records;
+};
+// Only existing regular file entries are removed. Compact individual
+// directory sectors in place, leaving their original sector count, directory
+// paths, data extents and UDF anchor/partition geometry unchanged.
+// Zero-filling a middle ISO record would conceal all later entries in the
+// same sector; this sector-bounded compaction avoids that corruption.
+Bytes compact_bridge_directory(
+    const Bytes& before,std::uint64_t physical,
+    const std::set<std::uint64_t>& deleted) {
+    need(before.size()%block==0 && !before.empty(),
+         "ISO/UDF Bridge directory must be sector-aligned");
+    Bytes output(before.size(),0);
+    std::size_t count=0;
+    for(std::size_t sector=0;sector<before.size();sector+=block) {
+        const auto end=sector+block;
+        std::size_t at=sector,dest=sector;
+        while(at<end && before[at]!=0) {
+            const auto bytes=static_cast<std::size_t>(before[at]);
+            need(bytes>=34 && bytes<=end-at,
+                 "invalid ISO/UDF Bridge directory record");
+            if(deleted.contains(physical+at)) {
+                ++count;
+            } else {
+                std::copy_n(before.begin()+static_cast<std::ptrdiff_t>(at),
+                            bytes,output.begin()+static_cast<std::ptrdiff_t>(dest));
+                dest+=bytes;
+            }
+            at+=bytes;
+        }
+        need(std::all_of(before.begin()+static_cast<std::ptrdiff_t>(at),
+                         before.begin()+static_cast<std::ptrdiff_t>(end),
+                         [](auto byte){return byte==0;}),
+             "ISO/UDF Bridge directory has nonzero trailing bytes");
+    }
+    need(count==deleted.size(),
+         "ISO/UDF Bridge delete record was not located exactly once");
+    return output;
+}
+void edit_iso_udf_bridge_delete(
+        const std::filesystem::path& path,Image& iso,
+        const std::vector<ArchiveChange>& changes,
+        const EditProgress& progress) {
+    need(iso.udf_bridge && iso.boot_lbas.empty(),
+         "bootable ISO/UDF Bridge deletion is not supported");
+    need(!changes.empty() && changes.size()<=4096,
+         "ISO/UDF Bridge file delete list is missing or too large");
+    const auto original=bridge_snapshot(iso);
+    std::set<std::string> deleted_names;
+    std::vector<UdfBridgeFileDelete> files;
+    files.reserve(changes.size());
+    std::map<std::pair<std::uint64_t,std::uint32_t>,BridgeDirectoryEdit> dirs;
+
+    const auto schedule=[&](std::uint32_t lba,std::uint32_t length,
+                            std::uint64_t record) {
+        need(length>0 && length%block==0 && length<=64u*1024u*1024u,
+             "unsupported ISO/UDF Bridge parent directory geometry");
+        const std::uint64_t offset=std::uint64_t(lba)*block;
+        need(record>=offset && record<offset+length &&
+             offset+length<=iso.size,
+             "ISO/UDF Bridge delete record outside parent directory");
+        const auto key=std::make_pair(offset,length);
+        auto& d=dirs[key];
+        d.offset=offset;
+        d.length=length;
+        need(d.records.insert(record).second,
+             "ISO/UDF Bridge duplicate on-disk deletion record");
+    };
+    for(const auto& change:changes) {
+        edit_tick(progress);
+        need(change.remove && !change.directory,
+             "ISO/UDF Bridge supports deletion of regular files only");
+        const auto key=edit_path(change.path);
+        need(deleted_names.insert(key).second,
+             "ISO/UDF Bridge deletion list contains duplicate paths");
+        Node* node=iso.root.get();
+        std::istringstream split(key);
+        std::string part;
+        while(std::getline(split,part,'/')) {
+            auto child=std::find_if(node->children.begin(),node->children.end(),
+                [&](const auto& entry){return entry->logical==part;});
+            need(child!=node->children.end(),
+                 "ISO/UDF Bridge file not found in ISO/Joliet namespace");
+            node=child->get();
+        }
+        need(node && node->parent && !node->directory && node->size>0,
+             "ISO/UDF Bridge deletion permits nonempty regular files only");
+        // A protected El Torito file cannot be removed even if its data is
+        // not directly over the catalog's first sector.
+        protect_boot(*node,iso.boot_lbas);
+        files.push_back({key,std::uint64_t(node->lba)*block,node->size});
+        schedule(node->parent->lba,node->parent->size,node->iso_record_at);
+        if(iso.joliet)
+            schedule(node->parent->joliet_lba,
+                     node->parent->joliet_size,node->joliet_record_at);
+    }
+    // Parse strict UDF Type-1 metadata, require exactly shared file extents,
+    // reject UDF directory/alias/multirun layouts BEFORE allocating a clone.
+    preflight_udf_bridge_file_deletes(path,files);
+    EditTransaction tx(path);
+    {
+        std::fstream stage(tx.output,std::ios::binary|std::ios::in|
+                           std::ios::out|std::ios::trunc);
+        need(bool(stage),"cannot create private ISO/UDF Bridge transaction");
+        iso.file.clear();iso.file.seekg(0);
+        copy_bytes(iso.file,stage,iso.size,progress);
+        need(bool(stage),"cannot clone ISO/UDF Bridge into private workspace");
+        stage.flush();
+        need(bool(stage),"cannot flush original bridge bytes into stage");
+        for(const auto& [key,edit]:dirs) {
+            (void)key;
+            edit_tick(progress);
+            const auto bytes=iso.read(edit.offset,edit.length);
+            const auto compacted=compact_bridge_directory(
+                bytes,edit.offset,edit.records);
+            stage.clear();
+            stage.seekp(static_cast<std::streamoff>(edit.offset));
+            need(bool(stage),"cannot seek ISO/Joliet directory in stage");
+            stage.write(reinterpret_cast<const char*>(compacted.data()),
+                        static_cast<std::streamsize>(compacted.size()));
+            need(bool(stage),"cannot rewrite staged ISO/Joliet directory");
+        }
+        stage.flush();
+        need(bool(stage),"cannot flush ISO/Joliet deletion records");
+    }
+    // Patches only selected UDF FID descriptors, updating CRCs; does NOT
+    // reclaim file blocks used by ISO, relocate partitions or rewrite VRS.
+    patch_udf_bridge_file_deletes(tx.output,files,progress);
+    iso.file.close();
+    {
+        Image verified(tx.output,true);
+        need(verified.udf_bridge && verified.size==iso.size,
+             "ISO/UDF Bridge lost volume descriptors after deletion");
+        auto expected=original;
+        for(const auto& key:deleted_names)
+            need(expected.erase(key)==1,
+                 "ISO/UDF Bridge target was not present before edit");
+        need(bridge_snapshot(verified)==expected,
+             "ISO/Joliet staged namespace changed beyond selected files");
+        const Disc udf(tx.output);
+        need(udf.format()=="UDF",
+             "synchronized ISO/UDF Bridge staged UDF namespace unreadable");
+        for(const auto& entry:udf.items())
+            need(!deleted_names.contains(entry.path),
+                 "deleted ISO/UDF Bridge file still visible through UDF");
+    }
+    tx.commit(progress);
+}
+
 struct BridgePatch {
     std::string path;
     std::filesystem::path source;
