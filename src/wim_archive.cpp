@@ -179,7 +179,8 @@ struct WimArchive::Impl {
     };
 };
 
-WimArchive::WimArchive(const std::filesystem::path& image)
+WimArchive::WimArchive(const std::filesystem::path& image,
+                       std::uint32_t only_image_index)
     : api_(std::make_unique<Impl>()) {
     require(std::filesystem::is_regular_file(image) &&
             !std::filesystem::is_symlink(image),
@@ -212,6 +213,11 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     const DWORD count = api_->count(api_->archive);
     require(count > 0 && count <= 256,
             "WIM has no image indexes or too many images");
+    require(only_image_index == 0 || only_image_index <= count,
+            "requested WIM image index does not exist");
+    // Reserve slots even for indices not loaded: locations_ retains the
+    // original one-based image index for WIMCreateImageFile.
+    api_->images.resize(count, nullptr);
     format_ = "WIM / Windows Imaging API / " + std::to_string(count) +
               " image(s) / " + std::to_string(parts.size()) + " part(s) / read-only";
     constexpr std::size_t max_items = 1'000'000;
@@ -221,9 +227,10 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     // Every WIM image index is represented under a separate top-level folder.
     // Iterate rather than recurse: malformed WIMs cannot exhaust the stack.
     for (DWORD index = 1; index <= count; ++index) {
+        if (only_image_index != 0 && index != only_image_index) continue;
         HANDLE himage = api_->load(api_->archive, index);
         if (!is_valid(himage)) fail_windows("WIMLoadImage failed");
-        api_->images.push_back(himage);
+        api_->images[index - 1] = himage;
         std::string prefix = "image" + std::to_string(index);
         Item top;
         top.path = prefix;
@@ -321,6 +328,7 @@ bool WimArchive::read(
     // Empty WIM file resources may have no backing stream.
     if (file.size == 0) return true;
     const HANDLE loaded = api_->images[location.image_index - 1];
+    require(is_valid(loaded), "WIM resource belongs to an image index that is not loaded");
     HANDLE stream = api_->create_file(loaded, location.image_path.c_str(),
                                       GENERIC_READ, OPEN_EXISTING, 0);
     if (!is_valid(stream))
