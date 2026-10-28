@@ -21,7 +21,7 @@
 #include <vector>
 
 namespace {
-constexpr int E_END_ARCHIVE=10,E_BAD_ARCHIVE=13,E_UNKNOWN_FORMAT=14,E_ECREATE=16,E_EABORTED=21,E_SMALL_BUF=20;
+constexpr int E_END_ARCHIVE=10,E_BAD_ARCHIVE=13,E_UNKNOWN_FORMAT=14,E_ECREATE=16,E_EABORTED=21,E_SMALL_BUF=20,E_NO_FILES=22;
 constexpr int PK_SKIP=0,PK_TEST=1,PK_EXTRACT=2;
 constexpr int PK_CAPS_BY_CONTENT=64,PK_CAPS_SEARCHTEXT=128;
 constexpr int E_NOT_SUPPORTED=24;
@@ -272,8 +272,14 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         if(ext!=L".iso"&&ext!=L".udf"&&ext!=L".wim"&&
            ext!=L".ima"&&ext!=L".img"&&ext!=L".vfd"&&
            ext!=L".flp"&&ext!=L".bif"&&ext!=L".raw"&&
-           ext!=L".vhd"&&ext!=L".vhdx")return E_NOT_SUPPORTED;
-        if(!std::filesystem::exists(image))return E_NOT_SUPPORTED;
+           ext!=L".vhd"&&ext!=L".vhdx") {
+            if(remove)report_delete_error("Unsupported archive extension for deletion");
+            return E_NOT_SUPPORTED;
+        }
+        if(!std::filesystem::exists(image)) {
+            if(remove)report_delete_error("Archive file no longer exists");
+            return E_NOT_SUPPORTED;
+        }
         std::vector<iso_wcx::ArchiveChange> changes;
         for(auto name:names){
             if(remove && (name.ends_with(L"\\*")||name.ends_with(L"/*")))name.resize(name.size()-2);
@@ -285,7 +291,10 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
                 c.directory=std::filesystem::is_directory(status);
             }changes.push_back(std::move(c));
         }
-        if(changes.empty())return 0;
+        if(changes.empty()) {
+            if(remove)report_delete_error("No entries were passed to DeleteFiles");
+            return E_NO_FILES;
+        }
         auto wide=archive;auto ansi=to_ansi(archive);const auto pw=pack_progress_w.load();const auto pa=pack_progress_a.load();
         const auto progress=[&]{if(pw)return pw(wide.data(),0)!=0;if(pa)return pa(ansi.data(),0)!=0;return true;};
         if(ext==L".iso"||ext==L".udf")
@@ -328,10 +337,28 @@ WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* li
     try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),from_bytes(sub,CP_ACP),from_bytes(source,CP_ACP),edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
 }
 WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
-    try{if(!archive)return E_NOT_SUPPORTED;return do_edit(archive,L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
+    try {
+        if(!archive) return E_NOT_SUPPORTED;
+        return do_edit(archive,L"",L"",edit_list(list),true,0);
+    }catch(const std::exception& e) {
+        report_delete_error(e.what());
+        return E_BAD_ARCHIVE;
+    }catch(...) {
+        report_delete_error("Could not parse Unicode delete list");
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
-    try{if(!archive)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
+    try {
+        if(!archive) return E_NOT_SUPPORTED;
+        return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);
+    }catch(const std::exception& e) {
+        report_delete_error(e.what());
+        return E_BAD_ARCHIVE;
+    }catch(...) {
+        report_delete_error("Could not parse ANSI delete list");
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
     try { iso_wcx::configure_updates(parent,module); } catch(...) {}
