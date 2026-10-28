@@ -332,7 +332,10 @@ BridgeIsoTree bridge_snapshot(const Image& image) {
     std::vector<std::pair<const Node*,std::string>> pending{
         {image.root.get(),std::string{}}};
     for(std::size_t index=0;index<pending.size();++index) {
-        const auto& [parent,prefix]=pending[index];
+        // Copy the prefix: appending nested directories can reallocate
+        // pending and invalidate a reference into that vector.
+        const Node* parent=pending[index].first;
+        const std::string prefix=pending[index].second;
         for(const auto& child:parent->children) {
             const auto key=prefix.empty()?child->logical:prefix+"/"+child->logical;
             need(result.emplace(key,BridgeIsoVisible{
