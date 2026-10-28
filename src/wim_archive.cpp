@@ -180,7 +180,8 @@ struct WimArchive::Impl {
 };
 
 WimArchive::WimArchive(const std::filesystem::path& image,
-                       std::uint32_t only_image_index)
+                       std::uint32_t only_image_index,
+                       ScanProgress scan_progress)
     : api_(std::make_unique<Impl>()) {
     require(std::filesystem::is_regular_file(image) &&
             !std::filesystem::is_symlink(image),
@@ -238,6 +239,7 @@ WimArchive::WimArchive(const std::filesystem::path& image,
         top.attributes = FILE_ATTRIBUTE_DIRECTORY;
         entries_.push_back(std::move(top));
         locations_.push_back({});
+        if (scan_progress) scan_progress(index, entries_.size());
         struct Pending { std::wstring path; std::string relative; unsigned depth; };
         std::vector<Pending> stack;
         stack.push_back({L"", prefix, 0});
@@ -293,6 +295,8 @@ WimArchive::WimArchive(const std::filesystem::path& image,
                         item.attributes = data.dwFileAttributes;
                         entries_.push_back(std::move(item));
                         locations_.push_back({index, source});
+                        if (scan_progress && (entries_.size() % 1024u) == 0)
+                            scan_progress(index, entries_.size());
                         if (directory)
                             stack.push_back({source, relative, current.depth + 1});
                     }
@@ -307,6 +311,7 @@ WimArchive::WimArchive(const std::filesystem::path& image,
                 }
             }
         }
+        if (scan_progress) scan_progress(index, entries_.size());
     }
 }
 
