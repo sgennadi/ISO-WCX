@@ -45,9 +45,13 @@ jobs:
         run: cmake --build build --config Release --parallel 2
       - name: Run tests including WCX DLL loading
         run: ctest --test-dir build -C Release --output-on-failure
-      - name: Verify safe WCX association repair
+      - name: Verify safe WCX association repair and removal
         shell: pwsh
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'WCX association repair regression failed' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_unassociate_wcx.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'WCX selective association removal regression failed' }
       # Build the developer-only real-WIM validator on both architectures,
       # but ship it separately from the auto-installable Total Commander ZIP.
       - name: Upload real-WIM validator (developer utility)
