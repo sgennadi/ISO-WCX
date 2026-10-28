@@ -32,7 +32,7 @@ jobs:
       matrix:
         arch: [Win32, x64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure Visual Studio 2026 with experimental C++26
         run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST=ON
       - name: Require VS2026 and C++26 configuration
@@ -56,14 +56,14 @@ jobs:
       # Build the developer-only real-WIM validator on both architectures,
       # but ship it separately from the auto-installable Total Commander ZIP.
       - name: Upload real-WIM validator (developer utility)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ISO-WCX-WIM-Validator-${{ matrix.arch }}
           path: build/Release/wim_real_image_validate.exe
           if-no-files-found: error
           retention-days: 14
       - name: Upload preview binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ISO-WCX-${{ matrix.arch }}-preview
           path: |
@@ -75,7 +75,7 @@ jobs:
     name: Linux core tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install MAME CHD fixture generator for CI only
         run: |
           bash .github/scripts/prepare-ubuntu-apt.sh
@@ -94,7 +94,7 @@ jobs:
     name: Linux Clang ASan + UBSan
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Confirm independent ISO writer test dependency
         run: python3 -c "import ctypes.util; assert ctypes.util.find_library('archive'), 'libarchive is required for independent ISO validation'"
       - name: Configure sanitizers
@@ -113,9 +113,9 @@ jobs:
     needs: windows
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Collect x86 and x64 plugins
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: ISO-WCX-*-preview
           path: package
@@ -137,7 +137,7 @@ jobs:
           unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-Repair.ps1'
           unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-RemoveAssociation.ps1'
       - name: Upload combined preview installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ISO-WCX-Installable-Preview
           path: ISO-WCX-preview.zip

@@ -41,7 +41,7 @@ jobs:
             cc: clang-19
             cxx: clang++-19
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install modern toolchains
         run: |
           sudo apt-get update
@@ -73,7 +73,7 @@ jobs:
       matrix:
         arch: [Win32, x64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Display modern toolchain
         shell: pwsh
         run: |

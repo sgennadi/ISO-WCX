@@ -17,7 +17,7 @@ jobs:
         os: [ubuntu-latest, windows-2025]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure C++20 compatibility baseline (VS2026 on Windows)
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DISO_WCX_CXX_STANDARD=20
       - name: Build
@@ -30,7 +30,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure Win32 C++20 baseline using VS2026
         run: cmake -S . -B build-win32 -G "Visual Studio 18 2026" -A Win32 -DISO_WCX_CXX_STANDARD=20
       - name: Build all Win32 native and WCX targets
