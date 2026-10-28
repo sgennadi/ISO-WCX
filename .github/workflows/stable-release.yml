@@ -46,7 +46,7 @@ jobs:
       matrix:
         arch: [Win32, x64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure Visual Studio 2026 with actual C++26 draft flags
         run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26
       - name: Verify VS2026 generator, requested dialect and MSVC 19.50+
@@ -66,7 +66,7 @@ jobs:
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
       - name: Upload tested WCX binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stable-${{ matrix.arch }}
           path: build/Release/ISO-WCX.wcx*
@@ -82,7 +82,7 @@ jobs:
       matrix:
         arch: [Win32, x64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure compatibility build
         run: cmake -S . -B build-compat -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=20
       - name: Compile all native tools and WCX DLL
@@ -105,7 +105,7 @@ jobs:
             cc: clang-19
             cxx: clang++-19
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install C++26 compiler and Ninja
         run: |
           bash .github/scripts/prepare-ubuntu-apt.sh
@@ -132,7 +132,7 @@ jobs:
     name: Stable Linux C++20 regression
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install independent test fixtures
         run: |
           bash .github/scripts/prepare-ubuntu-apt.sh
@@ -149,7 +149,7 @@ jobs:
     name: Stable ASan + UBSan regression
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure sanitizers
         run: |
           cmake -S . -B build-sanitized -DCMAKE_BUILD_TYPE=Debug \
@@ -168,7 +168,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install reference utilities only for validation
         run: |
           bash .github/scripts/prepare-ubuntu-apt.sh
@@ -188,7 +188,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check disk capacity
         run: df -h .
       - name: Install independent UDF verification tools
@@ -207,7 +207,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure and build native editor/inspector
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -220,7 +220,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install QEMU only as independent CI validator
         run: |
           bash .github/scripts/prepare-ubuntu-apt.sh
@@ -249,9 +249,9 @@ jobs:
     needs: [windows, windows-cxx20, linux-cxx26, linux, sanitizer, real-udf, large-udf, stage-benchmark, native-qemu-vhd]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Download both tested WCX architectures
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: stable-*
           path: binaries
@@ -283,7 +283,7 @@ jobs:
           sha256sum "${ISO_WCX_RELEASE_FILE}" > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
       - name: Upload Stable installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ISO-WCX-Installable-v0.20.0-Stable
           path: |
@@ -300,8 +300,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: ISO-WCX-Installable-v0.20.0-Stable
           path: release-asset
