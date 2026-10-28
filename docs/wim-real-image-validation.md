@@ -41,6 +41,48 @@ the small CI fixture uses an independent child-process watchdog to detect
 that condition rather than silently declaring success. The manual
 large-image command has no implicit timeout.
 
+## Diagnose a slow multi-index install.wim without waiting for a full scan
+
+A real-world **boot.wim** completed a full read-only audit of 9,700
+streams in 101 seconds. In a separate **install.wim** attempt the user
+stopped the full scan after more than 20 minutes; **no PASS was recorded
+for install.wim**. A multi-index install.wim can represent many Windows
+editions, resulting in much more metadata work and decompressed stream
+readback than the single-index boot.wim. It is not yet known which
+processing phase caused the slowdown.
+
+Use the **new** standalone validator from the latest CI artifacts.
+First inspect one edition without hashing every file:
+
+    .\build\Release\wim_real_image_validate.exe "D:\Images\install.wim" --audit-only --stats-only --index 1
+
+Then run a sample for just this index, with a three-minute *soft* limit:
+
+    .\build\Release\wim_real_image_validate.exe "D:\Images\install.wim" --audit-only --index 1 --max-seconds 180
+
+To identify the decompression throughput on the same index:
+
+    .\build\Release\wim_real_image_validate.exe "D:\Images\install.wim" --audit-only --full --index 1 --max-seconds 180
+
+You can change `--index 1` to `--index 2`, etc. Omitting `--index`
+traverses every WIM image index, and `--full` reads every nonempty
+regular-file default stream in those selected indexes. These options
+**do not modify the image**, and do not create a private WIM clone.
+
+Diagnostic lines distinguish `PHASE` (source hash, WIMGAPI metadata,
+resource readback, final source recheck), `INDEX` (count and size),
+`AUDIT` (current file), and `PROGRESS` (bytes, rate and current path).
+The default reduces console spam by reporting at intervals; `--verbose`
+prints every file. Save both stdout and stderr to a local log when useful.
+
+`--stats-only` reports `METADATA_OK` but does **not** prove data
+integrity. `--max-seconds` is **not** a hard OS-level timeout: the limit
+is checked between synchronous WIMGAPI operations and callbacks, which
+may themselves block. A budget-exceeded run returns **exit code 3 /
+INCOMPLETE**, never PASS or a valid full manifest. The original
+`--audit-only --full` without limits retains exhaustive behavior and
+may take a long time. The validator does not support resumable audits yet.
+
 ## Opt-in disposable-copy edit test
 
 With a genuine local WIM on writable NTFS (do not use a system-mounted
