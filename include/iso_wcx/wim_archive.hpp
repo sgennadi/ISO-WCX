@@ -49,6 +49,9 @@ private:
     std::vector<Location> locations_;
     std::string format_;
     std::mutex read_mutex_;
+    // Shared under read_mutex_: reusing one read buffer avoids zero-filling
+    // and allocating 1 MiB for every small file in large install.wim images.
+    std::vector<std::uint8_t> read_buffer_;
 };
 
 } // namespace iso_wcx
