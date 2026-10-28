@@ -18,7 +18,11 @@ namespace iso_wcx {
 // redistributable codec DLL, or external helper is required at runtime.
 class WimArchive final {
 public:
-    explicit WimArchive(const std::filesystem::path& image);
+    // An optional one-based index limits WIMGAPI metadata enumeration and
+    // decompressed stream reads to a single image. Zero preserves the normal
+    // WCX behavior of exposing all images.
+    explicit WimArchive(const std::filesystem::path& image,
+                        std::uint32_t only_image_index = 0);
     ~WimArchive();
     WimArchive(const WimArchive&) = delete;
     WimArchive& operator=(const WimArchive&) = delete;
