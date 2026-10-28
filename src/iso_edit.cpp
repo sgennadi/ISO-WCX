@@ -668,15 +668,15 @@ void edit_iso_udf_bridge_equal_length(
 void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
     edit_tick(progress);Image image(path,true);
     if(image.udf_bridge) {
-        // A bridge contains two independent directory namespaces. Removing
-        // only the ISO9660 record or only a UDF FID would create a file
-        // that is invisible in one view but live in the other. Fail BEFORE
-        // loading the entire UDF tree or creating a private edit workspace.
+        // A bridge has two namespaces. The strict delete path handles
+        // existing shared-extent regular files in both directory trees
+        // together; mixed mutations and all unsupported structures fail
+        // before any original bytes are modified.
         if(std::any_of(changes.begin(),changes.end(),
-                       [](const ArchiveChange& c){return c.remove;}))
-            throw EditUnsupported(
-                "Delete is not supported for ISO/UDF Bridge: both filesystem "
-                "directory trees must be updated together");
+                       [](const ArchiveChange& c){return c.remove;})) {
+            edit_iso_udf_bridge_delete(path,image,changes,progress);
+            return;
+        }
         edit_iso_udf_bridge_equal_length(path,image,changes,progress);
         return;
     }
