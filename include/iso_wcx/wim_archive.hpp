@@ -20,9 +20,12 @@ class WimArchive final {
 public:
     // An optional one-based index limits WIMGAPI metadata enumeration and
     // decompressed stream reads to a single image. Zero preserves the normal
-    // WCX behavior of exposing all images.
+    // WCX behavior of exposing all images. The optional diagnostic callback
+    // may reject a long-running enumeration and is never used by normal WCX.
+    using ScanProgress = std::function<void(std::uint32_t,std::size_t)>;
     explicit WimArchive(const std::filesystem::path& image,
-                        std::uint32_t only_image_index = 0);
+                        std::uint32_t only_image_index = 0,
+                        ScanProgress scan_progress = {});
     ~WimArchive();
     WimArchive(const WimArchive&) = delete;
     WimArchive& operator=(const WimArchive&) = delete;
