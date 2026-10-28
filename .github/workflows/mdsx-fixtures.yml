@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure native metadata inspector
         run: cmake -S . -B build-mds -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DISO_WCX_BUILD_DEV_TOOLS=ON
       - name: Build native descriptor probe
@@ -58,7 +58,7 @@ jobs:
           - arch: x64
             suffix: .wcx64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # ctypes cannot load a Win32 WCX from the runner's default 64-bit Python.
       # Match the Python process bitness to the WCX DLL for genuine ABI testing.
       - uses: actions/setup-python@v6
