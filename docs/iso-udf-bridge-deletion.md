@@ -17,6 +17,9 @@ following hold:
 - The file has exactly one shared physical data extent with the same
   length in both namespaces (nonempty UDF ShortAD; no sparse, embedded,
   aliased or multi-extent file).
+- The UDF Type-1 partition has **no allocation bitmap/LVID-managed
+  free-space and file counters**. Those media remain read-only until
+  the editor can update those counters consistently with both namespaces.
 - The source has no unsupported hybrid/system-area layout, Rock Ridge
   metadata, or El Torito boot catalogue.
 - The request contains regular-file deletions only. Directory deletions,
@@ -47,8 +50,9 @@ recompression operation.
 - Deleting a **directory**, even when empty; a matching recursive UDF
   directory writer and parent/FID reclamation are not implemented.
 - Different ISO and UDF extents, multi-run/embedded/sparse file data,
-  unreadable UDF CRC, hardlinks/aliases, different path spellings and
-  unsupported UDF variants (VAT/metadata/sparable/multiple partitions).
+  allocation bitmap/LVID-managed volumes, unreadable UDF CRC,
+  hardlinks/aliases, different path spellings and unsupported UDF variants
+  (VAT/metadata/sparable/multiple partitions).
 - General file creation, arbitrary-size replacement, UDF repartitioning,
   full image repacking, and UDF block-space reclamation.
 
