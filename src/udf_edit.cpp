@@ -2258,7 +2258,111 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     tx.commit(progress);
 }
 
+// Require that ISO and UDF point at precisely the same already-recorded,
+// single-sector/ShortAD file contents. This is deliberately narrower than
+// generic UDF deletion: we cannot safely reclaim space shared by two volume
+// namespaces or rewrite a bridge's partition geometry in this transaction.
+void check_bridge_file_deletes(const Type1& volume,
+                               const std::vector<UdfBridgeFileDelete>& targets) {
+    need(!targets.empty() && targets.size()<=max_items,
+         "ISO/UDF Bridge deletion requires selected regular files");
+    std::set<std::string> seen;
+    for(const auto& item:targets) {
+        const auto name=edit_path(item.path);
+        need(seen.insert(name).second,
+             "duplicate ISO/UDF Bridge file delete path");
+        need(item.length>0 && item.physical_offset%block==0,
+             "ISO/UDF Bridge delete requires a nonempty sector-aligned file");
+        const auto it=volume.files().find(name);
+        need(it!=volume.files().end(),
+             "ISO/UDF Bridge target not found in UDF namespace");
+        const auto& fe=it->second.fe;
+        need(fe.type==5 && fe.storage==0 && fe.runs.size()==1 &&
+             fe.size==item.length && fe.runs[0].at==item.physical_offset &&
+             fe.runs[0].recorded==item.length,
+             "ISO/UDF Bridge file must share exactly one physical data extent");
+        ArchiveChange removal;
+        removal.path=name;
+        removal.remove=true;
+        validate_udf_existing_change(volume,removal);
+    }
+}
+
 } // namespace
+
+void preflight_udf_bridge_file_deletes(
+    const std::filesystem::path& image,
+    const std::vector<UdfBridgeFileDelete>& targets) {
+    // Only this entry point opts in to parsing a mixed CD001/UDF image.
+    // Standard UDF edits remain explicitly forbidden on bridge media.
+    Type1 volume(image,true);
+    check_bridge_file_deletes(volume,targets);
+}
+
+void patch_udf_bridge_file_deletes(
+    const std::filesystem::path& staged,
+    const std::vector<UdfBridgeFileDelete>& targets,
+    const EditProgress& progress) {
+    edit_tick(progress);
+    // The caller must pass its own prepared EditTransaction::output. Never
+    // call this function with a user's original file as the stage.
+    Type1 volume(staged,true);
+    check_bridge_file_deletes(volume,targets);
+    volume.close();
+    std::fstream out(staged,std::ios::binary|std::ios::in|std::ios::out);
+    need(bool(out),"cannot open private ISO/UDF Bridge stage");
+    for(const auto& item:targets) {
+        edit_tick(progress);
+        const auto& target=volume.files().at(item.path);
+        auto fid=staged_read(out,target.fid_at,target.fid_bytes);
+        tag_check(fid,0,257);
+        need(!(fid[18]&0x0cu),
+             "UDF Bridge FID already deleted or has unsupported flags");
+        fid[18]|=0x04u; // ECMA-167 FID deleted characteristic
+        tag_update(fid,0,fid.size());
+        staged_write(out,target.fid_at,fid);
+        // Embedded parent directories include the FID bytes in their FE
+        // descriptor CRC. Recalculate that outer CRC as well.
+        if(target.parent_embedded) {
+            auto parent=staged_read(out,target.parent_at,block);
+            const auto tag=u16(parent,0);
+            tag_check(parent,0,tag);
+            need(tag==261 || tag==266,
+                 "unsupported UDF Bridge parent file descriptor");
+            const auto base=tag==261?176u:216u;
+            const auto ea=u32(parent,tag==261?168u:208u);
+            const auto ad=u32(parent,tag==261?172u:212u);
+            need(base+ea+ad<=block,
+                 "UDF Bridge parent descriptor size invalid");
+            tag_update(parent,0,base+ea+ad);
+            staged_write(out,target.parent_at,parent);
+        }
+    }
+    out.flush();
+    need(bool(out),"cannot flush synchronized UDF Bridge FID updates");
+    out.close();
+    // Independently reparse the entire UDF metadata tree. Only the chosen
+    // names may disappear: every other regular file retains its recorded
+    // location and size, and the source ISO has not been touched.
+    Type1 checked(staged,true);
+    need(checked.files().size()+targets.size()==volume.files().size(),
+         "UDF Bridge staged delete unexpectedly changed other file entries");
+    for(const auto& item:targets)
+        need(!checked.files().contains(item.path),
+             "UDF Bridge target still appears after FID deletion");
+    for(const auto& [name,before]:volume.files()) {
+        if(!checked.files().contains(name))continue;
+        const auto& after=checked.files().at(name);
+        need(before.fe.size==after.fe.size &&
+             before.fe.at==after.fe.at &&
+             before.fe.runs.size()==after.fe.runs.size(),
+             "UDF Bridge other file metadata changed during deletion");
+        for(std::size_t i=0;i<before.fe.runs.size();++i)
+            need(before.fe.runs[i].at==after.fe.runs[i].at &&
+                 before.fe.runs[i].recorded==after.fe.runs[i].recorded,
+                 "UDF Bridge unrelated file physical extent changed");
+    }
+}
 
 void edit_udf(const std::filesystem::path& image,
               const std::vector<ArchiveChange>& changes,
