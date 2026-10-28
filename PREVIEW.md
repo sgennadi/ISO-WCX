@@ -12,7 +12,7 @@ in PR #65 is **not** part of this Stable build.
 
 ## If Total Commander says `File iso.wcx not found!`
 
-This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.wcx`; it does **not** indicate that `ISO-WCX.wcx` or its adjacent 64-bit `ISO-WCX.wcx64` is missing. The automatic installer cannot remove existing old plugin associations. In Configuration > Options > Packer > Configure packer extension WCXs, select `iso`, delete **only** the obsolete missing ISO.WCX entry, then click **New type...** and choose the installed `ISO-WCX.wcx`. Restart Total Commander and retry with Ctrl+PgDn. Do not type `192,` in the filename field or delete unrelated working plugins. See [INSTALL_RU.txt](INSTALL_RU.txt) and [INSTALL_EN.txt](INSTALL_EN.txt).
+This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.wcx`; it does **not** indicate that `ISO-WCX.wcx` or its adjacent 64-bit `ISO-WCX.wcx64` is missing. The automatic installer cannot remove existing old plugin associations. In Configuration > Options > Packer > Configure packer extension WCXs, select `iso`, delete **only** the obsolete missing ISO.WCX entry, then click **New type...** and choose the installed `ISO-WCX.wcx`. If the **Delete** button in that association dialog does nothing, run the bundled optional `ISO-WCX-RemoveAssociation.ps1` with `-IniPath "C:\\path\\wincmd.ini" -Extension iso` to preview, then close TC and add `-Apply` to remove **only that ISO-WCX association** with a backup. For an obsolete `iso.wcx` use the separate `ISO-WCX-Repair.ps1`. These tools preserve user toolbar buttons, unrelated extensions and INI encoding. They are **not needed** to run the plugin. Restart Total Commander and retry with Ctrl+PgDn. Do not type `222,` in the DLL filename field. See [INSTALL_RU.txt](INSTALL_RU.txt) and [INSTALL_EN.txt](INSTALL_EN.txt).
 
 ## Supported in the preview
 
@@ -21,7 +21,7 @@ This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.
 - Rock Ridge RRIP NM/CE names, CL relocated directory references, PX non-writable/read-only mapping, TF modification timestamps and mirrored CE/PX number validation; symbolic links and POSIX special files are ignored rather than followed.
 - 2048-byte logical images, raw 2352-byte CD Mode 1 and Mode 2 Form 1, and 2336-byte XA Form 1 frames (no Form 2).
 - Some images with 150-sector lead-in (relative and absolute session LBA conventions), but **not full multisession TOC/CUE parsing**.
-- UDF Type-1 physical mapping, FE/EFE, embedded/short/long allocation, AED continuations, CS0 Unicode and reserve VDS. **Write Preview for validated UDF-only physical 2048-byte Type-1:** create multiple regular files and nested empty directories atomically; mix creation, bounded replacement and logical deletion; reallocate compatible parent directories; reclaim verified deleted FE/ShortAD blocks for the following transaction; safely reuse cleared deleted FID slots without increasing directory length; support bounded multi-ShortAD files beyond 4 GiB. Bitmap/LVID and CRC are verified. A sibling transactional stage uses native CoW cloning on supported filesystems or sparse copy fallback, never direct writes to the original. No VAT, Metadata, Sparable, AED chain creation or ISO/UDF Bridge writer. See [UDF writer](docs/udf-type1-writer.md).
+- UDF Type-1 physical mapping, FE/EFE, embedded/short/long allocation, AED continuations, CS0 Unicode and reserve VDS. **Write Preview for validated UDF-only physical 2048-byte Type-1:** create multiple regular files and nested empty directories atomically; mix creation, bounded replacement and logical deletion; reallocate compatible parent directories; reclaim verified deleted FE/ShortAD blocks for the following transaction; safely reuse cleared deleted FID slots without increasing directory length; support bounded multi-ShortAD files beyond 4 GiB. Bitmap/LVID and CRC are verified. A sibling transactional stage uses native CoW cloning on supported filesystems or sparse copy fallback, never direct writes to the original. No VAT, Metadata, Sparable, AED chain creation or **general** ISO/UDF Bridge writer; a narrow, independently tested synchronized Bridge file-delete mode is documented below. See [UDF writer](docs/udf-type1-writer.md).
 - **Experimental** UDF Metadata, Virtual (VAT) and Sparable partition-map reading, including mirror metadata fallback and packet redirects. UDF symbolic links (ICB type 12) and device/special ICBs are deliberately excluded from ordinary WCX extraction; they are never followed or materialized as regular files.
 - WCX list/test/extract for supported images, streamed file data and 64-bit sizes. Restricted PackFiles/DeleteFiles support covers validated plain ISO9660/Joliet, UDF-only physical Type-1 images (experimental), and standard unsplit WIM on Windows.
 
@@ -57,7 +57,7 @@ CLI tool: `disc_inspect image.iso` or `disc_inspect image.iso --extract OUTPUT`.
 
 Download the **ISO-WCX-Installable-Preview** artifact from successful GitHub Actions runs. Unzip the outer GitHub artifact archive, then open `ISO-WCX-preview.zip` directly in Total Commander; `pluginst.inf` prompts installation. Alternatively configure `.iso`, `.img` or `.bin` manually under **Configuration > Options > Packer > Configure packer extension WCXs**. Only use `.bin` images in the supported single-track layouts above.
 
-CI builds both Windows WCX architectures, runs parser and extraction tests, and packages only ISO-WCX.wcx, ISO-WCX.wcx64, pluginst.inf and human-readable instructions. No Setup.exe, third-party disk DLLs, PowerShell or CMD scripts are installed.
+CI builds both Windows WCX architectures, runs parser, extraction and DeleteFiles tests, and packages ISO-WCX.wcx, ISO-WCX.wcx64, pluginst.inf, instructions and two **optional** safe-association PowerShell helpers. No Setup.exe, third-party DLL, PowerShell or CMD program is required to use the WCX plugin.
 
 ## Native HDD images inside WCX (v0.13 preview)
 
@@ -234,10 +234,14 @@ lengths of up to 221 bytes and relaxed Joliet length up to 110 UTF-16 units
 long-name layouts are not portable to every optical image reader.
 Existing BIOS and EFI El Torito catalog/image sectors are preserved, and
 edits to overlapping file extents are refused. ISO/UDF Bridge images have
-one narrow write mode: equal-length replacement of an existing regular file
-whose ISO and UDF entries share a single physical extent. Bridge bootable
-images, addition/deletion, resize, embedded/sparse/hard-linked extents and
-UDF metadata rebuilding remain unsupported. Separate UDF-only Type-1 images
+two narrow Preview write modes: equal-length replacement of an existing
+shared-extent regular file; and **synchronized logical deletion** of an
+existing nonempty regular file with an identical single physical extent in
+ISO/Joliet and UDF Type-1 *without* bitmap/LVID counters. The latter
+updates both directory namespaces transactionally, recalculates UDF CRC,
+and verifies both trees before commit. Bootable/hybrid, bitmap-managed,
+directory deletion, general creation/resize, multi-run, sparse or linked
+Bridge edits are refused. See [Bridge deletion safety](docs/iso-udf-bridge-deletion.md). Separate UDF-only Type-1 images
 permit bounded new file/directory creation and contiguous ShortAD parent
 directory expansion, in addition to existing-file replacement/FID deletion; no
 files/directories or free-space reclamation. Hybrid system-area ISO,
