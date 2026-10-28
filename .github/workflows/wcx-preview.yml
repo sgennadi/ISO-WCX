@@ -130,10 +130,12 @@ jobs:
             echo "Unexpected third-party shared library in ISO-WCX installer" >&2
             exit 1
           fi
-          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX.wcx ISO-WCX.wcx64)
+          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-Repair.ps1 ISO-WCX-RemoveAssociation.ps1 package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-Repair.ps1 ISO-WCX-RemoveAssociation.ps1 ISO-WCX.wcx ISO-WCX.wcx64)
           unzip -t ISO-WCX-preview.zip
           unzip -Z1 ISO-WCX-preview.zip | grep -qx 'THIRD_PARTY_NOTICES.txt'
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-Repair.ps1'
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-RemoveAssociation.ps1'
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v4
         with:
