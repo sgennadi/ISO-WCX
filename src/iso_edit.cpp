@@ -99,6 +99,11 @@ struct Node {
     Bytes record,identifier,joliet_identifier;
     bool directory=false;
     std::uint32_t lba=0,size=0;
+    // Locations of the on-disc directory record representing this entry
+    // in primary ISO9660 and the paired Joliet namespace. Bridge deletion
+    // only compacts those existing directory records, never relocates data.
+    std::uint64_t iso_record_at=0,joliet_record_at=0;
+    std::uint32_t joliet_lba=0,joliet_size=0;
     std::filesystem::path source;
     Node* parent=nullptr;
     std::vector<std::unique_ptr<Node>> children;
@@ -183,12 +188,20 @@ public:
             for(std::size_t at=0;at<data.size();){unsigned len=data[at];if(!len){at=(at/block+1)*block;continue;}need(len>=34&&len<=data.size()-at&&at%block+len<=block,"bad ISO directory record");Bytes child(data.begin()+static_cast<std::ptrdiff_t>(at),data.begin()+static_cast<std::ptrdiff_t>(at+len));at+=len;
                 if(child[32]==1&&child[33]<=1){ // Validate dot records too (Rock Ridge SP/CE can live here).
                     auto tail=std::size_t(34);need(std::all_of(child.begin()+static_cast<std::ptrdiff_t>(tail),child.end(),[](auto c){return c==0;}),"Rock Ridge/system-use ISO editing is not supported");continue;}
-                auto c=parse(child,j,n.get(),depth+1,seen);need(names.insert(upper(c->logical)).second,"ambiguous ISO names");n->children.push_back(std::move(c));
+                auto c=parse(child,j,n.get(),depth+1,seen);
+                c->iso_record_at=std::uint64_t(n->lba)*block+at-len;
+                need(names.insert(upper(c->logical)).second,
+                     "ambiguous ISO names");
+                n->children.push_back(std::move(c));
             }
         }return n;
     }
     void pair(Node& a,const Node& b) {
-        a.joliet_identifier=b.identifier;a.logical=b.logical;
+        a.joliet_identifier=b.identifier;
+        a.joliet_record_at=b.iso_record_at;
+        a.joliet_lba=b.lba;
+        a.joliet_size=b.size;
+        a.logical=b.logical;
         need(a.children.size()==b.children.size(),"ISO and Joliet trees differ");std::set<const Node*> used;
         for(auto& x:a.children){std::vector<const Node*> found;
             for(const auto& y:b.children)if(!used.count(y.get())&&x->directory==y->directory&&x->size==y->size&&(x->directory||x->lba==y->lba))found.push_back(y.get());
