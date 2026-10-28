@@ -251,16 +251,11 @@ void report_delete_error(const char* description) noexcept {
         try { reason=from_bytes(description,CP_UTF8); }
         catch(...) { reason=L"Unsupported or invalid filesystem layout"; }
         if(reason.size()>800) reason.resize(800);
-        std::wstring text=L"The selected entry was NOT deleted.\\n\\n";
+        std::wstring text=L"The selected entry was NOT deleted.\n\n";
         text+=reason;
-        text+=L"\\n\\nISO-WCX has not committed the requested change. "
-              L"ISO/UDF Bridge and unsupported boot metadata must not be "
-              L"modified without a synchronized filesystem writer.";
-        std::replace(text.begin(),text.end(),L'\\r',L' ');
-        // These are two-character escape sequences in the literal above;
-        // turn them into actual newlines before displaying the message.
-        for(std::size_t pos=0;(pos=text.find(L"\\n",pos))!=std::wstring::npos;)
-            text.replace(pos,2,L"\n");
+        text+=L"\n\nThe original archive has not been committed. "
+              L"ISO/UDF Bridge, Rock Ridge and protected boot layouts "
+              L"require a compatible metadata writer.";
         MessageBoxW(nullptr,text.c_str(),L"ISO-WCX - Delete failed",
                     MB_OK|MB_ICONWARNING|MB_TASKMODAL);
     }catch(...) {
