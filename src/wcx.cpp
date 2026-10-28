@@ -18,6 +18,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -290,6 +291,37 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
                 const DWORD attributes=GetFileAttributesW(c.source.c_str());if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))return E_NOT_SUPPORTED;
                 c.directory=std::filesystem::is_directory(status);
             }changes.push_back(std::move(c));
+        }
+        if(remove && changes.size()>1) {
+            // TC may include both a directory and every one of its children
+            // in the DeleteFiles multi-SZ. Deleting the directory first and
+            // then processing a child used to turn a valid F8 request into
+            // an aborted transaction. Keep the shallowest selected ancestor.
+            const auto folded=[](std::string p) {
+                for(auto& ch:p)
+                    if(ch>='A'&&ch<='Z') ch=char(ch-'A'+'a');
+                return p;
+            };
+            std::stable_sort(changes.begin(),changes.end(),
+                [](const auto& a,const auto& b) {
+                    return a.path.size()<b.path.size();
+                });
+            std::unordered_set<std::string> selected;
+            std::vector<iso_wcx::ArchiveChange> normalized;
+            normalized.reserve(changes.size());
+            for(auto& c:changes) {
+                const auto key=folded(c.path);
+                bool covered=selected.contains(key);
+                for(std::size_t slash=key.find('/');!covered &&
+                    slash!=std::string::npos;slash=key.find('/',slash+1))
+                    if(selected.contains(key.substr(0,slash)))
+                        covered=true;
+                if(!covered) {
+                    selected.insert(key);
+                    normalized.push_back(std::move(c));
+                }
+            }
+            changes=std::move(normalized);
         }
         if(changes.empty()) {
             if(remove)report_delete_error("No entries were passed to DeleteFiles");
