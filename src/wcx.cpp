@@ -7,6 +7,7 @@
 #include <atomic>
 #include <type_traits>
 #include <cwctype>
+#include <cwchar>
 #include <windows.h>
 #include <algorithm>
 #include <cstdint>
@@ -231,6 +232,41 @@ template<class Char> std::vector<std::wstring> edit_list(const Char* list) {
         if constexpr(std::is_same_v<Char,wchar_t>)out.emplace_back(list,n);else out.push_back(from_bytes(list,CP_ACP));list+=n+1;
     }return out;
 }
+// WCX error return codes do not carry a reason string. Total Commander can
+// otherwise appear to do nothing when a selected ISO is an unsupported
+// ISO/UDF Bridge, Rock Ridge layout, or a protected boot resource.
+// Show one actionable message only inside the interactive TC host; never
+// display blocking dialogs in standalone smoke tests or background services.
+void report_delete_error(const char* description) noexcept {
+    try {
+        wchar_t host[MAX_PATH]{};
+        const DWORD length=GetModuleFileNameW(nullptr,host,MAX_PATH);
+        if(!length || length>=MAX_PATH) return;
+        const wchar_t* filename=std::wcsrchr(host,L'\\');
+        filename=filename ? filename+1 : host;
+        if(_wcsicmp(filename,L"TOTALCMD.EXE")!=0 &&
+           _wcsicmp(filename,L"TOTALCMD64.EXE")!=0)
+            return;
+        std::wstring reason;
+        try { reason=from_bytes(description,CP_UTF8); }
+        catch(...) { reason=L"Unsupported or invalid filesystem layout"; }
+        if(reason.size()>800) reason.resize(800);
+        std::wstring text=L"The selected entry was NOT deleted.\\n\\n";
+        text+=reason;
+        text+=L"\\n\\nISO-WCX has not committed the requested change. "
+              L"ISO/UDF Bridge and unsupported boot metadata must not be "
+              L"modified without a synchronized filesystem writer.";
+        std::replace(text.begin(),text.end(),L'\\r',L' ');
+        // These are two-character escape sequences in the literal above;
+        // turn them into actual newlines before displaying the message.
+        for(std::size_t pos=0;(pos=text.find(L"\\n",pos))!=std::wstring::npos;)
+            text.replace(pos,2,L"\n");
+        MessageBoxW(nullptr,text.c_str(),L"ISO-WCX - Delete failed",
+                    MB_OK|MB_ICONWARNING|MB_TASKMODAL);
+    }catch(...) {
+        OutputDebugStringW(L"ISO-WCX: failed to display delete error");
+    }
+}
 int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::wstring& source,
             const std::vector<std::wstring>& names,bool remove,int flags) {
     try {
@@ -275,9 +311,19 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         else iso_wcx::edit_fat(image,changes,progress);
         return 0;
     }catch(const iso_wcx::EditCancelled&){return E_EABORTED;}
-     catch(const iso_wcx::EditUnsupported&){return E_NOT_SUPPORTED;}
-     catch(const std::filesystem::filesystem_error&){return E_ECREATE;}
-     catch(...){return E_BAD_ARCHIVE;}
+     catch(const iso_wcx::EditUnsupported& e) {
+         if(remove) report_delete_error(e.what());
+         return E_NOT_SUPPORTED;
+     }catch(const std::filesystem::filesystem_error& e) {
+         if(remove) report_delete_error(e.what());
+         return E_ECREATE;
+     }catch(const std::exception& e) {
+         if(remove) report_delete_error(e.what());
+         return E_BAD_ARCHIVE;
+     }catch(...) {
+         if(remove) report_delete_error("unknown failure");
+         return E_BAD_ARCHIVE;
+     }
 }
 }
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
