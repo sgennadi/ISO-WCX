@@ -2311,6 +2311,22 @@ void patch_udf_bridge_file_deletes(
     volume.close();
     std::fstream out(staged,std::ios::binary|std::ios::in|std::ios::out);
     need(bool(out),"cannot open private ISO/UDF Bridge stage");
+    std::set<std::uint64_t> modified_embedded_parents;
+    // Validate the full descriptor and its existing CRC before we change
+    // ANY of its embedded FIDs. Revalidating it mid-batch is incorrect:
+    // after one FID is changed the old outer CRC is intentionally stale.
+    for(const auto& item:targets) {
+        const auto& target=volume.files().at(item.path);
+        if(target.parent_embedded)
+            modified_embedded_parents.insert(target.parent_at);
+    }
+    for(const auto parent_at:modified_embedded_parents) {
+        const auto parent=staged_read(out,parent_at,block);
+        const auto tag=u16(parent,0);
+        need(tag==261 || tag==266,
+             "unsupported UDF Bridge parent file descriptor");
+        tag_check(parent,0,tag);
+    }
     for(const auto& item:targets) {
         edit_tick(progress);
         const auto& target=volume.files().at(item.path);
@@ -2321,22 +2337,23 @@ void patch_udf_bridge_file_deletes(
         fid[18]|=0x04u; // ECMA-167 FID deleted characteristic
         tag_update(fid,0,fid.size());
         staged_write(out,target.fid_at,fid);
-        // Embedded parent directories include the FID bytes in their FE
-        // descriptor CRC. Recalculate that outer CRC as well.
-        if(target.parent_embedded) {
-            auto parent=staged_read(out,target.parent_at,block);
-            const auto tag=u16(parent,0);
-            tag_check(parent,0,tag);
-            need(tag==261 || tag==266,
-                 "unsupported UDF Bridge parent file descriptor");
-            const auto base=tag==261?176u:216u;
-            const auto ea=u32(parent,tag==261?168u:208u);
-            const auto ad=u32(parent,tag==261?172u:212u);
-            need(base+ea+ad<=block,
-                 "UDF Bridge parent descriptor size invalid");
-            tag_update(parent,0,base+ea+ad);
-            staged_write(out,target.parent_at,parent);
-        }
+    }
+    // Each embedded parent FE can contain multiple selected FIDs. Only
+    // after the LAST FID update may we calculate the parent CRC, otherwise
+    // a second deletion finds a deliberately stale CRC and aborts.
+    for(const auto parent_at:modified_embedded_parents) {
+        edit_tick(progress);
+        auto parent=staged_read(out,parent_at,block);
+        const auto tag=u16(parent,0);
+        need(tag==261 || tag==266,
+             "unsupported UDF Bridge parent file descriptor");
+        const auto base=tag==261?176u:216u;
+        const auto ea=u32(parent,tag==261?168u:208u);
+        const auto ad=u32(parent,tag==261?172u:212u);
+        need(base+ea+ad<=block,
+             "UDF Bridge parent descriptor size invalid");
+        tag_update(parent,0,base+ea+ad);
+        staged_write(out,parent_at,parent);
     }
     out.flush();
     need(bool(out),"cannot flush synchronized UDF Bridge FID updates");
