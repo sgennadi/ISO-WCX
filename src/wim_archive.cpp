@@ -339,21 +339,24 @@ bool WimArchive::read(
     if (!is_valid(stream))
         fail_windows("WIMCreateImageFile failed");
     Impl::CloseHandle file_guard(api_.get(), stream);
-    std::vector<std::uint8_t> buffer(1024u * 1024u);
+    // Serialize callers with read_mutex_ and reuse one 1-MiB buffer.
+    // On multi-edition install.wim this avoids tens of thousands of
+    // allocations and redundant zero initialization of the same memory.
+    if (read_buffer_.empty()) read_buffer_.resize(1024u * 1024u);
     std::uint64_t offset = 0;
     while (offset < file.size) {
         const DWORD wanted = static_cast<DWORD>(
-            std::min<std::uint64_t>(buffer.size(), file.size - offset));
+            std::min<std::uint64_t>(read_buffer_.size(), file.size - offset));
         OVERLAPPED overlapped{};
         overlapped.Offset = static_cast<DWORD>(offset);
         overlapped.OffsetHigh = static_cast<DWORD>(offset >> 32);
         DWORD received = 0;
-        if (!api_->read_file(stream, buffer.data(), wanted,
+        if (!api_->read_file(stream, read_buffer_.data(), wanted,
                              &received, &overlapped))
             fail_windows("WIMReadImageFile failed");
         require(received > 0 && received <= wanted,
                 "WIM file returned incomplete or invalid data");
-        if (!consumer(buffer.data(), received)) return false;
+        if (!consumer(read_buffer_.data(), received)) return false;
         offset += received;
     }
     return true;
