@@ -181,7 +181,7 @@ struct WimArchive::Impl {
 
 WimArchive::WimArchive(const std::filesystem::path& image,
                        std::uint32_t only_image_index,
-                       ScanProgress scan_progress)
+                       WimArchive::ScanProgress scan_progress)
     : api_(std::make_unique<Impl>()) {
     require(std::filesystem::is_regular_file(image) &&
             !std::filesystem::is_symlink(image),
