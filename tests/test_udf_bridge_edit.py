@@ -1,5 +1,6 @@
-"""Equal-length, byte-only ISO/UDF Bridge edits with independent ISO/UDF readback.
-Fixtures exercise the narrow shared-extent case; no UDF metadata is rewritten.
+"""Transactional shared-extent ISO/UDF Bridge changes and dual-namespace readback.
+Equal-size replacements rewrite only data. Narrow file deletes patch the ISO
+directory record and UDF FID (with valid CRCs) in one private transaction.
 """
 import pathlib
 import struct
@@ -9,8 +10,12 @@ import tempfile
 from test_images import iso_image, iso_record, udf_image, B
 from test_iso_edit import both, read_image
 
-def descriptor_bridge(boot=False,shared=True):
-    data=bytearray(udf_image())
+def descriptor_bridge(boot=False,shared=True,strict=False):
+    if strict:
+        from test_udf_edit import base_image
+        data=bytearray(base_image(layout='short'))
+    else:
+        data=bytearray(udf_image())
     iso=bytearray(iso_image(filename='hello;1'))
     if boot:
         from test_iso_edit import fixture
@@ -66,8 +71,32 @@ def main(editor,inspector):
         target=root/'udf-out'
         run([inspector,str(image),'--extract',str(target)])
         assert (target/'hello').read_bytes()==b'EARTH'
-        def rejected(operation,name,content=b'EARTH',boot=False,shared=True):
-            image.write_bytes(descriptor_bridge(boot=boot,shared=shared))
+        # Fully valid Type-1 metadata permits a synchronized logical
+        # deletion on the same shared physical ISO/UDF file. No user data
+        # is moved or reclaimed; no ISO volume geometry may change.
+        image.write_bytes(descriptor_bridge(strict=True))
+        original=image.read_bytes()
+        run([editor,str(image),'delete','hello'])
+        deleted=image.read_bytes()
+        assert deleted!=original and len(deleted)==len(original)
+        for lba in range(len(original)//B):
+            if lba not in (20,301):
+                at=lba*B
+                assert deleted[at:at+B]==original[at:at+B],(
+                    'dual delete touched unrelated ISO/UDF sector',lba)
+        assert 'hello' not in read_image(image),(
+            'ISO file remains after synchronized Bridge deletion')
+        extracted=root/'udf-deleted'
+        run([inspector,str(image),'--extract',str(extracted)])
+        assert not (extracted/'hello').exists(),(
+            'UDF FID still exposes deleted bridge file')
+        assert not list(root.glob('.iso-wcx-edit-*')),(
+            'successful bridge deletion leaked staging directory')
+
+        def rejected(operation,name,content=b'EARTH',boot=False,shared=True,
+                     strict=False):
+            image.write_bytes(descriptor_bridge(boot=boot,shared=shared,
+                                                strict=strict))
             source.write_bytes(content)
             before=image.read_bytes()
             args=[editor,str(image),operation,name]
@@ -76,12 +105,17 @@ def main(editor,inspector):
             run(args,expected=1)
             assert image.read_bytes()==before,'source ISO changed on rejection'
         rejected('add','hello',b'TOO LONG')
-        rejected('delete','hello')
+        rejected('delete','hello',strict=False)  # deliberately malformed FID
+        rejected('delete','hello',shared=False,strict=True)
+        rejected('delete','hello',boot=True,strict=True)
+        rejected('delete','missing',strict=True)
         rejected('mkdir','new_folder')
         rejected('add','missing',b'EARTH')
         rejected('add','hello',b'EARTH',shared=False)
         rejected('add','hello',b'EARTH',boot=True)
-    print('PASS: UDF Bridge shared-extent equal-length edit, dual readback, rollback, rejects')
+    print('PASS: UDF Bridge shared-extent replacement and synchronized '
+          'ISO+UDF file deletion; preserved other sectors, refused unsafe '
+          'layouts and rolled back')
 
 if __name__=='__main__':
     main(sys.argv[1],sys.argv[2])
