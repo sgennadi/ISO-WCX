@@ -430,6 +430,17 @@ if(WIN32)
       COMMAND wcx_delete_smoke "$<TARGET_FILE:ISO-WCX>")
     set_tests_properties(wcx_delete_iso_unicode_ansi_and_bridge_safety
       PROPERTIES TIMEOUT 120)
+    # Independently mastered two-file Bridge; call the real same-architecture
+    # WCX DeleteFilesW and re-read BOTH ISO and UDF filesystem trees.
+    add_executable(wcx_bridge_delete_smoke tests/wcx_bridge_delete_smoke.cpp)
+    add_test(NAME wcx_delete_iso_udf_bridge_dual_namespace
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_bridge_delete.py"
+        "$<TARGET_FILE:wcx_bridge_delete_smoke>"
+        "$<TARGET_FILE:ISO-WCX>"
+        "$<TARGET_FILE:disc_inspect>")
+    set_tests_properties(wcx_delete_iso_udf_bridge_dual_namespace
+      PROPERTIES TIMEOUT 180)
   endif()
 endif()
 
