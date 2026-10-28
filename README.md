@@ -25,6 +25,19 @@ remove only the obsolete `iso` association and add a new type pointing to
 the installed `ISO-WCX.wcx`. Restart TC. The plugin itself cannot repair an
 association that prevents its DLL from loading in the first place.
 
+If the **Delete** button in the *WCX association dialog* does nothing,
+that is a Total Commander configuration/UI operation, not a call to
+`DeleteFilesW` inside an archive. The value `222,C:\\...\\ISO-WCX.wcx`
+is a valid WCX capability mask plus DLL path, **not error 222**. To remove
+a specific stale association safely, use the repository's optional
+[`ISO-WCX-RemoveAssociation.ps1`](ISO-WCX-RemoveAssociation.ps1) with
+`-IniPath "C:\\path\\to\\wincmd.ini" -Extension iso` for a **read-only
+preview**; with Total Commander closed, add `-Apply` only after confirming
+the exact target. The script backs up the INI, preserves Russian/Hebrew
+configuration and user buttons, removes only matching ISO-WCX registrations
+for that extension, and leaves unrelated plugins untouched. It is not a
+runtime dependency and is not launched automatically by the WCX installer.
+
 For installation see [INSTALL_EN.txt](INSTALL_EN.txt) and
 [INSTALL_RU.txt](INSTALL_RU.txt); [PREVIEW.md](PREVIEW.md) describes
 experimental support. See [v0.21.0 release notes](RELEASE_NOTES.md).
