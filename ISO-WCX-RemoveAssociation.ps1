@@ -45,6 +45,17 @@ if($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes
 }
 $text=$encoding.GetString($bytes,$start,$bytes.Length-$start)
 if($text.IndexOf([char]0) -ge 0) { throw 'INI contains NUL bytes; refusing update.' }
+# Refuse encodings which cannot be decoded/re-encoded byte-identically.
+# This is essential for users with Russian/Hebrew buttons and custom menus.
+$roundtrip=$encoding.GetBytes($text)
+if($roundtrip.Length -ne ($bytes.Length-$start)) {
+    throw 'INI encoding cannot be round-tripped losslessly.'
+}
+for($offset=0;$offset -lt $roundtrip.Length;$offset++) {
+    if($roundtrip[$offset] -ne $bytes[$start+$offset]) {
+        throw 'INI encoding round-trip changed bytes; refusing modification.'
+    }
+}
 $lines=[regex]::Split($text,'(?<=\n)')
 $active=''
 $selected=New-Object 'System.Collections.Generic.List[int]'
