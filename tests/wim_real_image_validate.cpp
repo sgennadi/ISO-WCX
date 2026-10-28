@@ -236,13 +236,17 @@ static std::wstring native_string(const fs::path& path) {
 }
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc < 3 || argc > 5) {
+    if (argc < 3 || argc > 12) {
         std::wcerr << L"Usage (Administrator for editing):\n"
-                   << L"  wim_real_image_validate.exe <install.wim> "
+                   << L"  wim_real_image_validate.exe <image.wim> "
                       L"<ISO-WCX.wcx64 or ISO-WCX.wcx> [image-index] [--full]\n"
-                   << L"  wim_real_image_validate.exe <install.wim> --audit-only [--full]\n"
-                   << L"Editing needs writable NTFS and >2x input size free. "
-                      L"Read-only audit needs no WCX DLL or private WIM copy.\n";
+                   << L"  wim_real_image_validate.exe <image.wim> --audit-only"
+                      L" [--stats-only | --full] [--index N]"
+                      L" [--max-seconds N] [--verbose]\n"
+                   << L"Read-only audit does not mount, edit, or clone the WIM.\n"
+                   << L"--stats-only lists metadata, without content hashing.\n"
+                   << L"--max-seconds is a soft budget: a blocked system WIMGAPI"
+                      L" call cannot be interrupted.\n";
         return 1;
     }
     fs::path root;
@@ -260,26 +264,71 @@ int wmain(int argc, wchar_t** argv) {
         // copying and SHA-256 verification, then fail before WIMGAPI opens
         // image streams or a WCX DLL is loaded. This isolates cleanup from
         // unrelated native WIMGAPI read/driver teardown delays.
-        const bool inject_post_clone_failure = argc == 4 &&
+        const bool inject_post_clone_failure = !audit_only && argc == 4 &&
             std::wstring_view(argv[3]) == L"--test-fail-after-clone";
-        const bool full_content =
-            (argc == 4 && std::wstring_view(argv[3]) == L"--full") ||
-            (argc == 5 && std::wstring_view(argv[4]) == L"--full");
-        const bool has_index = argc >= 4 &&
-            std::wstring_view(argv[3]) != L"--full" &&
-            !inject_post_clone_failure && !audit_only;
-        require(!audit_only || (argc == 3 ||
-                (argc == 4 && full_content)),
-                "audit mode accepts only --audit-only [--full]");
-        require(argc != 5 || (!audit_only && full_content && has_index),
-                "use [image-index] [--full], in that order");
-        wchar_t* index_end = nullptr;
-        const unsigned long parsed = has_index
-            ? std::wcstoul(argv[3], &index_end, 10) : 1ul;
-        require(parsed != 0 && parsed <= 256 &&
-                (!has_index || (index_end != argv[3] && *index_end == L'\0')),
-                "image index must be a decimal integer in 1..256");
-        const unsigned image_index = static_cast<unsigned>(parsed);
+        bool full_content = false;
+        bool stats_only = false;
+        bool verbose = false;
+        std::uint32_t audit_index = 0;
+        unsigned max_seconds = 0;
+        const auto decimal = [](std::wstring_view value, unsigned maximum,
+                                const char* message) -> unsigned {
+            require(!value.empty(), message);
+            std::uint64_t number = 0;
+            for (const wchar_t digit : value) {
+                require(digit >= L'0' && digit <= L'9', message);
+                number = number * 10u + static_cast<unsigned>(digit - L'0');
+                require(number <= maximum, message);
+            }
+            require(number != 0, message);
+            return static_cast<unsigned>(number);
+        };
+        unsigned image_index = 1;
+        if (audit_only) {
+            bool saw_index = false, saw_budget = false;
+            for (int i = 3; i < argc; ++i) {
+                const std::wstring_view argument(argv[i]);
+                if (argument == L"--full") {
+                    require(!full_content, "duplicate --full option");
+                    full_content = true;
+                } else if (argument == L"--stats-only") {
+                    require(!stats_only, "duplicate --stats-only option");
+                    stats_only = true;
+                } else if (argument == L"--verbose") {
+                    require(!verbose, "duplicate --verbose option");
+                    verbose = true;
+                } else if (argument == L"--index") {
+                    require(!saw_index && i + 1 < argc,
+                            "--index requires a single image number");
+                    audit_index = decimal(argv[++i], 256,
+                        "--index must be an integer from 1 to 256");
+                    saw_index = true;
+                } else if (argument == L"--max-seconds") {
+                    require(!saw_budget && i + 1 < argc,
+                            "--max-seconds requires a value");
+                    max_seconds = decimal(argv[++i], 86400,
+                        "--max-seconds must be an integer from 1 to 86400");
+                    saw_budget = true;
+                } else {
+                    throw std::runtime_error("unknown read-only WIM audit option");
+                }
+            }
+            require(!stats_only || !full_content,
+                    "choose --stats-only OR --full");
+        } else {
+            const bool has_index = argc >= 4 &&
+                std::wstring_view(argv[3]) != L"--full" &&
+                !inject_post_clone_failure;
+            require(argc <= 5 && (argc < 5 ||
+                    (has_index && std::wstring_view(argv[4]) == L"--full")),
+                    "edit test accepts [image-index] [--full] only");
+            if (has_index)
+                image_index = decimal(argv[3], 256,
+                    "image index must be an integer from 1 to 256");
+            full_content = (argc == 4 && !has_index &&
+                    std::wstring_view(argv[3]) == L"--full") ||
+                argc == 5;
+        }
         require(fs::is_regular_file(fs::symlink_status(source)),
                 "source must be an existing regular, non-symlink WIM");
         if (!audit_only)
