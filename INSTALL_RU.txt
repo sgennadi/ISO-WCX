@@ -105,8 +105,20 @@ IMZ (WinImage): ZIP stored/deflate, один образ до 32 МиБ, пров
 DLL до того, как Total Commander его загрузил. Разовая ручная
 правка записи не требует отдельной утилиты.
 
-Число 192 перед запятой в wincmd.ini обозначает флаги WCX,
+Числа 192 (старые флаги) и 222 (актуальная маска ISO-WCX)
+перед запятой в wincmd.ini — флаги возможностей WCX,
 это НЕ часть пути к файлу.
+
+Только для Preview: если кнопка Delete в окне ассоциаций WCX не работает,
+в установочный ZIP добавлен необязательный скрипт
+ISO-WCX-RemoveAssociation.ps1. Выполните в PowerShell
+-IniPath "C:\\path\\to\\wincmd.ini" -Extension iso для проверки без записи.
+Закройте Total Commander и добавьте -Apply, чтобы удалить только
+ассоциацию ISO-WCX с резервной копией INI. Поддерживаются также
+RedirectSection в PackerPlugins/PackerPlugins64. Свои кнопки,
+команды и другие плагины Total Commander скрипт не удаляет.
+ISO-WCX-Repair.ps1 исправляет ссылки на отсутствующий старый ISO.WCX.
+Для обычной работы WCX эти скрипты НЕ требуются.
 
 Поддержка ISO9660, Joliet, Rock Ridge, UDF, CUE/BIN, CCD, NRG,
 MDS v1 и CSO/ZSO сохраняется. Добавлены встроенные декодеры
