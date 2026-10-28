@@ -63,6 +63,11 @@ static void require(bool ok, const std::string& reason) {
     if (!ok) throw std::runtime_error(reason);
 }
 
+struct AuditBudgetExceeded : std::runtime_error {
+    explicit AuditBudgetExceeded(const std::string& stage)
+        : std::runtime_error("soft time budget reached during " + stage) {}
+};
+
 static void nt_ok(NTSTATUS status, const char* operation) {
     if (status < 0)
         throw std::runtime_error(std::string(operation) + " NTSTATUS " +
@@ -546,6 +551,12 @@ int wmain(int argc, wchar_t** argv) {
         // before cleanup. NEVER remove a workspace after an unknown mount error.
         fs::remove_all(root);
         return 0;
+    } catch (const AuditBudgetExceeded& exhausted) {
+        // A bounded read-only audit is deliberately INCOMPLETE, not a PASS
+        // or a WIM corruption error. No workspace has ever been created.
+        std::cerr << "INCOMPLETE: " << exhausted.what()
+                  << "; no full-stream validation manifest was produced.\n";
+        return 3;
     } catch (const std::exception& failure) {
         SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT", nullptr);
         std::cerr << "FAIL: real-image WIM validation: " << failure.what() << '\n';
