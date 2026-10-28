@@ -41,7 +41,9 @@ struct IsoNamespaceView {
 class Disc {
 public:
     explicit Disc(std::filesystem::path image);
-    [[nodiscard]] const std::vector<Item>& items() const noexcept { return entries_; }
+    // WIM metadata is owned by WimArchive. Return the same immutable vector
+    // instead of copying hundreds of thousands of Item strings into Disc.
+    [[nodiscard]] const std::vector<Item>& items() const noexcept;
     [[nodiscard]] const std::string& format() const noexcept { return format_; }
     // Returns false when cancelled. Throws on damaged source or I/O error.
     bool copy(std::size_t index, const std::filesystem::path& output,
