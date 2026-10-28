@@ -2266,6 +2266,12 @@ void check_bridge_file_deletes(const Type1& volume,
                                const std::vector<UdfBridgeFileDelete>& targets) {
     need(!targets.empty() && targets.size()<=max_items,
          "ISO/UDF Bridge deletion requires selected regular files");
+    // Bitmap-managed UDF tracks file counts and reclaimed blocks in its
+    // LVID. This narrow bridge path deliberately leaves physical data
+    // allocated; until both counters are maintained atomically, refuse
+    // bitmap/LVID-managed media rather than publish inconsistent metadata.
+    need(!volume.has_bitmap(),
+         "ISO/UDF Bridge UDF bitmap/LVID deletion is not yet supported");
     std::set<std::string> seen;
     for(const auto& item:targets) {
         const auto name=edit_path(item.path);
