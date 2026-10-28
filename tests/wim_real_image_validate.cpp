@@ -347,65 +347,175 @@ int wmain(int argc, wchar_t** argv) {
         // chunks; --full visits every exposed nonempty regular stream.
         // This mode works from a read-only source drive and needs no elevation.
         if (audit_only) {
-            const auto started = std::chrono::steady_clock::now();
-            const auto source_time = fs::last_write_time(source);
-            const auto source_sha = sha_file(source);
-            std::uint64_t total_uncompressed = 0;
-            std::size_t stream_count = 0, tree_count = 0;
+            using Clock = std::chrono::steady_clock;
+            const auto started = Clock::now();
+            const auto elapsed = [&]() -> std::int64_t {
+                return std::chrono::duration_cast<std::chrono::seconds>(
+                    Clock::now() - started).count();
+            };
+            const auto phase = [&](const std::string& label) {
+                std::cout << "PHASE [+" << elapsed() << "s] " << label
+                          << "\n" << std::flush;
+            };
+            const auto budget_check = [&](const char* stage) {
+                if (max_seconds && elapsed() >= max_seconds)
+                    throw AuditBudgetExceeded(stage);
+            };
+            const auto original_time = fs::last_write_time(source);
+            std::array<unsigned char,32> source_hash{};
+            if (!stats_only) {
+                phase("hash compressed source WIM: begin");
+                source_hash = sha_file(source);
+                phase("hash compressed source WIM: complete");
+                budget_check("initial source SHA-256");
+            } else {
+                phase("metadata-only mode: no raw or decompressed file hashes");
+            }
+
+            std::size_t tree_count = 0, candidate_files = 0;
+            std::uint64_t candidate_bytes = 0;
+            std::uint64_t selected_bytes = 0, completed_bytes = 0;
+            std::size_t completed_files = 0;
             std::array<unsigned char,32> manifest_hash{};
+
+            phase(audit_index ?
+                "enumerating only WIM image index " + std::to_string(audit_index) :
+                "enumerating all WIM image indexes");
             {
-                iso_wcx::WimArchive archive(source);
-                tree_count = archive.items().size();
-                auto chosen = samples(archive, full_content);
-                require(!chosen.empty(), "no nonempty WIM file streams available to audit");
-                std::sort(chosen.begin(), chosen.end());
-                std::map<std::string, std::size_t> indices;
-                for (std::size_t i = 0; i < archive.items().size(); ++i)
-                    require(indices.emplace(archive.items()[i].path, i).second,
-                            "duplicate original WIM path");
+                // A selected index avoids loading and enumerating unrelated
+                // Windows editions, unlike a full multi-index install.wim audit.
+                iso_wcx::WimArchive archive(source, audit_index);
+                const auto& items = archive.items();
+                tree_count = items.size();
+                std::map<std::string, unsigned> per_image_samples;
+                std::map<std::string, std::pair<std::size_t,std::uint64_t>>
+                    image_totals;
+                std::vector<std::size_t> selected;
+                selected.reserve(std::min<std::size_t>(items.size(), 4096));
+                for (std::size_t i = 0; i < items.size(); ++i) {
+                    const auto& item = items[i];
+                    if (item.directory || item.size == 0) continue;
+                    const auto slash = item.path.find('/');
+                    if (slash == std::string::npos) continue;
+                    const std::string image = item.path.substr(0, slash);
+                    if (!image.starts_with("image")) continue;
+                    require(item.size <=
+                            std::numeric_limits<std::uint64_t>::max() -
+                            candidate_bytes, "WIM stream size sum overflow");
+                    candidate_bytes += item.size;
+                    ++candidate_files;
+                    auto& totals = image_totals[image];
+                    ++totals.first;
+                    totals.second += item.size;
+                    if (!stats_only &&
+                        (full_content || (item.size <= 64ull * 1024ull * 1024ull &&
+                        per_image_samples[image] < 4))) {
+                        selected.push_back(i);
+                        if (!full_content) ++per_image_samples[image];
+                        require(item.size <=
+                            std::numeric_limits<std::uint64_t>::max() -
+                            selected_bytes, "selected WIM byte sum overflow");
+                        selected_bytes += item.size;
+                    }
+                }
+                phase("WIM metadata: " + std::to_string(tree_count) +
+                      " entries, " + std::to_string(candidate_files) +
+                      " nonempty streams, " + std::to_string(candidate_bytes) +
+                      " uncompressed bytes in " +
+                      std::to_string(image_totals.size()) + " image index(es)");
+                for (const auto& [image, totals] : image_totals) {
+                    std::cout << "INDEX " << image << ": " << totals.first
+                              << " streams; " << totals.second
+                              << " uncompressed bytes\n" << std::flush;
+                }
+                budget_check("WIM metadata enumeration");
+                if (stats_only) {
+                    require(fs::file_size(source) == input_size &&
+                            fs::last_write_time(source) == original_time,
+                            "source WIM changed during metadata scan");
+                    std::cout << "METADATA_OK: " << tree_count
+                              << " entries, " << candidate_files << " streams, "
+                              << candidate_bytes << " uncompressed bytes; "
+                              << elapsed() << " sec. File contents NOT hashed.\n";
+                    return 0;
+                }
+                require(!selected.empty(),
+                        "no nonempty WIM resources eligible for SHA-256 audit");
+                std::sort(selected.begin(), selected.end(),
+                    [&](std::size_t a, std::size_t b) {
+                        return items[a].path < items[b].path;
+                    });
+                phase("decompressed stream audit: " +
+                      std::to_string(selected.size()) + " selected files / " +
+                      std::to_string(selected_bytes) + " bytes");
+                const auto read_started = Clock::now();
+                auto last_report = read_started - std::chrono::seconds(6);
                 Sha256 manifest;
-                for (const auto& name : chosen) {
-                    const auto index = indices.at(name);
-                    const auto size = archive.items()[index].size;
-                    require(size <= std::numeric_limits<std::uint64_t>::max() -
-                                    total_uncompressed,
-                            "WIM audit byte count overflow");
-                    std::cout << "AUDIT " << (stream_count + 1) << "/"
-                              << chosen.size() << " (" << size
-                              << " bytes): " << name << "\n" << std::flush;
-                    auto last = std::chrono::steady_clock::now();
+                for (const std::size_t index : selected) {
+                    budget_check("WIM stream iteration");
+                    const auto& item = items.at(index);
+                    const auto since_report = Clock::now() - last_report;
+                    if (verbose || completed_files == 0 ||
+                        (completed_files % 100 == 0) ||
+                        since_report >= std::chrono::seconds(5)) {
+                        std::cout << "AUDIT " << (completed_files + 1)
+                                  << "/" << selected.size()
+                                  << " (" << item.size << " bytes): "
+                                  << item.path << "\n" << std::flush;
+                        last_report = Clock::now();
+                    }
                     const auto digest = sha_item(archive, index,
                         [&](std::uint64_t done) {
-                            const auto now = std::chrono::steady_clock::now();
-                            if (now - last >= std::chrono::seconds(5)) {
-                                std::cout << "  read " << done << "/" << size
-                                          << " bytes\n" << std::flush;
-                                last = now;
+                            budget_check("WIMReadImageFile");
+                            const auto now = Clock::now();
+                            if (now - last_report >= std::chrono::seconds(5)) {
+                                const std::uint64_t processed =
+                                    completed_bytes + done;
+                                const double seconds = std::max(0.001,
+                                    std::chrono::duration<double>(
+                                        now - read_started).count());
+                                const double mibps = processed /
+                                    (1024.0 * 1024.0 * seconds);
+                                std::cout << "PROGRESS: " << (completed_files + 1)
+                                          << "/" << selected.size()
+                                          << " files, " << processed << "/"
+                                          << selected_bytes << " bytes, "
+                                          << mibps << " MiB/s (overall), current "
+                                          << item.path << " " << done << "/"
+                                          << item.size << "\n" << std::flush;
+                                last_report = now;
                             }
                         });
-                    const auto header = std::to_string(name.size()) + ":" +
-                        name + ":" + std::to_string(size) + ":";
+                    const auto header = std::to_string(item.path.size()) + ":" +
+                        item.path + ":" + std::to_string(item.size) + ":";
                     manifest.add(
                         reinterpret_cast<const std::uint8_t*>(header.data()),
                         header.size());
                     manifest.add(digest.data(), digest.size());
-                    total_uncompressed += size;
-                    ++stream_count;
+                    completed_bytes += item.size;
+                    ++completed_files;
                 }
                 manifest_hash = manifest.finish();
-            } // close every WIMGAPI image handle before checking the source
+            } // Close native WIMGAPI image handles before source verification.
+            phase("WIMGAPI stream audit and handle closure complete");
+            budget_check("source recheck");
             require(fs::file_size(source) == input_size &&
-                    fs::last_write_time(source) == source_time &&
-                    sha_file(source) == source_sha,
+                    fs::last_write_time(source) == original_time,
+                    "source WIM size or timestamp changed during audit");
+            phase("recheck source WIM SHA-256: begin");
+            require(sha_file(source) == source_hash,
                     "source WIM changed during read-only audit");
-            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now() - started).count();
-            std::cout << "PASS: read-only WIM " <<
-                (full_content ? "full" : "sample") << " audit; "
-                << tree_count << " entries, " << stream_count
-                << " streams, " << total_uncompressed
-                << " decompressed bytes, " << seconds << " sec; "
-                << "manifest SHA-256 " << sha_hex(manifest_hash) << "\n";
+            phase("recheck source WIM SHA-256: complete");
+            std::cout << "PASS: read-only WIM "
+                      << (full_content ? "full" : "sample") << " audit; "
+                      << tree_count << " entries, " << completed_files
+                      << " streams, " << completed_bytes
+                      << " decompressed bytes, " << elapsed() << " sec; "
+                      << "manifest SHA-256 " << sha_hex(manifest_hash)
+                      << (audit_index ?
+                          "; selected image index " + std::to_string(audit_index)
+                          : "; all image indexes")
+                      << "\n";
             return 0;
         }
 
