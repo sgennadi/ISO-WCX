@@ -70,7 +70,66 @@ try {
     catch { $caught=$true }
     Assert-True $caught 'mixed unrelated handler should be refused'
     Assert-True (Equal-Bytes $mixed ([IO.File]::ReadAllBytes($ini))) 'ambiguous association changed source'
-    Write-Host 'PASS: exact ISO-WCX association removal, duplicate keys, backup, BOM, buttons, other extensions, idempotency and ambiguous refusal'
+    # Real Total Commander installations can redirect PackerPlugins and the
+    # derived 64-bit cache into DIFFERENT INI files. Never alter the root
+    # settings file or user buttonbar when doing a redirected removal.
+    $rootIni=Join-Path $root 'redirected-wincmd.ini'
+    $assoc=Join-Path $root 'custom-packers.ini'
+    $cache=Join-Path $root 'custom-packers64.ini'
+    $rootText=(@(
+        '[Configuration]'
+        'LanguageIni=Hebrew'
+        'Buttonbar=C:\TC\my-commands.bar'
+        '[PackerPlugins]'
+        'RedirectSection=custom-packers.ini'
+        '[PackerPlugins64]'
+        'RedirectSection=custom-packers64.ini'
+    ) -join $crlf) + $crlf
+    $assocText=(@(
+        '[PackerPlugins]'
+        "iso=222,$plugin"
+        'wim=222,C:\Other\wim.wcx'
+    ) -join $crlf) + $crlf
+    $cacheText=(@(
+        '[PackerPlugins64]'
+        '$checksum$=987654'
+        'exts=iso*wim*'
+    ) -join $crlf) + $crlf
+    [IO.File]::WriteAllText($rootIni,$rootText,$encoding)
+    [IO.File]::WriteAllText($assoc,$assocText,$encoding)
+    [IO.File]::WriteAllText($cache,$cacheText,$encoding)
+    $rootBefore=[IO.File]::ReadAllBytes($rootIni)
+    $assocBefore=[IO.File]::ReadAllBytes($assoc)
+    $cacheBefore=[IO.File]::ReadAllBytes($cache)
+    & $tool -IniPath $rootIni -Extension iso | Out-Null
+    Assert-True (Equal-Bytes $rootBefore ([IO.File]::ReadAllBytes($rootIni))) 'redirect dry-run changed root'
+    Assert-True (Equal-Bytes $assocBefore ([IO.File]::ReadAllBytes($assoc))) 'redirect dry-run changed packers'
+    Assert-True (Equal-Bytes $cacheBefore ([IO.File]::ReadAllBytes($cache))) 'redirect dry-run changed checksum'
+    & $tool -IniPath $rootIni -Extension iso -Apply | Out-Null
+    Assert-True (Equal-Bytes $rootBefore ([IO.File]::ReadAllBytes($rootIni))) 'redirect changed root buttons'
+    $assocAfter=[IO.File]::ReadAllText($assoc,$encoding)
+    $cacheAfter=[IO.File]::ReadAllText($cache,$encoding)
+    Assert-True ($assocAfter -notmatch 'iso=') 'redirected ISO association was not removed'
+    Assert-True ($assocAfter.Contains('wim=222,C:\Other\wim.wcx')) 'unrelated redirected handler missing'
+    Assert-True ($cacheAfter -notmatch '\$checksum\$=') 'redirected derived checksum remained'
+    Assert-True ($cacheAfter.Contains('exts=iso*wim*')) 'redirected cache entries were erased'
+    Assert-True (@(Get-ChildItem $root -Filter 'custom-packers.ini.isowcx-association-backup-*').Count -eq 1) 'redirected packer backup missing'
+    Assert-True (@(Get-ChildItem $root -Filter 'custom-packers64.ini.isowcx-association-backup-*').Count -eq 1) 'redirected checksum backup missing'
+
+    # RedirectSection=1 is Total Commander's AlternateUserIni convention.
+    $alternateRoot=Join-Path $root 'alternate-root.ini'
+    $alternate=Join-Path $root 'alternate-user.ini'
+    [IO.File]::WriteAllText($alternateRoot,(@(
+        '[Configuration]'
+        'AlternateUserIni=alternate-user.ini'
+        '[PackerPlugins]'
+        'RedirectSection=1'
+    ) -join $crlf)+$crlf,$encoding)
+    [IO.File]::WriteAllText($alternate,$assocText,$encoding)
+    & $tool -IniPath $alternateRoot -Extension iso -Apply | Out-Null
+    Assert-True (-not [IO.File]::ReadAllText($alternate,$encoding).Contains("iso=222,$plugin")) 'AlternateUserIni was not updated'
+
+    Write-Host 'PASS: exact ISO-WCX association removal, redirect/alternate configs, byte backups, BOM, buttons, other extensions, idempotency and ambiguous refusal'
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
