@@ -45,9 +45,18 @@ std::mutex edit_mutex;
 using ChangeA=int (__stdcall*)(char*,int);
 using ChangeW=int (__stdcall*)(wchar_t*,int);
 struct State {
-    explicit State(std::filesystem::path p,
-                   iso_wcx::Disc::WimScanProgress progress = {})
-        :disc(std::move(p),std::move(progress)){}
+    explicit State(
+        std::filesystem::path p,
+        std::unique_ptr<iso_wcx::WimOpenProgress> indicator = {})
+        :open_progress(std::move(indicator)),
+         disc(std::move(p),
+              [this](std::uint32_t image,std::size_t entries) {
+                  if(open_progress)open_progress->on_scan(image,entries);
+              }) {}
+    // MUST be constructed before Disc: WIMLoadImage/Find callbacks run
+    // inside Disc's constructor. Retain the indicator until ReadHeader
+    // completes so TC's 100K+ filename publishing also gets progress.
+    std::unique_ptr<iso_wcx::WimOpenProgress> open_progress;
     iso_wcx::Disc disc;
     std::size_t cursor=0;
     ProgressA progress_a=nullptr;
@@ -92,7 +101,15 @@ void fill_common(HeaderExW& h,const iso_wcx::Item& item) {
 }
 int header_w(State* state,HeaderExW* result) {
     if(!state||!result)return E_BAD_ARCHIVE;
-    if(state->cursor>=state->disc.items().size())return E_END_ARCHIVE;
+    if(state->cursor>=state->disc.items().size()) {
+        state->open_progress.reset();
+        return E_END_ARCHIVE;
+    }
+    if(state->open_progress && (state->cursor%512u)==0u) {
+        state->open_progress->on_listing(
+            state->cursor,state->disc.items().size());
+        if(state->open_progress->cancelled())return E_EABORTED;
+    }
     *result={};
     const auto& item=state->disc.items()[state->cursor];
     auto wname=item_path(item);
@@ -190,14 +207,12 @@ bool wim_open_dialog_enabled(const std::filesystem::path& file) noexcept {
 }
 std::unique_ptr<State> open_state(const std::filesystem::path& path) {
     if(!wim_extension(path))return std::make_unique<State>(path);
-    iso_wcx::WimOpenProgress dialog(wim_open_dialog_enabled(path));
+    auto indicator=std::make_unique<iso_wcx::WimOpenProgress>(
+        wim_open_dialog_enabled(path));
     iso_wcx::wim_detail::Header header{};
     if(iso_wcx::wim_detail::read_header(path,header))
-        dialog.set_image_count(iso_wcx::wim_detail::u32(header,44));
-    return std::make_unique<State>(path,
-        [&dialog](std::uint32_t image,std::size_t entries){
-            dialog.on_scan(image,entries);
-        });
+        indicator->set_image_count(iso_wcx::wim_detail::u32(header,44));
+    return std::make_unique<State>(path,std::move(indicator));
 }
 } // namespace
 
