@@ -28,6 +28,9 @@ public:
 
     void set_image_count(std::uint32_t count) noexcept;
     void on_scan(std::uint32_t index,std::size_t entries);
+    // Once OpenArchive returns, TC still iterates every entry through
+    // ReadHeader/PK_SKIP. Keep the dialog alive until this step finishes.
+    void on_listing(std::size_t emitted,std::size_t total) noexcept;
     [[nodiscard]] bool cancelled() const noexcept { return cancelled_.load(); }
 
 private:
@@ -42,11 +45,15 @@ private:
     std::atomic<std::uint32_t> image_{0};
     std::atomic<std::uint32_t> image_count_{0};
     std::atomic<std::uint64_t> entries_{0};
+    std::atomic<std::uint64_t> published_{0};
+    std::atomic<std::uint64_t> total_entries_{0};
+    std::atomic<bool> publishing_{false};
     const ULONGLONG started_=GetTickCount64();
     std::mutex wait_mutex_;
     std::condition_variable wake_;
     std::thread worker_;
     std::wstring last_message_;
+    bool progress_is_determinate_=false;
 };
 } // namespace iso_wcx
 #endif
