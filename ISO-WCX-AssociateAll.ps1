@@ -271,7 +271,7 @@ foreach ($ext in $Extensions) {
     }
     $row = $section.Rows[$ext]
     $existing = [string]$row.Value
-    if (Is-OurPlugin $existing $target -or
+    if ((Is-OurPlugin $existing $target) -or
         ($ext -eq 'iso' -and (Is-MissingLegacyIso $existing))) {
         if ($existing -cne $newValue) {
             $updates[$row.Index] = $row.Prefix+$newValue
