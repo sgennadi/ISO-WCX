@@ -24,7 +24,9 @@ $plugin = Join-Path $root 'plugins\wcx\ISO-WCX'
 New-Item -ItemType Directory -Path $plugin -Force | Out-Null
 [IO.File]::WriteAllBytes((Join-Path $plugin 'ISO-WCX.wcx'),(FakePe 0x014C))
 [IO.File]::WriteAllBytes((Join-Path $plugin 'ISO-WCX.wcx64'),(FakePe 0x8664))
-$target = Join-Path $plugin 'ISO-WCX.wcx'
+# Windows runners can expose %TEMP% through a short 8.3 parent path.
+# Normalize the target exactly as the installer does before comparing INI.
+$target = Join-Path ([IO.Path]::GetFullPath($plugin)) 'ISO-WCX.wcx'
 $enc = [Text.UTF8Encoding]::new($true,$true)
 $eol = [string][char]13+[char]10
 $ini = Join-Path $root 'wincmd.ini'
