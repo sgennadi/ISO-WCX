@@ -15,6 +15,35 @@ remain limited; this is not full NTFS/ext4/UDF compatibility.**
 
 Development builds remain available through the [Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml).
 
+### One-pass image associations and faster normal ZIP opening (development Preview)
+
+The Preview ZIP now includes **`ISO-WCX-AssociateAll.cmd`** and
+**`ISO-WCX-AssociateAll.ps1`**, optional installers for all **23**
+non-ambiguous image extensions in one pass. Install the two WCX binaries, close
+all Total Commander windows, and run the CMD from the installed ISO-WCX
+directory. For an inspection-only report, use PowerShell:
+
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File ISO-WCX-AssociateAll.ps1`
+
+Add `-Apply` after closing TC. The script locates `wincmd.ini`, follows
+`[PackerPlugins]` and `[PackerPlugins64]` redirections, checks both WCX PE
+architectures, keeps a **byte-exact dated backup** of every modified INI,
+refreshes stale ISO-WCX capability flags, and invalidates only the derived
+64-bit WCX checksum. It preserves **all buttons, user commands, unrelated WCX
+handlers, INI encoding and existing ZIP/RAR/7z associations**. Already-assigned
+extensions handled by another plugin are reported and skipped; no forced
+takeover. Experimental/ambiguous `.bin`, `.mdf` and `.chd` can be selected
+explicitly via `-IncludeOptional`. The scripts are not runtime dependencies.
+
+**ZIP performance regression fix in Preview:** ISO-WCX no longer advertises
+`PK_CAPS_BY_CONTENT` (64), which could make TC consult its expensive image
+probe when handling unrelated archives. `GetPackerCaps` now returns **158**
+rather than old **222**. Both `CanYouHandleThisFile` and `OpenArchive` reject
+non-image extensions *before* creating a Disc parser or starting the updater.
+ZIP remains handled by Total Commander's normal ZIP reader. This is a
+preventive fix; actual speed on a specific TC installation still requires a
+real-host comparison. The previously released Stable v0.21.0 is unchanged.
+
 **No separate setup EXE, parser DLL, unpacker, PowerShell script or mounting
 service is needed.** Existing native helper CLIs are development/test programs,
 not dependencies of the WCX installation.
@@ -27,8 +56,9 @@ association that prevents its DLL from loading in the first place.
 
 If the **Delete** button in the *WCX association dialog* does nothing,
 that is a Total Commander configuration/UI operation, not a call to
-`DeleteFilesW` inside an archive. The value `222,C:\\...\\ISO-WCX.wcx`
-is a valid WCX capability mask plus DLL path, **not error 222**. To remove
+`DeleteFilesW` inside an archive. The value `222,C:\\...\\ISO-WCX.wcx` is the older Stable WCX
+capability mask plus DLL path (**not error 222**); new Preview uses `158,`
+to avoid global ZIP content probing. To remove
 a specific stale association safely, use the repository's optional
 [`ISO-WCX-RemoveAssociation.ps1`](ISO-WCX-RemoveAssociation.ps1) with
 `-IniPath "C:\\path\\to\\wincmd.ini" -Extension iso` for a **read-only
@@ -169,8 +199,9 @@ Total Commander after user confirmation.
 
 - **Manual:** In Total Commander, open **Files → Pack**, choose a packer
   extension associated with ISO-WCX, then **Configure... → Check now**.
-- **Automatic:** Once per day, on plugin initialization, a background WinHTTP
-  request checks the **latest Stable release** on our GitHub repository.
+- **Automatic:** Once per day, on first actual image handling in the new
+  Preview, a background WinHTTP request checks the **latest Stable release** on
+  our GitHub repository (older Stable checks at plugin initialization).
   A new version is shown only once; browsing/extraction never wait for the network.
 - **Disable automatic checks:** Choose **Do not check for updates automatically**
   (Russian: **Не проверять обновления автоматически**). Stored per user at
