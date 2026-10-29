@@ -30,6 +30,12 @@ void WimOpenProgress::set_image_count(std::uint32_t count) noexcept {
     image_count_.store(count);
 }
 
+void WimOpenProgress::on_listing(std::size_t emitted,std::size_t total) noexcept {
+    total_entries_.store(static_cast<std::uint64_t>(total));
+    published_.store(static_cast<std::uint64_t>(emitted));
+    publishing_.store(true);
+}
+
 void WimOpenProgress::on_scan(std::uint32_t index,std::size_t entries) {
     if (cancelled_.load()) throw WimOpenCancelled{};
     image_.store(index);
@@ -41,7 +47,11 @@ std::wstring WimOpenProgress::describe() const {
     std::wstring result;
     const auto image=image_.load();
     const auto total=image_count_.load();
-    if (!image) {
+    if (publishing_.load()) {
+        result=L"Publishing file list to Total Commander...\n";
+        result+=L"Entries: "+std::to_wstring(published_.load())+
+                L" / "+std::to_wstring(total_entries_.load());
+    } else if (!image) {
         result=L"Opening Windows Imaging API and reading WIM metadata...";
     } else {
         result=L"Reading image "+std::to_wstring(image);
@@ -54,6 +64,8 @@ std::wstring WimOpenProgress::describe() const {
     if (cancelled_.load()) {
         result+=L"\nCancellation requested. Waiting for the current "
                 L"Windows Imaging API operation to return...";
+    } else if (publishing_.load()) {
+        result+=L"\nListing metadata only. WIM file contents are not being read.";
     } else {
         result+=L"\nScanning directory metadata. File contents are not "
                 L"being extracted or hashed.";
@@ -80,6 +92,21 @@ HRESULT CALLBACK WimOpenProgress::dialog_callback(
                 break;
             }
             {
+                if(self->publishing_.load()) {
+                    if(!self->progress_is_determinate_) {
+                        SendMessageW(window,TDM_SET_MARQUEE_PROGRESS_BAR,FALSE,0);
+                        SendMessageW(window,TDM_SET_PROGRESS_BAR_RANGE,0,
+                                     MAKELPARAM(0,100));
+                        self->progress_is_determinate_=true;
+                    }
+                    const auto total=self->total_entries_.load();
+                    if(total) {
+                        const auto done=self->published_.load();
+                        const auto percent=static_cast<WPARAM>(
+                            std::min<std::uint64_t>(100,done*100/total));
+                        SendMessageW(window,TDM_SET_PROGRESS_BAR_POS,percent,0);
+                    }
+                }
                 auto message_text=self->describe();
                 if (message_text!=self->last_message_) {
                     self->last_message_=message_text;
