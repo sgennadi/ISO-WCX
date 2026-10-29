@@ -539,6 +539,37 @@ int wmain(int argc,wchar_t** argv) {
             close(h);
             if(still_present)return 80;
         }
+        // Additional Total Commander recursive-directory spellings may end
+        // in a separator and/or contain stacked final \\*.* tokens. Ensure
+        // they remove the selected folder, not a wildcard-expanded tree.
+        for(const auto& suffix:{L"\\*.*\\",L"\\*\\",L"\\*.*\\*.*"}) {
+            fs::create_directories(incoming/L"EMPTY_VARIANT");
+            wchar_t make_empty[]=L"EMPTY_VARIANT\0\0";
+            std::wstring idx=L"image1";
+            if(pack(packed.data(),idx.data(),src.data(),make_empty,0)!=0)
+                return 82;
+            std::wstring selected=L"image1\\EMPTY_VARIANT";
+            selected+=suffix;
+            selected.push_back(L'\0');
+            selected.push_back(L'\0');
+            if(erase(packed.data(),selected.data())!=0)
+                return 83;
+            OpenW args{};args.ArcName=packed.data();
+            HANDLE h=open(&args);
+            if(!h)return 84;
+            bool found_dir=false;
+            for(;;) {
+                HeaderExW item{};
+                const int rc=read(h,&item);
+                if(rc==10)break;
+                if(rc){close(h);return 85;}
+                if(std::wstring_view(item.FileName)==L"image1\\EMPTY_VARIANT")
+                    found_dir=true;
+                if(process(h,0,nullptr,nullptr)){close(h);return 86;}
+            }
+            close(h);
+            if(found_dir)return 87;
+        }
         // Unsafe wildcard tokens elsewhere in the path are never globs:
         // they must not change the original WIM on a refused delete.
         wchar_t invalid_wildcard[]=L"image1\\FOO*BAR\0\0";
