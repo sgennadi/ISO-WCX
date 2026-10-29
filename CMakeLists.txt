@@ -331,8 +331,9 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
 endif()
 
 if(WIN32)
-  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp)
-  target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32 user32)
+  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp
+    src/wcx_wim_open_progress.cpp)
+  target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32 user32 comctl32)
   target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
     ISO_WCX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     ISO_WCX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
