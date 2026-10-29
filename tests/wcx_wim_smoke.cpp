@@ -42,6 +42,7 @@ using OpenFn=HANDLE(__stdcall*)(OpenW*);
 using ReadFn=int(__stdcall*)(HANDLE,HeaderExW*);
 using ProcessFn=int(__stdcall*)(HANDLE,int,wchar_t*,wchar_t*);
 using CloseFn=int(__stdcall*)(HANDLE);
+using CanHandleFn=int(__stdcall*)(wchar_t*);
 using SetProgressFn=void(__stdcall*)(HANDLE,int(__stdcall*)(wchar_t*,int));
 using WimCreateFn=HANDLE(WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD);
 using WimCaptureFn=HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD);
@@ -354,7 +355,18 @@ int wmain(int argc,wchar_t** argv) {
         const auto read=bind<ReadFn>(dll,"ReadHeaderExW");
         const auto process=bind<ProcessFn>(dll,"ProcessFileW");
         const auto close=bind<CloseFn>(dll,"CloseArchive");
-        if(!open||!read||!process||!close)return 8;
+        const auto can_handle=bind<CanHandleFn>(dll,"CanYouHandleThisFileW");
+        if(!open||!read||!process||!close||!can_handle)return 8;
+        {
+            // CanYouHandleThisFile MUST NOT enumerate every image resource
+            // before OpenArchive scans them. Validate WIM/ESD by header and
+            // reject corrupt inputs without ever launching a WIM browse.
+            auto filename=original.wstring();
+            if(can_handle(filename.data())!=1)return 75;
+            auto fake=(root/L"not-a-wim.wim").wstring();
+            write(fake,"NOT A WIM");
+            if(can_handle(fake.data())!=0)return 76;
+        }
         auto verify=[&](const fs::path& file) {
             fs::remove_all(root/L"extracted");
             std::wstring path=file.wstring();
@@ -504,8 +516,35 @@ int wmain(int argc,wchar_t** argv) {
         if(!content(L"image1\\HELLO.TXT",data)||data!="replacement"||
            !content(L"image1\\ADDED.TXT",data)||data!="new-file"||
            !content(L"image2\\HELLO.TXT",data)||data!="hello-two")return 22;
-        wchar_t delete_list[]=L"image1\\ADDED.TXT\0\0";
-        if(erase(packed.data(),delete_list)||content(L"image1\\ADDED.TXT",data))return 23;
+        // Total Commander can send an empty folder with the trailing
+        // "*.*" wildcard. Previously WCX left the '*' in edit_path()
+        // and raised "unsafe archive edit character" instead of deleting.
+        wchar_t delete_list[]=L"image1\\NEW_EMPTY_FOLDER\\*.*\0image1\\ADDED.TXT\0\0";
+        if(erase(packed.data(),delete_list) ||
+           content(L"image1\\ADDED.TXT",data))return 23;
+        {
+            OpenW args{};args.ArcName=packed.data();
+            HANDLE h=open(&args);
+            if(!h)return 77;
+            bool still_present=false;
+            for(;;) {
+                HeaderExW item{};
+                const int code=read(h,&item);
+                if(code==10)break;
+                if(code!=0){close(h);return 78;}
+                if(std::wstring_view(item.FileName)==L"image1\\NEW_EMPTY_FOLDER")
+                    still_present=true;
+                if(process(h,0,nullptr,nullptr)!=0){close(h);return 79;}
+            }
+            close(h);
+            if(still_present)return 80;
+        }
+        // Unsafe wildcard tokens elsewhere in the path are never globs:
+        // they must not change the original WIM on a refused delete.
+        wchar_t invalid_wildcard[]=L"image1\\FOO*BAR\0\0";
+        const auto before_wildcard=load(original);
+        if(erase(packed.data(),invalid_wildcard)==0 ||
+           load(original)!=before_wildcard)return 81;
         // A rejected traversal must not change one byte of the original.
         const auto original_bytes=load(original);wchar_t bad_list[]=L"..\\escape\0\0";
         if(pack(packed.data(),sub.data(),src.data(),bad_list,0)==0||load(original)!=original_bytes)return 24;
