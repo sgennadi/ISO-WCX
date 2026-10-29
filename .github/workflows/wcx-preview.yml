@@ -114,58 +114,68 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
         run: ctest --test-dir build-sanitized --output-on-failure
   package:
-    name: Total Commander INF installer ${{ matrix.arch }}
+    name: Total Commander combined INF ZIP installer
     needs: windows
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: Win32
-            module: ISO-WCX.wcx
-            archive: ISO-WCX-preview-Win32.zip
-          - arch: x64
-            module: ISO-WCX.wcx64
-            archive: ISO-WCX-preview-x64.zip
     steps:
       - uses: actions/checkout@v7
-      - name: Collect ONLY the matching Total Commander plugin
+      - name: Collect both native WCX architectures
         uses: actions/download-artifact@v8
         with:
-          name: ISO-WCX-${{ matrix.arch }}-preview
+          pattern: ISO-WCX-*-preview
           path: package
-      - name: Package native pluginst.inf for matching architecture
+          merge-multiple: true
+      - name: Verify 32-bit and 64-bit modules and build native INF ZIP
         shell: bash
         run: |
           set -euo pipefail
-          test -s "package/${{ matrix.module }}"
-          # Each ZIP contains exactly one WCX: no extra architecture.
-          if [ "$(find package -maxdepth 1 -type f \( -iname '*.wcx' -o -iname '*.wcx64' \) | wc -l)" -ne 1 ]; then
-            echo 'Unexpected extra WCX module found' >&2
+          test -s package/ISO-WCX.wcx
+          test -s package/ISO-WCX.wcx64
+          # Both modules share the base name. TC automatically loads WCX64
+          # when running x64; Win32 loads the WCX from file= in pluginst.inf.
+          grep -qx 'type=wcx' pluginst.inf
+          grep -qx 'file=ISO-WCX.wcx' pluginst.inf
+          grep -qx 'defaultdir=ISO-WCX' pluginst.inf
+          grep -q '^defaultextension=iso,udf,' pluginst.inf
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          for name, machine in [('ISO-WCX.wcx', 0x14c), ('ISO-WCX.wcx64', 0x8664)]:
+              data = (Path('package') / name).read_bytes()
+              assert len(data) > 256 and data[:2] == b'MZ', name
+              pos = struct.unpack_from('<I', data, 0x3c)[0]
+              assert pos + 6 <= len(data), name
+              assert data[pos:pos+4] == b'PE\x00\x00', name
+              assert struct.unpack_from('<H', data, pos+4)[0] == machine, name
+          PY
+          if [ "$(find package -maxdepth 1 -type f \( -iname '*.wcx' -o -iname '*.wcx64' \) | wc -l)" -ne 2 ]; then
+            echo 'Both and only the two expected native WCX modules are required' >&2
             exit 1
           fi
-          sed 's/^file=.*/file=${{ matrix.module }}/' pluginst.inf > package/pluginst.inf
-          grep -qx 'type=wcx' package/pluginst.inf
-          grep -qx 'file=${{ matrix.module }}' package/pluginst.inf
-          grep -q '^defaultextension=iso,udf,' package/pluginst.inf
-          cp PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
-          (cd package && zip -9 "../${{ matrix.archive }}" \
+          if find package -maxdepth 1 -type f \( -iname '*.dll' -o -iname '*.exe' -o -iname '*.cmd' -o -iname '*.ps1' \) | grep -q .; then
+            echo 'No additional DLL or installer program is permitted' >&2
+            exit 1
+          fi
+          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip \
             pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt \
-            THIRD_PARTY_NOTICES.txt "${{ matrix.module }}")
-          unzip -t "${{ matrix.archive }}"
-          unzip -Z1 "${{ matrix.archive }}" | grep -qx "${{ matrix.module }}"
-          if [ "$(unzip -Z1 "${{ matrix.archive }}" | grep -Ei '\.wcx(64)?$' | wc -l)" -ne 1 ]; then
-            echo 'INF archive contains multiple WCX architectures' >&2
+            THIRD_PARTY_NOTICES.txt ISO-WCX.wcx ISO-WCX.wcx64)
+          unzip -t ISO-WCX-preview.zip
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'pluginst.inf'
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX.wcx'
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX.wcx64'
+          if [ "$(unzip -Z1 ISO-WCX-preview.zip | grep -Ei '\.wcx(64)?$' | wc -l)" -ne 2 ]; then
+            echo 'Combined INF installer contains an unexpected WCX module' >&2
             exit 1
           fi
-          if unzip -Z1 "${{ matrix.archive }}" | grep -Eq '\.(cmd|ps1|exe)$'; then
-            echo 'Unexpected external installer/script in native INF package' >&2
+          if unzip -Z1 ISO-WCX-preview.zip | grep -Ei '\.(dll|cmd|ps1|exe)$'; then
+            echo 'Unexpected extra program/script in native INF package' >&2
             exit 1
           fi
-      - name: Upload installable INF preview
+      - name: Upload combined native INF installer
         uses: actions/upload-artifact@v7
         with:
-          name: ISO-WCX-Installable-${{ matrix.arch }}-Preview
-          path: ${{ matrix.archive }}
+          name: ISO-WCX-Installable-Preview
+          path: ISO-WCX-preview.zip
           if-no-files-found: error
           retention-days: 14
