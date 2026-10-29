@@ -173,6 +173,399 @@ function Is-OurPlugin([string]$Value, [string]$Expected) {
         return $true
     }
     return [regex]::IsMatch($actual,'(?i)(^|[\\/])ISO-WCX[\\/]ISO-WCX\.wcx(?:64)?
+function Is-MissingLegacyIso([string]$Value) {
+    $parsed = [regex]::Match($Value,'^\s*\d+\s*,\s*(?<path>.+?)\s*$')
+    if (-not $parsed.Success) { return $false }
+    $path = $parsed.Groups['path'].Value.Trim().Trim('"')
+    if ($path -notmatch '(?i)(^|[\\/])ISO[\\/]iso\.wcx$') { return $false }
+    $expanded = Resolve-TcText $path ([string]$env:COMMANDER_PATH)
+    return $expanded -and -not (Test-Path -LiteralPath $expanded -PathType Leaf)
+}
+function Render-Doc($Doc,$PackerUpdates,[string[]]$Added,[bool]$ClearCache) {
+    $lines = [regex]::Split($Doc.Text,'(?<=\n)')
+    $builder = New-Object Text.StringBuilder
+    $active = ''
+    $packerFound = $false
+    for ($i=0;$i -lt $lines.Length;$i++) {
+        $line = [string]$lines[$i]
+        $body = $line.TrimEnd([char[]]@([char]13,[char]10))
+        $ending = $line.Substring($body.Length)
+        $header = [regex]::Match($body,'^\s*\[\s*(?<section>[^\]]+?)\s*\]\s*$')
+        if ($header.Success) {
+            $active = $header.Groups['section'].Value.Trim()
+            [void]$builder.Append($line)
+            if ($active -ieq 'PackerPlugins') {
+                $packerFound = $true
+                if ($ending.Length -eq 0 -and $Added.Count -gt 0) {
+                    [void]$builder.Append($Doc.Eol)
+                }
+                foreach ($new in $Added) { [void]$builder.Append($new+$Doc.Eol) }
+            }
+            continue
+        }
+        if ($active -ieq 'PackerPlugins' -and $PackerUpdates.ContainsKey($i)) {
+            [void]$builder.Append([string]$PackerUpdates[$i]+$ending)
+            continue
+        }
+        if ($ClearCache -and $active -ieq 'PackerPlugins64' -and
+            $body -match '^\s*\$checksum\$\s*=') {
+            continue
+        }
+        [void]$builder.Append($line)
+    }
+    if ($Added.Count -gt 0 -and -not $packerFound) {
+        if ($builder.Length -gt 0 -and
+            -not $builder.ToString().EndsWith([string][char]10)) {
+            [void]$builder.Append($Doc.Eol)
+        }
+        [void]$builder.Append('[PackerPlugins]'+$Doc.Eol)
+        foreach ($new in $Added) { [void]$builder.Append($new+$Doc.Eol) }
+    }
+    return $builder.ToString()
+}
+function Test-PluginBinary([string]$Path, [int]$Machine) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $stream = [IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    try {
+        if ($stream.Length -lt 136) { return $false }
+        $reader = [IO.BinaryReader]::new($stream)
+        if ($reader.ReadUInt16() -ne 0x5A4D) { return $false }
+        $stream.Position = 0x3C
+        $offset = [long]$reader.ReadUInt32()
+        if ($offset -lt 64 -or $offset -gt $stream.Length-6) { return $false }
+        $stream.Position = $offset
+        return ($reader.ReadUInt32() -eq 0x00004550 -and
+                $reader.ReadUInt16() -eq $Machine)
+    } finally { $stream.Dispose() }
+}
+
+$ini = Find-TcIni
+$root = Read-Doc $ini
+$packerPath = Resolve-SectionDoc $root 'PackerPlugins'
+$cachePath = Resolve-SectionDoc $root 'PackerPlugins64'
+$packer = if ($root.Path -ieq $packerPath) { $root } else { Read-Doc $packerPath }
+$cache = if ($packer.Path -ieq $cachePath) { $packer }
+         elseif ($root.Path -ieq $cachePath) { $root } else { Read-Doc $cachePath }
+if (-not $PluginDirectory) {
+    $PluginDirectory = Split-Path -Parent $PSCommandPath
+    if (-not (Test-Path -LiteralPath (Join-Path $PluginDirectory 'ISO-WCX.wcx'))) {
+        $PluginDirectory = Join-Path $env:COMMANDER_PATH 'plugins\wcx\ISO-WCX'
+    }
+}
+$plugin = [IO.Path]::GetFullPath($PluginDirectory)
+if ($Architecture -eq 'Auto') {
+    # Never infer plugin architecture from 64-bit Windows / PowerShell.
+    # It must match the installed Total Commander executable.
+    $dir = $TcDirectory
+    if (-not $dir) { $dir = $env:COMMANDER_PATH }
+    if (-not $dir) {
+        throw 'Pass -Architecture 32 or 64 (or -TcDirectory with only one TC edition).'
+    }
+    $has64 = Test-Path -LiteralPath (Join-Path $dir 'TOTALCMD64.EXE') -PathType Leaf
+    $has32 = Test-Path -LiteralPath (Join-Path $dir 'TOTALCMD.EXE') -PathType Leaf
+    if ($has64 -eq $has32) {
+        throw 'Ambiguous TC architecture: specify -Architecture 32 or 64.'
+    }
+    $Architecture = if ($has64) { '64' } else { '32' }
+}
+$filename = if ($Architecture -eq '64') { 'ISO-WCX.wcx64' } else { 'ISO-WCX.wcx' }
+$machine = if ($Architecture -eq '64') { 0x8664 } else { 0x014C }
+$target = Join-Path $plugin $filename
+if (-not (Test-PluginBinary $target $machine)) {
+    throw "Missing/mismatched Total Commander $Architecture-bit plugin: $target"
+}
+
+$section = Section-Rows $packer.Text 'PackerPlugins'
+if ($section.Rows.ContainsKey('zip') -and
+    (Is-OurPlugin ([string]$section.Rows['zip'].Value) $target)) {
+    Write-Warning 'ZIP is currently assigned to ISO-WCX. To restore native ZIP handling, run ISO-WCX-RemoveAssociation.ps1 -Extension zip (dry run), then -Apply with TC closed. Other ZIP plugins must remain untouched.'
+}
+$updates = @{}
+$added = New-Object 'System.Collections.Generic.List[string]'
+$skipped = New-Object 'System.Collections.Generic.List[string]'
+$updated = New-Object 'System.Collections.Generic.List[string]'
+foreach ($ext in $Extensions) {
+    $newValue = "$CapabilityMask,$target"
+    if (-not $section.Rows.ContainsKey($ext)) {
+        $added.Add("$ext=$newValue")
+        continue
+    }
+    $row = $section.Rows[$ext]
+    $existing = [string]$row.Value
+    if ((Is-OurPlugin $existing $target) -or
+        ($ext -eq 'iso' -and (Is-MissingLegacyIso $existing))) {
+        if ($existing -cne $newValue) {
+            $updates[$row.Index] = $row.Prefix+$newValue
+            $updated.Add($ext)
+        }
+    } else {
+        $skipped.Add($ext)
+    }
+}
+$changes = $updates.Count+$added.Count
+Write-Host "INI: $ini"
+Write-Host "Packer plugins: $($packer.Path)"
+Write-Host "64-bit cache: $($cache.Path)"
+Write-Host "ISO-WCX ($Architecture-bit Total Commander): $target"
+Write-Host "Extensions: $($Extensions.Count); add: $($added.Count); refresh: $($updated.Count); preserve foreign: $($skipped.Count)"
+if ($added.Count -gt 0) { Write-Host "ADD: $(($added | ForEach-Object { ($_ -split '=')[0] }) -join ', ')" }
+if ($updated.Count -gt 0) { Write-Host "REFRESH: $($updated -join ', ')" }
+if ($skipped.Count -gt 0) { Write-Host "OTHER PLUGINS UNCHANGED: $($skipped -join ', ')" }
+Write-Host 'ZIP/RAR/7z associations, toolbar buttons and user commands are never changed.'
+if ($changes -eq 0) {
+    Write-Host 'Nothing to change. All eligible associations are already registered.'
+    return
+}
+
+$plans = New-Object 'System.Collections.Generic.List[object]'
+$newPacker = Render-Doc $packer $updates $added.ToArray() ($cache.Path -ieq $packer.Path)
+if ($newPacker -cne $packer.Text) {
+    $plans.Add([pscustomobject]@{Doc=$packer; Payload=(As-Bytes $packer $newPacker)})
+}
+if ($cache.Path -ine $packer.Path) {
+    $newCache = Render-Doc $cache @{} @() $true
+    if ($newCache -cne $cache.Text) {
+        $plans.Add([pscustomobject]@{Doc=$cache;Payload=(As-Bytes $cache $newCache)})
+    }
+}
+if (-not $Apply) {
+    Write-Host 'DRY RUN. No files changed. Close Total Commander and rerun with -Apply.'
+    return
+}
+if (@(Get-Process -Name 'TOTALCMD','TOTALCMD64' -ErrorAction SilentlyContinue).Count -gt 0) {
+    throw 'Close every Total Commander instance before modifying its settings.'
+}
+$stages = New-Object 'System.Collections.Generic.List[object]'
+try {
+    foreach ($plan in $plans) {
+        if (-not (Equal-Bytes ([IO.File]::ReadAllBytes($plan.Doc.Path)) $plan.Doc.Bytes)) {
+            throw "INI changed during preparation: $($plan.Doc.Path)"
+        }
+        $suffix = [guid]::NewGuid().ToString('N')
+        $pending = "$($plan.Doc.Path).isowcx-bulk-pending-$suffix"
+        $backup = "$($plan.Doc.Path).isowcx-bulk-backup-$suffix"
+        [IO.File]::WriteAllBytes($pending,[byte[]]$plan.Payload)
+        $stages.Add([pscustomobject]@{
+            Doc=$plan.Doc;Pending=$pending;Backup=$backup;Committed=$false
+        })
+    }
+    foreach ($stage in $stages) {
+        if (-not (Equal-Bytes ([IO.File]::ReadAllBytes($stage.Doc.Path)) $stage.Doc.Bytes)) {
+            throw "INI changed before commit: $($stage.Doc.Path)"
+        }
+    }
+    foreach ($stage in $stages) {
+        [IO.File]::Replace($stage.Pending,$stage.Doc.Path,$stage.Backup)
+        $stage.Committed = $true
+        Write-Host "Backup: $($stage.Backup)"
+    }
+} catch {
+    for ($i=$stages.Count-1;$i -ge 0;$i--) {
+        $stage = $stages[$i]
+        if ($stage.Committed -and (Test-Path -LiteralPath $stage.Backup)) {
+            try { [IO.File]::Copy($stage.Backup,$stage.Doc.Path,$true) }
+            catch { Write-Warning "Manual restore needed: $($stage.Backup)" }
+        }
+    }
+    throw
+} finally {
+    foreach ($stage in $stages) {
+        if (Test-Path -LiteralPath $stage.Pending) {
+            Remove-Item -LiteralPath $stage.Pending -Force
+        }
+    }
+}
+Write-Host "SUCCESS: registered/updated $changes image types. Restart Total Commander."
+)
+}
+function Is-MissingLegacyIso([string]$Value) {
+    $parsed = [regex]::Match($Value,'^\s*\d+\s*,\s*(?<path>.+?)\s*$')
+    if (-not $parsed.Success) { return $false }
+    $path = $parsed.Groups['path'].Value.Trim().Trim('"')
+    if ($path -notmatch '(?i)(^|[\\/])ISO[\\/]iso\.wcx$') { return $false }
+    $expanded = Resolve-TcText $path ([string]$env:COMMANDER_PATH)
+    return $expanded -and -not (Test-Path -LiteralPath $expanded -PathType Leaf)
+}
+function Render-Doc($Doc,$PackerUpdates,[string[]]$Added,[bool]$ClearCache) {
+    $lines = [regex]::Split($Doc.Text,'(?<=\n)')
+    $builder = New-Object Text.StringBuilder
+    $active = ''
+    $packerFound = $false
+    for ($i=0;$i -lt $lines.Length;$i++) {
+        $line = [string]$lines[$i]
+        $body = $line.TrimEnd([char[]]@([char]13,[char]10))
+        $ending = $line.Substring($body.Length)
+        $header = [regex]::Match($body,'^\s*\[\s*(?<section>[^\]]+?)\s*\]\s*$')
+        if ($header.Success) {
+            $active = $header.Groups['section'].Value.Trim()
+            [void]$builder.Append($line)
+            if ($active -ieq 'PackerPlugins') {
+                $packerFound = $true
+                if ($ending.Length -eq 0 -and $Added.Count -gt 0) {
+                    [void]$builder.Append($Doc.Eol)
+                }
+                foreach ($new in $Added) { [void]$builder.Append($new+$Doc.Eol) }
+            }
+            continue
+        }
+        if ($active -ieq 'PackerPlugins' -and $PackerUpdates.ContainsKey($i)) {
+            [void]$builder.Append([string]$PackerUpdates[$i]+$ending)
+            continue
+        }
+        if ($ClearCache -and $active -ieq 'PackerPlugins64' -and
+            $body -match '^\s*\$checksum\$\s*=') {
+            continue
+        }
+        [void]$builder.Append($line)
+    }
+    if ($Added.Count -gt 0 -and -not $packerFound) {
+        if ($builder.Length -gt 0 -and
+            -not $builder.ToString().EndsWith([string][char]10)) {
+            [void]$builder.Append($Doc.Eol)
+        }
+        [void]$builder.Append('[PackerPlugins]'+$Doc.Eol)
+        foreach ($new in $Added) { [void]$builder.Append($new+$Doc.Eol) }
+    }
+    return $builder.ToString()
+}
+function Test-PluginBinary([string]$Path, [int]$Machine) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $stream = [IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    try {
+        if ($stream.Length -lt 136) { return $false }
+        $reader = [IO.BinaryReader]::new($stream)
+        if ($reader.ReadUInt16() -ne 0x5A4D) { return $false }
+        $stream.Position = 0x3C
+        $offset = [long]$reader.ReadUInt32()
+        if ($offset -lt 64 -or $offset -gt $stream.Length-6) { return $false }
+        $stream.Position = $offset
+        return ($reader.ReadUInt32() -eq 0x00004550 -and
+                $reader.ReadUInt16() -eq $Machine)
+    } finally { $stream.Dispose() }
+}
+
+$ini = Find-TcIni
+$root = Read-Doc $ini
+$packerPath = Resolve-SectionDoc $root 'PackerPlugins'
+$cachePath = Resolve-SectionDoc $root 'PackerPlugins64'
+$packer = if ($root.Path -ieq $packerPath) { $root } else { Read-Doc $packerPath }
+$cache = if ($packer.Path -ieq $cachePath) { $packer }
+         elseif ($root.Path -ieq $cachePath) { $root } else { Read-Doc $cachePath }
+if (-not $PluginDirectory) {
+    $PluginDirectory = Split-Path -Parent $PSCommandPath
+    if (-not (Test-Path -LiteralPath (Join-Path $PluginDirectory 'ISO-WCX.wcx'))) {
+        $PluginDirectory = Join-Path $env:COMMANDER_PATH 'plugins\wcx\ISO-WCX'
+    }
+}
+$plugin = [IO.Path]::GetFullPath($PluginDirectory)
+$target = Join-Path $plugin 'ISO-WCX.wcx'
+if (-not (Test-PluginBinary $target 0x014C) -or
+    -not (Test-PluginBinary (Join-Path $plugin 'ISO-WCX.wcx64') 0x8664)) {
+    throw "Valid Win32 ISO-WCX.wcx and x64 ISO-WCX.wcx64 were not found in $plugin"
+}
+
+$section = Section-Rows $packer.Text 'PackerPlugins'
+if ($section.Rows.ContainsKey('zip') -and
+    (Is-OurPlugin ([string]$section.Rows['zip'].Value) $target)) {
+    Write-Warning 'ZIP is currently assigned to ISO-WCX. To restore native ZIP handling, run ISO-WCX-RemoveAssociation.ps1 -Extension zip (dry run), then -Apply with TC closed. Other ZIP plugins must remain untouched.'
+}
+$updates = @{}
+$added = New-Object 'System.Collections.Generic.List[string]'
+$skipped = New-Object 'System.Collections.Generic.List[string]'
+$updated = New-Object 'System.Collections.Generic.List[string]'
+foreach ($ext in $Extensions) {
+    $newValue = "$CapabilityMask,$target"
+    if (-not $section.Rows.ContainsKey($ext)) {
+        $added.Add("$ext=$newValue")
+        continue
+    }
+    $row = $section.Rows[$ext]
+    $existing = [string]$row.Value
+    if ((Is-OurPlugin $existing $target) -or
+        ($ext -eq 'iso' -and (Is-MissingLegacyIso $existing))) {
+        if ($existing -cne $newValue) {
+            $updates[$row.Index] = $row.Prefix+$newValue
+            $updated.Add($ext)
+        }
+    } else {
+        $skipped.Add($ext)
+    }
+}
+$changes = $updates.Count+$added.Count
+Write-Host "INI: $ini"
+Write-Host "Packer plugins: $($packer.Path)"
+Write-Host "64-bit cache: $($cache.Path)"
+Write-Host "ISO-WCX: $target"
+Write-Host "Extensions: $($Extensions.Count); add: $($added.Count); refresh: $($updated.Count); preserve foreign: $($skipped.Count)"
+if ($added.Count -gt 0) { Write-Host "ADD: $(($added | ForEach-Object { ($_ -split '=')[0] }) -join ', ')" }
+if ($updated.Count -gt 0) { Write-Host "REFRESH: $($updated -join ', ')" }
+if ($skipped.Count -gt 0) { Write-Host "OTHER PLUGINS UNCHANGED: $($skipped -join ', ')" }
+Write-Host 'ZIP/RAR/7z associations, toolbar buttons and user commands are never changed.'
+if ($changes -eq 0) {
+    Write-Host 'Nothing to change. All eligible associations are already registered.'
+    return
+}
+
+$plans = New-Object 'System.Collections.Generic.List[object]'
+$newPacker = Render-Doc $packer $updates $added.ToArray() ($cache.Path -ieq $packer.Path)
+if ($newPacker -cne $packer.Text) {
+    $plans.Add([pscustomobject]@{Doc=$packer; Payload=(As-Bytes $packer $newPacker)})
+}
+if ($cache.Path -ine $packer.Path) {
+    $newCache = Render-Doc $cache @{} @() $true
+    if ($newCache -cne $cache.Text) {
+        $plans.Add([pscustomobject]@{Doc=$cache;Payload=(As-Bytes $cache $newCache)})
+    }
+}
+if (-not $Apply) {
+    Write-Host 'DRY RUN. No files changed. Close Total Commander and rerun with -Apply.'
+    return
+}
+if (@(Get-Process -Name 'TOTALCMD','TOTALCMD64' -ErrorAction SilentlyContinue).Count -gt 0) {
+    throw 'Close every Total Commander instance before modifying its settings.'
+}
+$stages = New-Object 'System.Collections.Generic.List[object]'
+try {
+    foreach ($plan in $plans) {
+        if (-not (Equal-Bytes ([IO.File]::ReadAllBytes($plan.Doc.Path)) $plan.Doc.Bytes)) {
+            throw "INI changed during preparation: $($plan.Doc.Path)"
+        }
+        $suffix = [guid]::NewGuid().ToString('N')
+        $pending = "$($plan.Doc.Path).isowcx-bulk-pending-$suffix"
+        $backup = "$($plan.Doc.Path).isowcx-bulk-backup-$suffix"
+        [IO.File]::WriteAllBytes($pending,[byte[]]$plan.Payload)
+        $stages.Add([pscustomobject]@{
+            Doc=$plan.Doc;Pending=$pending;Backup=$backup;Committed=$false
+        })
+    }
+    foreach ($stage in $stages) {
+        if (-not (Equal-Bytes ([IO.File]::ReadAllBytes($stage.Doc.Path)) $stage.Doc.Bytes)) {
+            throw "INI changed before commit: $($stage.Doc.Path)"
+        }
+    }
+    foreach ($stage in $stages) {
+        [IO.File]::Replace($stage.Pending,$stage.Doc.Path,$stage.Backup)
+        $stage.Committed = $true
+        Write-Host "Backup: $($stage.Backup)"
+    }
+} catch {
+    for ($i=$stages.Count-1;$i -ge 0;$i--) {
+        $stage = $stages[$i]
+        if ($stage.Committed -and (Test-Path -LiteralPath $stage.Backup)) {
+            try { [IO.File]::Copy($stage.Backup,$stage.Doc.Path,$true) }
+            catch { Write-Warning "Manual restore needed: $($stage.Backup)" }
+        }
+    }
+    throw
+} finally {
+    foreach ($stage in $stages) {
+        if (Test-Path -LiteralPath $stage.Pending) {
+            Remove-Item -LiteralPath $stage.Pending -Force
+        }
+    }
+}
+Write-Host "SUCCESS: registered/updated $changes image types. Restart Total Commander."
+)
 }
 function Is-MissingLegacyIso([string]$Value) {
     $parsed = [regex]::Match($Value,'^\s*\d+\s*,\s*(?<path>.+?)\s*$')
