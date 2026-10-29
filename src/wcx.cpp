@@ -235,12 +235,14 @@ std::unique_ptr<State> open_state(const std::filesystem::path& path) {
 
 #define WCX_EXPORT extern "C" __declspec(dllexport)
 WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
-    iso_wcx::schedule_update_check();
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
     try {
         if(!d->ArcName)return nullptr;
-        auto state=open_state(std::filesystem::path(d->ArcName));
+        const std::filesystem::path path(d->ArcName);
+        if(!probe_image_extension(path))return nullptr;
+        iso_wcx::schedule_update_check();
+        auto state=open_state(path);
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
     }catch(const iso_wcx::WimOpenCancelled&){
@@ -249,12 +251,14 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
     }catch(...){return nullptr;}
 }
 WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
-    iso_wcx::schedule_update_check();
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
     try {
         if(!d->ArcName)return nullptr;
-        auto state=open_state(std::filesystem::path(from_bytes(d->ArcName,CP_ACP)));
+        const std::filesystem::path path(from_bytes(d->ArcName,CP_ACP));
+        if(!probe_image_extension(path))return nullptr;
+        iso_wcx::schedule_update_check();
+        auto state=open_state(path);
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
     }catch(const iso_wcx::WimOpenCancelled&){
@@ -508,7 +512,8 @@ WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
     try { iso_wcx::configure_updates(parent,module); } catch(...) {}
 }
 WCX_EXPORT int __stdcall GetPackerCaps() {
-    iso_wcx::schedule_update_check();
+    // TC asks for flags at startup, including when the user only opens ZIPs.
+    // Do not start the update checker until an actual image is opened/probed.
     return PK_CAPS_SEARCHTEXT|2|4|8|16; // 158, no global BY_CONTENT ZIP interception
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
