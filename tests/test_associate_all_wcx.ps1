@@ -26,7 +26,7 @@ New-Item -ItemType Directory -Path $plugin -Force | Out-Null
 [IO.File]::WriteAllBytes((Join-Path $plugin 'ISO-WCX.wcx64'),(FakePe 0x8664))
 # Windows runners can expose %TEMP% through a short 8.3 parent path.
 # Normalize the target exactly as the installer does before comparing INI.
-$target = Join-Path ([IO.Path]::GetFullPath($plugin)) 'ISO-WCX.wcx'
+$target = Join-Path ([IO.Path]::GetFullPath($plugin)) 'ISO-WCX.wcx64'
 $enc = [Text.UTF8Encoding]::new($true,$true)
 $eol = [string][char]13+[char]10
 $ini = Join-Path $root 'wincmd.ini'
@@ -62,10 +62,10 @@ try {
         'exts=iso*cue*zip*rar*7z*'
     )
     $before = [IO.File]::ReadAllBytes($ini)
-    & $tool -IniPath $ini -PluginDirectory $plugin | Out-Null
+    & $tool -IniPath $ini -PluginDirectory $plugin -Architecture 64 | Out-Null
     Assert (Same $before ([IO.File]::ReadAllBytes($ini))) 'dry run modified INI'
     Assert ((Backups $ini).Count -eq 0) 'dry run made a backup'
-    & $tool -IniPath $ini -PluginDirectory $plugin -Apply | Out-Null
+    & $tool -IniPath $ini -PluginDirectory $plugin -Architecture 64 -Apply | Out-Null
     $after = [IO.File]::ReadAllBytes($ini)
     $txt = Text-Ini $ini
     if (-not $txt.Contains("iso=158,$target")) {
@@ -91,10 +91,10 @@ try {
     Assert ($after[0] -eq 239 -and $after[1] -eq 187 -and $after[2] -eq 191) 'UTF-8 BOM lost'
     Assert ((Backups $ini).Count -eq 1) 'one backup not created'
     Assert (Same $before ([IO.File]::ReadAllBytes((Backups $ini)[0].FullName))) 'backup is not byte exact'
-    & $tool -IniPath $ini -PluginDirectory $plugin -Apply | Out-Null
+    & $tool -IniPath $ini -PluginDirectory $plugin -Architecture 64 -Apply | Out-Null
     Assert (Same $after ([IO.File]::ReadAllBytes($ini))) 'rerun not idempotent'
     Assert ((Backups $ini).Count -eq 1) 'rerun added unnecessary backup'
-    & $tool -IniPath $ini -PluginDirectory $plugin -IncludeOptional -Apply | Out-Null
+    & $tool -IniPath $ini -PluginDirectory $plugin -Architecture 64 -IncludeOptional -Apply | Out-Null
     Assert ((Text-Ini $ini).Contains("chd=158,$target")) 'explicit CHD opt-in failed'
     Assert ((Text-Ini $ini).Contains("bin=158,$target")) 'explicit BIN opt-in failed'
 
@@ -127,10 +127,10 @@ try {
     )
     $rootOriginal = [IO.File]::ReadAllBytes($rootIni)
     $cacheOriginal = [IO.File]::ReadAllBytes($cache)
-    & $tool -IniPath $rootIni -PluginDirectory $plugin | Out-Null
+    & $tool -IniPath $rootIni -PluginDirectory $plugin -Architecture 64 | Out-Null
     Assert (Same $rootOriginal ([IO.File]::ReadAllBytes($rootIni))) 'redirect dry-run mutated root'
     Assert (Same $cacheOriginal ([IO.File]::ReadAllBytes($cache))) 'redirect dry-run mutated cache'
-    & $tool -IniPath $rootIni -PluginDirectory $plugin -Apply | Out-Null
+    & $tool -IniPath $rootIni -PluginDirectory $plugin -Architecture 64 -Apply | Out-Null
     Assert (Same $rootOriginal ([IO.File]::ReadAllBytes($rootIni))) 'root buttons overwritten'
     Assert ((Text-Ini $packers).Contains("vhd=158,$target")) 'redirected own plugin was not updated'
     Assert ((Text-Ini $packers).Contains('zip=735,C:\Other\zip.wcx')) 'redirected ZIP overwritten'
@@ -148,7 +148,7 @@ try {
     )
     $collisionOriginal = [IO.File]::ReadAllBytes($collision)
     $caught = $false
-    try { & $tool -IniPath $collision -PluginDirectory $plugin -Apply | Out-Null }
+    try { & $tool -IniPath $collision -PluginDirectory $plugin -Architecture 64 -Apply | Out-Null }
     catch { $caught = $true }
     Assert $caught 'duplicate ISO keys should be rejected'
     Assert (Same $collisionOriginal ([IO.File]::ReadAllBytes($collision))) 'duplicate INI was changed'
@@ -159,7 +159,7 @@ try {
     $invalidBefore = [IO.File]::ReadAllBytes($invalid)
     [IO.File]::WriteAllBytes((Join-Path $plugin 'ISO-WCX.wcx64'),(FakePe 0x014C))
     $caught = $false
-    try { & $tool -IniPath $invalid -PluginDirectory $plugin -Apply | Out-Null }
+    try { & $tool -IniPath $invalid -PluginDirectory $plugin -Architecture 64 -Apply | Out-Null }
     catch { $caught = $true }
     Assert $caught 'incorrect PE architecture accepted'
     Assert (Same $invalidBefore ([IO.File]::ReadAllBytes($invalid))) 'bad DLL changed INI'
