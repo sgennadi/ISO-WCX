@@ -1,6 +1,6 @@
 [plugininstall]
-description=ISO-WCX v0.21.0 Stable: Export Image Structure, WIM diagnostics, VS2026 C++26
-version=0.21.0
+description=ISO-WCX Preview: native Total Commander image browser, WIM and disk images
+version=0.21.0-preview
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX
