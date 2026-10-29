@@ -54,8 +54,10 @@ std::wstring WimOpenProgress::describe() const {
     } else if (!image) {
         result=L"Opening Windows Imaging API and reading WIM metadata...";
     } else {
-        result=L"Reading image "+std::to_wstring(image);
+        result=L"Opening WIM image "+std::to_wstring(image);
         if (total) result+=L" of "+std::to_wstring(total);
+        result+=L"\nWindows Imaging API: loading image metadata / "
+                L"enumerating folders";
         result+=L"\nMetadata entries discovered: "+
                 std::to_wstring(entries_.load());
     }
@@ -153,8 +155,10 @@ void WimOpenProgress::run() noexcept {
                        TDF_ALLOW_DIALOG_CANCELLATION;
         config.dwCommonButtons=TDCBF_CANCEL_BUTTON;
         config.pszWindowTitle=L"ISO-WCX - Opening WIM";
-        config.pszMainInstruction=L"Reading Windows image indexes";
-        config.pszContent=L"Reading WIM metadata...";
+        config.pszMainInstruction=L"Opening WIM in Total Commander";
+        config.pszContent=L"Loading Windows image indexes. Large install.wim "
+                          L"files may contain hundreds of thousands of paths; "
+                          L"the counter updates as WIMGAPI reports metadata.";
         config.pszFooter=L"Metadata-only operation. The WIM remains unchanged.";
         config.pfCallback=&WimOpenProgress::dialog_callback;
         config.lpCallbackData=reinterpret_cast<LONG_PTR>(this);
