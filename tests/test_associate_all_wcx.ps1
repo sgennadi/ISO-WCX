@@ -28,6 +28,9 @@ $target = Join-Path $plugin 'ISO-WCX.wcx'
 $enc = [Text.UTF8Encoding]::new($true,$true)
 $eol = [string][char]13+[char]10
 $ini = Join-Path $root 'wincmd.ini'
+# Construct Unicode test data independently of PowerShell 5.1 script encoding.
+$hebrew = -join ([char[]]@(0x05D0,0x05D1,0x05D2,0x05D3))
+$russian = -join ([char[]]@(0x0420,0x0443,0x0441,0x0441,0x043A,0x0438,0x0439))
 function Set-Ini([string]$Path,[string[]]$Lines) {
     [IO.File]::WriteAllText($Path,(($Lines -join $eol)+$eol),$enc)
 }
@@ -35,14 +38,16 @@ function Text-Ini([string]$Path) {
     return [IO.File]::ReadAllText($Path,$enc)
 }
 function Backups([string]$Path) {
-    return @(Get-ChildItem -LiteralPath (Split-Path -Parent $Path) -Filter ((Split-Path -Leaf $Path)+'.isowcx-bulk-backup-*'))
+    # Keep a zero-element array as an array under strict-mode PowerShell 5.1.
+    $files = @(Get-ChildItem -LiteralPath (Split-Path -Parent $Path) -Filter ((Split-Path -Leaf $Path)+'.isowcx-bulk-backup-*'))
+    return ,$files
 }
 try {
     # Main INI: preserve Cyrillic/Hebrew user settings, other plugins and ZIP.
     Set-Ini $ini @(
         '[Configuration]'
-        'LanguageIni=Русский'
-        'Buttonbar=C:\MyCommands\הכפתורים.bar'
+        "LanguageIni=$russian"
+        "Buttonbar=C:\MyCommands\$hebrew.bar"
         'UserCmd=cm_myimportantmacro'
         '[PackerPlugins]'
         "iso=222,$target"
@@ -72,7 +77,7 @@ try {
     Assert ($txt.Contains('rar=735,C:\Existing\rar.wcx')) 'RAR was hijacked'
     Assert ($txt.Contains('7z=735,C:\Existing\7z.wcx')) '7z was hijacked'
     Assert ($txt.Contains('cue=735,C:\Other\cue.wcx')) 'foreign handler overwritten'
-    Assert ($txt.Contains('Buttonbar=C:\MyCommands\הכפתורים.bar')) 'custom buttons lost'
+    Assert ($txt.Contains("Buttonbar=C:\MyCommands\$hebrew.bar")) 'custom buttons lost'
     Assert ($txt.Contains('UserCmd=cm_myimportantmacro')) 'user commands lost'
     Assert (-not $txt.Contains('$checksum$=')) 'stale WCX64 cache checksum remained'
     Assert ($txt.Contains('exts=iso*cue*zip*rar*7z*')) 'unrelated 64-bit cache fields lost'
