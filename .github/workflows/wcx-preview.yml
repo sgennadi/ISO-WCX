@@ -114,39 +114,58 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
         run: ctest --test-dir build-sanitized --output-on-failure
   package:
-    name: Total Commander INF installer packages
+    name: Total Commander INF installer ${{ matrix.arch }}
     needs: windows
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: Win32
+            module: ISO-WCX.wcx
+            archive: ISO-WCX-preview-Win32.zip
+          - arch: x64
+            module: ISO-WCX.wcx64
+            archive: ISO-WCX-preview-x64.zip
     steps:
       - uses: actions/checkout@v7
-      - name: Collect x86 and x64 plugins
+      - name: Collect ONLY the matching Total Commander plugin
         uses: actions/download-artifact@v8
         with:
-          pattern: ISO-WCX-*-preview
+          name: ISO-WCX-${{ matrix.arch }}-preview
           path: package
-          merge-multiple: true
-      - name: Build auto-installable Total Commander package
+      - name: Package native pluginst.inf for matching architecture
+        shell: bash
         run: |
-          test -s package/ISO-WCX.wcx
-          test -s package/ISO-WCX.wcx64
-          # Exactly two self-contained WCX DLLs; exclude *additional*
-          # third-party shared libraries from this self-contained package.
-          if find package -maxdepth 1 -type f \( -iname '*.dll' -o -iname '*.so*' -o -iname '*.dylib' \) | grep -q .; then
-            echo "Unexpected third-party shared library in ISO-WCX installer" >&2
+          set -euo pipefail
+          test -s "package/${{ matrix.module }}"
+          # Each ZIP contains exactly one WCX: no extra architecture.
+          if [ "$(find package -maxdepth 1 -type f \( -iname '*.wcx' -o -iname '*.wcx64' \) | wc -l)" -ne 1 ]; then
+            echo 'Unexpected extra WCX module found' >&2
             exit 1
           fi
-          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-Repair.ps1 ISO-WCX-RemoveAssociation.ps1 ISO-WCX-AssociateAll.ps1 ISO-WCX-AssociateAll.cmd package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-Repair.ps1 ISO-WCX-RemoveAssociation.ps1 ISO-WCX-AssociateAll.ps1 ISO-WCX-AssociateAll.cmd ISO-WCX.wcx ISO-WCX.wcx64)
-          unzip -t ISO-WCX-preview.zip
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'THIRD_PARTY_NOTICES.txt'
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-Repair.ps1'
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-RemoveAssociation.ps1'
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-AssociateAll.ps1'
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-AssociateAll.cmd'
-      - name: Upload combined preview installer
+          sed 's/^file=.*/file=${{ matrix.module }}/' pluginst.inf > package/pluginst.inf
+          grep -qx 'type=wcx' package/pluginst.inf
+          grep -qx 'file=${{ matrix.module }}' package/pluginst.inf
+          grep -q '^defaultextension=iso,udf,' package/pluginst.inf
+          cp PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
+          (cd package && zip -9 "../${{ matrix.archive }}" \
+            pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt \
+            THIRD_PARTY_NOTICES.txt "${{ matrix.module }}")
+          unzip -t "${{ matrix.archive }}"
+          unzip -Z1 "${{ matrix.archive }}" | grep -qx "${{ matrix.module }}"
+          if [ "$(unzip -Z1 "${{ matrix.archive }}" | grep -Ei '\.wcx(64)?$' | wc -l)" -ne 1 ]; then
+            echo 'INF archive contains multiple WCX architectures' >&2
+            exit 1
+          fi
+          if unzip -Z1 "${{ matrix.archive }}" | grep -Eq '\.(cmd|ps1|exe)$'; then
+            echo 'Unexpected external installer/script in native INF package' >&2
+            exit 1
+          fi
+      - name: Upload installable INF preview
         uses: actions/upload-artifact@v7
         with:
-          name: ISO-WCX-Installable-Preview
-          path: ISO-WCX-preview.zip
+          name: ISO-WCX-Installable-${{ matrix.arch }}-Preview
+          path: ${{ matrix.archive }}
           if-no-files-found: error
           retention-days: 14
