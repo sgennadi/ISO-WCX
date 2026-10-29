@@ -172,7 +172,7 @@ function Is-OurPlugin([string]$Value, [string]$Expected) {
     if ([string]::Equals($actual,$Expected,[StringComparison]::OrdinalIgnoreCase)) {
         return $true
     }
-    return [regex]::IsMatch($actual,'(?i)(^|[\\/])ISO-WCX[\\/]ISO-WCX\.wcx(?:64)?
+    return [regex]::IsMatch($actual,'(?i)(^|[\\/])ISO-WCX[\\/]ISO-WCX\.wcx(?:64)?$')
 function Is-MissingLegacyIso([string]$Value) {
     $parsed = [regex]::Match($Value,'^\s*\d+\s*,\s*(?<path>.+?)\s*$')
     if (-not $parsed.Success) { return $false }
