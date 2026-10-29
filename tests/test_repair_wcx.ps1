@@ -55,7 +55,7 @@ try {
     $modified = [IO.File]::ReadAllBytes($ini)
     Assert-True ($modified[0] -eq 239 -and $modified[1] -eq 187 -and $modified[2] -eq 191) 'UTF-8 BOM lost'
     $updatedText = $u8.GetString($modified,3,$modified.Length-3)
-    $expectedText = $beforeText.Replace("iso=$legacy", "iso=222,$plug32")
+    $expectedText = $beforeText.Replace("iso=$legacy", "iso=158,$plug32")
     Assert-True ($updatedText -ceq $expectedText) 'changed another association, section, encoding, or line ending'
     $backups = @(Get-ChildItem -LiteralPath $root -Filter '*.isowcx-backup-*')
     Assert-True ($backups.Count -eq 1) 'missing/duplicate recovery backup'
@@ -67,15 +67,15 @@ try {
     Assert-True (@(Get-ChildItem -LiteralPath $root -Filter '*.isowcx-backup-*').Count -eq 1) 'idempotent run wrote another backup'
 
     # A previous ISO-WCX install can carry the stale 192 flags even when
-    # its path is correct. Update only its own ISO row to 222, preserving
+    # its path is correct. Update only its own ISO row to 158, preserving
     # the language, buttons and all unrelated plugin entries.
     $stale = $beforeText.Replace("iso=$legacy", "iso=192,$plug32")
     [IO.File]::WriteAllText($ini,$stale,$u8)
     & $repair -IniPath $ini -PluginDirectory $plugin -Apply | Out-Null
     $refreshed = [IO.File]::ReadAllBytes($ini)
-    Assert-True ($u8.GetString($refreshed,3,$refreshed.Length-3) -ceq $expectedText) 'stale 192 flags were not updated to 222'
+    Assert-True ($u8.GetString($refreshed,3,$refreshed.Length-3) -ceq $expectedText) 'stale 192 flags were not updated to 158'
     & $repair -IniPath $ini -PluginDirectory $plugin -Apply | Out-Null
-    Assert-Bytes $refreshed ([IO.File]::ReadAllBytes($ini)) 'already valid 222 association changed on repeat'
+    Assert-Bytes $refreshed ([IO.File]::ReadAllBytes($ini)) 'already valid 158 association changed on repeat'
 
     # User's unrelated working ISO handler must never be overwritten.
     $third = $beforeText.Replace("iso=$legacy", 'iso=192,C:\OtherPlugin\custom.wcx')
