@@ -15,25 +15,25 @@ remain limited; this is not full NTFS/ext4/UDF compatibility.**
 
 Development builds remain available through the [Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml).
 
-### One-pass image associations and faster normal ZIP opening (development Preview)
+### Preview: native INF install with only the matching WCX architecture
 
-The Preview ZIP now includes **`ISO-WCX-AssociateAll.cmd`** and
-**`ISO-WCX-AssociateAll.ps1`**, optional installers for all **23**
-non-ambiguous image extensions in one pass. Install the two WCX binaries, close
-all Total Commander windows, and run the CMD from the installed ISO-WCX
-directory. For an inspection-only report, use PowerShell:
+The Preview CI now produces **two native Total Commander installers**:
 
-`powershell.exe -NoProfile -ExecutionPolicy Bypass -File ISO-WCX-AssociateAll.ps1`
+- **ISO-WCX-Installable-x64-Preview** contains `ISO-WCX-preview-x64.zip`
+  with `pluginst.inf` and *only* `ISO-WCX.wcx64`.
+- **ISO-WCX-Installable-Win32-Preview** contains
+  `ISO-WCX-preview-Win32.zip` with `pluginst.inf` and *only*
+  `ISO-WCX.wcx`.
 
-Add `-Apply` after closing TC. The script locates `wincmd.ini`, follows
-`[PackerPlugins]` and `[PackerPlugins64]` redirections, checks both WCX PE
-architectures, keeps a **byte-exact dated backup** of every modified INI,
-refreshes stale ISO-WCX capability flags, and invalidates only the derived
-64-bit WCX checksum. It preserves **all buttons, user commands, unrelated WCX
-handlers, INI encoding and existing ZIP/RAR/7z associations**. Already-assigned
-extensions handled by another plugin are reported and skipped; no forced
-takeover. Experimental/ambiguous `.bin`, `.mdf` and `.chd` can be selected
-explicitly via `-IncludeOptional`. The scripts are not runtime dependencies.
+Open the appropriate ZIP with **Enter** in the matching TC edition and
+confirm installation. The `file=` entry in `pluginst.inf` selects
+exactly that architecture; `defaultextension` offers **23 image
+extensions** during TC's standard installer dialog(s). TC may prompt
+separately for each extension; INF cannot run a post-install script,
+silently overwrite all WCX bindings, or conditionally choose a DLL
+architecture from one combined ZIP. **No EXE/CMD/PowerShell installer
+is shipped** and ZIP/RAR/7z are not registered to ISO-WCX. Toolbar
+buttons and user commands are not modified by our package.
 
 **ZIP performance regression fix in Preview:** ISO-WCX no longer advertises
 `PK_CAPS_BY_CONTENT` (64), which could make TC consult its expensive image
