@@ -117,6 +117,36 @@ privileged Windows mount, failure cleanup, ACL/ADS and real image tests
 complete, the normal Apply/Capture edit remains the safe default.
 See [WIM mount preview](docs/wim-mount-fast-preview.md).
 
+## Faster WIM open + visible progress (PR #67 Preview)
+
+For large `install.wim`, `boot.wim`, compatible `.esd` and split `.swm` files,
+`CanYouHandleThisFile(W)` performs a bounded WIM header/part check instead
+of running a second, full WIMGAPI directory enumeration before opening.
+`OpenArchive` still lists the whole WIM tree, but the extra pre-open scan
+is eliminated; no file contents are decompressed or hashed merely to
+browse it.
+
+When **Total Commander** opens a WIM part of at least **64 MiB** and the
+operation lasts over **1.2 seconds**, ISO-WCX displays a responsive native
+Windows progress window on its own UI thread. It shows the current
+`imageN`, discovered metadata entries and elapsed time, then switches
+from an indeterminate progress indicator to **actual filename-listing
+percentage** as Total Commander consumes `ReadHeader` items. Cancel
+requests are accepted but cannot interrupt an already-running synchronous
+Windows WIMGAPI call; the plugin aborts safely at the next callback
+(returning `E_EABORTED`) without modifying the source archive.
+No external executable or third-party DLL is required. A headless WCX
+consumer never receives a popup. Set
+`ISO_WCX_WIM_OPEN_PROGRESS=0` in Total Commander's process environment
+to disable the optional window.
+
+Folder deletion via Total Commander F8 now accepts either
+`imageN\\Folder\\*` or `imageN\\Folder\\*.*` as an **exact directory
+selection**. Arbitrary wildcards or unsafe path components remain refused.
+This does not make 7 GiB WIM edits instantaneous: normal directory
+changes still use staged WIMGAPI Apply/Capture unless the separate
+experimental fast-mount feature has been explicitly enabled.
+
 ## WIM read-only metadata validation (v0.21.0)
 
 v0.21.0 adds strict read-only development-side WIM metadata preflight,
