@@ -10,22 +10,31 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
-## Batch image associations and ZIP performance (2026-10-29 Preview)
+## Native pluginst.inf installation and ZIP performance (2026-10-29 Preview)
 
-Use the optional `ISO-WCX-AssociateAll.cmd` from the installed Preview
-plugin folder **after closing all Total Commander windows**. One run safely
-registers all 23 unambiguous image extensions (ISO/UDF/WIM/ESD/SWM,
-CUE/CCD/NRG/MDS/MDX, CSO/ZSO/ISZ/DAA, IMG/RAW/VHD/VHDX and floppy types).
-A dry run is available via `ISO-WCX-AssociateAll.ps1`; append `-Apply`
-to save. Explicit `-IncludeOptional` adds the ambiguous `.bin`, `.mdf`
-and experimental `.chd` only on request.
+The Preview CI produces **two separate installable ZIP archives**, not a combined
+multi-architecture installer:
 
-The helper validates Win32/x64 DLL architecture, handles redirected
-`[PackerPlugins]`/`[PackerPlugins64]` sections, preserves original INI
-encoding and all toolbar/user-command settings, and backs up every modified
-INI. Existing third-party handlers are skipped; ZIP/RAR/7z cannot be replaced.
-The Preview installer ZIP includes both helper files; neither is needed to
-load or use the WCX plugin.
+- `ISO-WCX-preview-x64.zip` contains `pluginst.inf`, `ISO-WCX.wcx64`
+  and documentation, **not** `ISO-WCX.wcx`.
+- `ISO-WCX-preview-Win32.zip` contains `pluginst.inf`, `ISO-WCX.wcx`
+  and documentation, **not** `ISO-WCX.wcx64`.
+
+Open the archive for your *Total Commander architecture* by pressing Enter
+on the ZIP in Total Commander and confirm the built-in installer dialog.
+The `file=` line in `pluginst.inf` selects the correct single WCX module.
+`defaultextension` lists 23 non-ambiguous image extensions; TC handles
+those associations **during its own installation dialogs**. Its native INF
+installer may ask separately about each extension. The INF format does not
+support running a postinstall script or silently modifying every association.
+
+There is no `.exe`, `.cmd`, `.ps1` or external DLL in either installable
+ZIP. Third-party ZIP/RAR/7z handlers are **not** listed for association.
+The INF installation uses TC's standard configuration interface, not direct
+`wincmd.ini` rewriting, and does not replace the user's toolbar or commands.
+If both 32- and 64-bit TC editions are installed, use the ZIP matching the
+edition you are actually using. The packages cannot select architecture
+conditionally from one INF file.
 
 To prevent sluggish normal ZIP opens, the Preview plugin no longer advertises
 `PK_CAPS_BY_CONTENT`. The cached/native WCX capability mask changes from
@@ -38,7 +47,7 @@ pending, as does real 7 GiB `install.wim` GUI validation.
 
 ## If Total Commander says `File iso.wcx not found!`
 
-This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.wcx`; it does **not** indicate that `ISO-WCX.wcx` or its adjacent 64-bit `ISO-WCX.wcx64` is missing. The automatic installer cannot remove existing old plugin associations. In Configuration > Options > Packer > Configure packer extension WCXs, select `iso`, delete **only** the obsolete missing ISO.WCX entry, then click **New type...** and choose the installed `ISO-WCX.wcx`. If the **Delete** button in that association dialog does nothing, run the bundled optional `ISO-WCX-RemoveAssociation.ps1` with `-IniPath "C:\\path\\wincmd.ini" -Extension iso` to preview, then close TC and add `-Apply` to remove **only that ISO-WCX association** with a backup. For an obsolete `iso.wcx` use the separate `ISO-WCX-Repair.ps1`. These tools preserve user toolbar buttons, unrelated extensions and INI encoding. They are **not needed** to run the plugin. Restart Total Commander and retry with Ctrl+PgDn. Do not type capability masks (`222,` in old Stable, `158,` in Preview) in the DLL filename field. See [INSTALL_RU.txt](INSTALL_RU.txt) and [INSTALL_EN.txt](INSTALL_EN.txt).
+This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.wcx`; it does **not** indicate that `ISO-WCX.wcx` or the matching edition's `ISO-WCX.wcx64` is missing. The automatic installer cannot remove existing old plugin associations. In Configuration > Options > Packer > Configure packer extension WCXs, select `iso`, delete **only** the obsolete missing ISO.WCX entry, then click **New type...** and choose the installed `ISO-WCX.wcx` (Win32) or `ISO-WCX.wcx64` (x64). If the **Delete** button in that association dialog does nothing, run the optional repository helper `ISO-WCX-RemoveAssociation.ps1` with `-IniPath "C:\\path\\wincmd.ini" -Extension iso` to preview, then close TC and add `-Apply` to remove **only that ISO-WCX association** with a backup. For an obsolete `iso.wcx` use the separate `ISO-WCX-Repair.ps1`. These tools preserve user toolbar buttons, unrelated extensions and INI encoding. They are **not needed** to run the plugin. Restart Total Commander and retry with Ctrl+PgDn. Do not type capability masks (`222,` in old Stable, `158,` in Preview) in the DLL filename field. See [INSTALL_RU.txt](INSTALL_RU.txt) and [INSTALL_EN.txt](INSTALL_EN.txt).
 
 ## Supported in the preview
 
@@ -81,9 +90,19 @@ CLI tool: `disc_inspect image.iso` or `disc_inspect image.iso --extract OUTPUT`.
 
 ## Installing in Total Commander
 
-Download the **ISO-WCX-Installable-Preview** artifact from successful GitHub Actions runs. Unzip the outer GitHub artifact archive, then open `ISO-WCX-preview.zip` directly in Total Commander; `pluginst.inf` prompts installation. Alternatively configure `.iso`, `.img` or `.bin` manually under **Configuration > Options > Packer > Configure packer extension WCXs**. Only use `.bin` images in the supported single-track layouts above.
+From a successful [WCX Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml),
+download either **ISO-WCX-Installable-x64-Preview** or
+**ISO-WCX-Installable-Win32-Preview**, matching your TC edition.
+Unzip the GitHub Actions artifact wrapper and open the enclosed
+`ISO-WCX-preview-x64.zip` or `ISO-WCX-preview-Win32.zip` with Enter
+in Total Commander (not Ctrl+PgDn). Confirm the `pluginst.inf` installer.
+It automatically copies only the matching WCX module and prompts for
+supported image extension associations. No additional setup step is needed.
 
-CI builds both Windows WCX architectures, runs parser, extraction and DeleteFiles tests, and packages ISO-WCX.wcx, ISO-WCX.wcx64, pluginst.inf, instructions and two **optional** safe-association PowerShell helpers. No Setup.exe, third-party DLL, PowerShell or CMD program is required to use the WCX plugin.
+A stock `pluginst.inf` cannot silently apply all 23 associations in one
+action: Total Commander owns the association dialogs. ZIP/RAR/7z are not
+included in the image extension list. Keep this distinction in mind when
+upgrading an older ISO-WCX installation with preexisting associations.
 
 ## Native HDD images inside WCX (v0.13 preview)
 
