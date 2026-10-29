@@ -361,15 +361,23 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         std::vector<iso_wcx::ArchiveChange> changes;
         for(auto name:names){
             if(remove) {
-                // Total Commander selects a directory as "folder\\*.*"
-                // (or "folder\\*") depending on its delete configuration.
-                // These are directory-selection sentinels, NOT wildcards to
-                // expand. Strip only an exact final segment; edit_path()
-                // continues to reject wildcards anywhere else.
-                if(name.ends_with(L"\\*.*") || name.ends_with(L"/*.*"))
-                    name.resize(name.size()-4);
-                else if(name.ends_with(L"\\*") || name.ends_with(L"/*"))
-                    name.resize(name.size()-2);
+                // TC may send "folder\\*.*", "folder\\*", or the same
+                // sentinel terminated by a directory separator. Remove
+                // terminal directory-selection tokens ONLY: any wildcard in
+                // the actual folder/file name is still rejected by edit_path.
+                while(!name.empty() &&
+                      (name.back()==L'\\' || name.back()==L'/'))
+                    name.pop_back();
+                while(name.ends_with(L"\\*.*") || name.ends_with(L"/*.*") ||
+                      name.ends_with(L"\\*") || name.ends_with(L"/*")) {
+                    if(name.ends_with(L"\\*.*") || name.ends_with(L"/*.*"))
+                        name.resize(name.size()-4);
+                    else
+                        name.resize(name.size()-2);
+                    while(!name.empty() &&
+                          (name.back()==L'\\' || name.back()==L'/'))
+                        name.pop_back();
+                }
             }
             auto relative=iso_wcx::edit_path(edit_utf8(name));
             iso_wcx::ArchiveChange c;c.path=subpath.empty()?relative:iso_wcx::edit_path(iso_wcx::edit_path(edit_utf8(subpath))+"/"+relative);c.remove=remove;
