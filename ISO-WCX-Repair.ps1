@@ -108,15 +108,15 @@ $value = $m.Groups['value'].Value.Trim()
 $parts = [regex]::Match($value, '^(?<flags>\d+)\s*,\s*(?<path>.+)$')
 # Match native GetPackerCaps: old mask 192 lacks modify/delete/options.
 # Only obsolete legacy ISO.WCX or ISO-WCX's own association is eligible.
-$flags = '222'
+$flags = '158'
 $legacy = $value.Trim('"')
 if ($parts.Success) {
     $legacy = $parts.Groups['path'].Value.Trim().Trim('"')
 }
 $alreadyInstalled = $legacy -match '(?i)(^|[\\/])ISO-WCX[\\/]ISO-WCX\.wcx$'
 if ($alreadyInstalled) {
-    if ($parts.Success -and $parts.Groups['flags'].Value -eq '222') {
-        Write-Host 'ISO already references ISO-WCX.wcx with flags 222. No changes needed.'
+    if ($parts.Success -and $parts.Groups['flags'].Value -eq '158') {
+        Write-Host 'ISO already references ISO-WCX.wcx with flags 158. No changes needed.'
         return
     }
     if (-not $PluginDirectory) {
@@ -159,7 +159,7 @@ if ((Get-Item -LiteralPath $new32).Length -eq 0 -or
 }
 
 # Preserve unrelated plugin registrations, comments, line endings, whitespace
-# and ANSI/UTF-8/UTF-16 BOM; use ISO-WCX's native capability mask 222.
+# and ANSI/UTF-8/UTF-16 BOM; use ISO-WCX's native capability mask 158.
 # Never modify other [PackerPlugins] values or [PackerPlugins64] manually.
 $new32 = (Resolve-Path -LiteralPath $new32).ProviderPath
 $newValue = "$flags,$new32"
