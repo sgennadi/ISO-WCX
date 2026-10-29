@@ -245,8 +245,11 @@ void validate_unique_plugin_keys(const fs::path& ini) {
         throw std::runtime_error("PackerPlugins section exceeds safe size");
     std::vector<std::wstring> seen;
     const auto is_target = [](const std::wstring& name) {
-        for (const wchar_t* ext : {L"iso", L"cue", L"ccd", L"nrg",
-                                   L"mds", L"cso", L"zso"})
+        for (const wchar_t* ext : {L"iso", L"udf", L"cue", L"ccd", L"nrg",
+                                   L"mds", L"mdx", L"cso", L"zso", L"isz", L"daa",
+                                   L"img", L"raw", L"vhd", L"vhdx", L"wim",
+                                   L"esd", L"swm", L"ima", L"vfd", L"flp",
+                                   L"bif", L"imz"})
             if (name == ext) return true;
         return false;
     };
@@ -356,8 +359,13 @@ std::wstring run(const Options& opts) {
     const std::wstring new_path = (destination / L"ISO-WCX.wcx").wstring();
     std::vector<Change> updates;
     unsigned preserved = 0;
-    for (const auto& ext : std::array<const wchar_t*, 7>{
-         L"iso", L"cue", L"ccd", L"nrg", L"mds", L"cso", L"zso"}) {
+    // Register the 23 supported image extensions in a single pass.
+    // Never take over ZIP/RAR/7z or another working user's WCX handler.
+    for (const auto& ext : std::array<const wchar_t*, 23>{
+         L"iso", L"udf", L"cue", L"ccd", L"nrg", L"mds",
+         L"mdx", L"cso", L"zso", L"isz", L"daa", L"img",
+         L"raw", L"vhd", L"vhdx", L"wim", L"esd", L"swm",
+         L"ima", L"vfd", L"flp", L"bif", L"imz"}) {
         const std::wstring existing = profile(assoc_ini, L"PackerPlugins", ext);
         const std::wstring raw = old_path(existing);
         std::wstring reason;
@@ -366,12 +374,12 @@ std::wstring run(const Options& opts) {
         else if (installed_name(raw)) {
             if (!same_path(fs::path(resolved_old_path(raw, tc_dir)), fs::path(new_path))) {
                 reason = L"ISO-WCX path migration";
-            } else if (existing != L"222," + new_path) {
+            } else if (existing != L"158," + new_path) {
                 // A legacy 192 mask advertises content/search only, hiding
                 // pack/delete/options in some TC versions despite the WCX
                 // GetPackerCaps() implementation returning 222. Repair only
                 // an association that already targets THIS plugin DLL.
-                reason = L"refresh ISO-WCX capability flags to 222";
+                reason = L"refresh ISO-WCX capability flags to 158";
             }
         } else if (legacy_name(raw)) {
             const auto legacy = resolved_old_path(raw, tc_dir);
@@ -381,10 +389,10 @@ std::wstring run(const Options& opts) {
             ++preserved;
             continue;
         }
-        // Match the native GetPackerCaps() mask: modify(2), multiple(4),
-        // delete(8), options(16), by-content(64), search-text(128) = 222.
-        // Never apply this mask to an unrelated WCX association.
-        updates.push_back({ext, L"222," + new_path, reason});
+        // Match GetPackerCaps(): modify(2), multiple(4), delete(8),
+        // options(16), search-text(128) = 158. Global by-content (64)
+        // must stay disabled to avoid intercepting ordinary ZIP archives.
+        updates.push_back({ext, L"158," + new_path, reason});
     }
 
     if (!same_path(binary_source, destination))
