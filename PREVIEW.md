@@ -10,31 +10,26 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
-## Native pluginst.inf installation and ZIP performance (2026-10-29 Preview)
+## One native pluginst.inf ZIP with both WCX architectures
 
-The Preview CI produces **two separate installable ZIP archives**, not a combined
-multi-architecture installer:
+The Preview workflow produces **one** `ISO-WCX-Installable-Preview`
+artifact containing `ISO-WCX-preview.zip`. Its contents include
+`ISO-WCX.wcx` (Win32), `ISO-WCX.wcx64` (x64), `pluginst.inf` and
+documentation.
 
-- `ISO-WCX-preview-x64.zip` contains `pluginst.inf`, `ISO-WCX.wcx64`
-  and documentation, **not** `ISO-WCX.wcx`.
-- `ISO-WCX-preview-Win32.zip` contains `pluginst.inf`, `ISO-WCX.wcx`
-  and documentation, **not** `ISO-WCX.wcx64`.
+`pluginst.inf` declares `type=wcx`, `file=ISO-WCX.wcx` and
+`defaultdir=ISO-WCX`. Total Commander automatically recognizes the
+adjacent `.wcx64` sibling when running its 64-bit edition. You do not
+need to pick an architecture-specific archive or run an EXE, CMD, or
+PowerShell installer. Both architecture modules are shipped in the ZIP,
+but TC **loads the one matching its process architecture**.
 
-Open the archive for your *Total Commander architecture* by pressing Enter
-on the ZIP in Total Commander and confirm the built-in installer dialog.
-The `file=` line in `pluginst.inf` selects the correct single WCX module.
-`defaultextension` lists 23 non-ambiguous image extensions; TC handles
-those associations **during its own installation dialogs**. Its native INF
-installer may ask separately about each extension. The INF format does not
-support running a postinstall script or silently modifying every association.
-
-There is no `.exe`, `.cmd`, `.ps1` or external DLL in either installable
-ZIP. Third-party ZIP/RAR/7z handlers are **not** listed for association.
-The INF installation uses TC's standard configuration interface, not direct
-`wincmd.ini` rewriting, and does not replace the user's toolbar or commands.
-If both 32- and 64-bit TC editions are installed, use the ZIP matching the
-edition you are actually using. The packages cannot select architecture
-conditionally from one INF file.
+The `defaultextension` entry advertises 23 image formats during native
+TC plugin installation. The TC installation UI may still ask about
+individual extensions; `pluginst.inf` cannot run a post-install script
+or unconditionally overwrite existing user associations. ZIP/RAR/7z
+are never offered to ISO-WCX. User-defined buttons/commands remain
+untouched by the package.
 
 To prevent sluggish normal ZIP opens, the Preview plugin no longer advertises
 `PK_CAPS_BY_CONTENT`. The cached/native WCX capability mask changes from
@@ -90,19 +85,30 @@ CLI tool: `disc_inspect image.iso` or `disc_inspect image.iso --extract OUTPUT`.
 
 ## Installing in Total Commander
 
-From a successful [WCX Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml),
-download either **ISO-WCX-Installable-x64-Preview** or
-**ISO-WCX-Installable-Win32-Preview**, matching your TC edition.
-Unzip the GitHub Actions artifact wrapper and open the enclosed
-`ISO-WCX-preview-x64.zip` or `ISO-WCX-preview-Win32.zip` with Enter
-in Total Commander (not Ctrl+PgDn). Confirm the `pluginst.inf` installer.
-It automatically copies only the matching WCX module and prompts for
-supported image extension associations. No additional setup step is needed.
+Download the **ISO-WCX-Installable-Preview** artifact from a successful
+[Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml).
+Unpack the GitHub artifact wrapper, then open the enclosed
+`ISO-WCX-preview.zip` directly in Total Commander with **Enter**.
+Confirm the `pluginst.inf` installation. Both native plugin binaries
+are included; TC chooses Win32 WCX or x64 WCX64 itself.
 
-A stock `pluginst.inf` cannot silently apply all 23 associations in one
-action: Total Commander owns the association dialogs. ZIP/RAR/7z are not
-included in the image extension list. Keep this distinction in mind when
-upgrading an older ISO-WCX installation with preexisting associations.
+### WIM and ISO editing in Preview
+
+| Image | Supported modifications | Limits |
+| --- | --- | --- |
+| Standard unsplit WIM | Create/replace/delete files and directories within existing indexes; delete an image index except the last | WIMGAPI Apply/Capture can take many minutes and require NTFS staging, free disk and privileges. Fast Mount/Commit for creation of folders only is **experimental and off by default**. |
+| Plain ISO9660/Joliet | Constrained addition, same-/bounded-size replacement and deletion of compatible entries | Rejects unsafe boot/system-area layouts, Rock Ridge and layouts that cannot be kept consistent. Not a universal ISO remastering engine. |
+| UDF-only Type-1 | Selected file and directory creations, file replacement and logical deletion | Experimental, validated physical Type-1 metadata and sufficient space only. |
+| ISO/UDF Bridge | Narrow synchronized file replacement/deletion when both namespaces remain valid | No general directory creation or hybrid boot editing. |
+| ESD / SWM | Read and extract only | Editing is not supported. |
+
+The separate **hybrid-boot ISO/Joliet deletion PR #65** is draft
+and not included in this Preview branch. Test editing only on disposable
+copies of important installation images. Folder deletion from Total
+Commander may involve special trailing wildcard tokens; the Preview WCX
+normalizes those only at the terminal directory selection to avoid unsafe
+file changes. Large WIM enumeration has an asynchronous native progress
+dialog, but performance and cancellation still need real-host testing.
 
 ## Native HDD images inside WCX (v0.13 preview)
 

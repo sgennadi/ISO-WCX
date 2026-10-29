@@ -15,25 +15,33 @@ remain limited; this is not full NTFS/ext4/UDF compatibility.**
 
 Development builds remain available through the [Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml).
 
-### Preview: native INF install with only the matching WCX architecture
+### Preview: one native INF archive with 32- and 64-bit WCX
 
-The Preview CI now produces **two native Total Commander installers**:
+The Windows CI produces **one installable artifact**,
+`ISO-WCX-Installable-Preview`, containing `ISO-WCX-preview.zip`:
 
-- **ISO-WCX-Installable-x64-Preview** contains `ISO-WCX-preview-x64.zip`
-  with `pluginst.inf` and *only* `ISO-WCX.wcx64`.
-- **ISO-WCX-Installable-Win32-Preview** contains
-  `ISO-WCX-preview-Win32.zip` with `pluginst.inf` and *only*
-  `ISO-WCX.wcx`.
+- `pluginst.inf` uses `type=wcx`, `file=ISO-WCX.wcx`, and
+  `defaultextension` for 23 image formats.
+- `ISO-WCX.wcx` is the Win32 plugin and the **adjacent**
+  `ISO-WCX.wcx64` is its x64 counterpart. Total Commander chooses the
+  matching WCX architecture automatically; users do not select between
+  install archives.
+- No installer EXE/CMD/PowerShell scripts or third-party DLLs are bundled.
 
-Open the appropriate ZIP with **Enter** in the matching TC edition and
-confirm installation. The `file=` entry in `pluginst.inf` selects
-exactly that architecture; `defaultextension` offers **23 image
-extensions** during TC's standard installer dialog(s). TC may prompt
-separately for each extension; INF cannot run a post-install script,
-silently overwrite all WCX bindings, or conditionally choose a DLL
-architecture from one combined ZIP. **No EXE/CMD/PowerShell installer
-is shipped** and ZIP/RAR/7z are not registered to ISO-WCX. Toolbar
-buttons and user commands are not modified by our package.
+Open the inner ZIP with **Enter** in Total Commander and accept the native
+`pluginst.inf` installation. The 23 image associations are offered during
+TC's own installation prompts; the INF format does not guarantee silently
+registering all extensions without prompts. ZIP/RAR/7z are not in the list.
+The installer does not modify toolbar buttons or custom commands.
+
+**Editing status (Preview, not universal):** standard unsplit WIM supports
+bounded add/replace/delete of files and folders; it uses expensive WIMGAPI
+Apply/Capture, and the optional fast mount/commit route currently supports
+only directory creation and is disabled by default. Plain ISO9660/Joliet
+supports constrained editing on validated layouts. Experimental UDF Type-1
+supports selected creates/replacements/deletions. Bootable hybrid ISO delete
+support is still a separate draft, and ESD/SWM are read-only. See
+[Preview](PREVIEW.md) and [WIM integration](docs/wim-integration.md).
 
 **ZIP performance regression fix in Preview:** ISO-WCX no longer advertises
 `PK_CAPS_BY_CONTENT` (64), which could make TC consult its expensive image
