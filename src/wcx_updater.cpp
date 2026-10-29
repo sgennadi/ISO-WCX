@@ -37,9 +37,11 @@
 namespace iso_wcx {
 namespace {
 constexpr wchar_t registry_path[] = L"Software\\ISO-WCX\\Updates";
+constexpr wchar_t wim_registry_path[] = L"Software\\ISO-WCX\\WIM";
 constexpr wchar_t github_api[] =
     L"https://api.github.com/repos/sgennadi/ISO-WCX/releases/latest";
-constexpr int id_never=4101, id_check=4102, id_install=4103, id_status=4104, id_export=4105;
+constexpr int id_never=4101, id_check=4102, id_install=4103,
+              id_status=4104, id_export=4105, id_wim_fast=4106;
 constexpr UINT check_later=WM_APP+191;
 constexpr std::size_t max_response=64u*1024u;
 constexpr std::size_t max_package=64u*1024u*1024u;
@@ -53,6 +55,7 @@ using Internet=std::unique_ptr<std::remove_pointer_t<HINTERNET>,
 struct State {
     bool automatic=true;
     bool russian=false;
+    bool wim_fast=false;
     std::wstring latest_tag;
     bool newer=false;
 };
@@ -117,6 +120,24 @@ void write_reg(const wchar_t* name, DWORD type, const void* p, DWORD bytes) {
 void save_automatic(bool allow) {
     const DWORD value=allow?1:0;
     write_reg(L"AutoCheck",REG_DWORD,&value,sizeof(value));
+}
+bool read_wim_fast_setting() {
+    DWORD value=0,size=sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER,wim_registry_path,
+             L"FastMountFolders",RRF_RT_REG_DWORD,
+             nullptr,&value,&size)==ERROR_SUCCESS && value==1;
+}
+bool save_wim_fast_setting(bool enabled) {
+    HKEY key=nullptr;
+    const auto opened=RegCreateKeyExW(
+         HKEY_CURRENT_USER,wim_registry_path,0,nullptr,0,KEY_SET_VALUE,
+         nullptr,&key,nullptr);
+    if(opened!=ERROR_SUCCESS)return false;
+    const DWORD value=enabled?1u:0u;
+    const auto stored=RegSetValueExW(key,L"FastMountFolders",0,REG_DWORD,
+                            reinterpret_cast<const BYTE*>(&value),sizeof(value));
+    RegCloseKey(key);
+    return stored==ERROR_SUCCESS;
 }
 void save_last_check() {
     const auto time=unix_now();
@@ -631,6 +652,7 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         SetWindowLongPtrW(dlg,DWLP_USER,lp);
         state->russian=russian();
         state->automatic=read_dword(L"AutoCheck",1);
+        state->wim_fast=read_wim_fast_setting();
         add_control(dlg,L"STATIC",L"",SS_LEFT,id_status,12,10,340,38);
         add_control(dlg,L"BUTTON",tr(state->russian,
              L"Do not check for updates automatically",
@@ -647,6 +669,16 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         add_control(dlg,L"BUTTON",tr(state->russian,
              L"Export Image Structure...",L"Экспорт структуры образа..."),
              BS_PUSHBUTTON|WS_TABSTOP,id_export,12,113,340,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Fast WIM folders (experimental; administrator required)",
+             L"Быстрые папки WIM (экспериментально; нужны права администратора)"),
+             BS_AUTOCHECKBOX|WS_TABSTOP,id_wim_fast,12,145,340,24);
+        add_control(dlg,L"STATIC",tr(state->russian,
+             L"Creates a temporary WIM copy. Keep disabled for production images.",
+             L"Создаёт временную копию WIM. Для рабочих образов оставьте выключенным."),
+             SS_LEFT,0,12,175,340,31);
+        CheckDlgButton(dlg,id_wim_fast,
+                       state->wim_fast?BST_CHECKED:BST_UNCHECKED);
         CheckDlgButton(dlg,id_never,
               state->automatic?BST_UNCHECKED:BST_CHECKED);
         EnableWindow(GetDlgItem(dlg,id_install),FALSE);
@@ -666,6 +698,36 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         if(cmd==id_never && HIWORD(wp)==BN_CLICKED) {
             state->automatic=IsDlgButtonChecked(dlg,id_never)!=BST_CHECKED;
             save_automatic(state->automatic);
+            return TRUE;
+        }
+        if(cmd==id_wim_fast && HIWORD(wp)==BN_CLICKED) {
+            const bool selected=IsDlgButtonChecked(dlg,id_wim_fast)==BST_CHECKED;
+            if(selected) {
+                const auto warning=tr(state->russian,
+                    L"Experimental WIM mounting requires administrator rights and "
+                    L"an NTFS workspace with enough free space for a complete "
+                    L"temporary WIM copy. Only use on backed-up images.\n\n"
+                    L"Enable fast folder creation?",
+                    L"Экспериментальное монтирование WIM требует прав "
+                    L"администратора и свободного места на NTFS для полной "
+                    L"временной копии WIM. Работайте с резервной копией.\n\n"
+                    L"Включить быстрое создание папок?");
+                if(MessageBoxW(dlg,warning,L"ISO-WCX WIM Preview",
+                    MB_ICONWARNING|MB_YESNO|MB_DEFBUTTON2)!=IDYES) {
+                    CheckDlgButton(dlg,id_wim_fast,BST_UNCHECKED);
+                    return TRUE;
+                }
+            }
+            if(!save_wim_fast_setting(selected)) {
+                MessageBoxW(dlg,tr(state->russian,
+                    L"Could not save WIM preference in the current user registry.",
+                    L"Не удалось сохранить параметр WIM в реестре пользователя."),
+                    L"ISO-WCX",MB_ICONERROR|MB_OK);
+                CheckDlgButton(dlg,id_wim_fast,
+                    state->wim_fast?BST_CHECKED:BST_UNCHECKED);
+                return TRUE;
+            }
+            state->wim_fast=selected;
             return TRUE;
         }
         if(cmd==id_check) {check_release(dlg,*state,true);return TRUE;}
@@ -721,7 +783,7 @@ void configure_updates(HWND parent,HINSTANCE instance) {
     const auto store16=[&](std::size_t at,WORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
     store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER);
     store32(4,0);store16(8,0);store16(10,0);store16(12,0);
-    store16(14,367);store16(16,152);store16(18,0);store16(20,0);
+    store16(14,367);store16(16,214);store16(18,0);store16(20,0);
     constexpr wchar_t caption[]=L"ISO-WCX Settings";
     std::memcpy(raw.data()+22,caption,sizeof(caption));
     State state{};

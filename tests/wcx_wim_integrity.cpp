@@ -1,0 +1,336 @@
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+// Integration fixture: only Windows system WIMGAPI and Win32 security APIs.
+// This developer-only executable is never bundled with the WCX ZIP.
+#include <windows.h>
+#include <sddl.h>
+#include <aclapi.h>
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace fs=std::filesystem;
+using Create=HANDLE(WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD);
+using SetTemp=BOOL(WINAPI*)(HANDLE,PCWSTR);
+using Capture=HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD);
+using Load=HANDLE(WINAPI*)(HANDLE,DWORD);
+using Apply=BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD);
+using Close=BOOL(WINAPI*)(HANDLE);
+using Pack=int(__stdcall*)(wchar_t*,wchar_t*,wchar_t*,wchar_t*,int);
+using SetProgress=void(__stdcall*)(HANDLE,int(__stdcall*)(wchar_t*,int));
+static std::atomic<unsigned> used_fast_mount{0};
+
+static int __stdcall progress(wchar_t* label,int value) {
+    if(value<0 && label &&
+       std::wstring_view(label).find(
+           L"Create WIM folders without applying image")!=std::wstring_view::npos)
+        ++used_fast_mount;
+    return 1;
+}
+static void require(bool valid,const char* msg) {
+    if(!valid)throw std::runtime_error(std::string(msg)+
+                           " (Win32 "+std::to_string(GetLastError())+")");
+}
+template<class F>static F bind(HMODULE dll,const char* name) {
+    const auto address=GetProcAddress(dll,name);
+    require(address!=nullptr,"missing required Win32/WIMGAPI export");
+    return reinterpret_cast<F>(address);
+}
+static void save(const fs::path& file,std::string_view value) {
+    fs::create_directories(file.parent_path());
+    std::ofstream out(file,std::ios::binary|std::ios::trunc);
+    require(bool(out),"cannot create integrity source file or named ADS");
+    out.write(value.data(),static_cast<std::streamsize>(value.size()));
+    require(bool(out),"cannot flush integrity input bytes");
+}
+static std::string read(const fs::path& file) {
+    std::ifstream in(file,std::ios::binary);
+    require(bool(in),"cannot read preserved regular file or named ADS");
+    return {std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>{}};
+}
+// WIM files can have multiple names for the *same* NTFS file ID.
+static bool shared_file_id(const fs::path& first,const fs::path& second) {
+    auto open=[](const fs::path& path) {
+        return CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,
+                 FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                 nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    };
+    const HANDLE a=open(first);
+    require(a!=INVALID_HANDLE_VALUE,"cannot open primary NTFS hardlink");
+    const HANDLE b=open(second);
+    if(b==INVALID_HANDLE_VALUE) {
+        CloseHandle(a);
+        require(false,"cannot open secondary NTFS hardlink");
+    }
+    BY_HANDLE_FILE_INFORMATION x{},y{};
+    const BOOL ok_a=GetFileInformationByHandle(a,&x);
+    const BOOL ok_b=GetFileInformationByHandle(b,&y);
+    CloseHandle(a);
+    CloseHandle(b);
+    require(ok_a && ok_b,"cannot query NTFS hardlink file identifiers");
+    return x.dwVolumeSerialNumber==y.dwVolumeSerialNumber &&
+           x.nFileIndexHigh==y.nFileIndexHigh &&
+           x.nFileIndexLow==y.nFileIndexLow &&
+           x.nNumberOfLinks>=2 && y.nNumberOfLinks>=2;
+}
+static fs::path ads(const fs::path& file) {
+    return fs::path(file.wstring()+L":ISO_WCX_INTEGRITY");
+}
+static void set_protected_dacl(const fs::path& file) {
+    PSECURITY_DESCRIPTOR descriptor=nullptr;
+    const auto sddl=L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)";
+    require(ConvertStringSecurityDescriptorToSecurityDescriptorW(
+               sddl,SDDL_REVISION_1,&descriptor,nullptr)!=FALSE,
+            "convert protected DACL fixture");
+    BOOL present=FALSE,defaulted=FALSE;
+    PACL acl=nullptr;
+    const BOOL extracted=GetSecurityDescriptorDacl(
+        descriptor,&present,&acl,&defaulted);
+    require(extracted!=FALSE && present && acl!=nullptr,
+            "protected ACL fixture does not contain a DACL");
+    // SetFileSecurityW is obsolete and does not reliably propagate the
+    // protected DACL control bit on all NTFS versions. Explicitly use the
+    // documented PROTECTED_DACL_SECURITY_INFORMATION setter.
+    auto filename=file.wstring();
+    const DWORD error=SetNamedSecurityInfoW(
+        filename.data(),SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,nullptr,acl,nullptr);
+    LocalFree(descriptor);
+    SetLastError(error);
+    require(error==ERROR_SUCCESS,"assign protected file DACL");
+}
+static std::wstring dacl(const fs::path& file) {
+    DWORD bytes=0;
+    SetLastError(ERROR_SUCCESS);
+    (void)GetFileSecurityW(file.c_str(),DACL_SECURITY_INFORMATION,
+                          nullptr,0,&bytes);
+    require(bytes>=sizeof(SECURITY_DESCRIPTOR),"cannot read DACL length");
+    std::vector<BYTE> buffer(bytes);
+    require(GetFileSecurityW(file.c_str(),DACL_SECURITY_INFORMATION,
+                             buffer.data(),bytes,&bytes)!=FALSE,
+            "read DACL");
+    LPWSTR output=nullptr;
+    require(ConvertSecurityDescriptorToStringSecurityDescriptorW(
+               buffer.data(),SDDL_REVISION_1,DACL_SECURITY_INFORMATION,
+               &output,nullptr)!=FALSE,"convert file DACL to SDDL");
+    std::wstring result=output;
+    LocalFree(output);
+    return result;
+}
+static std::uint64_t hash(const fs::path& file) {
+    std::ifstream input(file,std::ios::binary);
+    require(bool(input),"cannot read large WIM integrity file");
+    std::array<char,64*1024> bytes{};
+    std::uint64_t value=14695981039346656037ull;
+    while(input) {
+        input.read(bytes.data(),static_cast<std::streamsize>(bytes.size()));
+        const auto size=input.gcount();
+        for(std::streamsize i=0;i<size;++i) {
+            value^=static_cast<unsigned char>(bytes[static_cast<std::size_t>(i)]);
+            value*=1099511628211ull;
+        }
+    }
+    require(input.eof() && !input.bad(),"large WIM input could not be hashed");
+    return value;
+}
+static unsigned payload_mib() {
+    wchar_t value[16]{};
+    const DWORD count=GetEnvironmentVariableW(
+        L"ISO_WCX_WIM_INTEGRITY_MIB",value,16);
+    if(count==0)return 64;
+    require(count<16,"integrity payload size setting is too long");
+    wchar_t* end=nullptr;
+    const auto number=std::wcstoul(value,&end,10);
+    require(end!=value && *end==0 && number>=64 && number<=2048,
+            "integrity payload MiB must be between 64 and 2048");
+    return static_cast<unsigned>(number);
+}
+static void write_incompressible(const fs::path& file,unsigned mib) {
+    std::ofstream out(file,std::ios::binary|std::ios::trunc);
+    require(bool(out),"cannot create WIM integrity payload");
+    std::array<char,64*1024> block{};
+    std::uint32_t random=0x71c6d32bu;
+    for(unsigned n=0;n<mib*16u;++n) {
+        for(auto& item:block) {
+            random^=random<<13;
+            random^=random>>17;
+            random^=random<<5;
+            item=static_cast<char>(random);
+        }
+        out.write(block.data(),static_cast<std::streamsize>(block.size()));
+        require(bool(out),"cannot fill 64-MiB payload");
+    }
+}
+int wmain(int argc,wchar_t** argv) {
+    if(argc!=2)return 1;
+    const auto root=fs::temp_directory_path()/
+        (L"iso-wcx-wim-integrity-"+std::to_wstring(GetCurrentProcessId())+L"-"+
+         std::to_wstring(GetTickCount64()));
+    bool preserve_on_failure=false;
+    try {
+        fs::create_directories(root);
+        const auto source=root/L"source",source2=root/L"source2";
+        fs::create_directories(source/L"Protected");
+        const auto protected_file=source/L"Protected"/L"restricted.dat";
+        const std::string ordinary="Untouched WIM file payload";
+        const std::string stream="Named ADS preserved across WIM mounted edits";
+        save(protected_file,ordinary);
+        const auto linked_file=source/L"Protected"/L"restricted-hardlink.dat";
+        require(CreateHardLinkW(linked_file.c_str(),protected_file.c_str(),
+                                nullptr)!=FALSE,
+                "cannot create NTFS hardlink fixture");
+        require(shared_file_id(protected_file,linked_file),
+                "fixture hardlinks do not share one NTFS file ID");
+        save(ads(protected_file),stream);
+        set_protected_dacl(protected_file);
+        const auto expected_acl=dacl(protected_file);
+        require(expected_acl.find(L"D:P")!=std::wstring::npos,
+                "protected DACL fixture is not marked protected");
+        const unsigned mib=payload_mib();
+        const auto large=source/(std::to_wstring(mib)+L"MiB-random.bin");
+        write_incompressible(large,mib);
+        const auto size=fs::file_size(large);
+        require(size==static_cast<std::uint64_t>(mib)*1024ull*1024ull,
+                "large WIM integrity input has the wrong size");
+        const auto expected_hash=hash(large);
+        save(source2/L"second.txt","Second index must be unchanged");
+        const auto wim=root/L"integrity.wim";
+        const HMODULE dll=LoadLibraryExW(L"wimgapi.dll",nullptr,
+                                         LOAD_LIBRARY_SEARCH_SYSTEM32);
+        require(dll!=nullptr,"Windows system WIMGAPI unavailable");
+        const auto create=bind<Create>(dll,"WIMCreateFile");
+        const auto temp=bind<SetTemp>(dll,"WIMSetTemporaryPath");
+        const auto capture=bind<Capture>(dll,"WIMCaptureImage");
+        const auto load=bind<Load>(dll,"WIMLoadImage");
+        const auto apply=bind<Apply>(dll,"WIMApplyImage");
+        const auto close=bind<Close>(dll,"WIMCloseHandle");
+        DWORD state=0;
+        HANDLE container=create(wim.c_str(),GENERIC_READ|GENERIC_WRITE,
+                                CREATE_ALWAYS,0,2u,&state);
+        require(container && container!=INVALID_HANDLE_VALUE,
+                "cannot create two-index integrity WIM");
+        require(temp(container,root.c_str())!=FALSE,"set capture scratch");
+        for(const auto& input:{source,source2}) {
+            HANDLE image=capture(container,input.c_str(),0);
+            require(image && image!=INVALID_HANDLE_VALUE,
+                    "cannot capture WIM index");
+            require(close(image)!=FALSE,"cannot close captured image index");
+        }
+        require(close(container)!=FALSE,"close captured WIM");
+        // The WIM container itself may have restricted NTFS permissions
+        // and a named stream unrelated to its internal WIM metadata.
+        // A safe transactional replacement must preserve both.
+        const std::string archive_stream="Original WIM container named ADS";
+        save(ads(wim),archive_stream);
+        set_protected_dacl(wim);
+        const auto archive_acl=dacl(wim);
+        require(read(ads(wim))==archive_stream,
+                "cannot initialize NTFS ADS on WIM container");
+
+        const auto unpack=[&](const fs::path& target,DWORD index) {
+            fs::create_directories(target);
+            DWORD opened=0;
+            HANDLE archive=create(wim.c_str(),GENERIC_READ,OPEN_EXISTING,
+                                  0,0,&opened);
+            require(archive && archive!=INVALID_HANDLE_VALUE,
+                    "open integrity WIM for independent apply");
+            require(temp(archive,root.c_str())!=FALSE,"set WIM apply scratch");
+            HANDLE image=load(archive,index);
+            require(image && image!=INVALID_HANDLE_VALUE,"load WIM apply index");
+            const BOOL ok=apply(image,target.c_str(),0);
+            const DWORD error=GetLastError();
+            close(image);
+            close(archive);
+            SetLastError(error);
+            require(ok!=FALSE,"independent system WIMApplyImage failed");
+        };
+        const auto verify=[&](const fs::path& folder) {
+            const auto restored=folder/L"Protected"/L"restricted.dat";
+            require(read(restored)==ordinary,"regular file content changed");
+            require(read(ads(restored))==stream,"NTFS named ADS content changed");
+            require(dacl(restored)==expected_acl,
+                    "protected NTFS DACL changed across WIM capture or commit");
+            const auto linked=folder/L"Protected"/L"restricted-hardlink.dat";
+            require(read(linked)==ordinary,
+                    "NTFS hardlink regular stream changed");
+            require(read(ads(linked))==stream,
+                    "NTFS hardlink named ADS stream changed");
+            require(dacl(linked)==expected_acl,
+                    "NTFS hardlink protected DACL changed");
+            require(shared_file_id(restored,linked),
+                    "WIM mounted edit broke two-name NTFS hardlink identity");
+            const auto restored_large=folder/(std::to_wstring(mib)+L"MiB-random.bin");
+            require(fs::file_size(restored_large)==size,"large file length changed");
+            require(hash(restored_large)==expected_hash,
+                    "incompressible WIM file bytes changed");
+        };
+        unpack(root/L"baseline",1);
+        verify(root/L"baseline"); // Baseline proves WIM captured DACL + ADS.
+
+        const HMODULE plugin=LoadLibraryW(argv[1]);
+        require(plugin!=nullptr,"cannot load Preview WCX DLL");
+        const auto pack=bind<Pack>(plugin,"PackFilesW");
+        const auto set_progress=bind<SetProgress>(plugin,"SetProcessDataProcW");
+        const auto incoming=root/L"incoming";
+        fs::create_directories(incoming/L"FAST_INTEGRITY_FOLDER");
+        std::wstring archive_name=wim.wstring(),index_name=L"image1";
+        std::wstring source_name=incoming.wstring();
+        wchar_t entries[]=L"FAST_INTEGRITY_FOLDER\0\0";
+        used_fast_mount.store(0);
+        preserve_on_failure=true;
+        SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"1");
+        set_progress(INVALID_HANDLE_VALUE,&progress);
+        const int result=pack(archive_name.data(),index_name.data(),
+                              source_name.data(),entries,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+        require(result==0,"WCX fast WIM folder editing failed");
+        require(used_fast_mount.load()>0,"edit bypassed the fast mounted path");
+        require(dacl(wim)==archive_acl,
+                "transaction changed protected NTFS DACL of the WIM container");
+        require(read(ads(wim))==archive_stream,
+                "transaction lost NTFS ADS attached to the WIM container");
+        unpack(root/L"after",1);
+        verify(root/L"after");
+        require(fs::is_directory(root/L"after"/L"FAST_INTEGRITY_FOLDER"),
+                "requested folder is missing after WIM apply");
+        unpack(root/L"after2",2);
+        require(read(root/L"after2"/L"second.txt")==
+                    "Second index must be unchanged",
+                "editing first WIM index modified second index contents");
+        FreeLibrary(plugin);
+        FreeLibrary(dll);
+        preserve_on_failure=false;
+        std::error_code ec;
+        fs::remove_all(root,ec);
+        std::cout<<"PASS: "<<mib<<"-MiB LZX WIM mount preserved contents, "
+                    "internal ACL/ADS/hardlinks, second index, "
+                    "and external WIM-container ACL/ADS\n";
+        return 0;
+    }catch(const std::exception& e){
+        SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+        std::cerr<<"WIM fast mount ACL/ADS integrity test FAILED: "
+                 <<e.what()<<" (fixture "<<root.string()<<")\n";
+        if(!preserve_on_failure) {
+            std::error_code ec;
+            fs::remove_all(root,ec);
+        }
+        return 2;
+    }
+}
+#endif

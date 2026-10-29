@@ -179,7 +179,9 @@ struct WimArchive::Impl {
     };
 };
 
-WimArchive::WimArchive(const std::filesystem::path& image)
+WimArchive::WimArchive(const std::filesystem::path& image,
+                       std::uint32_t only_image_index,
+                       WimArchive::ScanProgress scan_progress)
     : api_(std::make_unique<Impl>()) {
     require(std::filesystem::is_regular_file(image) &&
             !std::filesystem::is_symlink(image),
@@ -212,6 +214,11 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     const DWORD count = api_->count(api_->archive);
     require(count > 0 && count <= 256,
             "WIM has no image indexes or too many images");
+    require(only_image_index == 0 || only_image_index <= count,
+            "requested WIM image index does not exist");
+    // Reserve slots even for indices not loaded: locations_ retains the
+    // original one-based image index for WIMCreateImageFile.
+    api_->images.resize(count, nullptr);
     format_ = "WIM / Windows Imaging API / " + std::to_string(count) +
               " image(s) / " + std::to_string(parts.size()) + " part(s) / read-only";
     constexpr std::size_t max_items = 1'000'000;
@@ -221,9 +228,14 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     // Every WIM image index is represented under a separate top-level folder.
     // Iterate rather than recurse: malformed WIMs cannot exhaust the stack.
     for (DWORD index = 1; index <= count; ++index) {
+        if (only_image_index != 0 && index != only_image_index) continue;
+        // Notify before synchronous WIMLoadImage: on a multi-gigabyte
+        // install.wim this single native call can take a long time.
+        // The dialog has its own message thread and remains responsive.
+        if (scan_progress) scan_progress(index, entries_.size());
         HANDLE himage = api_->load(api_->archive, index);
         if (!is_valid(himage)) fail_windows("WIMLoadImage failed");
-        api_->images.push_back(himage);
+        api_->images[index - 1] = himage;
         std::string prefix = "image" + std::to_string(index);
         Item top;
         top.path = prefix;
@@ -231,6 +243,7 @@ WimArchive::WimArchive(const std::filesystem::path& image)
         top.attributes = FILE_ATTRIBUTE_DIRECTORY;
         entries_.push_back(std::move(top));
         locations_.push_back({});
+        if (scan_progress) scan_progress(index, entries_.size());
         struct Pending { std::wstring path; std::string relative; unsigned depth; };
         std::vector<Pending> stack;
         stack.push_back({L"", prefix, 0});
@@ -286,6 +299,8 @@ WimArchive::WimArchive(const std::filesystem::path& image)
                         item.attributes = data.dwFileAttributes;
                         entries_.push_back(std::move(item));
                         locations_.push_back({index, source});
+                        if (scan_progress && (entries_.size() % 1024u) == 0)
+                            scan_progress(index, entries_.size());
                         if (directory)
                             stack.push_back({source, relative, current.depth + 1});
                     }
@@ -300,6 +315,7 @@ WimArchive::WimArchive(const std::filesystem::path& image)
                 }
             }
         }
+        if (scan_progress) scan_progress(index, entries_.size());
     }
 }
 
@@ -321,26 +337,30 @@ bool WimArchive::read(
     // Empty WIM file resources may have no backing stream.
     if (file.size == 0) return true;
     const HANDLE loaded = api_->images[location.image_index - 1];
+    require(is_valid(loaded), "WIM resource belongs to an image index that is not loaded");
     HANDLE stream = api_->create_file(loaded, location.image_path.c_str(),
                                       GENERIC_READ, OPEN_EXISTING, 0);
     if (!is_valid(stream))
         fail_windows("WIMCreateImageFile failed");
     Impl::CloseHandle file_guard(api_.get(), stream);
-    std::vector<std::uint8_t> buffer(1024u * 1024u);
+    // Serialize callers with read_mutex_ and reuse one 1-MiB buffer.
+    // On multi-edition install.wim this avoids tens of thousands of
+    // allocations and redundant zero initialization of the same memory.
+    if (read_buffer_.empty()) read_buffer_.resize(1024u * 1024u);
     std::uint64_t offset = 0;
     while (offset < file.size) {
         const DWORD wanted = static_cast<DWORD>(
-            std::min<std::uint64_t>(buffer.size(), file.size - offset));
+            std::min<std::uint64_t>(read_buffer_.size(), file.size - offset));
         OVERLAPPED overlapped{};
         overlapped.Offset = static_cast<DWORD>(offset);
         overlapped.OffsetHigh = static_cast<DWORD>(offset >> 32);
         DWORD received = 0;
-        if (!api_->read_file(stream, buffer.data(), wanted,
+        if (!api_->read_file(stream, read_buffer_.data(), wanted,
                              &received, &overlapped))
             fail_windows("WIMReadImageFile failed");
         require(received > 0 && received <= wanted,
                 "WIM file returned incomplete or invalid data");
-        if (!consumer(buffer.data(), received)) return false;
+        if (!consumer(read_buffer_.data(), received)) return false;
         offset += received;
     }
     return true;

@@ -95,9 +95,21 @@ If Total Commander says "File iso.wcx not found!" pointing to an old
 
 A DLL cannot change a missing DLL's association before Total Commander
 has loaded it. This is a one-time settings correction, not an
-additional required program. The leading "192," sometimes shown in
-wincmd.ini is a Total Commander WCX capability mask, NOT part of the
-file path. Do not type it in the file selection dialog.
+additional required program. The leading "192," (legacy) or
+"222," (current ISO-WCX GetPackerCaps) in wincmd.ini represents
+Total Commander capability flags, NOT part of the DLL path. Never
+type these numeric flags in the file selection dialog.
+
+For the Preview build only: if the WCX association dialog's Delete
+button does nothing, the package includes optional
+ISO-WCX-RemoveAssociation.ps1. Execute it in PowerShell with
+-IniPath "C:\\path\\to\\wincmd.ini" -Extension iso for read-only
+diagnostics. With Total Commander fully closed, append -Apply to
+remove only the ISO-WCX mapping and create an INI backup. The tool
+also handles redirected PackerPlugins/PackerPlugins64 sections and
+does not modify toolbar buttons or other WCX associations.
+ISO-WCX-Repair.ps1 is available for obsolete missing ISO.WCX
+references. These scripts are NOT required for normal plugin use.
 
 Check other extensions only if they point to that same obsolete plugin.
 The installer also registers `.udf`; a UDF-only `.iso` is detected by content.

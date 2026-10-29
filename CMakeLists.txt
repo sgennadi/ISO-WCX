@@ -187,6 +187,10 @@ if(BUILD_TESTING)
   add_executable(wim_metadata_tree_tests tests/wim_metadata_tree.cpp)
   target_include_directories(wim_metadata_tree_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME wim_uncompressed_metadata_tree_read_only COMMAND wim_metadata_tree_tests)
+  # Cross-platform safety gate for the optional Windows WIM folder mount.
+  add_executable(wim_mount_fast_plan_tests tests/wim_mount_fast_plan.cpp)
+  target_include_directories(wim_mount_fast_plan_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME wim_fast_mount_plan_and_tree_parity COMMAND wim_mount_fast_plan_tests)
 endif()
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
 # runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
@@ -327,8 +331,11 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
 endif()
 
 if(WIN32)
-  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp)
-  target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32)
+  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp
+    src/wcx_wim_open_progress.cpp)
+  # Do not statically import ComCtl32/TaskDialogIndirect: WCX DLL loading
+  # must succeed in headless tools and CI before any GUI code is needed.
+  target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32 user32)
   target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
     ISO_WCX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     ISO_WCX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
@@ -365,14 +372,84 @@ if(WIN32)
   endif()
   set_target_properties(ISO-WCX PROPERTIES PREFIX "" SUFFIX "${WCX_SUFFIX}")
   if(BUILD_TESTING)
+    # Detect WCX LoadLibrary/CRT/UI dependency deadlocks before running
+    # hours of unrelated integration tests, in both Win32 and x64.
+    add_executable(wcx_dll_load_smoke tests/wcx_dll_load_smoke.cpp)
+    add_test(NAME wcx_dll_load_unload
+      COMMAND wcx_dll_load_smoke "$<TARGET_FILE:ISO-WCX>")
+    set_tests_properties(wcx_dll_load_unload PROPERTIES TIMEOUT 15)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
     add_executable(wcx_wim_smoke tests/wcx_wim_smoke.cpp)
+    # This compiles on both Windows architectures but is intentionally NOT
+    # registered as a CI test: it requires a user-supplied real install.wim.
+    # The developer-only executable is excluded from the WCX installer ZIP.
+    add_executable(wim_real_image_validate tests/wim_real_image_validate.cpp)
+    target_link_libraries(wim_real_image_validate PRIVATE iso_disc bcrypt)
+    # A small WIM-independent NTFS transaction regression on every Windows
+    # architecture, not just the privileged mount/commit integration lane.
+    add_executable(edit_transaction_ntfs tests/edit_transaction_ntfs.cpp)
+    target_include_directories(edit_transaction_ntfs PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(edit_transaction_ntfs PRIVATE advapi32)
+    add_test(NAME ntfs_atomic_replace_acl_ads_and_rollback
+      COMMAND edit_transaction_ntfs)
+    set_tests_properties(ntfs_atomic_replace_acl_ads_and_rollback
+      PROPERTIES TIMEOUT 60)
     add_test(NAME wcx_wim_multi_image_lzx_esd
-      COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>")
+      COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>"
+        "$<TARGET_FILE:wim_real_image_validate>")
     set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 240)
+    # Independent WIMGAPI decompressed-stream readback, with no WIM mount,
+    # archive edit, or third-party DLL. A synthetic two-index WIM tests
+    # both the sample audit and exhaustive --full path on each architecture.
+    add_test(NAME wcx_wim_read_only_sample_and_full_audit
+      COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>"
+        --audit-fixture "$<TARGET_FILE:wim_real_image_validate>")
+    set_tests_properties(wcx_wim_read_only_sample_and_full_audit
+      PROPERTIES TIMEOUT 120)
+    option(ISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST
+      "Test opt-in Windows WIMGAPI mount/commit on a disposable WIM" OFF)
+    if(ISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST)
+      add_test(NAME wcx_wim_fast_mount_real_windows
+        COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>" --fast-mount
+          "$<TARGET_FILE:wim_real_image_validate>")
+      set_tests_properties(wcx_wim_fast_mount_real_windows PROPERTIES TIMEOUT 420)
+      # Independent Windows system-WIMGAPI apply/readback on a 64-MiB
+      # incompressible LZX WIM with protected DACL and NTFS ADS.
+      add_executable(wcx_wim_integrity tests/wcx_wim_integrity.cpp)
+      target_link_libraries(wcx_wim_integrity PRIVATE advapi32)
+      add_test(NAME wcx_wim_fast_mount_acl_ads_hardlinks
+        COMMAND wcx_wim_integrity "$<TARGET_FILE:ISO-WCX>")
+      set_tests_properties(wcx_wim_fast_mount_acl_ads_hardlinks
+        PROPERTIES TIMEOUT 420)
+      # x64 runs a genuine 512 MiB compressed WIM; Win32 retains the
+      # 64 MiB fixture to cover 32-bit API and pointer-size compatibility.
+      if(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
+        set_tests_properties(wcx_wim_fast_mount_acl_ads_hardlinks
+          PROPERTIES ENVIRONMENT "ISO_WCX_WIM_INTEGRITY_MIB=512")
+      endif()
+    endif()
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
+    # Del/F8 regression against actual ISO-WCX WCX exports, not only the
+    # archive-edit fixture. Run for Windows x86 and x64 in Preview CI.
+    add_executable(wcx_delete_smoke tests/wcx_delete_smoke.cpp)
+    add_test(NAME wcx_delete_iso_unicode_ansi_and_bridge_safety
+      COMMAND wcx_delete_smoke "$<TARGET_FILE:ISO-WCX>")
+    set_tests_properties(wcx_delete_iso_unicode_ansi_and_bridge_safety
+      PROPERTIES TIMEOUT 120)
+    # Independently mastered two-file Bridge; call the real same-architecture
+    # WCX DeleteFilesW and re-read BOTH ISO and UDF filesystem trees.
+    add_executable(wcx_bridge_delete_smoke tests/wcx_bridge_delete_smoke.cpp)
+    add_test(NAME wcx_delete_iso_udf_bridge_dual_namespace
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_bridge_delete.py"
+        "$<TARGET_FILE:wcx_bridge_delete_smoke>"
+        "$<TARGET_FILE:ISO-WCX>"
+        "$<TARGET_FILE:disc_inspect>")
+    set_tests_properties(wcx_delete_iso_udf_bridge_dual_namespace
+      PROPERTIES TIMEOUT 180)
   endif()
 endif()
 

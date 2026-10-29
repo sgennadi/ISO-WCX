@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -15,6 +16,22 @@ struct ArchiveChange {
 };
 using EditProgress = std::function<bool()>;
 void edit_iso(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
+// Extremely narrow shared-extent ISO/UDF Bridge deletion: only existing
+// regular files with identical ISO and UDF physical runs. First preflight
+// without writing, then patch the already-private EditTransaction stage.
+// Neither function may change the source archive.
+struct UdfBridgeFileDelete {
+    std::string path;
+    std::uint64_t physical_offset=0;
+    std::uint64_t length=0;
+};
+void preflight_udf_bridge_file_deletes(
+    const std::filesystem::path& image,
+    const std::vector<UdfBridgeFileDelete>& targets);
+void patch_udf_bridge_file_deletes(
+    const std::filesystem::path& staged,
+    const std::vector<UdfBridgeFileDelete>& targets,
+    const EditProgress& progress = {});
 // UDF Type-1 Preview: bounded new file/dir allocation with a verified bitmap,
 // existing-file replacement and logical FID deletion; no bridge rewriting.
 void edit_udf(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});

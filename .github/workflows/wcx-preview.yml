@@ -13,6 +13,7 @@ on:
       - '.github/workflows/wcx-preview.yml'
       - 'INSTALL_*.txt'
       - 'ISO-WCX-Repair*'
+      - 'ISO-WCX-RemoveAssociation.ps1'
       - 'pluginst.inf'
       - 'README.md'
       - 'PREVIEW.md'
@@ -33,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Configure Visual Studio 2026 with experimental C++26
-        run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26
+        run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST=ON
       - name: Require VS2026 and C++26 configuration
         shell: pwsh
         run: |
@@ -43,11 +44,26 @@ jobs:
           Write-Host "Visual Studio 2026 C++26 Preview: ${{ matrix.arch }}"
       - name: Build
         run: cmake --build build --config Release --parallel 2
+      - name: Fail fast if the WCX DLL loader stalls
+        run: ctest --test-dir build -C Release --output-on-failure -R "^wcx_dll_load_unload$"
       - name: Run tests including WCX DLL loading
         run: ctest --test-dir build -C Release --output-on-failure
-      - name: Verify safe WCX association repair
+      - name: Verify safe WCX association repair and removal
         shell: pwsh
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'WCX association repair regression failed' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_unassociate_wcx.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'WCX selective association removal regression failed' }
+      # Build the developer-only real-WIM validator on both architectures,
+      # but ship it separately from the auto-installable Total Commander ZIP.
+      - name: Upload real-WIM validator (developer utility)
+        uses: actions/upload-artifact@v7
+        with:
+          name: ISO-WCX-WIM-Validator-${{ matrix.arch }}
+          path: build/Release/wim_real_image_validate.exe
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload preview binaries
         uses: actions/upload-artifact@v7
         with:
@@ -116,10 +132,12 @@ jobs:
             echo "Unexpected third-party shared library in ISO-WCX installer" >&2
             exit 1
           fi
-          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX.wcx ISO-WCX.wcx64)
+          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-Repair.ps1 ISO-WCX-RemoveAssociation.ps1 package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-Repair.ps1 ISO-WCX-RemoveAssociation.ps1 ISO-WCX.wcx ISO-WCX.wcx64)
           unzip -t ISO-WCX-preview.zip
           unzip -Z1 ISO-WCX-preview.zip | grep -qx 'THIRD_PARTY_NOTICES.txt'
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-Repair.ps1'
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-RemoveAssociation.ps1'
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v7
         with:

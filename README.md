@@ -25,6 +25,19 @@ remove only the obsolete `iso` association and add a new type pointing to
 the installed `ISO-WCX.wcx`. Restart TC. The plugin itself cannot repair an
 association that prevents its DLL from loading in the first place.
 
+If the **Delete** button in the *WCX association dialog* does nothing,
+that is a Total Commander configuration/UI operation, not a call to
+`DeleteFilesW` inside an archive. The value `222,C:\\...\\ISO-WCX.wcx`
+is a valid WCX capability mask plus DLL path, **not error 222**. To remove
+a specific stale association safely, use the repository's optional
+[`ISO-WCX-RemoveAssociation.ps1`](ISO-WCX-RemoveAssociation.ps1) with
+`-IniPath "C:\\path\\to\\wincmd.ini" -Extension iso` for a **read-only
+preview**; with Total Commander closed, add `-Apply` only after confirming
+the exact target. The script backs up the INI, preserves Russian/Hebrew
+configuration and user buttons, removes only matching ISO-WCX registrations
+for that extension, and leaves unrelated plugins untouched. It is not a
+runtime dependency and is not launched automatically by the WCX installer.
+
 For installation see [INSTALL_EN.txt](INSTALL_EN.txt) and
 [INSTALL_RU.txt](INSTALL_RU.txt); [PREVIEW.md](PREVIEW.md) describes
 experimental support. See [v0.21.0 release notes](RELEASE_NOTES.md).
@@ -86,6 +99,54 @@ button is available after installing a build that contains this change;
 published older Stable builds remain unchanged. If Configure... is missing,
 reassociate the WCX plugin so Total Commander refreshes its capability flags.
 
+## Experimental fast WIM folder creation (development Preview after v0.21.0)
+
+The new WIMGAPI **mount-and-commit** path can avoid applying and recapturing
+the complete WIM for a batch of empty directories in one image index.
+It is **opt-in only**, either from the new checkbox in
+**ISO-WCX → Configure** (Preview builds) or via
+`ISO_WCX_WIM_FAST_MOUNT=1` in Total Commander's process environment.
+The environment variable `0` forces the safe legacy path. The source is cloned transactionally,
+the mounted index is committed only to the private copy, and the result
+is independently enumerated and compared before source replacement.
+The staging clone is still proportional to the WIM file size; the mount
+driver and administrative access are required.
+
+**Published Stable v0.21.0 does not include this Preview feature**. Until
+privileged Windows mount, failure cleanup, ACL/ADS and real image tests
+complete, the normal Apply/Capture edit remains the safe default.
+See [WIM mount preview](docs/wim-mount-fast-preview.md).
+
+## Faster WIM open + visible progress (PR #67 Preview)
+
+For large `install.wim`, `boot.wim`, compatible `.esd` and split `.swm` files,
+`CanYouHandleThisFile(W)` performs a bounded WIM header/part check instead
+of running a second, full WIMGAPI directory enumeration before opening.
+`OpenArchive` still lists the whole WIM tree, but the extra pre-open scan
+is eliminated; no file contents are decompressed or hashed merely to
+browse it.
+
+When **Total Commander** opens a WIM part of at least **64 MiB** and the
+operation lasts over **1.2 seconds**, ISO-WCX displays a responsive native
+Windows progress window on its own UI thread. It shows the current
+`imageN`, discovered metadata entries and elapsed time, then switches
+from an indeterminate progress indicator to **actual filename-listing
+percentage** as Total Commander consumes `ReadHeader` items. Cancel
+requests are accepted but cannot interrupt an already-running synchronous
+Windows WIMGAPI call; the plugin aborts safely at the next callback
+(returning `E_EABORTED`) without modifying the source archive.
+No external executable or third-party DLL is required. A headless WCX
+consumer never receives a popup. Set
+`ISO_WCX_WIM_OPEN_PROGRESS=0` in Total Commander's process environment
+to disable the optional window.
+
+Folder deletion via Total Commander F8 now accepts either
+`imageN\\Folder\\*` or `imageN\\Folder\\*.*` as an **exact directory
+selection**. Arbitrary wildcards or unsafe path components remain refused.
+This does not make 7 GiB WIM edits instantaneous: normal directory
+changes still use staged WIMGAPI Apply/Capture unless the separate
+experimental fast-mount feature has been explicitly enabled.
+
 ## WIM read-only metadata validation (v0.21.0)
 
 v0.21.0 adds strict read-only development-side WIM metadata preflight,
@@ -131,13 +192,13 @@ restart TC. This updater is not present in the original v0.18.0 Stable build.
 | Format/layout | Coverage |
 | --- | --- |
 | WIM / ESD / SWM on Windows | Browse/extract multiple `imageN/` indexes with system WIMGAPI (XPRESS/LZX/LZMS as supported by Windows), including complete split SWM sets validated by GUID and sequence. **Edit:** standard unsplit WIM only, using Windows WIMGAPI and an NTFS staging workspace with elevated privileges; ESD/SWM read-only. No external utility or extra DLL. |
-| ISO 9660 / Joliet | Browse/extract Unicode names, multi-extent and interleaved files; fallback from corrupt Joliet. **Edit:** add/replace/delete files and folders in validated plain 2048-byte ISO9660/Joliet images; experimental long primary ISO identifiers up to 221 bytes and relaxed Joliet identifiers up to 110 UTF-16 units, including surrogate pairs. Deterministic collision-checked short aliases and El Torito boot-extent safeguards. Rejects system-area hybrid and Rock Ridge/multi-extent rebuilding. **ISO/UDF Bridge:** supports only equal-size replacement of an existing nonbootable file when ISO and UDF share its exact single data extent. No adding/deleting, resizing, or UDF metadata editing. Stages and validates both namespaces. |
+| ISO 9660 / Joliet | Browse/extract Unicode names, multi-extent and interleaved files; fallback from corrupt Joliet. **Edit:** add/replace/delete files and folders in validated plain 2048-byte ISO9660/Joliet images; experimental long primary ISO identifiers up to 221 bytes and relaxed Joliet identifiers up to 110 UTF-16 units, including surrogate pairs. Deterministic collision-checked short aliases and El Torito boot-extent safeguards. Rejects system-area hybrid and Rock Ridge/multi-extent rebuilding. **ISO/UDF Bridge (PR #67 Preview):** equal-size replacement of an existing nonbootable shared-extent file; and **restricted synchronized deletion** of regular, nonempty, nonboot files with the same single physical data extent in ISO/Joliet and UDF Type-1 **without a bitmap/LVID allocator**. Deletion compacts ISO/Joliet directory records in place and marks the corresponding UDF FID deleted with corrected CRC in one private transaction. Reparse both namespaces before atomic commit. No general add/mkdir, resized replacement, directory deletion, Rock Ridge/hybrid system-area edits, bootable Bridge edits or UDF allocation recovery. See [Bridge deletion constraints](docs/iso-udf-bridge-deletion.md). |
 | Rock Ridge | RRIP NM/CE and relocated CL directories; PX read-only and TF modification timestamps; no symlink/device extraction |
 | Raw BIN/IMG | CD Mode 1 / Mode 2 Form 1 (2352-byte), XA Form 1 (2336-byte); automatic probing limited to single-track images |
 | CUE/BIN | BINARY data tracks (`MODE1/2048`, `MODE1/2352`, `MODE2/2352`, `MODE2/2336`), INDEX 00/01, multiple FILE entries, audio-track skipping; latest recognizable data track |
 | CloneCD CCD/IMG | `.ccd` version 3 + matching `.img` (2352-byte sectors), single-session Mode 1 / Mode 2 Form 1 data tracks, including ECMA-130 scrambled sectors. Optional `.sub` sidecar exposed byte-for-byte under `subchannels/disc.sub`; CD-Audio and CD-Text decoding not implemented; CRC-valid Q track/index frames summarized in `subchannels/q-index.csv`. |
 | 150-sector prefix | Relative and some absolute-LBA cases (not full multisession parsing) |
-| UDF Type 1 | Browse FE/EFE, OSTA CS0 Unicode, AED continuations and reserve VDS failover. Read-only whole-disk UDF 2.01 with 512–32768-byte power-of-two blocks. **Write Preview (validated, nonhybrid UDF-only 2048-byte physical Type-1):** atomic multi-file and nested directory creation; mixed create/replace/logical-delete; bounded FE/ShortAD resize; multiple extents and files over 4 GiB; safe exclusive-ownership deleted FE/ShortAD reclamation and next-transaction block reuse; reuse of verified deleted FID slots to prevent directory growth. Atomic staged verification with optional CoW reflink/block clone and sparse fallback. **Not** a general UDF writer: ISO/UDF Bridge rewriting, VAT/metadata/sparable writes, symlinks, hard links and AED chain creation remain unsupported. See [UDF writer](docs/udf-type1-writer.md) and [portability](docs/udf-cross-platform.md). |
+| UDF Type 1 | Browse FE/EFE, OSTA CS0 Unicode, AED continuations and reserve VDS failover. Read-only whole-disk UDF 2.01 with 512–32768-byte power-of-two blocks. **Write Preview (validated, nonhybrid UDF-only 2048-byte physical Type-1):** atomic multi-file and nested directory creation; mixed create/replace/logical-delete; bounded FE/ShortAD resize; multiple extents and files over 4 GiB; safe exclusive-ownership deleted FE/ShortAD reclamation and next-transaction block reuse; reuse of verified deleted FID slots to prevent directory growth. Atomic staged verification with optional CoW reflink/block clone and sparse fallback. **Not** a general UDF writer: general ISO/UDF Bridge rewriting (except the narrow synchronized file delete above), VAT/metadata/sparable writes, symlinks, hard links and AED chain creation remain unsupported. See [UDF writer](docs/udf-type1-writer.md) and [portability](docs/udf-cross-platform.md). |
 | UDF Metadata / VAT / Sparable | Experimental read-only partition-map support with synthetic fixtures, not comprehensive UDF 1.02–2.60. The UDF reader exposes regular files and directories; symlinks, block devices and other special ICB types are not materialized as ordinary files. |
 | Nero NRG | Uncompressed NERO / NER5, DAOI/DAOX and ETNF/ETN2 data tracks; reads the latest detectable data track |
 | Alcohol MDS/MDF | MDS v1 session/track descriptors with sidecar MDF (2048/2336/2352/2448 data sectors). **Preview: MDS v2 / monolithic MDX**, native AES-decrypted/zlib-inflated descriptor, plain and compressed (stored/RLE/raw-DEFLATE groups) unencrypted data-track random access, extraction through WCX with real MDF/MDX ISO filesystem fixtures. Password-protected AES-LRW sectors, other optical variants and writing remain unsupported. |

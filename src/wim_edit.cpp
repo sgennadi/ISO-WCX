@@ -3,6 +3,8 @@
 #include "iso_wcx/edit_transaction.hpp"
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/wim_parts.hpp"
+#include "iso_wcx/wim_mount_fast_plan.hpp"
+#include "iso_wcx/wim_mount_recovery.hpp"
 #include <msxml6.h>
 #include <map>
 #include <mutex>
@@ -14,6 +16,8 @@
 #include <fstream>
 #include <string>
 #include <utility>
+#include <vector>
+#include <unordered_map>
 #include <cstdint>
 
 namespace iso_wcx { namespace {
@@ -171,6 +175,311 @@ void remove_tree(const std::filesystem::path& path){
     checked(SetFileAttributesW(path.c_str(),attr&~FILE_ATTRIBUTE_READONLY),"clear temporary read-only flag");
     checked((attr&FILE_ATTRIBUTE_DIRECTORY)?RemoveDirectoryW(path.c_str()):DeleteFileW(path.c_str()),"remove WIM entry");
 }
+
+// The fast folder-only path is deliberately opt-in during initial field
+// validation. No untested driver mount is attempted in existing Stable builds.
+// WIM_GENERIC_MOUNT == GENERIC_EXECUTE; this uses the Windows system WIMGAPI,
+// never DISM.EXE, wimlib-imagex, a runtime DLL or a separate worker EXE.
+bool fast_mount_requested() {
+    // A process-level override is especially useful for CI and immediate
+    // emergency opt-out: 0 always disables; 1 enables regardless of GUI.
+    wchar_t setting[16]{};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD n=GetEnvironmentVariableW(
+        L"ISO_WCX_WIM_FAST_MOUNT",setting,16);
+    if(n!=0 || GetLastError()!=ERROR_ENVVAR_NOT_FOUND)
+        return n==1 && setting[0]==L'1';
+    // User preference is stored independently from the updater settings.
+    // Unset or malformed values fail closed to the old Apply/Capture path.
+    constexpr wchar_t registry_key[]=L"Software\\ISO-WCX\\WIM";
+    DWORD enabled=0,size=sizeof(enabled);
+    return RegGetValueW(HKEY_CURRENT_USER,registry_key,
+              L"FastMountFolders",RRF_RT_REG_DWORD,nullptr,&enabled,
+              &size)==ERROR_SUCCESS && enabled==1;
+}
+std::vector<wim_detail::WimTreeItem> tree_snapshot(const WimArchive& archive) {
+    std::vector<wim_detail::WimTreeItem> result;
+    result.reserve(archive.items().size());
+    for(const auto& item:archive.items())
+        result.push_back({item.path,item.size,item.attributes,item.dos_time,
+                          item.directory});
+    return result;
+}
+struct WimStageCopy {
+    const EditProgress& progress;
+    const WimEditStatus& status;
+    ULONGLONG last_signal=0;
+    bool cancelled=false;
+};
+DWORD CALLBACK wim_stage_copy_callback(
+    LARGE_INTEGER total,LARGE_INTEGER transferred,LARGE_INTEGER,
+    LARGE_INTEGER,DWORD,DWORD,HANDLE,HANDLE,LPVOID opaque) noexcept {
+    auto& state=*static_cast<WimStageCopy*>(opaque);
+    try {
+        const auto now=GetTickCount64();
+        if(now-state.last_signal>=200u || transferred.QuadPart==total.QuadPart) {
+            state.last_signal=now;
+            const auto bytes=total.QuadPart>0 ?
+                std::clamp<LONGLONG>(transferred.QuadPart,0,total.QuadPart) : 0;
+            const unsigned percent=total.QuadPart>0 ?
+                6u+static_cast<unsigned>(20ull*static_cast<std::uint64_t>(bytes)/
+                                          static_cast<std::uint64_t>(total.QuadPart)) : 6u;
+            if((state.status && !state.status(L"Clone WIM (fast folder edit)",percent)) ||
+               (state.progress && !state.progress())) {
+                state.cancelled=true;
+                return PROGRESS_CANCEL;
+            }
+        }
+        return PROGRESS_CONTINUE;
+    }catch(...) {
+        state.cancelled=true;
+        return PROGRESS_CANCEL;
+    }
+}
+void fast_mount_folder_edit(
+        const std::filesystem::path& path,
+        const wim_detail::MountFolderPlan& plan,
+        const EditProgress& progress,const WimEditStatus& status) {
+    auto report=[&](const wchar_t* label,unsigned percent) {
+        if(status && !status(label,percent))throw EditCancelled();
+        edit_tick(progress);
+    };
+    report(L"Validate WIM for fast folder edit",2);
+    std::vector<wim_detail::WimTreeItem> original;
+    {
+        // Only the selected WIM index can gain folders. Enumerating every
+        // unrelated Windows edition here doubled the cost of both the
+        // preflight and the independent post-commit parity check.
+        const WimArchive existing(path,plan.index);
+        original=tree_snapshot(existing);
+    }
+    // Skip an expensive transaction entirely if each folder already exists.
+    // WIM can encode two names which Windows treats as the same path,
+    // and NTFS is usually case-insensitive. Reject ambiguous aliases before
+    // cloning any multi-gigabyte WIM or making a mount point.
+    std::unordered_map<std::string,bool> known;
+    std::unordered_map<std::string,std::string> case_aliases;
+    known.reserve(original.size());
+    case_aliases.reserve(original.size());
+    for(const auto& item:original) {
+        if(!known.emplace(item.path,item.directory).second ||
+           !case_aliases.emplace(
+               wim_detail::windows_case_key(item.path),item.path).second)
+            throw EditUnsupported("ambiguous or case-colliding WIM paths");
+    }
+    const std::string prefix="image"+std::to_string(plan.index)+"/";
+    bool all_exist=true;
+    for(const auto& relative:plan.paths) {
+        std::size_t start=0;
+        while(start<relative.size()) {
+            const auto slash=relative.find('/',start);
+            const auto end=slash==std::string::npos?relative.size():slash;
+            const auto key=prefix+relative.substr(0,end);
+            const auto alias=case_aliases.find(wim_detail::windows_case_key(key));
+            if(alias!=case_aliases.end() && alias->second!=key)
+                throw EditUnsupported(
+                    "WIM folder spelling differs from an existing NTFS name");
+            const auto hit=known.find(key);
+            if(hit!=known.end() && !hit->second)
+                throw EditUnsupported("cannot create WIM folder beneath an existing file");
+            if(slash==std::string::npos) {
+                if(hit==known.end())all_exist=false;
+                break;
+            }
+            start=slash+1;
+        }
+    }
+    if(all_exist) {
+        report(L"WIM folders already exist",99);
+        return;
+    }
+
+    // Keep a recoverable sibling clone. Even a failed mount must never
+    // touch the original WIM or delete a still-mounted Windows directory.
+    Privileges privileges;
+    // Fail before the potentially multi-gigabyte stage clone if the host
+    // does not export its native Windows WIM mount/commit entry points.
+    Library library;
+    HMODULE dll=library.h;
+    using Mount=BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD);
+    using Commit=BOOL(WINAPI*)(HANDLE,DWORD,PHANDLE);
+    using Unmount=BOOL(WINAPI*)(HANDLE,DWORD);
+    auto mount=api<Mount>(dll,"WIMMountImageHandle");
+    auto commit=api<Commit>(dll,"WIMCommitImageHandle");
+    auto unmount=api<Unmount>(dll,"WIMUnmountImageHandle");
+    auto create=api<HANDLE(WINAPI*)(PCWSTR,DWORD,DWORD,DWORD,DWORD,PDWORD)>(
+        dll,"WIMCreateFile");
+    auto close=api<Close>(dll,"WIMCloseHandle");
+    auto temp=api<BOOL(WINAPI*)(HANDLE,PCWSTR)>(dll,"WIMSetTemporaryPath");
+    auto load=api<HANDLE(WINAPI*)(HANDLE,DWORD)>(dll,"WIMLoadImage");
+    EditTransaction tx(path);
+    const auto folder=tx.workspace/L"mounted";
+    const auto scratch=tx.workspace/L"scratch";
+    const auto mount_name=folder.wstring();
+    if(mount_name.size()>=MAX_PATH || scratch.wstring().size()>=MAX_PATH)
+        throw EditUnsupported("WIM fast mount path exceeds Windows MAX_PATH");
+    wchar_t volume[MAX_PATH]{},filesystem[MAX_PATH]{};
+    checked(GetVolumePathNameW(tx.workspace.c_str(),volume,MAX_PATH),
+            "inspect mount workspace volume");
+    checked(GetVolumeInformationW(volume,nullptr,0,nullptr,nullptr,nullptr,
+                                  filesystem,MAX_PATH),
+            "inspect mount workspace filesystem");
+    if(_wcsicmp(filesystem,L"NTFS")!=0)
+        throw EditUnsupported("WIM mount fast path requires an NTFS volume");
+    // CopyFileEx would otherwise fill the drive and fail after many minutes.
+    // Verify quota-aware caller-available space on the actual sibling mount
+    // volume, with a conservative allowance for mount scratch and metadata.
+    ULARGE_INTEGER available{};
+    checked(GetDiskFreeSpaceExW(tx.workspace.c_str(),&available,
+                                nullptr,nullptr),
+            "inspect NTFS free space for fast WIM staging");
+    const auto source_size=std::filesystem::file_size(path);
+    if(!wim_detail::enough_staging_space(
+          static_cast<std::uint64_t>(source_size),available.QuadPart))
+        throw EditUnsupported(
+            "insufficient NTFS free space for WIM clone and mount scratch");
+    std::filesystem::create_directory(folder);
+    std::filesystem::create_directory(scratch);
+    report(L"Stage WIM before mounting",6);
+    WimStageCopy copy{progress,status};
+    BOOL aborted=FALSE;
+    const BOOL cloned=CopyFileExW(path.c_str(),tx.output.c_str(),
+                                 &wim_stage_copy_callback,&copy,&aborted,
+                                 COPY_FILE_FAIL_IF_EXISTS);
+    if(!cloned) {
+        if(copy.cancelled || GetLastError()==ERROR_REQUEST_ABORTED)
+            throw EditCancelled();
+        checked(false,"clone WIM into private edit workspace");
+    }
+    checked(std::filesystem::file_size(tx.output)==std::filesystem::file_size(path),
+            "WIM staged clone changed length");
+    // Fail before invoking the privileged mount driver if another process
+    // modified/replaced the source while we copied the multi-gigabyte WIM.
+    // The commit repeats this check after unmount and verification.
+    tx.assert_source_unchanged();
+    wim_detail::Header stage_header{};
+    if(!wim_detail::read_header(tx.output,stage_header))
+        throw EditUnsupported("cloned WIM header is invalid");
+    wim_detail::validate(stage_header);
+    report(L"Mount selected WIM image",28);
+    // The mount driver can outlive the process. Persist this private,
+    // operation-specific recovery note before registering the mount.
+    {
+        const auto note=wim_detail::make_mount_recovery_note(
+            std::filesystem::absolute(path),tx.output,folder,plan.index);
+        const auto marker=tx.workspace/L"WIM-MOUNT-RECOVERY.txt";
+        HANDLE handle=CreateFileW(marker.c_str(),GENERIC_WRITE,0,nullptr,
+                                  CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+        checked(handle!=INVALID_HANDLE_VALUE,"create WIM recovery note");
+        DWORD written=0;
+        const BOOL wrote=WriteFile(handle,note.data(),
+                                  static_cast<DWORD>(note.size()),&written,nullptr);
+        const BOOL durable=wrote && written==note.size() && FlushFileBuffers(handle);
+        CloseHandle(handle);
+        checked(durable,"flush WIM recovery note");
+    }
+
+    // WIMGAPI's mount driver may not be installed on every Windows host.
+    // This Preview mode refuses and preserves the original if unavailable.
+    {
+        // Windows WIMGAPI mount access is the GENERIC_EXECUTE bit. Keep
+        // READ|WRITE as well so WIMCommitImageHandle can update the staged WIM.
+        Handle container(create(tx.output.c_str(),
+                          GENERIC_READ|GENERIC_WRITE|GENERIC_EXECUTE,
+                          OPEN_EXISTING,0,0,nullptr),close);
+        checked(temp(container.h,scratch.c_str()),
+                "configure WIM fast mount scratch directory");
+        Handle image(load(container.h,plan.index),close);
+        Callback callback{progress,status};
+        Registered registration(dll,container.h,callback);
+        bool mounted=false;
+        bool unmount_attempted=false;
+        try {
+            // FAST flag supports lazy Windows WIM mounts. No fallback after
+            // invoking mount: failed mounts must be diagnosed/cleaned explicitly.
+            constexpr DWORD WIM_FLAG_MOUNT_FAST=0x00000400u;
+            constexpr DWORD WIM_FLAG_NO_RP_FIX=0x00000100u;
+            if(!mount(image.h,folder.c_str(),
+                      WIM_FLAG_MOUNT_FAST|WIM_FLAG_NO_RP_FIX)) {
+                const DWORD error=GetLastError();
+                // A failed mount might still leave a registered reparse point.
+                // Preserve its staged WIM and path for administrator recovery.
+                tx.preserve();
+                throw std::runtime_error("WIM fast mount failed (Win32 "+
+                    std::to_string(error)+"); staged workspace: "+
+                    tx.workspace.string());
+            }
+            mounted=true;
+            report(L"Create WIM folders without applying image",39);
+            for(const auto& relative_name:plan.paths) {
+                const auto relative=relative_path(relative_name);
+                no_reparse(folder,relative);
+                const auto destination=folder/relative;
+                std::filesystem::create_directories(destination);
+                no_reparse(folder,relative);
+                const auto attrs=GetFileAttributesW(destination.c_str());
+                checked(attrs!=INVALID_FILE_ATTRIBUTES &&
+                        (attrs&FILE_ATTRIBUTE_DIRECTORY)!=0 &&
+                        (attrs&FILE_ATTRIBUTE_REPARSE_POINT)==0,
+                        "verify new WIM directory attributes");
+                callback.tick();
+            }
+            report(L"Commit fast WIM metadata",60);
+            // 0 updates the selected index in place, never adds a new index.
+            // Do not request VERIFY here; a full stream re-read would defeat
+            // folder-only performance. Independently verify the resulting tree.
+            checked(commit(image.h,0,nullptr),"commit mounted WIM metadata");
+            report(L"Unmount fast WIM edit",83);
+            // WIMGAPI may have partially released the mount on failure.
+            // Never invoke Unmount twice on a possibly stale image handle.
+            unmount_attempted=true;
+            if(!unmount(image.h,0)) {
+                const DWORD error=GetLastError();
+                tx.preserve();
+                throw std::runtime_error("WIM fast unmount failed (Win32 "+
+                    std::to_string(error)+"); recover mounted workspace: "+
+                    tx.workspace.string());
+            }
+            mounted=false;
+        }catch(...) {
+            if(mounted && !unmount_attempted) {
+                unmount_attempted=true;
+                if(!unmount(image.h,0)) {
+                    tx.preserve();
+                    throw std::runtime_error(
+                        "WIM mounted workspace could not be discarded; "
+                        "do NOT delete or rename its image before recovery: "+
+                        tx.workspace.string());
+                }
+            }
+            throw;
+        }
+    }
+    // The mount and all WIMGAPI handles must be closed before independent
+    // metadata enumeration and before attempting to replace the source WIM.
+    report(L"Verify WIM folder changes",87);
+    wim_detail::Header updated_header{};
+    if(!wim_detail::read_header(tx.output,updated_header))
+        throw EditUnsupported("fast WIM output has no valid header");
+    wim_detail::validate(updated_header);
+    if(wim_detail::u32(updated_header,44)!=
+           wim_detail::u32(stage_header,44) ||
+       wim_detail::u32(updated_header,120)!=
+           wim_detail::u32(stage_header,120))
+        throw EditUnsupported("fast WIM unexpectedly changed image count or boot index");
+    {
+        // Other indexes are preserved by the native in-place WIM commit.
+        // The header check above ensures image count and boot index remain
+        // intact; compare every entry and attribute in the modified index.
+        const WimArchive updated(tx.output,plan.index);
+        const auto newer=tree_snapshot(updated);
+        std::string failure;
+        if(!wim_detail::verify_mounted_folder_tree(original,newer,plan,failure))
+            throw EditUnsupported("fast WIM change verification failed: "+failure);
+    }
+    report(L"Commit verified fast WIM",99);
+    tx.commit(progress);
+}
 }
 void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,
               const EditProgress& progress,const WimEditStatus& status){
@@ -188,6 +497,14 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         auto digits=top.substr(5);if(digits.empty()||digits.size()>3||digits[0]=='0'||digits.find_first_not_of("0123456789")!=std::string::npos)throw EditUnsupported("invalid WIM index");unsigned index=static_cast<unsigned>(std::stoul(digits));if(!index||index>images)throw EditUnsupported("creating WIM indexes is not supported yet");
         if(slash==std::string::npos){if(!c.remove)throw EditUnsupported("cannot replace an image index");deleted.insert(index);}else{c.path=p.substr(slash+1);edits[index].push_back(std::move(c));}}
     if(deleted.size()==images)throw EditUnsupported("cannot delete the last WIM image");
+    // Strict experimental opt-in until real machine WIM mount and crash
+    // recovery have been validated. Normal users retain Apply/Capture.
+    if(fast_mount_requested()) {
+        if(const auto plan=wim_detail::plan_mounted_folders(edits,deleted)) {
+            fast_mount_folder_edit(path,*plan,progress,status);
+            return;
+        }
+    }
     report(L"Prepare NTFS staging",3);
     Privileges privileges;Apartment apartment;EditTransaction tx(path);Library library;auto m=library.h;
     // Native Windows capture/apply preserve security and alternate streams on NTFS.
@@ -246,65 +563,91 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         }
         checked(api<BOOL(WINAPI*)(HANDLE,DWORD)>(m,"WIMSetBootImage")(output.h,new_boot),"preserve WIM boot index");
     }
-    // Reopen the rebuilt image, validate all index trees, and independently
-    // compare newly supplied streams. Do not re-decompress every unchanged
-    // file: this made creating even an empty directory take minutes longer.
+    // WIMExportImage already validated every unchanged index. The legacy
+    // verifier re-enumerated ALL trees after Apply/Capture (including hundreds
+    // of thousands of files in unrelated Windows editions) even though it
+    // only checked requested changes. Verify the header's index/boot mapping
+    // once, and enumerate/read back only indexes that were actually changed.
+    // This preserves full edited-file content comparison and cancellation.
     report(L"Verify WIM structure",85);
-    {
-        WimArchive verified(tx.output);
-        std::map<std::string,std::size_t> found;
+    wim_detail::Header result_header{};
+    if(!wim_detail::read_header(tx.output,result_header))
+        throw EditUnsupported("rebuilt WIM header is missing");
+    wim_detail::validate(result_header);
+    const unsigned expected_images=images-static_cast<unsigned>(deleted.size());
+    unsigned expected_boot=0;
+    if(boot!=0 && !deleted.contains(boot)) {
+        expected_boot=boot;
+        for(const auto removed_index:deleted)
+            if(removed_index<boot) --expected_boot;
+    }
+    if(wim_detail::u32(result_header,44)!=expected_images ||
+       wim_detail::u32(result_header,120)!=expected_boot)
+        throw EditUnsupported("rebuilt WIM image/boot index mapping changed");
+
+    unsigned output_index=0;
+    for(unsigned index=1;index<=images;++index) {
+        if(deleted.contains(index))continue;
+        ++output_index;
+        const auto at=edits.find(index);
+        if(at==edits.end())continue;
+        // WIMGAPI can enumerate one chosen index without loading other
+        // editions. The original full-image scan was proportional to the
+        // total combined file count, not the number of requested changes.
+        WimArchive verified(tx.output,output_index);
+        std::unordered_map<std::string,std::size_t> found;
         const auto& items=verified.items();
-        for(std::size_t i=0;i<items.size();++i){
-            // Metadata may contain hundreds of thousands of entries. Avoid
-            // a UI callback for each one; checking cancellation every 1024
-            // entries is responsive without monopolizing Total Commander.
+        found.reserve(items.size());
+        for(std::size_t i=0;i<items.size();++i) {
             if((i&1023u)==0u)callback.tick();
             if(!found.emplace(items[i].path,i).second)
                 throw EditUnsupported("duplicate WIM output path");
         }
-        unsigned new_index=0;
-        for(unsigned index=1;index<=images;++index){
-            if(deleted.count(index))continue;
-            ++new_index;
-            const auto prefix="image"+std::to_string(new_index);
-            if(!found.contains(prefix))throw EditUnsupported("missing output WIM image index");
-            if(!edits.contains(index))continue;
-            for(const auto& change:edits.at(index)){
-                callback.tick();
-                const auto key=prefix+"/"+change.path;
-                const auto entry=found.find(key);
-                if(change.remove){
-                    if(entry!=found.end())throw EditUnsupported("removed WIM entry still exists");
-                    continue;
-                }
-                if(entry==found.end())throw EditUnsupported("new WIM entry is missing");
-                const auto& item=items[entry->second];
-                if(item.directory!=change.directory)
-                    throw EditUnsupported("WIM edited entry has wrong type");
-                if(change.directory)continue;
-                const auto length=std::filesystem::file_size(change.source);
-                if(item.size!=length)throw EditUnsupported("WIM edited file size differs");
-                std::ifstream input(change.source,std::ios::binary);
-                if(!input)throw EditUnsupported("cannot verify WIM added file source");
-                bool mismatch=false;
-                std::array<char,64*1024> buffer{};
-                const bool read=verified.read(entry->second,[&](const std::uint8_t* data,std::size_t bytes){
+        const auto prefix="image"+std::to_string(output_index);
+        if(!found.contains(prefix))
+            throw EditUnsupported("missing rebuilt WIM image index");
+        for(const auto& change:at->second) {
+            callback.tick();
+            const auto key=prefix+"/"+change.path;
+            const auto entry=found.find(key);
+            if(change.remove) {
+                if(entry!=found.end())
+                    throw EditUnsupported("removed WIM entry still exists");
+                continue;
+            }
+            if(entry==found.end())
+                throw EditUnsupported("new WIM entry is missing");
+            const auto& item=items[entry->second];
+            if(item.directory!=change.directory)
+                throw EditUnsupported("WIM edited entry has wrong type");
+            if(change.directory)continue;
+            const auto length=std::filesystem::file_size(change.source);
+            if(item.size!=length)
+                throw EditUnsupported("WIM edited file size differs");
+            std::ifstream input(change.source,std::ios::binary);
+            if(!input)
+                throw EditUnsupported("cannot verify WIM added file source");
+            bool mismatch=false;
+            std::array<char,64*1024> buffer{};
+            const bool read=verified.read(entry->second,
+                [&](const std::uint8_t* data,std::size_t bytes) {
                     callback.tick();
                     std::size_t offset=0;
-                    while(offset<bytes){
+                    while(offset<bytes) {
                         const auto n=std::min(buffer.size(),bytes-offset);
                         input.read(buffer.data(),static_cast<std::streamsize>(n));
                         if(input.gcount()!=static_cast<std::streamsize>(n) ||
-                           std::memcmp(buffer.data(),data+offset,n)!=0){
-                            mismatch=true;return false;
+                           std::memcmp(buffer.data(),data+offset,n)!=0) {
+                            mismatch=true;
+                            return false;
                         }
                         offset+=n;
                     }
                     return true;
                 });
-                if(!read || mismatch || input.peek()!=std::char_traits<char>::eof())
-                    throw EditUnsupported("WIM edited file readback mismatch");
-            }
+            if(!read || mismatch ||
+               input.peek()!=std::char_traits<char>::eof())
+                throw EditUnsupported("WIM edited file readback mismatch");
         }
     }
     report(L"Commit verified WIM",99);
