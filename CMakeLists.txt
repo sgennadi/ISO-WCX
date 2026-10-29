@@ -372,6 +372,12 @@ if(WIN32)
   endif()
   set_target_properties(ISO-WCX PROPERTIES PREFIX "" SUFFIX "${WCX_SUFFIX}")
   if(BUILD_TESTING)
+    # Detect WCX LoadLibrary/CRT/UI dependency deadlocks before running
+    # hours of unrelated integration tests, in both Win32 and x64.
+    add_executable(wcx_dll_load_smoke tests/wcx_dll_load_smoke.cpp)
+    add_test(NAME wcx_dll_load_unload
+      COMMAND wcx_dll_load_smoke "$<TARGET_FILE:ISO-WCX>")
+    set_tests_properties(wcx_dll_load_unload PROPERTIES TIMEOUT 15)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
