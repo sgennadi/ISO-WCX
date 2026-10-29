@@ -10,9 +10,35 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
+## Batch image associations and ZIP performance (2026-10-29 Preview)
+
+Use the optional `ISO-WCX-AssociateAll.cmd` from the installed Preview
+plugin folder **after closing all Total Commander windows**. One run safely
+registers all 23 unambiguous image extensions (ISO/UDF/WIM/ESD/SWM,
+CUE/CCD/NRG/MDS/MDX, CSO/ZSO/ISZ/DAA, IMG/RAW/VHD/VHDX and floppy types).
+A dry run is available via `ISO-WCX-AssociateAll.ps1`; append `-Apply`
+to save. Explicit `-IncludeOptional` adds the ambiguous `.bin`, `.mdf`
+and experimental `.chd` only on request.
+
+The helper validates Win32/x64 DLL architecture, handles redirected
+`[PackerPlugins]`/`[PackerPlugins64]` sections, preserves original INI
+encoding and all toolbar/user-command settings, and backs up every modified
+INI. Existing third-party handlers are skipped; ZIP/RAR/7z cannot be replaced.
+The Preview installer ZIP includes both helper files; neither is needed to
+load or use the WCX plugin.
+
+To prevent sluggish normal ZIP opens, the Preview plugin no longer advertises
+`PK_CAPS_BY_CONTENT`. The cached/native WCX capability mask changes from
+Stable `222` to Preview `158`, and both `CanYouHandleThisFile(W)` and
+`OpenArchive(W)` immediately refuse unrelated extensions. The updater also
+does not start solely because Total Commander queries WCX capabilities.
+ZIP remains handled by Total Commander. Native ABI/CI regressions cover
+fast rejection, but actual Total Commander performance remains field-test
+pending, as does real 7 GiB `install.wim` GUI validation.
+
 ## If Total Commander says `File iso.wcx not found!`
 
-This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.wcx`; it does **not** indicate that `ISO-WCX.wcx` or its adjacent 64-bit `ISO-WCX.wcx64` is missing. The automatic installer cannot remove existing old plugin associations. In Configuration > Options > Packer > Configure packer extension WCXs, select `iso`, delete **only** the obsolete missing ISO.WCX entry, then click **New type...** and choose the installed `ISO-WCX.wcx`. If the **Delete** button in that association dialog does nothing, run the bundled optional `ISO-WCX-RemoveAssociation.ps1` with `-IniPath "C:\\path\\wincmd.ini" -Extension iso` to preview, then close TC and add `-Apply` to remove **only that ISO-WCX association** with a backup. For an obsolete `iso.wcx` use the separate `ISO-WCX-Repair.ps1`. These tools preserve user toolbar buttons, unrelated extensions and INI encoding. They are **not needed** to run the plugin. Restart Total Commander and retry with Ctrl+PgDn. Do not type `222,` in the DLL filename field. See [INSTALL_RU.txt](INSTALL_RU.txt) and [INSTALL_EN.txt](INSTALL_EN.txt).
+This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.wcx`; it does **not** indicate that `ISO-WCX.wcx` or its adjacent 64-bit `ISO-WCX.wcx64` is missing. The automatic installer cannot remove existing old plugin associations. In Configuration > Options > Packer > Configure packer extension WCXs, select `iso`, delete **only** the obsolete missing ISO.WCX entry, then click **New type...** and choose the installed `ISO-WCX.wcx`. If the **Delete** button in that association dialog does nothing, run the bundled optional `ISO-WCX-RemoveAssociation.ps1` with `-IniPath "C:\\path\\wincmd.ini" -Extension iso` to preview, then close TC and add `-Apply` to remove **only that ISO-WCX association** with a backup. For an obsolete `iso.wcx` use the separate `ISO-WCX-Repair.ps1`. These tools preserve user toolbar buttons, unrelated extensions and INI encoding. They are **not needed** to run the plugin. Restart Total Commander and retry with Ctrl+PgDn. Do not type capability masks (`222,` in old Stable, `158,` in Preview) in the DLL filename field. See [INSTALL_RU.txt](INSTALL_RU.txt) and [INSTALL_EN.txt](INSTALL_EN.txt).
 
 ## Supported in the preview
 
