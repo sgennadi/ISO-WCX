@@ -40,7 +40,12 @@ struct IsoNamespaceView {
 
 class Disc {
 public:
-    explicit Disc(std::filesystem::path image);
+    // Optional metadata progress is used for the WCX-owned opening dialog.
+    // It is invoked while WIMGAPI enumerates WIM indexes, before Total
+    // Commander can register SetProcessDataProc on the archive handle.
+    using WimScanProgress = std::function<void(std::uint32_t,std::size_t)>;
+    explicit Disc(std::filesystem::path image,
+                  WimScanProgress wim_scan_progress = {});
     // WIM metadata is owned by WimArchive. Return the same immutable vector
     // instead of copying hundreds of thousands of Item strings into Disc.
     [[nodiscard]] const std::vector<Item>& items() const noexcept;
