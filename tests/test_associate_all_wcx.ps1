@@ -66,6 +66,11 @@ try {
     & $tool -IniPath $ini -PluginDirectory $plugin -Apply | Out-Null
     $after = [IO.File]::ReadAllBytes($ini)
     $txt = Text-Ini $ini
+    if (-not $txt.Contains("iso=158,$target")) {
+        $relevant = @($txt -split '[\r\n]+' | Where-Object { $_ -match '^(?i:iso|wim|cue|udf)\s*=' })
+        Write-Host "DEBUG expected: iso=158,$target"
+        Write-Host "DEBUG actual packer rows: $($relevant -join ' // ')"
+    }
     Assert ($txt.Contains("iso=158,$target")) 'old mask was not refreshed'
     Assert ($txt.Contains("wim=158,$target")) 'wim missing'
     Assert ($txt.Contains("vhdx=158,$target")) 'vhdx missing'
