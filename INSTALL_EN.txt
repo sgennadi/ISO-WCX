@@ -11,6 +11,30 @@ Installation (no additional tools)
    These are the 32-bit and 64-bit versions of the same WCX plugin.
 4. Restart Total Commander and open an ISO, VHD or VHDX with Ctrl+PgDn.
 
+Bulk image associations and normal ZIP opening (Preview only)
+-------------------------------------------------------------
+The Preview ZIP includes ISO-WCX-AssociateAll.cmd and
+ISO-WCX-AssociateAll.ps1. After installing both WCX plugin binaries,
+close ALL Total Commander windows and run ISO-WCX-AssociateAll.cmd from
+the installed ISO-WCX folder. A single run registers 23 unambiguous
+image extensions. PowerShell runs ISO-WCX-AssociateAll.ps1 in READ-ONLY
+mode by default; add -Apply with TC closed to make the changes.
+Use -IniPath "C:\Path\wincmd.ini" and -PluginDirectory "C:\Path\ISO-WCX"
+if the automatic paths are not the active settings.
+
+Every changed INI gets a byte-exact recovery backup. RedirectSection and
+separate PackerPlugins/PackerPlugins64 files are respected. Toolbars,
+custom user commands, unrelated WCX handlers, ZIP/RAR/7z associations and
+original INI encodings are preserved. Already-occupied extensions are
+reported and skipped. Ambiguous/experimental BIN/MDF/CHD require explicit
+-IncludeOptional. The helper is optional, not a plugin runtime dependency.
+
+ZIP speed fix in Preview: ISO-WCX no longer advertises the global
+PK_CAPS_BY_CONTENT (64) capability, and its probe/OpenArchive reject
+ZIP/RAR/7z before scanning an image. Preview capabilities now have
+mask 158 rather than Stable v0.21.0 mask 222; TC's normal ZIP support
+remains intact. Verify actual ZIP timing after installing this Preview.
+
 No setup EXE, repair CMD, PowerShell script, external parser DLL, virtual
 disk mount, driver, or standalone disk extraction program is necessary.
 The WCX binaries include ISO/UDF, supported virtual-disk readers and
@@ -96,7 +120,7 @@ If Total Commander says "File iso.wcx not found!" pointing to an old
 A DLL cannot change a missing DLL's association before Total Commander
 has loaded it. This is a one-time settings correction, not an
 additional required program. The leading "192," (legacy) or
-"222," (current ISO-WCX GetPackerCaps) in wincmd.ini represents
+"222," (Stable v0.21.0) or "158," (new Preview) in wincmd.ini represents
 Total Commander capability flags, NOT part of the DLL path. Never
 type these numeric flags in the file selection dialog.
 
