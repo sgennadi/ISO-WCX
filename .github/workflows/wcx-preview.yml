@@ -114,7 +114,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
         run: ctest --test-dir build-sanitized --output-on-failure
   package:
-    name: Total Commander ZIP installer
+    name: Total Commander INF installer packages
     needs: windows
     runs-on: ubuntu-24.04
     steps:
