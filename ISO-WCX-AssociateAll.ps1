@@ -227,7 +227,7 @@ function Test-PluginBinary([string]$Path, [int]$Machine) {
     $stream = [IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
     try {
         if ($stream.Length -lt 136) { return $false }
-        $reader = New-Object IO.BinaryReader($stream)
+        $reader = [IO.BinaryReader]::new($stream)
         if ($reader.ReadUInt16() -ne 0x5A4D) { return $false }
         $stream.Position = 0x3C
         $offset = [long]$reader.ReadUInt32()
@@ -259,6 +259,10 @@ if (-not (Test-PluginBinary $target 0x014C) -or
 }
 
 $section = Section-Rows $packer.Text 'PackerPlugins'
+if ($section.Rows.ContainsKey('zip') -and
+    (Is-OurPlugin ([string]$section.Rows['zip'].Value) $target)) {
+    Write-Warning 'ZIP is currently assigned to ISO-WCX. To restore native ZIP handling, run ISO-WCX-RemoveAssociation.ps1 -Extension zip (dry run), then -Apply with TC closed. Other ZIP plugins must remain untouched.'
+}
 $updates = @{}
 $added = New-Object 'System.Collections.Generic.List[string]'
 $skipped = New-Object 'System.Collections.Generic.List[string]'
