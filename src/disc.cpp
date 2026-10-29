@@ -1173,7 +1173,8 @@ IsoNamespaceView inspect_iso_namespace(const std::filesystem::path& image,
     return view;
 }
 
-Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
+Disc::Disc(std::filesystem::path image,
+           WimScanProgress wim_scan_progress): image_(std::move(image)) {
     // For descriptor-driven disc images, each independently recognizable
     // filesystem track is made available. Do not scan raw media heuristically:
     // only CUE/MDS/NRG tables provide trusted track start/end boundaries.
@@ -1198,7 +1199,8 @@ Disc::Disc(std::filesystem::path image): image_(std::move(image)) {
     if(extension == L".wim" || extension == L".esd" || extension == L".swm") {
 #ifdef _WIN32
         // WIMGAPI is a Windows system component, not an external helper.
-        auto archive = std::make_shared<WimArchive>(image_);
+        auto archive = std::make_shared<WimArchive>(
+            image_,0,std::move(wim_scan_progress));
         // WCX ReadHeader uses Disc::items(), so there is no need to
         // duplicate every WIMGAPI metadata entry and UTF-8 path here.
         format_ = archive->format();
