@@ -173,7 +173,7 @@ int wmain(int argc,wchar_t** argv) {
 
         // TC sometimes supplies both a folder and its children in the same
         // NUL-separated DeleteFilesW request. One parent delete must win.
-        wchar_t recursive[]=L"DOCS\\ONE.TXT\0DOCS\\*\0\0";
+        wchar_t recursive[]=L"DOCS\\ONE.TXT\0DOCS\\*.*\0\0";
         need(delW(arc.data(),recursive)==0,
              "recursive directory deletion returned an error");
         names=list_names(image,open,header,process,close);
