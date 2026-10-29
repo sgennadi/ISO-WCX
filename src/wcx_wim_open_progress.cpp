@@ -162,7 +162,22 @@ void WimOpenProgress::run() noexcept {
         config.pszFooter=L"Metadata-only operation. The WIM remains unchanged.";
         config.pfCallback=&WimOpenProgress::dialog_callback;
         config.lpCallbackData=reinterpret_cast<LONG_PTR>(this);
-        (void)TaskDialogIndirect(&config,nullptr,nullptr,nullptr);
+        // Defer loading ComCtl32 until an actual Total Commander UI is
+        // required. A static TaskDialogIndirect import makes EVERY WCX
+        // LoadLibrary pull GUI dependencies into command-line readers and
+        // headless CI processes, where it can deadlock under loader lock.
+        // The native WCX must remain loadable without a desktop session.
+        using TaskDialogIndirectFn=HRESULT (WINAPI*)(
+            const TASKDIALOGCONFIG*,int*,int*,BOOL*);
+        const HMODULE controls=LoadLibraryExW(
+            L"comctl32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if(!controls)return;
+        const auto open_dialog=reinterpret_cast<TaskDialogIndirectFn>(
+            GetProcAddress(controls,"TaskDialogIndirect"));
+        if(open_dialog) {
+            (void)open_dialog(&config,nullptr,nullptr,nullptr);
+        }
+        FreeLibrary(controls);
     } catch (...) {
         // Closing the indicator cannot invalidate a successful WIM read.
     }
