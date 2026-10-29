@@ -229,6 +229,10 @@ WimArchive::WimArchive(const std::filesystem::path& image,
     // Iterate rather than recurse: malformed WIMs cannot exhaust the stack.
     for (DWORD index = 1; index <= count; ++index) {
         if (only_image_index != 0 && index != only_image_index) continue;
+        // Notify before synchronous WIMLoadImage: on a multi-gigabyte
+        // install.wim this single native call can take a long time.
+        // The dialog has its own message thread and remains responsive.
+        if (scan_progress) scan_progress(index, entries_.size());
         HANDLE himage = api_->load(api_->archive, index);
         if (!is_valid(himage)) fail_windows("WIMLoadImage failed");
         api_->images[index - 1] = himage;
