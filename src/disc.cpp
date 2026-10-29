@@ -1174,7 +1174,8 @@ IsoNamespaceView inspect_iso_namespace(const std::filesystem::path& image,
 }
 
 Disc::Disc(std::filesystem::path image,
-           WimScanProgress wim_scan_progress): image_(std::move(image)) {
+           [[maybe_unused]] WimScanProgress wim_scan_progress)
+    : image_(std::move(image)) {
     // For descriptor-driven disc images, each independently recognizable
     // filesystem track is made available. Do not scan raw media heuristically:
     // only CUE/MDS/NRG tables provide trusted track start/end boundaries.
