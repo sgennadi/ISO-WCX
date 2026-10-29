@@ -18,6 +18,8 @@ using CloseFn=int (__stdcall*)(HANDLE);
 using SetProgressW=void (__stdcall*)(HANDLE,int (__stdcall*)(wchar_t*,int));
 using SetProgressA=void (__stdcall*)(HANDLE,int (__stdcall*)(char*,int));
 using PackerCaps=int (__stdcall*)();
+using ProbeW=int (__stdcall*)(wchar_t*);
+using ProbeA=int (__stdcall*)(char*);
 static int unicode_callbacks=0,ansi_callbacks=0,reported_bytes=0;
 static bool cancel_next=false;
 static int __stdcall progress_w(wchar_t*,int bytes) {
@@ -54,11 +56,17 @@ int main(int argc,char** argv){
     auto set_progress_w=reinterpret_cast<SetProgressW>(GetProcAddress(dll,"SetProcessDataProcW"));
     auto set_progress_a=reinterpret_cast<SetProgressA>(GetProcAddress(dll,"SetProcessDataProc"));
     auto caps=reinterpret_cast<PackerCaps>(GetProcAddress(dll,"GetPackerCaps"));
+    auto probe_w=reinterpret_cast<ProbeW>(GetProcAddress(dll,"CanYouHandleThisFileW"));
+    auto probe_a=reinterpret_cast<ProbeA>(GetProcAddress(dll,"CanYouHandleThisFile"));
     const auto configure=GetProcAddress(dll,"ConfigurePacker");
     if(!open||!header||!process||!close||!set_progress_w||!set_progress_a||
-       !caps||!configure||(caps()&16)==0){
-        std::cerr<<"Missing WCX updater ConfigPacker export/options capability\n";
+       !caps||!configure||!probe_w||!probe_a||(caps()&16)==0){
+        std::cerr<<"Missing WCX updater ConfigPacker or probe export/options capability\n";
         return 3;
+    }
+    if(caps()!=158 || (caps()&64)!=0) {
+        std::cerr<<"WCX is advertising global content probing; can slow down ordinary ZIP archives\n";
+        return 39;
     }
     constexpr std::size_t block=2048;
     std::vector<std::uint8_t> image(32*block,0);
@@ -76,6 +84,55 @@ int main(int argc,char** argv){
     fs::create_directories(folder);
     auto file=folder/L"image.iso";auto output=folder/L"result.txt";
     {std::ofstream f(file,std::ios::binary);f.write(reinterpret_cast<const char*>(image.data()),static_cast<std::streamsize>(image.size()));}
+    // TC must never invoke our expensive image parser for unrelated archives.
+    // Both ANSI and Unicode probes must reject ZIP/RAR/7z immediately.
+    for(const auto& name : {L"sample.zip",L"sample.rar",L"sample.7z",
+                            L"readme.txt",L"some-file.docx"}) {
+        const auto unsupported=folder/name;
+        {std::ofstream ignored(unsupported,std::ios::binary);
+         ignored << "PK random archive bytes";
+        }
+        auto unicode=unsupported.wstring();
+        if(probe_w(unicode.data())!=0) {
+            std::cerr<<"Non-image extension accepted by Unicode probe\n";
+            return 40;
+        }
+        OpenW rejected{};rejected.ArcName=unicode.data();
+        if(auto unexpected=open(&rejected)) {
+            close(unexpected);
+            std::cerr<<"Non-image extension opened as WCX image\n";
+            return 41;
+        }
+        if(rejected.OpenResult!=14) {
+            std::cerr<<"Non-image OpenArchive did not return UNKNOWN_FORMAT\n";
+            return 42;
+        }
+    }
+    char zip_ansi[]="sample.zip";
+    if(probe_a(zip_ansi)!=0) {
+        std::cerr<<"ANSI ZIP probe was not rejected\n";
+        return 43;
+    }
+    auto zip_large=folder/L"synthetic-large.zip";
+    {
+        HANDLE output=CreateFileW(zip_large.c_str(),GENERIC_WRITE,FILE_SHARE_READ,
+                                  nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(output==INVALID_HANDLE_VALUE)return 44;
+        LARGE_INTEGER length{};length.QuadPart=64LL*1024*1024;
+        bool ok=SetFilePointerEx(output,length,nullptr,FILE_BEGIN)!=0 &&
+                SetEndOfFile(output)!=0;
+        CloseHandle(output);
+        if(!ok)return 45;
+    }
+    auto large_name=zip_large.wstring();
+    const auto started=GetTickCount64();
+    for(int i=0;i<128;i++) {
+        if(probe_w(large_name.data())!=0)return 46;
+    }
+    if(GetTickCount64()-started>5000) {
+        std::cerr<<"Large ZIP rejected too slowly; global probe regression\n";
+        return 47;
+    }
     std::wstring source=file.wstring();OpenW options{};options.ArcName=source.data();
     std::cerr << "wcx smoke: invoking OpenArchiveW\n" << std::flush;
     HANDLE state=open(&options);if(!state||options.OpenResult!=0){std::cerr<<"OpenArchiveW failed\n";return 4;}
