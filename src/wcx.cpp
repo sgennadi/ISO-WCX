@@ -3,6 +3,8 @@
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/wcx_updater.hpp"
+#include "iso_wcx/wim_parts.hpp"
+#include "wcx_wim_open_progress.hpp"
 #include <mutex>
 #include <atomic>
 #include <type_traits>
@@ -43,7 +45,9 @@ std::mutex edit_mutex;
 using ChangeA=int (__stdcall*)(char*,int);
 using ChangeW=int (__stdcall*)(wchar_t*,int);
 struct State {
-    explicit State(std::filesystem::path p):disc(std::move(p)){}
+    explicit State(std::filesystem::path p,
+                   iso_wcx::Disc::WimScanProgress progress = {})
+        :disc(std::move(p),std::move(progress)){}
     iso_wcx::Disc disc;
     std::size_t cursor=0;
     ProgressA progress_a=nullptr;
@@ -146,6 +150,57 @@ int do_process(State* state,int operation,const wchar_t* dest_path,const wchar_t
 }
 }
 
+namespace {
+// The fast CanYouHandleThisFile probe must not load 100K+ WIMGAPI entries.
+// Total Commander can call it immediately before OpenArchive, otherwise
+// opening a large install.wim needlessly scans every index twice.
+bool wim_extension(const std::filesystem::path& file) {
+    auto ext=file.extension().wstring();
+    std::transform(ext.begin(),ext.end(),ext.begin(),
+                   [](wchar_t c){return std::towlower(c);});
+    return ext==L".wim" || ext==L".esd" || ext==L".swm";
+}
+bool quick_wim_probe(const std::filesystem::path& path) noexcept {
+    try {
+        const auto parts=iso_wcx::resolve_wim_parts(path);
+        iso_wcx::wim_detail::Header h{};
+        if(!iso_wcx::wim_detail::read_header(parts.front(),h))return false;
+        iso_wcx::wim_detail::validate(h);
+        const auto count=iso_wcx::wim_detail::u32(h,44);
+        return count>0 && count<=256;
+    }catch(...) {return false;}
+}
+bool wim_open_dialog_enabled(const std::filesystem::path& file) noexcept {
+    try {
+        wchar_t host[MAX_PATH]{};
+        const DWORD n=GetModuleFileNameW(nullptr,host,MAX_PATH);
+        if(!n || n>=MAX_PATH)return false;
+        const wchar_t* name=std::wcsrchr(host,L'\\');
+        name=name?name+1:host;
+        if(_wcsicmp(name,L"TOTALCMD.EXE")!=0 &&
+           _wcsicmp(name,L"TOTALCMD64.EXE")!=0)
+            return false; // never pop up in a test/CLI service
+        wchar_t preference[8]{};
+        if(GetEnvironmentVariableW(L"ISO_WCX_WIM_OPEN_PROGRESS",
+                                   preference,8)==1 &&
+           preference[0]==L'0')
+            return false;
+        return std::filesystem::file_size(file)>=64ull*1024ull*1024ull;
+    }catch(...) {return false;}
+}
+std::unique_ptr<State> open_state(const std::filesystem::path& path) {
+    if(!wim_extension(path))return std::make_unique<State>(path);
+    iso_wcx::WimOpenProgress dialog(wim_open_dialog_enabled(path));
+    iso_wcx::wim_detail::Header header{};
+    if(iso_wcx::wim_detail::read_header(path,header))
+        dialog.set_image_count(iso_wcx::wim_detail::u32(header,44));
+    return std::make_unique<State>(path,
+        [&dialog](std::uint32_t image,std::size_t entries){
+            dialog.on_scan(image,entries);
+        });
+}
+} // namespace
+
 #define WCX_EXPORT extern "C" __declspec(dllexport)
 WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
     iso_wcx::schedule_update_check();
@@ -153,9 +208,12 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
     d->OpenResult=E_UNKNOWN_FORMAT;
     try {
         if(!d->ArcName)return nullptr;
-        auto state=std::make_unique<State>(std::filesystem::path(d->ArcName));
+        auto state=open_state(std::filesystem::path(d->ArcName));
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
+    }catch(const iso_wcx::WimOpenCancelled&){
+        d->OpenResult=E_EABORTED;
+        return nullptr;
     }catch(...){return nullptr;}
 }
 WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
@@ -164,9 +222,12 @@ WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
     d->OpenResult=E_UNKNOWN_FORMAT;
     try {
         if(!d->ArcName)return nullptr;
-        auto state=std::make_unique<State>(std::filesystem::path(from_bytes(d->ArcName,CP_ACP)));
+        auto state=open_state(std::filesystem::path(from_bytes(d->ArcName,CP_ACP)));
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
+    }catch(const iso_wcx::WimOpenCancelled&){
+        d->OpenResult=E_EABORTED;
+        return nullptr;
     }catch(...){return nullptr;}
 }
 WCX_EXPORT int __stdcall ReadHeaderExW(HANDLE handle,HeaderExW* result) {
@@ -413,12 +474,22 @@ WCX_EXPORT int __stdcall GetPackerCaps() {
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
     iso_wcx::schedule_update_check();
     if(!path)return 0;
-    try{iso_wcx::Disc test{std::filesystem::path(path)};return 1;}catch(...){return 0;}
+    try {
+        const std::filesystem::path source(path);
+        if(wim_extension(source))return quick_wim_probe(source)?1:0;
+        iso_wcx::Disc test(source);
+        return 1;
+    }catch(...){return 0;}
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFile(char* path) {
     iso_wcx::schedule_update_check();
     if(!path)return 0;
-    try{iso_wcx::Disc test{std::filesystem::path(from_bytes(path,CP_ACP))};return 1;}catch(...){return 0;}
+    try {
+        const std::filesystem::path source(from_bytes(path,CP_ACP));
+        if(wim_extension(source))return quick_wim_probe(source)?1:0;
+        iso_wcx::Disc test(source);
+        return 1;
+    }catch(...){return 0;}
 }
 #else
 #error "WCX adapter must be compiled for Windows"
