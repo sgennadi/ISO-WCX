@@ -44,6 +44,8 @@ jobs:
           Write-Host "Visual Studio 2026 C++26 Preview: ${{ matrix.arch }}"
       - name: Build
         run: cmake --build build --config Release --parallel 2
+      - name: Fail fast if the WCX DLL loader stalls
+        run: ctest --test-dir build -C Release --output-on-failure -R "^wcx_dll_load_unload$"
       - name: Run tests including WCX DLL loading
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Verify safe WCX association repair and removal
