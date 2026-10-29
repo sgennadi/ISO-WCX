@@ -26,7 +26,7 @@
 namespace {
 constexpr int E_END_ARCHIVE=10,E_BAD_ARCHIVE=13,E_UNKNOWN_FORMAT=14,E_ECREATE=16,E_EABORTED=21,E_SMALL_BUF=20,E_NO_FILES=22;
 constexpr int PK_SKIP=0,PK_TEST=1,PK_EXTRACT=2;
-constexpr int PK_CAPS_BY_CONTENT=64,PK_CAPS_SEARCHTEXT=128;
+constexpr int PK_CAPS_SEARCHTEXT=128;
 constexpr int E_NOT_SUPPORTED=24;
 constexpr int ATTR_DIR=0x10,ATTR_ARCHIVE=0x20;
 
@@ -171,6 +171,23 @@ namespace {
 // The fast CanYouHandleThisFile probe must not load 100K+ WIMGAPI entries.
 // Total Commander can call it immediately before OpenArchive, otherwise
 // opening a large install.wim needlessly scans every index twice.
+// Content probing is intentionally restricted to image extensions.  Never
+// attempt the heavyweight Disc parser on ZIP/RAR/7z or arbitrary files.
+// PK_CAPS_BY_CONTENT is disabled in GetPackerCaps so TC itself will not
+// load ISO-WCX while opening unrelated archive types.
+bool probe_image_extension(const std::filesystem::path& file) {
+    auto ext=file.extension().wstring();
+    std::transform(ext.begin(),ext.end(),ext.begin(),
+                   [](wchar_t c){return std::towlower(c);});
+    for(const std::wstring_view image : {
+        L".iso",L".udf",L".cue",L".bin",L".ccd",L".nrg",
+        L".mds",L".mdx",L".mdf",L".cso",L".zso",L".isz",L".daa",
+        L".img",L".raw",L".vhd",L".vhdx",L".wim",L".esd",L".swm",
+        L".ima",L".vfd",L".flp",L".bif",L".imz",L".chd"}) {
+        if(ext==image)return true;
+    }
+    return false;
+}
 bool wim_extension(const std::filesystem::path& file) {
     auto ext=file.extension().wstring();
     std::transform(ext.begin(),ext.end(),ext.begin(),
@@ -492,23 +509,25 @@ WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
 }
 WCX_EXPORT int __stdcall GetPackerCaps() {
     iso_wcx::schedule_update_check();
-    return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT|2|4|8|16; // 16=PK_CAPS_OPTIONS
+    return PK_CAPS_SEARCHTEXT|2|4|8|16; // 158, no global BY_CONTENT ZIP interception
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
-    iso_wcx::schedule_update_check();
     if(!path)return 0;
     try {
         const std::filesystem::path source(path);
+        if(!probe_image_extension(source))return 0;
+        iso_wcx::schedule_update_check();
         if(wim_extension(source))return quick_wim_probe(source)?1:0;
         iso_wcx::Disc test(source);
         return 1;
     }catch(...){return 0;}
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFile(char* path) {
-    iso_wcx::schedule_update_check();
     if(!path)return 0;
     try {
         const std::filesystem::path source(from_bytes(path,CP_ACP));
+        if(!probe_image_extension(source))return 0;
+        iso_wcx::schedule_update_check();
         if(wim_extension(source))return quick_wim_probe(source)?1:0;
         iso_wcx::Disc test(source);
         return 1;
