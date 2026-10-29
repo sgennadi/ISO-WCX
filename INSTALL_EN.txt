@@ -11,23 +11,26 @@ Installation (no additional tools)
    These are the 32-bit and 64-bit versions of the same WCX plugin.
 4. Restart Total Commander and open an ISO, VHD or VHDX with Ctrl+PgDn.
 
-Bulk image associations and normal ZIP opening (Preview only)
--------------------------------------------------------------
-The Preview ZIP includes ISO-WCX-AssociateAll.cmd and
-ISO-WCX-AssociateAll.ps1. After installing both WCX plugin binaries,
-close ALL Total Commander windows and run ISO-WCX-AssociateAll.cmd from
-the installed ISO-WCX folder. A single run registers 23 unambiguous
-image extensions. PowerShell runs ISO-WCX-AssociateAll.ps1 in READ-ONLY
-mode by default; add -Apply with TC closed to make the changes.
-Use -IniPath "C:\Path\wincmd.ini" and -PluginDirectory "C:\Path\ISO-WCX"
-if the automatic paths are not the active settings.
+Preview installation through pluginst.inf (no EXE or helper scripts)
+------------------------------------------------------------------
+For Total Commander x64 choose ISO-WCX-preview-x64.zip, which contains
+only ISO-WCX.wcx64, pluginst.inf and documentation.
+For Total Commander Win32 choose ISO-WCX-preview-Win32.zip, which
+contains only ISO-WCX.wcx, pluginst.inf and documentation.
 
-Every changed INI gets a byte-exact recovery backup. RedirectSection and
-separate PackerPlugins/PackerPlugins64 files are respected. Toolbars,
-custom user commands, unrelated WCX handlers, ZIP/RAR/7z associations and
-original INI encodings are preserved. Already-occupied extensions are
-reported and skipped. Ambiguous/experimental BIN/MDF/CHD require explicit
--IncludeOptional. The helper is optional, not a plugin runtime dependency.
+From a successful GitHub Actions Preview run, download
+ISO-WCX-Installable-x64-Preview or ISO-WCX-Installable-Win32-Preview.
+Extract the outer artifact wrapper, then press Enter on the enclosed
+ZIP in Total Commander. Confirm the native pluginst.inf installation.
+Ctrl+PgDn bypasses the automatic installation prompt.
+
+All 23 unambiguous image extensions are in the native INF
+defaultextension list and handled DURING installation. Total Commander
+may display a separate association dialog for each one; pluginst.inf
+does not support running a post-install command or silently applying all
+associations. ZIP/RAR/7z are not listed. The package does not include
+scripts or additional EXEs; only one WCX architecture is installed.
+If both Total Commander editions exist, choose the ZIP for your edition.
 
 ZIP speed fix in Preview: ISO-WCX no longer advertises the global
 PK_CAPS_BY_CONTENT (64) capability, and its probe/OpenArchive reject
