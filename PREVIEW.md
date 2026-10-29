@@ -36,9 +36,21 @@ To prevent sluggish normal ZIP opens, the Preview plugin no longer advertises
 Stable `222` to Preview `158`, and both `CanYouHandleThisFile(W)` and
 `OpenArchive(W)` immediately refuse unrelated extensions. The updater also
 does not start solely because Total Commander queries WCX capabilities.
-ZIP remains handled by Total Commander. Native ABI/CI regressions cover
-fast rejection, but actual Total Commander performance remains field-test
-pending, as does real 7 GiB `install.wim` GUI validation.
+ZIP remains handled by Total Commander. Native Win32/x64 smoke tests
+check that repeated `GetPackerCaps`, `CanYouHandleThisFileW` and
+`OpenArchiveW` calls bypass a 64-MiB ZIP-signature fixture without
+probing its contents. This microbenchmark is not a substitute for a
+real Total Commander ZIP timing comparison.
+
+For WIM files at least **64 MiB**, the separate native opening indicator
+appears only after **1.2 seconds**. It shows the current WIM index,
+discovered metadata entries and elapsed time. When WCX finishes scanning
+the WIM, it shows an exact percentage and entry count as TC receives
+`ReadHeader` results. During extraction, TC displays byte progress;
+during WIM edits, WIMGAPI Apply/Capture, rebuild and validation stages
+report progress to TC. Cancel is cooperative: an already-running
+synchronous WIMGAPI call can delay acknowledgement. Real 7 GiB
+`install.wim` GUI validation remains pending.
 
 ## If Total Commander says `File iso.wcx not found!`
 

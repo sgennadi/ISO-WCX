@@ -119,17 +119,40 @@ int main(int argc,char** argv){
                                   nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
         if(output==INVALID_HANDLE_VALUE)return 44;
         LARGE_INTEGER length{};length.QuadPart=64LL*1024*1024;
-        bool ok=SetFilePointerEx(output,length,nullptr,FILE_BEGIN)!=0 &&
+        // Give the sparse test archive a real ZIP local-file signature.
+        // This catches a future regression to expensive global "PK" scanning.
+        const unsigned char signature[4]={0x50,0x4b,0x03,0x04};
+        DWORD written=0;
+        bool ok=WriteFile(output,signature,sizeof(signature),&written,nullptr)!=0 &&
+                written==sizeof(signature) &&
+                SetFilePointerEx(output,length,nullptr,FILE_BEGIN)!=0 &&
                 SetEndOfFile(output)!=0;
         CloseHandle(output);
         if(!ok)return 45;
     }
     auto large_name=zip_large.wstring();
     const auto started=GetTickCount64();
-    for(int i=0;i<128;i++) {
-        if(probe_w(large_name.data())!=0)return 46;
+    constexpr int zip_attempts=512;
+    for(int i=0;i<zip_attempts;i++) {
+        // TC may query both capabilities and the archive probe before open.
+        if(caps()!=158 || probe_w(large_name.data())!=0)return 46;
+        OpenW rejected{};
+        rejected.ArcName=large_name.data();
+        if(auto unexpected=open(&rejected)) {
+            close(unexpected);
+            std::cerr<<"Large ZIP unexpectedly opened by ISO-WCX\n";
+            return 48;
+        }
+        if(rejected.OpenResult!=14) {
+            std::cerr<<"Large ZIP was not rejected before archive parsing\n";
+            return 49;
+        }
     }
-    if(GetTickCount64()-started>5000) {
+    const auto zip_elapsed=GetTickCount64()-started;
+    std::cerr<<"ZIP fast bypass: "<<zip_attempts
+             <<" caps/probe/OpenArchive cycles in "<<zip_elapsed
+             <<" ms (64 MiB ZIP signature fixture)\n";
+    if(zip_elapsed>5000) {
         std::cerr<<"Large ZIP rejected too slowly; global probe regression\n";
         return 47;
     }

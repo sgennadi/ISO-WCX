@@ -49,8 +49,17 @@ std::wstring WimOpenProgress::describe() const {
     const auto total=image_count_.load();
     if (publishing_.load()) {
         result=L"Publishing file list to Total Commander...\n";
-        result+=L"Entries: "+std::to_wstring(published_.load())+
-                L" / "+std::to_wstring(total_entries_.load());
+        const auto total=total_entries_.load();
+        const auto done=std::min(published_.load(),total);
+        result+=L"Entries: "+std::to_wstring(done)+
+                L" / "+std::to_wstring(total);
+        if(total) {
+            // WIMGAPI has finished the scan, so the listing denominator
+            // is now exact. Do not fake a percentage during enumeration.
+            const auto percent=std::min<std::uint64_t>(
+                100,(done*100)/total);
+            result+=L" ("+std::to_wstring(percent)+L"%)";
+        }
     } else if (!image) {
         result=L"Opening Windows Imaging API and reading WIM metadata...";
     } else {
