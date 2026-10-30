@@ -426,10 +426,13 @@ int main() {
                 fs::create_directories(sys);
                 const auto protected_file=sys/L"protected.dll";
                 write_bytes(protected_file,"WIM-STAGING-ONLY");
-                set_protected_dacl(sys);
+                // Prepare all content/attributes before restoring the
+                // protected System32 DACL. That ACL intentionally makes
+                // later nonprivileged mutations unsafe in this fixture.
                 need(SetFileAttributesW(protected_file.c_str(),
                      FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_HIDDEN)!=FALSE,
                      "mark temporary WIM file readonly/hidden");
+                set_protected_dacl(sys);
                 // Link to OUTSIDE the ephemeral workspace must be unlinked
                 // without traversing the target. Skip if the OS has not
                 // enabled developer-mode symlink creation.
