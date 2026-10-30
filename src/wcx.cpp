@@ -330,12 +330,9 @@ template<class Char> std::vector<std::wstring> edit_list(const Char* list) {
         if constexpr(std::is_same_v<Char,wchar_t>)out.emplace_back(list,n);else out.push_back(from_bytes(list,CP_ACP));list+=n+1;
     }return out;
 }
-// WCX error return codes do not carry a reason string. Total Commander can
-// otherwise appear to do nothing when a selected ISO is an unsupported
-// ISO/UDF Bridge, Rock Ridge layout, or a protected boot resource.
-// Show one actionable message only inside the interactive TC host; never
-// display blocking dialogs in standalone smoke tests or background services.
-void report_delete_error(const char* description) noexcept {
+// WCX error codes cannot explain why PackFiles or DeleteFiles failed.
+// Display a useful reason only inside interactive TC, never in headless CI.
+void report_edit_error(const char* description,bool remove) noexcept {
     try {
         wchar_t host[MAX_PATH]{};
         const DWORD length=GetModuleFileNameW(nullptr,host,MAX_PATH);
@@ -349,16 +346,19 @@ void report_delete_error(const char* description) noexcept {
         try { reason=from_bytes(description,CP_UTF8); }
         catch(...) { reason=L"Unsupported or invalid filesystem layout"; }
         if(reason.size()>800) reason.resize(800);
-        std::wstring text=L"The selected entry was NOT deleted.\n\n";
+        std::wstring text=remove
+            ? L"The selected entry was NOT deleted.\n\n"
+            : L"The requested file or directory was NOT added/replaced.\n\n";
         text+=reason;
         text+=L"\n\nNo successful edit was reported. Unsupported ISO/UDF "
               L"Bridge, Rock Ridge and protected boot layouts need "
               L"a synchronized metadata writer. If a WIM mount failed, "
               L"inspect its recovery workspace before retrying.";
-        MessageBoxW(nullptr,text.c_str(),L"ISO-WCX - Delete failed",
+        MessageBoxW(nullptr,text.c_str(),
+                    remove?L"ISO-WCX - Delete failed":L"ISO-WCX - Edit failed",
                     MB_OK|MB_ICONWARNING|MB_TASKMODAL);
     }catch(...) {
-        OutputDebugStringW(L"ISO-WCX: failed to display delete error");
+        OutputDebugStringW(L"ISO-WCX: failed to display archive edit error");
     }
 }
 int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::wstring& source,
@@ -372,11 +372,11 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
            ext!=L".ima"&&ext!=L".img"&&ext!=L".vfd"&&
            ext!=L".flp"&&ext!=L".bif"&&ext!=L".raw"&&
            ext!=L".vhd"&&ext!=L".vhdx") {
-            if(remove)report_delete_error("Unsupported archive extension for deletion");
+            report_edit_error("Unsupported archive extension for editing",remove);
             return E_NOT_SUPPORTED;
         }
         if(!std::filesystem::exists(image)) {
-            if(remove)report_delete_error("Archive file no longer exists");
+            report_edit_error("Archive file no longer exists",remove);
             return E_NOT_SUPPORTED;
         }
         std::vector<iso_wcx::ArchiveChange> changes;
@@ -403,8 +403,11 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             auto relative=iso_wcx::edit_path(edit_utf8(name));
             iso_wcx::ArchiveChange c;c.path=subpath.empty()?relative:iso_wcx::edit_path(iso_wcx::edit_path(edit_utf8(subpath))+"/"+relative);c.remove=remove;
             if(!remove){c.source=std::filesystem::path(source)/std::filesystem::u8path(relative);auto status=std::filesystem::symlink_status(c.source);
-                if(!std::filesystem::is_regular_file(status)&&!std::filesystem::is_directory(status))return E_NOT_SUPPORTED;
-                const DWORD attributes=GetFileAttributesW(c.source.c_str());if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))return E_NOT_SUPPORTED;
+                if(!std::filesystem::is_regular_file(status)&&!std::filesystem::is_directory(status))
+                    throw iso_wcx::EditUnsupported("Source must be a regular file or directory");
+                const DWORD attributes=GetFileAttributesW(c.source.c_str());
+                if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))
+                    throw iso_wcx::EditUnsupported("Source is missing or contains a reparse point");
                 c.directory=std::filesystem::is_directory(status);
             }changes.push_back(std::move(c));
         }
@@ -440,7 +443,7 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             changes=std::move(normalized);
         }
         if(changes.empty()) {
-            if(remove)report_delete_error("No entries were passed to DeleteFiles");
+            report_edit_error("No entries were passed to the archive editor",remove);
             return E_NO_FILES;
         }
         auto wide=archive;auto ansi=to_ansi(archive);const auto pw=pack_progress_w.load();const auto pa=pack_progress_a.load();
@@ -464,16 +467,16 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         return 0;
     }catch(const iso_wcx::EditCancelled&){return E_EABORTED;}
      catch(const iso_wcx::EditUnsupported& e) {
-         if(remove) report_delete_error(e.what());
+         report_edit_error(e.what(),remove);
          return E_NOT_SUPPORTED;
      }catch(const std::filesystem::filesystem_error& e) {
-         if(remove) report_delete_error(e.what());
+         report_edit_error(e.what(),remove);
          return E_ECREATE;
      }catch(const std::exception& e) {
-         if(remove) report_delete_error(e.what());
+         report_edit_error(e.what(),remove);
          return E_BAD_ARCHIVE;
      }catch(...) {
-         if(remove) report_delete_error("unknown failure");
+         report_edit_error("unknown failure",remove);
          return E_BAD_ARCHIVE;
      }
 }
@@ -489,10 +492,10 @@ WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
         if(!archive) return E_NOT_SUPPORTED;
         return do_edit(archive,L"",L"",edit_list(list),true,0);
     }catch(const std::exception& e) {
-        report_delete_error(e.what());
+        report_edit_error(e.what(),true);
         return E_BAD_ARCHIVE;
     }catch(...) {
-        report_delete_error("Could not parse Unicode delete list");
+        report_edit_error("Could not parse Unicode delete list",true);
         return E_BAD_ARCHIVE;
     }
 }
@@ -501,10 +504,10 @@ WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
         if(!archive) return E_NOT_SUPPORTED;
         return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);
     }catch(const std::exception& e) {
-        report_delete_error(e.what());
+        report_edit_error(e.what(),true);
         return E_BAD_ARCHIVE;
     }catch(...) {
-        report_delete_error("Could not parse ANSI delete list");
+        report_edit_error("Could not parse ANSI delete list",true);
         return E_BAD_ARCHIVE;
     }
 }
