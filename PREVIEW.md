@@ -10,29 +10,28 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
-## Architecture-specific native pluginst.inf ZIPs (no EXE)
+## ONE universal pluginst.inf ZIP (both TC architectures)
 
-For a **64-bit** Total Commander, download the Preview Actions artifact
-`ISO-WCX-Installable-x64-Preview` and open its inner
-`ISO-WCX-preview-x64.zip` with **Enter** in TC. It contains only
-`ISO-WCX.wcx64`; the INF registers `file=ISO-WCX.wcx64`.
-For **32-bit** TC, download `ISO-WCX-Installable-Win32-Preview` and
-open `ISO-WCX-preview-Win32.zip`. It contains only `ISO-WCX.wcx`,
-with `file=ISO-WCX.wcx`.
+**Project requirement (do not split):** GitHub Actions publishes a single
+`ISO-WCX-Installable-Preview` artifact containing exactly
+`ISO-WCX-preview.zip` for either 32-bit or 64-bit Total Commander.
+No separate x86/x64 installer ZIPs, no EXE, CMD or PowerShell installer.
 
-The old combined `ISO-WCX-Installable-Preview` artifact is retained for
-mixed 32/64-bit TC installations, containing both files as required for
-that use case. There is **no separate EXE, PowerShell or CMD installer**.
-CI verifies that each architecture-specific ZIP contains one WCX of the
-correct PE machine type, the matching `pluginst.inf`, and no executable
-helpers or third-party DLLs.
+The ZIP contains `pluginst.inf`, `ISO-WCX.wcx` (Win32),
+`ISO-WCX.wcx64` (x64), and documentation. A single
+`pluginst.inf` entry `file=ISO-WCX.wcx` tells Total Commander to load
+`ISO-WCX.wcx64` for its 64-bit edition and `ISO-WCX.wcx` for the
+32-bit edition. Although both modules are shipped and extracted by the
+stock INF installer, **only the correctly matching one is loaded**.
 
-The `defaultextension` entry offers 23 supported image types via the
-normal Total Commander installation flow. TC may display one association
-dialog per extension; the INF format cannot silently register everything
-without user confirmations. It does not delete leftover files from
-earlier plugin installations or touch existing toolbar buttons.
-ZIP/RAR/7z are excluded from image extension registrations.
+After unpacking the outer Actions artifact, open the inner installer ZIP
+using **Enter** in Total Commander and accept the native `pluginst.inf`
+installation. It advertises 23 supported image extensions. TC can prompt
+per extension; the INF cannot force silent bulk registration, remove older
+binaries, or conditionally extract only one architecture. Existing
+ZIP/RAR/7z associations, toolbars, custom commands and unrelated plugins
+must stay unchanged. CI enforces the single-ZIP requirement and both
+native PE machine types.
 
 To prevent sluggish normal ZIP opens, the Preview plugin no longer advertises
 `PK_CAPS_BY_CONTENT`. The cached/native WCX capability mask changes from
