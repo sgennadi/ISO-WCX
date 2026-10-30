@@ -181,7 +181,7 @@ std::string load(const fs::path& filename) {
     std::ifstream file(filename,std::ios::binary);
     return {std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
 }
-int wmain(int argc,wchar_t** argv) {
+static int run_wim_smoke(int argc,wchar_t** argv) {
     const bool fast_mount_test=argc>=3 &&
         std::wstring_view(argv[2])==L"--fast-mount";
     const bool audit_fixture_test=argc==4 &&
@@ -904,6 +904,14 @@ int wmain(int argc,wchar_t** argv) {
         std::cerr<<"WIM WCX test error: "<<e.what()<<"\n";
         return 12;
     }
+}
+
+int wmain(int argc,wchar_t** argv) {
+    const int result=run_wim_smoke(argc,argv);
+    if(result!=0)
+        std::cerr<<"WIM WCX smoke FAILED (diagnostic exit code "
+                 <<result<<")\n";
+    return result;
 }
 #endif
 
