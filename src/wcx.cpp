@@ -482,10 +482,27 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
 }
 }
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
-    try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(archive,sub?sub:L"",source,edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
+    try {
+        if(!archive||!source)return E_NOT_SUPPORTED;
+        return do_edit(archive,sub?sub:L"",source,edit_list(list),false,flags);
+    }catch(const std::exception& e) {
+        report_edit_error(e.what(),false);return E_BAD_ARCHIVE;
+    }catch(...) {
+        report_edit_error("Unable to parse the Unicode file list",false);
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* list,int flags) {
-    try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),from_bytes(sub,CP_ACP),from_bytes(source,CP_ACP),edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
+    try {
+        if(!archive||!source)return E_NOT_SUPPORTED;
+        return do_edit(from_bytes(archive,CP_ACP),from_bytes(sub,CP_ACP),
+                       from_bytes(source,CP_ACP),edit_list(list),false,flags);
+    }catch(const std::exception& e) {
+        report_edit_error(e.what(),false);return E_BAD_ARCHIVE;
+    }catch(...) {
+        report_edit_error("Unable to parse the ANSI file list",false);
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
     try {
