@@ -614,6 +614,19 @@ int wmain(int argc,wchar_t** argv) {
            load(original)!=before_preflight_cancel)
             return 91;
 
+        // A multi-index F8 batch must preflight ALL requested paths before
+        // starting even the first Apply/Capture. A real entry in image1 and
+        // a missing entry in image2 must not partly delete image1.
+        wchar_t atomic_batch[]=L"image1\\HELLO.TXT\0image2\\DOES_NOT_EXIST\0\0";
+        const auto before_atomic_batch=load(original);
+        const auto staging_before_batch=wim_legacy_staging_calls.load();
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int atomic_batch_rc=erase(packed.data(),atomic_batch);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(atomic_batch_rc==0 || load(original)!=before_atomic_batch ||
+           wim_legacy_staging_calls.load()!=staging_before_batch)
+            return 92;
+
         // Unsafe wildcard tokens elsewhere in the path are never globs:
         // they must not change the original WIM on a refused delete.
         wchar_t invalid_wildcard[]=L"image1\\FOO*BAR\0\0";
