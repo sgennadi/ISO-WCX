@@ -171,6 +171,14 @@ int wmain(int argc,wchar_t** argv) {
              names.contains(L"DOCS\\ONE.TXT"),
              "WCX failed to list packed test files");
 
+        // Idempotent native PackFilesW mkdir must not rebuild a complete
+        // ISO or append redundant directory/path table sectors.
+        const auto before_repeat=load(image);
+        wchar_t repeat_folder[]=L"DOCS\0\0";
+        need(pack(arc.data(),sub.data(),src.data(),repeat_folder,0)==0 &&
+             load(image)==before_repeat,
+             "PackFilesW remastered ISO for an already existing folder");
+
         // TC sometimes supplies both a folder and its children in the same
         // NUL-separated DeleteFilesW request. One parent delete must win.
         wchar_t recursive[]=L"DOCS\\ONE.TXT\0DOCS\\*.*\0\0";
