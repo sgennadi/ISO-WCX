@@ -331,11 +331,16 @@ int wmain(int argc,wchar_t** argv) {
                 PROCESS_INFORMATION process{};
                 if(!CreateProcessW(validator.c_str(),command_line.data(),
                                    nullptr,nullptr,FALSE,0,nullptr,
-                                   root.c_str(),&startup,&process))
+                                   root.c_str(),&startup,&process)) {
+                    std::wcerr << L"Preflight subprocess failed to launch: "
+                               << GetLastError() << L"\n";
                     return 70;
+                }
                 CloseHandle(process.hThread);
                 const DWORD wait=WaitForSingleObject(process.hProcess,60000);
                 if(wait!=WAIT_OBJECT_0) {
+                    std::wcerr << L"WIM preflight timed out: " << test_argument
+                               << L" (wait " << wait << L")\n";
                     TerminateProcess(process.hProcess,71);
                     WaitForSingleObject(process.hProcess,5000);
                     CloseHandle(process.hProcess);
@@ -344,14 +349,26 @@ int wmain(int argc,wchar_t** argv) {
                 DWORD exit_code=0;
                 const BOOL got_exit=GetExitCodeProcess(process.hProcess,&exit_code);
                 CloseHandle(process.hProcess);
-                if(!got_exit || exit_code!=2)return 72;
+                if(!got_exit || exit_code!=2) {
+                    std::wcerr << L"WIM preflight " << test_argument
+                               << L" exited " << exit_code
+                               << L" (GetExitCodeProcess " << got_exit
+                               << L")\n";
+                    return 72;
+                }
                 if(load(original)!=pristine_bytes ||
-                   fs::last_write_time(original)!=pristine_time)
+                   fs::last_write_time(original)!=pristine_time) {
+                    std::wcerr << L"WIM source changed after preflight "
+                               << test_argument << L"\n";
                     return 73;
+                }
                 for(const auto& entry:fs::directory_iterator(root))
                     if(entry.path().filename().wstring().starts_with(
-                           L".iso-wcx-real-validation-"))
+                           L".iso-wcx-real-validation-")) {
+                        std::wcerr << L"Preflight left private workspace: "
+                                   << entry.path() << L"\n";
                         return 74; // Never leave a failed pre-WCX clone.
+                    }
                 return 0;
             };
             if(const int failure=reject_cleanly(L"256"))
