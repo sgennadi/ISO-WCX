@@ -666,9 +666,18 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     for(const auto& change:changes){auto p=edit_path(change.path);std::istringstream split(p);std::string name;Node* parent=image.root.get();
         std::vector<std::string> parts;while(std::getline(split,name,'/'))parts.push_back(name);
         for(std::size_t i=0;i<parts.size();++i){const bool last=i+1==parts.size();const auto key=upper(parts[i]);auto it=std::find_if(parent->children.begin(),parent->children.end(),[&](const auto& n){return upper(n->logical)==key;});
-            if(last&&change.remove){if(it!=parent->children.end()){protect_boot(**it,image.boot_lbas);parent->children.erase(it);}break;}
+            if(last&&change.remove){
+                // F8/Delete must not return success when a stale ISO item
+                // was already absent; never commit a no-op remaster.
+                need(it!=parent->children.end(),
+                     "ISO entry to delete was not found (source kept unchanged)");
+                protect_boot(**it,image.boot_lbas);
+                parent->children.erase(it);
+                break;
+            }
             if(it==parent->children.end()){
-                if(change.remove)break;
+                if(change.remove)
+                    throw EditUnsupported("ISO entry to delete has a missing parent");
                 auto n=std::make_unique<Node>();n->parent=parent;n->logical=parts[i];n->name=upper(parts[i]);n->directory=!last||change.directory;n->record.resize(34,0);n->record[18]=126;n->record[19]=1;n->record[20]=1;
                 // For new Joliet names, generate a deterministic short ISO alias when necessary.
                 try {
