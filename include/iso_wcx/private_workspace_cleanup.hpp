@@ -218,9 +218,20 @@ inline bool delete_entry(const fs::path& path,Result& result) {
         if(unlink())return true;
         code=GetLastError();
     }
-    // A non-directory file can usually be deleted with DELETE_CHILD on
-    // the parent under SeRestorePrivilege; refuse to rewrite its ACL,
-    // since hardlinks can share that security descriptor with external data.
+    // DELETE_CHILD granted on our private parent can authorize unlinking
+    // protected NTFS files or reparse-point directory entries. Do not
+    // rewrite ACLs on files: their hardlinks may have other paths.
+    if(code==ERROR_ACCESS_DENIED) {
+        const DWORD parent_attr=attributes(path.parent_path());
+        if(parent_attr!=INVALID_FILE_ATTRIBUTES &&
+           (parent_attr&FILE_ATTRIBUTE_DIRECTORY) &&
+           !(parent_attr&FILE_ATTRIBUTE_REPARSE_POINT) &&
+           enable_temporary_directory_access(path.parent_path())==
+               ERROR_SUCCESS) {
+            if(unlink())return true;
+            code=GetLastError();
+        }
+    }
     failure(result,path,code);
     return false;
 }
