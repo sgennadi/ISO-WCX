@@ -771,8 +771,41 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     }
     for(auto& [lba,vd]:image.descriptors){both(vd,80,static_cast<std::uint32_t>(next));out.seekp(std::uint64_t(lba)*block);write(out,vd);}
     out.flush();need(bool(out),"ISO flush failed");out.close();image.file.close();
-    // Reparse the staged namespaces, path tables and retained boot descriptors.
-    {Image verified(tx.output);need(verified.size==next*block,"staged ISO size mismatch");}
+    // Reparse the staged namespaces and independently check every requested
+    // result against the newly written directory/path table metadata. Do
+    // NOT replace the original ISO on a false-success F8/Delete, missing
+    // add, wrong type, or size mismatch. The same check covers Joliet names
+    // because Image::pair() reconciles the primary/Joliet directories.
+    {
+        Image verified(tx.output);
+        need(verified.size==next*block,"staged ISO size mismatch");
+        for(const auto& change:changes) {
+            edit_tick(progress);
+            const auto normalized=edit_path(change.path);
+            Node* node=verified.root.get();
+            std::istringstream stream(normalized);
+            std::string part;
+            while(node && std::getline(stream,part,'/')) {
+                const auto wanted=upper(part);
+                const auto child=std::find_if(node->children.begin(),
+                    node->children.end(),[&](const auto& candidate) {
+                        return upper(candidate->logical)==wanted;
+                    });
+                node=child==node->children.end()?nullptr:child->get();
+            }
+            if(change.remove) {
+                need(node==nullptr,
+                     "removed ISO entry still appears in staged directory");
+                continue;
+            }
+            need(node!=nullptr,"added ISO entry is missing from staged directory");
+            need(node->directory==change.directory,
+                 "staged ISO entry differs from requested file/directory type");
+            if(!change.directory)
+                need(node->size==std::filesystem::file_size(change.source),
+                     "staged ISO file size differs from added source");
+        }
+    }
     tx.commit(progress);
 }
 }
