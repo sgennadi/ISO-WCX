@@ -192,6 +192,18 @@ int wmain(int argc,wchar_t** argv) {
              load(image)==prior,
              "missing file silently succeeded or changed source ISO");
 
+        // Repeating the F8 selection after deleting the directory must
+        // NOT report a successful ISO rewrite. The terminal wildcard is
+        // only a directory selection token, never a filename glob.
+        wchar_t stale_folder[]=L"DOCS\\*.*\0\0";
+        need(delW(arc.data(),stale_folder)==24 &&
+             load(image)==prior,
+             "stale ISO directory F8 delete changed the archive or succeeded");
+        wchar_t unsafe_glob[]=L"FOO*BAR\\ONE.TXT\0\0";
+        need(delW(arc.data(),unsafe_glob)==24 &&
+             load(image)==prior,
+             "ISO wildcard inside a filename bypassed edit path validation");
+
         // TC's ANSI ABI is still used by older callers.
         std::string mbcs=image.string();
         char ansi_name[]="HELLO.TXT\0\0";
