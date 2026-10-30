@@ -11,34 +11,25 @@ Installation (no additional tools)
    These are the 32-bit and 64-bit versions of the same WCX plugin.
 4. Restart Total Commander and open an ISO, VHD or VHDX with Ctrl+PgDn.
 
-Preview: native Total Commander installation without an EXE
--------------------------------------------------------------
-GitHub Actions publishes three pluginst.inf ZIP installer artifacts.
+Preview: ONE universal ZIP for Total Commander 32-bit and 64-bit
+--------------------------------------------------------------
+Project-wide distribution rule: ONE ISO-WCX-preview.zip installation archive
+for BOTH Total Commander editions. No separate x86/x64 ZIPs or setup EXE.
 
-For 64-bit Total Commander, use ISO-WCX-Installable-x64-Preview
-and its inner ISO-WCX-preview-x64.zip. This installs ONLY
-ISO-WCX.wcx64 (64-bit pluginst.inf file=ISO-WCX.wcx64).
+Download ISO-WCX-Installable-Preview from a successful GitHub Actions run.
+Extract the Actions artifact wrapper; open its ISO-WCX-preview.zip using
+Enter directly inside Total Commander and accept pluginst.inf.
 
-For 32-bit Total Commander, use ISO-WCX-Installable-Win32-Preview
-and its inner ISO-WCX-preview-Win32.zip. This installs ONLY
-ISO-WCX.wcx (32-bit pluginst.inf file=ISO-WCX.wcx).
+The one installer archive contains pluginst.inf, ISO-WCX.wcx (Win32),
+ISO-WCX.wcx64 (x64) and documentation. TC LOADS only the matching module.
+The native installer extracts both versions from the common ZIP; with no
+standalone installer, pluginst.inf cannot choose which file to extract.
 
-For a mixed TC32/TC64 installation, ISO-WCX-Installable-Preview
-still provides the compatible combined ISO-WCX-preview.zip
-containing both native WCX modules.
-
-Unpack the outer GitHub Actions artifact, then open the matching inner
-ZIP with Enter in Total Commander to invoke its native INF installer.
-The architecture-specific ZIP physically contains exactly one WCX,
-pluginst.inf and documentation. No additional EXE, CMD or PowerShell
-installer is needed.
-
-The INF lists 23 image extensions for association by Total Commander.
-The native installer may ask for each extension individually; stock INF
-cannot silently register all of them in one step or auto-select a different
-ZIP by TC architecture. ZIP/RAR/7z, toolbar buttons and custom commands
-are preserved. Previously installed extra DLL files are not automatically
-removed by TC's native installer.
+All 23 supported image extensions are offered by pluginst.inf, but TC may
+display an association prompt for each. The INF format cannot bypass those
+confirmations. ZIP/RAR/7z, existing user buttons and external plugins are
+not assigned to ISO-WCX. Previously installed extra files are not removed
+by the stock INF installer. No CMD, PowerShell or extra DLL is needed.
 
 Preview editing status:
 - Standard unsplit WIM: add/replace/delete files and directories and
