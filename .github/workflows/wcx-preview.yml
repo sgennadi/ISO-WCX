@@ -172,44 +172,17 @@ jobs:
             echo 'Unexpected extra program/script in native INF package' >&2
             exit 1
           fi
-      - name: Build architecture-specific native pluginst.inf ZIPs
+      - name: Validate the single universal TC installer ZIP
         shell: bash
         run: |
           set -euo pipefail
-          # Stock TC pluginst.inf extracts every ZIP member. Ship a single
-          # WCX binary in each architecture-specific installer (no EXE/PS1).
-          mkdir -p package-x64 package-Win32
-          cp PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package-x64/
-          cp PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package-Win32/
-          cp package/ISO-WCX.wcx64 package-x64/
-          cp package/ISO-WCX.wcx package-Win32/
-          sed 's/^file=ISO-WCX.wcx$/file=ISO-WCX.wcx64/' pluginst.inf > package-x64/pluginst.inf
-          cp pluginst.inf package-Win32/pluginst.inf
-          grep -qx 'file=ISO-WCX.wcx64' package-x64/pluginst.inf
-          grep -qx 'file=ISO-WCX.wcx' package-Win32/pluginst.inf
-          (cd package-x64 && zip -9 ../ISO-WCX-preview-x64.zip \
-            pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt \
-            THIRD_PARTY_NOTICES.txt ISO-WCX.wcx64)
-          (cd package-Win32 && zip -9 ../ISO-WCX-preview-Win32.zip \
-            pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt \
-            THIRD_PARTY_NOTICES.txt ISO-WCX.wcx)
-          python3 tests/test_native_installer_zips.py \
-            ISO-WCX-preview.zip ISO-WCX-preview-x64.zip ISO-WCX-preview-Win32.zip
-      - name: Upload native x64-only installer
-        uses: actions/upload-artifact@v7
-        with:
-          name: ISO-WCX-Installable-x64-Preview
-          path: ISO-WCX-preview-x64.zip
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload native Win32-only installer
-        uses: actions/upload-artifact@v7
-        with:
-          name: ISO-WCX-Installable-Win32-Preview
-          path: ISO-WCX-preview-Win32.zip
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload combined native INF installer
+          python3 tests/test_native_installer_zips.py ISO-WCX-preview.zip
+          count="$(find . -maxdepth 1 -type f -name 'ISO-WCX*.zip' | wc -l)"
+          if [ "$count" -ne 1 ]; then
+            echo "Exactly one universal installable ZIP is allowed; found $count" >&2
+            exit 1
+          fi
+      - name: Upload the only native universal INF installer
         uses: actions/upload-artifact@v7
         with:
           name: ISO-WCX-Installable-Preview
