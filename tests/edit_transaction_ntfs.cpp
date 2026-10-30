@@ -444,6 +444,10 @@ int main() {
                 (void)CreateSymbolicLinkW(link.c_str(),outside.c_str(),
                        SYMBOLIC_LINK_FLAG_DIRECTORY|allow_unprivileged);
             }
+            if(fs::exists(expanded_root)) {
+                std::wcerr<<L"Expanded WIM scratch diagnostic:\n"
+                          <<iso_wcx::take_edit_cleanup_warning()<<L"\n";
+            }
             need(!fs::exists(expanded_root),
                  "WIM expanded Windows tree with protected ACL was not cleaned");
             need(read_bytes(root/L"symlink-target"/L"keep.txt")==
