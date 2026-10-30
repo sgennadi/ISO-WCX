@@ -222,6 +222,21 @@ bool wim_open_dialog_enabled(const std::filesystem::path& file) noexcept {
         return std::filesystem::file_size(file)>=64ull*1024ull*1024ull;
     }catch(...) {return false;}
 }
+// F7 pack progress can stay at 0% while WIMGAPI is inside synchronous
+// Apply/Capture. The self-owned TaskDialog only runs in a real TC GUI
+// process, never when DLL tests, services or CLI tools call PackFiles.
+bool wim_edit_dialog_enabled() noexcept {
+    wchar_t host[MAX_PATH]{};
+    const DWORD n=GetModuleFileNameW(nullptr,host,MAX_PATH);
+    if(!n||n>=MAX_PATH)return false;
+    const wchar_t* filename=std::wcsrchr(host,L'\\');
+    filename=filename?filename+1:host;
+    if(_wcsicmp(filename,L"TOTALCMD.EXE")!=0 &&
+       _wcsicmp(filename,L"TOTALCMD64.EXE")!=0)return false;
+    wchar_t setting[8]{};
+    return !(GetEnvironmentVariableW(L"ISO_WCX_WIM_EDIT_PROGRESS",setting,8)==1
+             && setting[0]==L'0');
+}
 std::unique_ptr<State> open_state(const std::filesystem::path& path) {
     if(!wim_extension(path))return std::make_unique<State>(path);
     auto indicator=std::make_unique<iso_wcx::WimOpenProgress>(
@@ -451,12 +466,20 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         if(ext==L".iso"||ext==L".udf")
              iso_wcx::edit_optical(image,changes,progress);
         else if(ext==L".wim") {
+            // TC's plugin progress window can remain at 0% when creating
+            // folders (F7). The delayed native UI remains responsive during
+            // WIMGAPI calls and preserves real stage/cancel checkpoints.
+            // Do not show another dialog for Delete (F8), whose TC
+            // progress callback already works on the user's machine.
+            iso_wcx::WimOpenProgress indicator(
+                !remove && wim_edit_dialog_enabled(),
+                iso_wcx::WimOpenProgress::Mode::Editing);
             const auto status=[&](const wchar_t* stage,unsigned percent){
-                // The WCX callback uses negative Size for direct 1..100%.
-                // Display the active WIM stage instead of the same archive
-                // filename for five minutes. Unicode first, never both.
+                if(!indicator.on_edit(stage,percent))return false;
+                // WCX callback uses negative Size for direct 1..100%.
+                // Keep it for standard TC progress and cancellation too.
                 const int pct=-static_cast<int>(std::clamp(percent,1u,99u));
-                auto label=std::wstring(L"WIM: ")+stage;
+                auto label=std::wstring(L"WIM: ")+(stage?stage:L"Working");
                 if(pw)return pw(label.data(),pct)!=0;
                 if(pa){auto narrow=to_ansi(label);return pa(narrow.data(),pct)!=0;}
                 return true;
