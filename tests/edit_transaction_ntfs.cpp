@@ -355,8 +355,26 @@ int main() {
             write_bytes(deferred/"original-archive.backup","PRIVATE-STAGED-BACKUP");
             iso_wcx::defer_edit_workspace_cleanup(deferred);
             iso_wcx::retry_deferred_edit_workspace_cleanup();
-            need(!fs::exists(deferred),
-                 "native mount check did not clean unregistered private stage");
+            if(fs::exists(deferred)) {
+                // Some CI images have WIMGAPI but no working native mount
+                // registry. Unknown is NOT the same as unmounted, even if
+                // DISM reports no mounts. Preserve any possible mount.
+                need(fs::exists(deferred/"mounted") &&
+                     read_bytes(deferred/"original-archive.backup")==
+                         "PRIVATE-STAGED-BACKUP",
+                     "uncertain native mount was partially deleted");
+                const auto state=iso_wcx::workspace_cleanup::cleanup(deferred);
+                need(!state.clean && state.unsafe,
+                     "uncertain native WIMGAPI mount was not preserved");
+                // The test itself created an EMPTY dummy mount directory.
+                // Once we remove that exact fixture directory, private
+                // cleanup can safely dispose of the ordinary backup.
+                need(fs::remove(deferred/"mounted"),
+                     "cannot remove fixture-created empty dummy mount");
+                iso_wcx::retry_deferred_edit_workspace_cleanup();
+                need(!fs::exists(deferred),
+                     "known unmounted fixture backup could not be cleaned");
+            }
         }
         // A native WIMGAPI mount marker with arbitrary content is NEVER a
         // disposable expanded tree, even if DISM says there are no mounts.
