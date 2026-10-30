@@ -497,6 +497,11 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         auto digits=top.substr(5);if(digits.empty()||digits.size()>3||digits[0]=='0'||digits.find_first_not_of("0123456789")!=std::string::npos)throw EditUnsupported("invalid WIM index");unsigned index=static_cast<unsigned>(std::stoul(digits));if(!index||index>images)throw EditUnsupported("creating WIM indexes is not supported yet");
         if(slash==std::string::npos){if(!c.remove)throw EditUnsupported("cannot replace an image index");deleted.insert(index);}else{c.path=p.substr(slash+1);edits[index].push_back(std::move(c));}}
     if(deleted.size()==images)throw EditUnsupported("cannot delete the last WIM image");
+    // A mixed request must not silently discard edits to an index that is
+    // removed in the same transaction. Fail before cloning/applying the WIM.
+    for(const unsigned index:deleted)
+        if(edits.contains(index))
+            throw EditUnsupported("cannot edit a WIM image index scheduled for deletion");
     // Strict experimental opt-in until real machine WIM mount and crash
     // recovery have been validated. Normal users retain Apply/Capture.
     if(fast_mount_requested()) {
@@ -547,7 +552,17 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             for(const auto& c:edits[index]){
                 callback.tick();
                 auto relative=relative_path(c.path);no_reparse(expanded,relative);auto target=expanded/relative;
-                if(c.remove){remove_tree(target);continue;}
+                if(c.remove) {
+                    // remove_tree() is intentionally idempotent for recursive
+                    // cleanup, but a user F8/Delete request must NOT succeed
+                    // if the selected WIM entry was already absent. Otherwise
+                    // we recapture a large install.wim and report a fake
+                    // successful deletion of nothing.
+                    if(GetFileAttributesW(target.c_str())==INVALID_FILE_ATTRIBUTES)
+                        throw EditUnsupported("WIM entry to delete was not found");
+                    remove_tree(target);
+                    continue;
+                }
                 if(c.directory){std::filesystem::create_directories(target);continue;}
                 checked(std::filesystem::is_regular_file(std::filesystem::symlink_status(c.source)),"source must be a regular file");
                 std::filesystem::create_directories(target.parent_path());
