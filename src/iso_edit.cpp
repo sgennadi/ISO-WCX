@@ -683,6 +683,10 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         edit_iso_udf_bridge_equal_length(path,image,changes,progress);
         return;
     }
+    // Creating a directory that is already present is idempotent. Avoid
+    // copying/rebuilding an entire multi-gigabyte ISO and growing its path
+    // tables on a request that changes no directory or file metadata.
+    bool changed=false;
     for(const auto& change:changes){auto p=edit_path(change.path);std::istringstream split(p);std::string name;Node* parent=image.root.get();
         std::vector<std::string> parts;while(std::getline(split,name,'/'))parts.push_back(name);
         for(std::size_t i=0;i<parts.size();++i){const bool last=i+1==parts.size();const auto key=upper(parts[i]);auto it=std::find_if(parent->children.begin(),parent->children.end(),[&](const auto& n){return upper(n->logical)==key;});
@@ -693,6 +697,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                      "ISO entry to delete was not found (no changes committed)");
                 protect_boot(**it,image.boot_lbas);
                 parent->children.erase(it);
+                changed=true;
                 break;
             }
             if(it==parent->children.end()){
@@ -717,13 +722,17 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                     need(c->identifier!=n->identifier,"ISO alias collision");
                 if(image.joliet)n->joliet_identifier=identifier(parts[i],true,n->directory);
                 parent->children.push_back(std::move(n));it=std::prev(parent->children.end());
+                changed=true;
             }
             auto& n=**it;
             if(!last){need(n.directory,"parent is not a directory");parent=&n;continue;}
             need(n.directory==change.directory,"file/directory replacement is not supported");
-            if(!n.directory){protect_boot(n,image.boot_lbas);need(std::filesystem::is_regular_file(std::filesystem::symlink_status(change.source)),"edit source must be a regular file");auto size=std::filesystem::file_size(change.source);need(size<=0xffffffffu,"files over 4GiB require unsupported multi-extent writing");n.size=static_cast<std::uint32_t>(size);n.source=change.source;}
+            if(!n.directory){protect_boot(n,image.boot_lbas);need(std::filesystem::is_regular_file(std::filesystem::symlink_status(change.source)),"edit source must be a regular file");auto size=std::filesystem::file_size(change.source);need(size<=0xffffffffu,"files over 4GiB require unsupported multi-extent writing");n.size=static_cast<std::uint32_t>(size);n.source=change.source;changed=true;}
         }
     }
+    // The source is already validated; no-op mkdir must preserve it byte for
+    // byte, without allocating a staged ISO or resetting its timestamps.
+    if(!changed)return;
     EditTransaction tx(path);std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary|std::ios::trunc);need(bool(out),"cannot create staged ISO");image.file.clear();image.file.seekg(0);copy_bytes(image.file,out,image.size,progress);
     std::uint64_t next=image.size/block;
     std::vector<Node*> all{image.root.get()},dirs{image.root.get()};
