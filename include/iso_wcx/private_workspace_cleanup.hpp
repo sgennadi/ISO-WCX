@@ -7,6 +7,8 @@
 #include <aclapi.h>
 #include <algorithm>
 #include <cwctype>
+#include <cwchar>
+#include <initializer_list>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -193,10 +195,14 @@ inline bool delete_entry(const fs::path& path,Result& result) {
         }else if(!SetFileAttributesW(native.c_str(),
                    attr&~FILE_ATTRIBUTE_READONLY)) {
             const DWORD code=GetLastError();
-            if((code!=ERROR_ACCESS_DENIED ||
-                !directory ||
-                enable_temporary_directory_access(path)!=ERROR_SUCCESS) ||
-               !SetFileAttributesW(native.c_str(),attr&~FILE_ATTRIBUTE_READONLY)) {
+            if(code!=ERROR_ACCESS_DENIED || !directory) {
+                failure(result,path,code);return false;
+            }
+            const DWORD acl=enable_temporary_directory_access(path);
+            if(acl!=ERROR_SUCCESS) {
+                failure(result,path,acl);return false;
+            }
+            if(!SetFileAttributesW(native.c_str(),attr&~FILE_ATTRIBUTE_READONLY)) {
                 failure(result,path,GetLastError());return false;
             }
         }
@@ -218,6 +224,46 @@ inline bool delete_entry(const fs::path& path,Result& result) {
     failure(result,path,code);
     return false;
 }
+// A directory created by WIMApplyImage is only scratch storage. Unlike a
+// mount, it is safe to discard its ACL-protected Windows folders AFTER
+// WIMCaptureImage has finished. Use the same link-safe delete engine.
+inline Result cleanup_expanded(
+        const fs::path& root,const fs::path& expanded) noexcept {
+    Result report{};
+    try {
+        const auto name=expanded.filename().wstring();
+        if(!private_workspace_name(root) ||
+           fs::absolute(expanded.parent_path()).lexically_normal() !=
+           fs::absolute(root).lexically_normal() ||
+           !(name==L"expanded" || name.starts_with(L"expanded-image-"))) {
+            report.unsafe=true;
+            failure(report,expanded,ERROR_INVALID_NAME);
+            return report;
+        }
+        const DWORD mount_attr=attributes(root/L"mounted");
+        if(mount_attr!=INVALID_FILE_ATTRIBUTES ||
+           (GetLastError()!=ERROR_FILE_NOT_FOUND &&
+            GetLastError()!=ERROR_PATH_NOT_FOUND)) {
+            report.unsafe=true;
+            failure(report,root/L"mounted",ERROR_BUSY);
+            return report;
+        }
+        const DWORD root_attr=attributes(root);
+        if(root_attr==INVALID_FILE_ATTRIBUTES ||
+           !(root_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           (root_attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+            report.unsafe=true;
+            failure(report,root,ERROR_ACCESS_DENIED);
+            return report;
+        }
+        CleanupPrivileges privileges;
+        report.clean=delete_entry(expanded,report);
+    }catch(...) {
+        failure(report,expanded,ERROR_GEN_FAILURE);
+    }
+    return report;
+}
+
 inline Result cleanup(const fs::path& root) noexcept {
     Result report{};
     try {
