@@ -626,9 +626,40 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 callback.tick();
                 continue;
             }
-            const auto expanded=tx.workspace/L"expanded";
+            // Each edited index gets its OWN apply tree. If Windows keeps
+            // one tree locked, later indexes must never see stale content.
+            const auto expanded=tx.workspace/
+                (edits.size()==1 ? L"expanded" :
+                 (L"expanded-image-"+std::to_wstring(index)));
             std::filesystem::create_directory(expanded);
-            struct Cleanup {std::filesystem::path path;~Cleanup(){try{remove_tree(path);}catch(...){}}}cleanup{expanded};
+            struct Cleanup {
+                std::filesystem::path root,path;
+                const WimEditStatus& status;
+                unsigned percent;
+                ~Cleanup() noexcept {
+                    // WIMGAPI Capture has returned; all image data and ACLs
+                    // are already recorded in the output WIM. The temporary
+                    // Windows tree can now be removed using SeRestorePrivilege
+                    // without changing the captured image's NTFS security.
+                    try {
+                        if(status) (void)status(L"Cleanup expanded WIM staging",
+                                                percent);
+                        const auto result=
+                            workspace_cleanup::cleanup_expanded(root,path);
+                        if(!result.clean) {
+                            OutputDebugStringW((
+                                L"ISO-WCX: deferred WIM expanded cleanup: "+
+                                path.wstring()+L" blocked="+
+                                result.blocked.wstring()+L" error="+
+                                std::to_wstring(result.error)+L"\n").c_str());
+                        }
+                    }catch(...) {}
+                    // On an incomplete cleanup EditTransaction will retry
+                    // the entire private workspace after WIMGAPI handles
+                    // are released (and again on WCX CloseArchive).
+                }
+            }cleanup{tx.workspace,expanded,status,
+                      begin+(end-begin)*94u/100u};
             const unsigned apply_end=begin+(end-begin)*55u/100u;
             callback.begin_stage(L"Extract WIM image "+number,begin,apply_end-begin);
             const BOOL applied=api<BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMApplyImage")(image.h,expanded.c_str(),2u|0x100u);
