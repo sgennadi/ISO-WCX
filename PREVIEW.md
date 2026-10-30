@@ -111,14 +111,16 @@ are included; TC chooses Win32 WCX or x64 WCX64 itself.
 | Image | Supported modifications | Limits |
 | --- | --- | --- |
 | Standard unsplit WIM | Create/replace/delete files and directories within existing indexes; delete an image index except the last | WIMGAPI Apply/Capture can take many minutes and require NTFS staging, free disk and privileges. Fast Mount/Commit for creation of folders only is **experimental and off by default**. |
-| Plain ISO9660/Joliet | Constrained addition, same-/bounded-size replacement and deletion of compatible entries | Rejects unsafe boot/system-area layouts, Rock Ridge and layouts that cannot be kept consistent. Not a universal ISO remastering engine. |
+| Plain ISO9660/Joliet | Constrained addition, replacement, deletion and byte-exact no-op for already existing folders | Rock Ridge and incompatible layouts remain read-only; not a general-purpose ISO remaster. |\n| Hybrid boot ISO9660/Joliet (Preview) | Delete existing regular files by unlinking directory records only | Keep system-area MBR/GPT, El Torito sectors and payload bytes unchanged. No directory deletion, additions, resizing, Rock Ridge or UDF Bridge. |
 | UDF-only Type-1 | Selected file and directory creations, file replacement and logical deletion | Experimental, validated physical Type-1 metadata and sufficient space only. |
 | ISO/UDF Bridge | Narrow synchronized file replacement/deletion when both namespaces remain valid | No general directory creation or hybrid boot editing. |
 | ESD / SWM | Read and extract only | Editing is not supported. |
 
-The separate **hybrid-boot ISO/Joliet deletion PR #65** is draft
-and not included in this Preview branch. Test editing only on disposable
-copies of important installation images. Folder deletion from Total
+The restricted **hybrid-boot ISO/Joliet file unlink code from PR #65**
+is now integrated into this **combined Preview** (PR #68). It remains
+experimental, requires real BIOS/UEFI boot testing and never securely
+erases unlinked payload bytes. See [boot-preserving unlink constraints](docs/iso-hybrid-unlink.md).
+Test only on disposable copies of installation images. Folder deletion from Total
 Commander may involve special trailing wildcard tokens; the Preview WCX
 normalizes those only at the terminal directory selection to avoid unsafe
 file changes. Large WIM enumeration has an asynchronous native progress
