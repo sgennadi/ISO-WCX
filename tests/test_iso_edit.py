@@ -146,6 +146,15 @@ def main(binary, reader=None):
         image.write_bytes(fixture());run('add','HELLO.TXT');run('add','DOCS/NEW.TXT');run('mkdir','EMPTY');run('mkdir','AAA');run('mkdir','DOCS/Z_CHILD');run('mkdir','DOCS/A_CHILD')
         expected={'HELLO.TXT':source.read_bytes(),'DOCS/':None,'DOCS/NEW.TXT':source.read_bytes(),'EMPTY/':None,'AAA/':None,'DOCS/Z_CHILD/':None,'DOCS/A_CHILD/':None}
         assert read_image(image)==expected
+        # A repeated native TC folder creation must not copy or grow the
+        # entire ISO. Compare both size and every byte across repeated calls.
+        # This especially matters for large ISO images and path tables.
+        pristine=image.read_bytes()
+        run('mkdir','DOCS')
+        run('mkdir','EMPTY')
+        run('mkdir','DOCS/A_CHILD')
+        assert image.read_bytes()==pristine, (
+            'repeated ISO mkdir remastered or expanded an unchanged image')
         validate_path_tables(image)
         independent=independent_read(image)
         if independent is not None:assert independent['DOCS/NEW.TXT']==source.read_bytes()
