@@ -150,6 +150,11 @@ def main(binary, reader=None):
         independent=independent_read(image)
         if independent is not None:assert independent['DOCS/NEW.TXT']==source.read_bytes()
         run('cancel','OTHER.TXT',False);run('add','../escape',False)
+        # Stale TC ISO selections must fail closed, never remaster and
+        # report success for an item that has already disappeared.
+        run('delete','NOT_PRESENT.TXT',False)
+        run('delete','DOCS/NOT_PRESENT.TXT',False)
+        run('delete','MISSING_PARENT/FILE.TXT',False)
         run('delete','DOCS');assert 'DOCS/NEW.TXT' not in read_image(image)
         image.write_bytes(fixture(joliet=True));run('add','café.txt');run('add','NEW.TXT');run('mkdir','ZZZ');run('mkdir','AAA')
         validate_path_tables(image)
