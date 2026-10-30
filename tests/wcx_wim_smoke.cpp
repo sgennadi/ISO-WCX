@@ -570,6 +570,16 @@ int wmain(int argc,wchar_t** argv) {
             close(h);
             if(found_dir)return 87;
         }
+        // Regression: WIM DeleteFiles used to report success for an absent
+        // path because recursive cleanup intentionally accepts a missing
+        // target. Never spend a full Apply/Capture claiming to delete nothing
+        // and never mutate the original source on such a request.
+        wchar_t missing_folder[]=L"image1\\NOT_PRESENT\\*.*\0\0";
+        const auto before_missing=load(original);
+        if(erase(packed.data(),missing_folder)==0 ||
+           load(original)!=before_missing)return 88;
+        if(!content(L"image1\\HELLO.TXT",data)||data!="replacement")
+            return 89;
         // Unsafe wildcard tokens elsewhere in the path are never globs:
         // they must not change the original WIM on a refused delete.
         wchar_t invalid_wildcard[]=L"image1\\FOO*BAR\0\0";
