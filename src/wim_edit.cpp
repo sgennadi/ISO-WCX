@@ -5,6 +5,7 @@
 #include "iso_wcx/wim_parts.hpp"
 #include "iso_wcx/wim_mount_fast_plan.hpp"
 #include "iso_wcx/wim_mount_recovery.hpp"
+#include "iso_wcx/wim_mount_state.hpp"
 #include <msxml6.h>
 #include <map>
 #include <mutex>
@@ -403,11 +404,17 @@ void fast_mount_folder_edit(
             if(!mount(image.h,folder.c_str(),
                       WIM_FLAG_MOUNT_FAST|WIM_FLAG_NO_RP_FIX)) {
                 const DWORD error=GetLastError();
-                // A failed mount might still leave a registered reparse point.
-                // Preserve its staged WIM and path for administrator recovery.
-                tx.preserve();
+                // Failed WIMMountImageHandle does not imply a live mount.
+                // Previously we ALWAYS preserved a multi-GB clone, even
+                // when the Windows driver registered nothing (DISM empty).
+                // Only discard our private stage if the native WIMGAPI
+                // registry AND reparse-point check conclusively say safe.
+                if(wim_detail::inspect_private_mount(
+                        dll,folder,tx.workspace)!=
+                   wim_detail::PrivateMountState::Unmounted)
+                    tx.preserve();
                 throw std::runtime_error("WIM fast mount failed (Win32 "+
-                    std::to_string(error)+"); staged workspace: "+
+                    std::to_string(error)+"); workspace: "+
                     tx.workspace.string());
             }
             mounted=true;
@@ -436,9 +443,12 @@ void fast_mount_folder_edit(
             unmount_attempted=true;
             if(!unmount(image.h,0)) {
                 const DWORD error=GetLastError();
-                tx.preserve();
+                if(wim_detail::inspect_private_mount(
+                       dll,folder,tx.workspace)!=
+                   wim_detail::PrivateMountState::Unmounted)
+                    tx.preserve();
                 throw std::runtime_error("WIM fast unmount failed (Win32 "+
-                    std::to_string(error)+"); recover mounted workspace: "+
+                    std::to_string(error)+"); recover workspace if mounted: "+
                     tx.workspace.string());
             }
             mounted=false;
@@ -446,14 +456,47 @@ void fast_mount_folder_edit(
             if(mounted && !unmount_attempted) {
                 unmount_attempted=true;
                 if(!unmount(image.h,0)) {
-                    tx.preserve();
+                    if(wim_detail::inspect_private_mount(
+                           dll,folder,tx.workspace)!=
+                       wim_detail::PrivateMountState::Unmounted)
+                        tx.preserve();
                     throw std::runtime_error(
                         "WIM mounted workspace could not be discarded; "
                         "do NOT delete or rename its image before recovery: "+
                         tx.workspace.string());
                 }
             }
+            // A successful unmount can still leave a native registration or
+            // reparse point; never let EditTransaction recursively delete it.
+            if(wim_detail::inspect_private_mount(dll,folder,tx.workspace)!=
+               wim_detail::PrivateMountState::Unmounted) {
+                tx.preserve();
+                throw std::runtime_error(
+                    "WIM mount remains registered after cancel; preserve "+
+                    tx.workspace.string());
+            }
             throw;
+        }
+    }
+    // WIMGAPI handles are closed here. Recheck its OWN native mount registry:
+    // DISM may return an empty list even for orphaned WIMGAPI mount points.
+    // Only remove an EMPTY mount directory; never recursively unlink a
+    // mounted Windows tree or invoke global WIMDeleteImageMounts.
+    if(wim_detail::inspect_private_mount(dll,folder,tx.workspace)!=
+       wim_detail::PrivateMountState::Unmounted) {
+        tx.preserve();
+        throw std::runtime_error(
+            "WIM mount cleanup incomplete: preserved "+
+            tx.workspace.string());
+    }
+    {
+        std::error_code ec;
+        const bool removed=std::filesystem::remove(folder,ec);
+        if(!removed || ec) {
+            tx.preserve();
+            throw std::runtime_error(
+                "WIM mount directory is not empty after unmount: preserve "+
+                tx.workspace.string());
         }
     }
     // The mount and all WIMGAPI handles must be closed before independent
