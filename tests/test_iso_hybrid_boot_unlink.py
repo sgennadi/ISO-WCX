@@ -64,6 +64,10 @@ def main(binary):
         assert 'HELLO.TXT' not in read_image(image)
         assert 'café.txt' not in read_image(image, True)
         assert changed[21*B:21*B+5] == b'world', 'unlinked payload must remain untouched'
+        # A stale F8 request must not be accepted on a hybrid-boot ISO.
+        # In particular, it must never patch unrelated boot/system sectors.
+        run(binary, image, 'delete', 'café.txt', False)
+        run(binary, image, 'delete', 'MISSING_FILE.TXT', False)
 
         # Atomic batch unlink: two records in the same directory sectors.
         two = bootable_joliet()
