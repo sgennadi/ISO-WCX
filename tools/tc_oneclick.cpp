@@ -626,11 +626,12 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
     try {
         Options opts=parse(argc,argv);quiet=opts.quiet;
         LocalFree(argv);
+        argv=nullptr;
         auto summary=install(opts,nullptr);
         if(!quiet)MessageBoxW(nullptr,summary.c_str(),L"ISO-WCX installer",MB_OK|MB_ICONINFORMATION);
         return 0;
     } catch(const std::exception& e) {
-        LocalFree(argv);
+        if(argv)LocalFree(argv);
         cli_error(std::string("ISO-WCX installation failed: ")+e.what()+"\r\n");
         if(!quiet) {
             std::wstring msg=L"ISO-WCX installation failed; no user plugin associations were intentionally replaced.\n"
