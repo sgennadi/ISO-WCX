@@ -40,7 +40,10 @@ Preview editing status:
   and deletions on supported validated layouts, not arbitrary boot ISO.
 - UDF-only Type-1: selected experimental file/directory modifications.
 - ISO/UDF Bridge: only narrowly validated file operations.
-- Hybrid bootable ISO file deletion is still separate Draft PR #65.
+- Hybrid bootable ISO: Preview can unlink existing regular files only,
+  preserving MBR/GPT system area, El Torito sectors and file payloads.
+  Directory deletion, add/resize, Rock Ridge and bootable UDF Bridges
+  remain unsupported. Test disposable copies and verify BIOS/UEFI boot.
 - ESD/SWM remains read-only. Edit copies of important images only.
 
 ZIP speed fix in Preview: ISO-WCX no longer advertises the global
