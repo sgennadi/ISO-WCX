@@ -15,24 +15,30 @@ remain limited; this is not full NTFS/ext4/UDF compatibility.**
 
 Development builds remain available through the [Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml).
 
-### Preview: one native INF archive with 32- and 64-bit WCX
+### Preview: native TC installer ZIPs for the installed architecture
 
-The Windows CI produces **one installable artifact**,
-`ISO-WCX-Installable-Preview`, containing `ISO-WCX-preview.zip`:
+The [Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml)
+publishes **three** native `pluginst.inf` installer ZIPs. Choose the package
+matching the Total Commander **process** (not Windows) architecture:
 
-- `pluginst.inf` uses `type=wcx`, `file=ISO-WCX.wcx`, and
-  `defaultextension` for 23 image formats.
-- `ISO-WCX.wcx` is the Win32 plugin and the **adjacent**
-  `ISO-WCX.wcx64` is its x64 counterpart. Total Commander chooses the
-  matching WCX architecture automatically; users do not select between
-  install archives.
-- No installer EXE/CMD/PowerShell scripts or third-party DLLs are bundled.
+| TC edition | GitHub Actions artifact | Inner installation ZIP | WCX installed |
+| --- | --- | --- | --- |
+| **64-bit TC** | `ISO-WCX-Installable-x64-Preview` | `ISO-WCX-preview-x64.zip` | **Only `ISO-WCX.wcx64`** |
+| **32-bit TC** | `ISO-WCX-Installable-Win32-Preview` | `ISO-WCX-preview-Win32.zip` | **Only `ISO-WCX.wcx`** |
+| Mixed 32/64-bit TC | `ISO-WCX-Installable-Preview` | `ISO-WCX-preview.zip` | Both WCX modules, with TC loading its matching one |
 
-Open the inner ZIP with **Enter** in Total Commander and accept the native
-`pluginst.inf` installation. The 23 image associations are offered during
-TC's own installation prompts; the INF format does not guarantee silently
-registering all extensions without prompts. ZIP/RAR/7z are not in the list.
-The installer does not modify toolbar buttons or custom commands.
+Open the inner installer ZIP with **Enter** inside Total Commander (not
+Ctrl+PgDn); accept its built-in `pluginst.inf` installation. The INF
+specifies all 23 supported image extensions. Total Commander may prompt to
+associate each extension separately: stock `pluginst.inf` cannot silently
+apply all 23 associations in one dialog, choose a different ZIP according
+to the host architecture, or delete leftover binaries from earlier
+installations. The architecture-specific ZIP physically contains **only
+one WCX**, so no extra DLL is installed in a fresh plugin directory.
+
+These installer ZIPs contain no EXE, CMD or PowerShell scripts and do not
+change toolbar buttons, custom commands, or ZIP/RAR/7z associations.
+Stable v0.21.0 remains separate and unchanged.
 
 **Editing status (Preview, not universal):** standard unsplit WIM supports
 bounded add/replace/delete of files and folders; it uses expensive WIMGAPI
