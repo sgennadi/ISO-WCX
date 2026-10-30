@@ -11,6 +11,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "iso_wcx/wim_mount_state.hpp"
 #endif
 namespace iso_wcx {
 #ifdef _WIN32
@@ -57,8 +58,21 @@ inline void retry_deferred_edit_workspace_cleanup() noexcept {
                 // have passed for a workspace to enter this queue.
                 const auto mount=workspace/L"mounted";
                 const DWORD attributes=GetFileAttributesW(mount.c_str());
-                if(attributes!=INVALID_FILE_ATTRIBUTES &&
-                   (attributes&FILE_ATTRIBUTE_REPARSE_POINT))continue;
+                if(attributes!=INVALID_FILE_ATTRIBUTES) {
+                    // A mount may remain WIMGAPI-registered even without
+                    // FILE_ATTRIBUTE_REPARSE_POINT; DISM listing is not
+                    // sufficient. Query native WIMGAPI before any deletion.
+                    if(attributes&FILE_ATTRIBUTE_REPARSE_POINT)continue;
+                    const HMODULE lib=LoadLibraryExW(
+                        L"wimgapi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+                    if(!lib)continue;
+                    const auto state=wim_detail::inspect_private_mount(
+                        lib,mount,workspace);
+                    FreeLibrary(lib);
+                    if(state!=wim_detail::PrivateMountState::Unmounted)
+                        continue;
+                }else if(GetLastError()!=ERROR_FILE_NOT_FOUND &&
+                         GetLastError()!=ERROR_PATH_NOT_FOUND)continue;
                 std::error_code error;
                 std::filesystem::remove_all(workspace,error);
                 if(error && std::filesystem::exists(workspace))
