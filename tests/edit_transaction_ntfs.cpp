@@ -334,6 +334,30 @@ int main() {
                  "backup-named archive lost ADS/DACL");
             fs::remove(colliding_name);
         }
+        // Simulate a private backup that was locked until TC closed its
+        // WIM archive handle. The WCX CloseArchive path calls the same
+        // deferred cleanup hook after releasing its reader.
+        {
+            const auto deferred=root/".iso-wcx-edit-deferred-test";
+            fs::create_directory(deferred);
+            write_bytes(deferred/"original-archive.backup","OLD-WIM-CLONE");
+            iso_wcx::defer_edit_workspace_cleanup(deferred);
+            iso_wcx::retry_deferred_edit_workspace_cleanup();
+            need(!fs::exists(deferred),
+                 "CloseArchive-style deferred backup cleanup left workspace");
+        }
+        // DISM can be empty for native WIMGAPI. A private mount-like folder
+        // must be checked with WIMGetMountedImageInfo before cleanup.
+        {
+            const auto deferred=root/".iso-wcx-edit-mount-registry-test";
+            fs::create_directory(deferred);
+            fs::create_directory(deferred/"mounted");
+            write_bytes(deferred/"original-archive.backup","PRIVATE-STAGED-BACKUP");
+            iso_wcx::defer_edit_workspace_cleanup(deferred);
+            iso_wcx::retry_deferred_edit_workspace_cleanup();
+            need(!fs::exists(deferred),
+                 "native mount check did not clean unregistered private stage");
+        }
         for (const auto& entry : fs::directory_iterator(root))
             need(entry.path() == archive, "transaction leaked workspace");
         fs::remove_all(root);
