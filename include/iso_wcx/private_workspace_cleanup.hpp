@@ -67,7 +67,7 @@ public:
         if(!DuplicateTokenEx(source_,TOKEN_QUERY|TOKEN_ADJUST_PRIVILEGES|
                              TOKEN_IMPERSONATE,nullptr,SecurityImpersonation,
                              TokenImpersonation,&elevated_))return;
-        for(const wchar_t* privilege:{SE_RESTORE_NAME,SE_BACKUP_NAME}) {
+        for(const wchar_t* privilege:{L"SeRestorePrivilege",L"SeBackupPrivilege"}) {
             TOKEN_PRIVILEGES entry{};
             entry.PrivilegeCount=1;
             if(!LookupPrivilegeValueW(nullptr,privilege,
