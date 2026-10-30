@@ -502,6 +502,47 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     for(const unsigned index:deleted)
         if(edits.contains(index))
             throw EditUnsupported("cannot edit a WIM image index scheduled for deletion");
+
+    // F8 often selects a stale entry after an earlier edit, or Total Commander
+    // passes a folder wildcard that names an absent directory. Check the
+    // SOURCE metadata BEFORE WIMApplyImage/WIMCaptureImage or creating a
+    // transaction. A nonexistent item must not launch a multi-gigabyte
+    // Apply/Capture merely to return an error after several minutes.
+    //
+    // Only DELETE needs this source scan. File additions and replacements
+    // retain their previous fast path; a valid deletion is still verified
+    // independently after capture. WIMGAPI may block inside WIMLoadImage,
+    // so report the metadata stage without claiming a fabricated percentage.
+    for(const auto& [index, changes_for_index]:edits) {
+        std::unordered_set<std::string> pending;
+        const auto prefix="image"+std::to_string(index)+"/";
+        for(const auto& change:changes_for_index)
+            if(change.remove)pending.insert(prefix+change.path);
+        if(pending.empty())continue;
+
+        const auto message=L"Check WIM delete targets (image "+
+                           std::to_wstring(index)+L")";
+        report(message.c_str(),2);
+        ULONGLONG last_update=0;
+        WimArchive source_listing(path,index,
+            [&](std::uint32_t,std::size_t entries) {
+                edit_tick(progress);
+                if(!status)return;
+                const ULONGLONG now=GetTickCount64();
+                if(last_update!=0 && now-last_update<250u)return;
+                last_update=now;
+                const auto label=L"Check WIM delete targets: image "+
+                                 std::to_wstring(index)+L", "+
+                                 std::to_wstring(entries)+L" paths";
+                if(!status(label.c_str(),2))throw EditCancelled();
+            });
+        for(const auto& item:source_listing.items()) {
+            if(pending.erase(item.path) && pending.empty())break;
+        }
+        if(!pending.empty())
+            throw EditUnsupported(
+                "WIM entry to delete was not found in source metadata");
+    }
     // Strict experimental opt-in until real machine WIM mount and crash
     // recovery have been validated. Normal users retain Apply/Capture.
     if(fast_mount_requested()) {
