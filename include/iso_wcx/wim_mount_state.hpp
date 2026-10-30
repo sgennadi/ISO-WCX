@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cwchar>
+#include <cwctype>
 #include <filesystem>
 #include <string>
 #include <vector>
