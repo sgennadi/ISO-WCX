@@ -546,10 +546,23 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
      }
 }
 }
+// A cancelled native WIM mount can release its last WIMGAPI handle during
+// stack unwinding. Retry cleanup AFTER the edit function has returned and
+// all private image handles/destructors have completed. CloseArchive still
+// provides another retry if TC keeps a backup open.
+void retry_wim_cleanup_after_edit(const std::wstring& archive) noexcept {
+    try {
+        if(!wim_extension(std::filesystem::path(archive)))return;
+        iso_wcx::retry_deferred_edit_workspace_cleanup();
+    }catch(...) {}
+}
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
     try {
         if(!archive||!source)return E_NOT_SUPPORTED;
-        return do_edit(archive,sub?sub:L"",source,edit_list(list),false,flags);
+        const int result=do_edit(archive,sub?sub:L"",source,
+                                 edit_list(list),false,flags);
+        retry_wim_cleanup_after_edit(archive);
+        return result;
     }catch(const std::exception& e) {
         report_edit_error(e.what(),false);return E_BAD_ARCHIVE;
     }catch(...) {
@@ -560,8 +573,12 @@ WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* sourc
 WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* list,int flags) {
     try {
         if(!archive||!source)return E_NOT_SUPPORTED;
-        return do_edit(from_bytes(archive,CP_ACP),from_bytes(sub,CP_ACP),
-                       from_bytes(source,CP_ACP),edit_list(list),false,flags);
+        const auto name=from_bytes(archive,CP_ACP);
+        const int result=do_edit(name,from_bytes(sub,CP_ACP),
+                                 from_bytes(source,CP_ACP),
+                                 edit_list(list),false,flags);
+        retry_wim_cleanup_after_edit(name);
+        return result;
     }catch(const std::exception& e) {
         report_edit_error(e.what(),false);return E_BAD_ARCHIVE;
     }catch(...) {
@@ -572,7 +589,9 @@ WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* li
 WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
     try {
         if(!archive) return E_NOT_SUPPORTED;
-        return do_edit(archive,L"",L"",edit_list(list),true,0);
+        const int result=do_edit(archive,L"",L"",edit_list(list),true,0);
+        retry_wim_cleanup_after_edit(archive);
+        return result;
     }catch(const std::exception& e) {
         report_edit_error(e.what(),true);
         return E_BAD_ARCHIVE;
@@ -584,7 +603,10 @@ WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
 WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
     try {
         if(!archive) return E_NOT_SUPPORTED;
-        return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);
+        const auto name=from_bytes(archive,CP_ACP);
+        const int result=do_edit(name,L"",L"",edit_list(list),true,0);
+        retry_wim_cleanup_after_edit(name);
+        return result;
     }catch(const std::exception& e) {
         report_edit_error(e.what(),true);
         return E_BAD_ARCHIVE;
