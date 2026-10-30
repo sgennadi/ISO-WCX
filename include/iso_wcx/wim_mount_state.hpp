@@ -60,16 +60,11 @@ inline PrivateMountState inspect_private_mount(
             GetProcAddress(wimgapi,"WIMGetMountedImageInfo"));
         if(!fn)return PrivateMountState::Unknown;
 
-        DWORD entries=0,needed=0;
-        SetLastError(ERROR_SUCCESS);
-        BOOL ok=fn(1,&entries,nullptr,0,&needed);
-        if(!ok && GetLastError()!=ERROR_INSUFFICIENT_BUFFER)
-            return PrivateMountState::Unknown;
-        // Use a few extra entries to tolerate concurrent mounts.
-        std::size_t capacity=std::max<std::size_t>(
-            needed,static_cast<std::size_t>(entries+4u)*
-                   sizeof(MountInfoLevel1));
-        if(capacity>4u*1024u*1024u)return PrivateMountState::Unknown;
+        // Query with a real buffer on the FIRST call. Several Windows
+        // WIMGAPI versions reject a null buffer when there are zero
+        // registered images, rather than reporting a required length.
+        // A failed query remains Unknown and cannot authorize deletion.
+        std::size_t capacity=sizeof(MountInfoLevel1)*8u;
         const auto target=mount_key(mount);
         const auto root=mount_key(workspace);
         for(int attempt=0;attempt<3;++attempt) {
@@ -91,8 +86,8 @@ inline PrivateMountState inspect_private_mount(
                     return PrivateMountState::Unknown;
                 continue;
             }
-            if(count>buffer.size() ||
-               returned>bytes)
+            if(count>buffer.size() || returned>bytes ||
+               (count!=0 && returned<count*sizeof(MountInfoLevel1)))
                 return PrivateMountState::Unknown;
             for(DWORD i=0;i<count;++i) {
                 // The API fields have fixed MAX_PATH buffers. Fail closed
