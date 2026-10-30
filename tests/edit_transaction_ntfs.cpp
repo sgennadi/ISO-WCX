@@ -371,8 +371,11 @@ int main() {
                 // cleanup can safely dispose of the ordinary backup.
                 need(fs::remove(deferred/"mounted"),
                      "cannot remove fixture-created empty dummy mount");
-                iso_wcx::retry_deferred_edit_workspace_cleanup();
-                need(!fs::exists(deferred),
+                // The deferred queue deliberately does NOT requeue an
+                // UNKNOWN/unsafe mount. This is a synthetic fixture with a
+                // confirmed empty directory that the TEST removed itself.
+                const auto cleaned=iso_wcx::workspace_cleanup::cleanup(deferred);
+                need(cleaned.clean && !fs::exists(deferred),
                      "known unmounted fixture backup could not be cleaned");
             }
         }
