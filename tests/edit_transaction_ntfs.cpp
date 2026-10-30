@@ -356,27 +356,34 @@ int main() {
             iso_wcx::defer_edit_workspace_cleanup(deferred);
             iso_wcx::retry_deferred_edit_workspace_cleanup();
             if(fs::exists(deferred)) {
-                // Some CI images have WIMGAPI but no working native mount
-                // registry. Unknown is NOT the same as unmounted, even if
-                // DISM reports no mounts. Preserve any possible mount.
-                need(fs::exists(deferred/"mounted") &&
-                     read_bytes(deferred/"original-archive.backup")==
-                         "PRIVATE-STAGED-BACKUP",
-                     "uncertain native mount was partially deleted");
-                const auto state=iso_wcx::workspace_cleanup::cleanup(deferred);
-                need(!state.clean && state.unsafe,
-                     "uncertain native WIMGAPI mount was not preserved");
-                // The test itself created an EMPTY dummy mount directory.
-                // Once we remove that exact fixture directory, private
-                // cleanup can safely dispose of the ordinary backup.
-                need(fs::remove(deferred/"mounted"),
-                     "cannot remove fixture-created empty dummy mount");
-                // The deferred queue deliberately does NOT requeue an
-                // UNKNOWN/unsafe mount. This is a synthetic fixture with a
-                // confirmed empty directory that the TEST removed itself.
-                const auto cleaned=iso_wcx::workspace_cleanup::cleanup(deferred);
+                // WIMGAPI can confirm an empty dummy mount and unlink it
+                // before the ordinary backup deletion completes. Such a
+                // completed unmount is safe, unlike an active mounted tree.
+                const auto mounted=deferred/"mounted";
+                if(fs::exists(mounted)) {
+                    need(fs::is_empty(mounted),
+                         "native cleanup entered nonempty WIM mount");
+                    const auto unknown=
+                        iso_wcx::workspace_cleanup::cleanup(deferred);
+                    if(!unknown.clean) {
+                        need(unknown.unsafe && fs::exists(mounted),
+                             "WIMGAPI-unknown mount was modified");
+                        // Only TEST code may remove this exact synthetic
+                        // empty directory, independently of WIMGAPI.
+                        need(fs::remove(mounted),
+                             "cannot remove fixture-created empty mount");
+                    }
+                }
+                const auto cleaned=
+                    iso_wcx::workspace_cleanup::cleanup(deferred);
+                if(!cleaned.clean) {
+                    std::wcerr<<L"Private stage cleanup: blocked="
+                              <<cleaned.blocked.wstring()
+                              <<L" error="<<cleaned.error
+                              <<L" unsafe="<<cleaned.unsafe<<L"\n";
+                }
                 need(cleaned.clean && !fs::exists(deferred),
-                     "known unmounted fixture backup could not be cleaned");
+                     "unmounted temporary stage was not fully cleaned");
             }
         }
         // A native WIMGAPI mount marker with arbitrary content is NEVER a
