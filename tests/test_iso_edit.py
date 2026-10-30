@@ -150,6 +150,12 @@ def main(binary, reader=None):
         independent=independent_read(image)
         if independent is not None:assert independent['DOCS/NEW.TXT']==source.read_bytes()
         run('cancel','OTHER.TXT',False);run('add','../escape',False)
+        # F8 on a stale entry must fail, not silently rewrite the entire ISO
+        # or claim it deleted a path that did not exist.
+        run('delete','NOT_PRESENT.TXT',False)
+        run('delete','DOCS/NOT_PRESENT.TXT',False)
+        run('delete','MISSING_PARENT/FILE.TXT',False)
+        assert read_image(image)['DOCS/NEW.TXT']==source.read_bytes()
         run('delete','DOCS');assert 'DOCS/NEW.TXT' not in read_image(image)
         image.write_bytes(fixture(joliet=True));run('add','café.txt');run('add','NEW.TXT');run('mkdir','ZZZ');run('mkdir','AAA')
         validate_path_tables(image)
