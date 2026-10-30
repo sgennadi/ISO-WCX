@@ -386,10 +386,36 @@ void report_edit_error(const char* description,bool remove) noexcept {
         OutputDebugStringW(L"ISO-WCX: failed to display archive edit error");
     }
 }
+// Report a cleanup warning separately from the edit result: the WIM may
+// already have been committed successfully while Windows still holds a
+// private scratch handle. Do not instruct users to repeat the edit.
+void report_workspace_cleanup_warning(const std::wstring& reason) noexcept {
+    if(reason.empty())return;
+    try {
+        wchar_t host[MAX_PATH]{};
+        const DWORD length=GetModuleFileNameW(nullptr,host,MAX_PATH);
+        if(!length || length>=MAX_PATH)return;
+        const wchar_t* filename=std::wcsrchr(host,L'\\');
+        filename=filename?filename+1:host;
+        if(_wcsicmp(filename,L"TOTALCMD.EXE")!=0 &&
+           _wcsicmp(filename,L"TOTALCMD64.EXE")!=0)return;
+        const auto text=std::wstring(
+            L"ISO-WCX has finished the archive edit, but could not "
+            L"delete all temporary extracted Windows files.\n\n")+
+            reason+
+            L"\n\nClose any panel opened inside this folder. "
+            L"The plugin will retry after the archive is closed. "
+            L"Do not manually delete a mounted WIM image.";
+        MessageBoxW(nullptr,text.c_str(),L"ISO-WCX - Temporary WIM files",
+                    MB_OK|MB_ICONWARNING|MB_TASKMODAL);
+    }catch(...) {}
+}
 int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::wstring& source,
             const std::vector<std::wstring>& names,bool remove,int flags) {
     try {
         // No move packing: source files are never removed by this plugin.
+        // Never report a previous edit's cleanup failure as the current one.
+        (void)iso_wcx::take_edit_cleanup_warning();
         if(flags&1)return E_NOT_SUPPORTED;
         std::lock_guard lock(edit_mutex);
         std::filesystem::path image(archive);auto ext=image.extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return std::towlower(c);});
@@ -481,6 +507,9 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             // WIMGAPI calls and preserves real stage/cancel checkpoints.
             // Do not show another dialog for Delete (F8), whose TC
             // progress callback already works on the user's machine.
+            // Scope the GUI to close its TaskDialog before displaying a
+            // pending scratch cleanup warning.
+            {
             iso_wcx::WimOpenProgress indicator(
                 !remove && wim_edit_dialog_enabled(),
                 iso_wcx::WimOpenProgress::Mode::Editing);
@@ -495,6 +524,9 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
                 return true;
             };
             iso_wcx::edit_wim(image,changes,progress,status);
+            }
+            report_workspace_cleanup_warning(
+                iso_wcx::take_edit_cleanup_warning());
         }
         else iso_wcx::edit_fat(image,changes,progress);
         return 0;
