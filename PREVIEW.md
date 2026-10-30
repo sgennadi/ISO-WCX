@@ -10,26 +10,29 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
-## One native pluginst.inf ZIP with both WCX architectures
+## Architecture-specific native pluginst.inf ZIPs (no EXE)
 
-The Preview workflow produces **one** `ISO-WCX-Installable-Preview`
-artifact containing `ISO-WCX-preview.zip`. Its contents include
-`ISO-WCX.wcx` (Win32), `ISO-WCX.wcx64` (x64), `pluginst.inf` and
-documentation.
+For a **64-bit** Total Commander, download the Preview Actions artifact
+`ISO-WCX-Installable-x64-Preview` and open its inner
+`ISO-WCX-preview-x64.zip` with **Enter** in TC. It contains only
+`ISO-WCX.wcx64`; the INF registers `file=ISO-WCX.wcx64`.
+For **32-bit** TC, download `ISO-WCX-Installable-Win32-Preview` and
+open `ISO-WCX-preview-Win32.zip`. It contains only `ISO-WCX.wcx`,
+with `file=ISO-WCX.wcx`.
 
-`pluginst.inf` declares `type=wcx`, `file=ISO-WCX.wcx` and
-`defaultdir=ISO-WCX`. Total Commander automatically recognizes the
-adjacent `.wcx64` sibling when running its 64-bit edition. You do not
-need to pick an architecture-specific archive or run an EXE, CMD, or
-PowerShell installer. Both architecture modules are shipped in the ZIP,
-but TC **loads the one matching its process architecture**.
+The old combined `ISO-WCX-Installable-Preview` artifact is retained for
+mixed 32/64-bit TC installations, containing both files as required for
+that use case. There is **no separate EXE, PowerShell or CMD installer**.
+CI verifies that each architecture-specific ZIP contains one WCX of the
+correct PE machine type, the matching `pluginst.inf`, and no executable
+helpers or third-party DLLs.
 
-The `defaultextension` entry advertises 23 image formats during native
-TC plugin installation. The TC installation UI may still ask about
-individual extensions; `pluginst.inf` cannot run a post-install script
-or unconditionally overwrite existing user associations. ZIP/RAR/7z
-are never offered to ISO-WCX. User-defined buttons/commands remain
-untouched by the package.
+The `defaultextension` entry offers 23 supported image types via the
+normal Total Commander installation flow. TC may display one association
+dialog per extension; the INF format cannot silently register everything
+without user confirmations. It does not delete leftover files from
+earlier plugin installations or touch existing toolbar buttons.
+ZIP/RAR/7z are excluded from image extension registrations.
 
 To prevent sluggish normal ZIP opens, the Preview plugin no longer advertises
 `PK_CAPS_BY_CONTENT`. The cached/native WCX capability mask changes from
