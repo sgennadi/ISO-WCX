@@ -786,7 +786,15 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
                 return 50;
             for(const auto& item:fs::directory_iterator(root)) {
                 const auto name=item.path().filename().wstring();
-                if(name.starts_with(L".iso-wcx-edit-"))return 51;
+                if(name.starts_with(L".iso-wcx-edit-")) {
+                    std::wcerr<<L"Cancelled WIM edit left private stage: "
+                              <<item.path()<<L"\n";
+                    for(const auto& child:fs::directory_iterator(item.path())) {
+                        std::wcerr<<L"  retained: "
+                                  <<child.path().filename().wstring()<<L"\n";
+                    }
+                    return 51;
+                }
             }
 
             // Cancellation AFTER WIMCommitImageHandle and unmount, but
