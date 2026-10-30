@@ -52,6 +52,9 @@ using WimCloseFn=BOOL(WINAPI*)(HANDLE);
 static std::atomic<unsigned> pack_progress_calls{0};
 static std::atomic<unsigned> wim_percent_calls{0};
 static std::atomic<unsigned> wim_stage_calls{0};
+static std::atomic<unsigned> wim_legacy_staging_calls{0};
+static std::atomic<unsigned> wim_delete_metadata_preflight_calls{0};
+static std::atomic<bool> cancel_wim_delete_preflight{false};
 static std::atomic<unsigned> wim_fast_mount_stages{0};
 static std::atomic<unsigned> wim_recovery_notes_seen{0};
 static fs::path wim_recovery_test_root;
@@ -108,6 +111,14 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
         ++wim_percent_calls;
         if(stage && std::wstring_view(stage).starts_with(L"WIM: "))
             ++wim_stage_calls;
+        if(stage && std::wstring_view(stage).find(L"Prepare NTFS staging")!=
+            std::wstring_view::npos)
+            ++wim_legacy_staging_calls;
+        if(stage && std::wstring_view(stage).find(L"Check WIM delete targets")!=
+            std::wstring_view::npos) {
+            ++wim_delete_metadata_preflight_calls;
+            if(cancel_wim_delete_preflight.load())return 0;
+        }
         if(stage && std::wstring_view(stage).find(
                 L"Create WIM folders without applying image") !=
                 std::wstring_view::npos) {
@@ -576,10 +587,33 @@ int wmain(int argc,wchar_t** argv) {
         // and never mutate the original source on such a request.
         wchar_t missing_folder[]=L"image1\\NOT_PRESENT\\*.*\0\0";
         const auto before_missing=load(original);
-        if(erase(packed.data(),missing_folder)==0 ||
-           load(original)!=before_missing)return 88;
+        const auto staging_before=wim_legacy_staging_calls.load();
+        const auto checks_before=wim_delete_metadata_preflight_calls.load();
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int missing_rc=erase(packed.data(),missing_folder);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(missing_rc==0 || load(original)!=before_missing)return 88;
+        if(wim_legacy_staging_calls.load()!=staging_before ||
+           wim_delete_metadata_preflight_calls.load()<=checks_before)
+            return 90; // Missing path was refused BEFORE Apply/Capture.
         if(!content(L"image1\\HELLO.TXT",data)||data!="replacement")
             return 89;
+
+        // Cancel during metadata preflight: no WIM staging and no source
+        // changes, even when the directory DOES exist in the source.
+        wchar_t existing_folder[]=L"image1\\HELLO.TXT\0\0";
+        const auto before_preflight_cancel=load(original);
+        const auto staging_before_cancel=wim_legacy_staging_calls.load();
+        cancel_wim_delete_preflight.store(true);
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int preflight_cancel_rc=erase(packed.data(),existing_folder);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        cancel_wim_delete_preflight.store(false);
+        if(preflight_cancel_rc!=21 ||
+           wim_legacy_staging_calls.load()!=staging_before_cancel ||
+           load(original)!=before_preflight_cancel)
+            return 91;
+
         // Unsafe wildcard tokens elsewhere in the path are never globs:
         // they must not change the original WIM on a refused delete.
         wchar_t invalid_wildcard[]=L"image1\\FOO*BAR\0\0";
