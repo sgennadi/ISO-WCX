@@ -10,7 +10,8 @@
 
 namespace iso_wcx {
 
-WimOpenProgress::WimOpenProgress(bool enabled) noexcept {
+WimOpenProgress::WimOpenProgress(bool enabled,Mode mode) noexcept
+    : mode_(mode) {
     if (!enabled) return;
     try {
         worker_ = std::thread([this] { run(); });
@@ -36,6 +37,22 @@ void WimOpenProgress::on_listing(std::size_t emitted,std::size_t total) noexcept
     publishing_.store(true);
 }
 
+bool WimOpenProgress::on_edit(const wchar_t* stage,unsigned percent) noexcept {
+    if (cancelled_.load()) return false;
+    try {
+        {
+            std::lock_guard lock(edit_mutex_);
+            edit_stage_=stage?stage:L"Processing Windows image";
+        }
+        edit_percent_.store(std::min(percent,99u));
+        edit_last_update_.store(GetTickCount64());
+        return !cancelled_.load();
+    } catch (...) {
+        // A failed optional UI update must not corrupt an otherwise valid WIM.
+        return !cancelled_.load();
+    }
+}
+
 void WimOpenProgress::on_scan(std::uint32_t index,std::size_t entries) {
     if (cancelled_.load()) throw WimOpenCancelled{};
     image_.store(index);
@@ -45,6 +62,25 @@ void WimOpenProgress::on_scan(std::uint32_t index,std::size_t entries) {
 
 std::wstring WimOpenProgress::describe() const {
     std::wstring result;
+    if(mode_==Mode::Editing) {
+        {
+            std::lock_guard lock(edit_mutex_);
+            result=edit_stage_.empty()?L"Preparing WIM edit":edit_stage_;
+        }
+        const auto percent=edit_percent_.load();
+        result+=L"\nOperation checkpoint: "+std::to_wstring(percent)+L"%";
+        const auto elapsed=(GetTickCount64()-started_)/1000u;
+        result+=L"\nElapsed: "+std::to_wstring(elapsed)+L" seconds";
+        const auto since=GetTickCount64()-edit_last_update_.load();
+        if(since>3000u && edit_last_update_.load()!=0)
+            result+=L"\nWindows Imaging API is still working on this stage.";
+        if(cancelled_.load())
+            result+=L"\nCancellation requested; waiting for a safe "
+                    L"Windows Imaging API checkpoint...";
+        else
+            result+=L"\nThe original WIM remains unchanged until verified commit.";
+        return result;
+    }
     const auto image=image_.load();
     const auto total=image_count_.load();
     if (publishing_.load()) {
@@ -103,7 +139,7 @@ HRESULT CALLBACK WimOpenProgress::dialog_callback(
                 break;
             }
             {
-                if(self->publishing_.load()) {
+                if(self->mode_==Mode::Opening && self->publishing_.load()) {
                     if(!self->progress_is_determinate_) {
                         SendMessageW(window,TDM_SET_MARQUEE_PROGRESS_BAR,FALSE,0);
                         SendMessageW(window,TDM_SET_PROGRESS_BAR_RANGE,0,
@@ -151,7 +187,8 @@ void WimOpenProgress::run() noexcept {
             std::unique_lock lock(wait_mutex_);
             // Don't flash a dialog for tiny boot.wim or immediately cached
             // archives. Both sides of this wait are woken by the destructor.
-            if (wake_.wait_for(lock,std::chrono::milliseconds(1200),
+            if (wake_.wait_for(lock,std::chrono::milliseconds(
+                    mode_==Mode::Editing?700:1200),
                                [this]{return finished_.load();}))
                 return;
         }
@@ -163,12 +200,19 @@ void WimOpenProgress::run() noexcept {
                        TDF_SHOW_MARQUEE_PROGRESS_BAR|
                        TDF_ALLOW_DIALOG_CANCELLATION;
         config.dwCommonButtons=TDCBF_CANCEL_BUTTON;
-        config.pszWindowTitle=L"ISO-WCX - Opening WIM";
-        config.pszMainInstruction=L"Opening WIM in Total Commander";
-        config.pszContent=L"Loading Windows image indexes. Large install.wim "
-                          L"files may contain hundreds of thousands of paths; "
-                          L"the counter updates as WIMGAPI reports metadata.";
-        config.pszFooter=L"Metadata-only operation. The WIM remains unchanged.";
+        config.pszWindowTitle=mode_==Mode::Editing?
+            L"ISO-WCX - Editing WIM":L"ISO-WCX - Opening WIM";
+        config.pszMainInstruction=mode_==Mode::Editing?
+            L"Creating files and folders in WIM":
+            L"Opening WIM in Total Commander";
+        config.pszContent=mode_==Mode::Editing?
+            L"Preparing WIM editing. A moving indicator remains active "
+            L"during long synchronous Windows Imaging API calls.":
+            L"Loading Windows image indexes. Large install.wim files "
+            L"may contain hundreds of thousands of paths.";
+        config.pszFooter=mode_==Mode::Editing?
+            L"Private copy. The source is replaced only after verification.":
+            L"Metadata-only operation. The WIM remains unchanged.";
         config.pfCallback=&WimOpenProgress::dialog_callback;
         config.lpCallbackData=reinterpret_cast<LONG_PTR>(this);
         // Defer loading ComCtl32 until an actual Total Commander UI is
