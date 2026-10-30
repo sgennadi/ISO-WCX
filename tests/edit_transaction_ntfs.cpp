@@ -358,6 +358,34 @@ int main() {
             need(!fs::exists(deferred),
                  "native mount check did not clean unregistered private stage");
         }
+        // A native WIMGAPI mount marker with arbitrary content is NEVER a
+        // disposable expanded tree, even if DISM says there are no mounts.
+        // The source WIM and that directory must remain byte-identical.
+        {
+            const auto suspicious=root/L".iso-wcx-edit-4101-9204";
+            fs::create_directories(suspicious/L"mounted"/L"Windows");
+            write_bytes(suspicious/L"mounted"/L"Windows"/L"KEEP.TXT",
+                        "DO-NOT-TOUCH-MOUNT");
+            auto result=iso_wcx::workspace_cleanup::cleanup(suspicious);
+            need(!result.clean && result.unsafe,
+                 "WIM cleanup accepted a nonempty mount placeholder");
+            need(read_bytes(suspicious/L"mounted"/L"Windows"/L"KEEP.TXT")==
+                     "DO-NOT-TOUCH-MOUNT",
+                 "WIM cleanup traversed a possible mounted WIM tree");
+            fs::remove_all(suspicious);
+        }
+        // Arbitrary user paths are never valid ISO-WCX workspaces, even if
+        // they contain an expanded-looking Windows directory.
+        {
+            const auto outside=root/L"not-an-isowcx-workspace";
+            fs::create_directories(outside);
+            write_bytes(outside/L"KEEP.TXT","KEEP-USER-DATA");
+            auto result=iso_wcx::workspace_cleanup::cleanup(outside);
+            need(result.unsafe && !result.clean &&
+                 read_bytes(outside/L"KEEP.TXT")=="KEEP-USER-DATA",
+                 "cleanup accepted an arbitrary user-selected directory");
+            fs::remove_all(outside);
+        }
         // This is a miniature WIMApplyImage output: Windows folders,
         // restored protected ACLs, read-only / hidden files and a private
         // NTFS tree which must be deleted without modifying the source.
