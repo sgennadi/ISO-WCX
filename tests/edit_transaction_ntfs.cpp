@@ -338,7 +338,7 @@ int main() {
         // WIM archive handle. The WCX CloseArchive path calls the same
         // deferred cleanup hook after releasing its reader.
         {
-            const auto deferred=root/".iso-wcx-edit-deferred-test";
+            const auto deferred=root/".iso-wcx-edit-4101-9202";
             fs::create_directory(deferred);
             write_bytes(deferred/"original-archive.backup","OLD-WIM-CLONE");
             iso_wcx::defer_edit_workspace_cleanup(deferred);
@@ -349,7 +349,7 @@ int main() {
         // DISM can be empty for native WIMGAPI. A private mount-like folder
         // must be checked with WIMGetMountedImageInfo before cleanup.
         {
-            const auto deferred=root/".iso-wcx-edit-mount-registry-test";
+            const auto deferred=root/".iso-wcx-edit-4101-9203";
             fs::create_directory(deferred);
             fs::create_directory(deferred/"mounted");
             write_bytes(deferred/"original-archive.backup","PRIVATE-STAGED-BACKUP");
@@ -357,6 +357,62 @@ int main() {
             iso_wcx::retry_deferred_edit_workspace_cleanup();
             need(!fs::exists(deferred),
                  "native mount check did not clean unregistered private stage");
+        }
+        // This is a miniature WIMApplyImage output: Windows folders,
+        // restored protected ACLs, read-only / hidden files and a private
+        // NTFS tree which must be deleted without modifying the source.
+        {
+            fs::path expanded_root;
+            {
+                iso_wcx::EditTransaction tx(archive);
+                expanded_root=tx.workspace;
+                const auto sys=tx.workspace/L"expanded"/L"Windows"/L"System32";
+                fs::create_directories(sys);
+                const auto protected_file=sys/L"protected.dll";
+                write_bytes(protected_file,"WIM-STAGING-ONLY");
+                set_protected_dacl(sys);
+                need(SetFileAttributesW(protected_file.c_str(),
+                     FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_HIDDEN)!=FALSE,
+                     "mark temporary WIM file readonly/hidden");
+                // Link to OUTSIDE the ephemeral workspace must be unlinked
+                // without traversing the target. Skip if the OS has not
+                // enabled developer-mode symlink creation.
+                const auto outside=root/L"symlink-target";
+                fs::create_directories(outside);
+                write_bytes(outside/L"keep.txt","KEEP-OUTSIDE");
+                const auto link=tx.workspace/L"expanded"/L"external-junction";
+                constexpr DWORD allow_unprivileged=0x2u;
+                (void)CreateSymbolicLinkW(link.c_str(),outside.c_str(),
+                       SYMBOLIC_LINK_FLAG_DIRECTORY|allow_unprivileged);
+            }
+            need(!fs::exists(expanded_root),
+                 "WIM expanded Windows tree with protected ACL was not cleaned");
+            need(read_bytes(root/L"symlink-target"/L"keep.txt")==
+                     "KEEP-OUTSIDE",
+                 "WIM cleanup traversed outside the private workspace");
+            fs::remove_all(root/L"symlink-target");
+        }
+        // Simulate a file handle held by TC until CloseArchive. A complete
+        // cleanup must be retried AFTER the handle is released.
+        {
+            fs::path temporary;
+            HANDLE hold=INVALID_HANDLE_VALUE;
+            {
+                iso_wcx::EditTransaction tx(archive);
+                temporary=tx.workspace;
+                const auto busy=temporary/L"original-archive.backup";
+                write_bytes(busy,"LOCKED-SNAPSHOT");
+                hold=CreateFileW(busy.c_str(),GENERIC_READ,0,nullptr,
+                                  OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+                need(hold!=INVALID_HANDLE_VALUE,"lock WCX private backup");
+            }
+            need(fs::exists(temporary),
+                 "locked WIM stage was unexpectedly deleted");
+            CloseHandle(hold);
+            iso_wcx::retry_deferred_edit_workspace_cleanup();
+            need(!fs::exists(temporary),
+                 "CloseArchive deferred backup cleanup did not complete");
+            (void)iso_wcx::take_edit_cleanup_warning();
         }
         for (const auto& entry : fs::directory_iterator(root))
             need(entry.path() == archive, "transaction leaked workspace");
