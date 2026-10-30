@@ -2,6 +2,7 @@
 #ifdef _WIN32
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/archive_edit.hpp"
+#include "iso_wcx/edit_transaction.hpp"
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/wim_parts.hpp"
 #include "wcx_wim_open_progress.hpp"
@@ -310,7 +311,16 @@ WCX_EXPORT int __stdcall ProcessFile(HANDLE handle,int operation,char* path,char
     }catch(...){return E_BAD_ARCHIVE;}
 }
 WCX_EXPORT int __stdcall CloseArchive(HANDLE handle) {
-    delete reinterpret_cast<State*>(handle);return 0;
+    try {
+        // The old WIM backup may still be held by the archive reader until
+        // TC exits the virtual WIM panel. Release the handle FIRST, then
+        // retry cleaning ONLY workspaces created by this plugin process.
+        delete reinterpret_cast<State*>(handle);
+        iso_wcx::retry_deferred_edit_workspace_cleanup();
+        return 0;
+    }catch(...) {
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT void __stdcall SetProcessDataProcW(HANDLE handle,ProgressW proc) {
     if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_w.store(proc);return;}
