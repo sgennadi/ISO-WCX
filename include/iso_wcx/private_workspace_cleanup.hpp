@@ -322,12 +322,21 @@ inline Result cleanup(const fs::path& root) noexcept {
                 failure(report,mount,ERROR_BUSY);
                 return report;
             }
-            // A fresh, valid mount staging directory is always removed
-            // explicitly by the fast writer AFTER unmount. A leftover
-            // directory is suspect even if native enumeration is empty.
-            report.unsafe=true;
-            failure(report,mount,ERROR_BUSY);
-            return report;
+            // A failed mount may leave an EMPTY, unregistered directory.
+            // Only that exact disposable mount root can be removed. Never
+            // recurse into a nonempty Windows tree or a live WIMGAPI mount.
+            std::error_code ec;
+            if(!fs::is_empty(mount,ec) || ec) {
+                report.unsafe=true;
+                failure(report,mount,ERROR_DIR_NOT_EMPTY);
+                return report;
+            }
+            ec.clear();
+            if(!fs::remove(mount,ec) || ec) {
+                failure(report,mount,ec?static_cast<DWORD>(ec.value()):
+                                          ERROR_ACCESS_DENIED);
+                return report;
+            }
         }
         const DWORD missing=GetLastError();
         if(missing!=ERROR_FILE_NOT_FOUND && missing!=ERROR_PATH_NOT_FOUND) {
