@@ -47,8 +47,8 @@ bounded add/replace/delete of files and folders; it uses expensive WIMGAPI
 Apply/Capture, and the optional fast mount/commit route currently supports
 only directory creation and is disabled by default. Plain ISO9660/Joliet
 supports constrained editing on validated layouts. Experimental UDF Type-1
-supports selected creates/replacements/deletions. Bootable hybrid ISO delete
-support is still a separate draft, and ESD/SWM are read-only. See
+supports selected creates/replacements/deletions. Bootable hybrid ISO supports strictly validated file-only unlink in
+Preview without remastering MBR/GPT or El Torito sectors; ESD/SWM are read-only. See
 [Preview](PREVIEW.md) and [WIM integration](docs/wim-integration.md).
 
 **ZIP performance regression fix in Preview:** ISO-WCX no longer advertises
@@ -487,8 +487,8 @@ See [bounded optical container design](docs/packed-optical.md).
 - Split SWM sets: open any part with all `.swm` files in the same folder.
   Parts are matched by GUID and part number, including renamed files.
 - Plain ISO9660/Joliet editing adds/replaces/removes files and folders
-  transactionally; unsupported hybrid/Rock Ridge layouts fail without
-  modifying the input. A narrow ISO/UDF Bridge mode permits only identical-
+  transactionally. Strict hybrid-boot ISO file-only unlink preserves the
+  boot/system area; Rock Ridge and unsupported layouts fail unchanged. A narrow ISO/UDF Bridge mode permits only identical-
   length replacement of nonboot files whose physical data extent is shared
   across both namespaces; metadata-changing Bridge edits are refused.
   Existing supported boot-image sectors are preserved in plain ISO editing.
