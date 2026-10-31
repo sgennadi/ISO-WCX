@@ -34,7 +34,7 @@ by the stock INF installer. No CMD, PowerShell or extra DLL is needed.
 Built-in association repair after upgrades (Preview)
 ---------------------------------------------------
 Total Commander's pluginst.inf cannot uninstall older WCX registrations.
-On the first WIM open after an update, ISO-WCX checks its own old bindings
+On the first WIM, ISO or UDF open after an update, ISO-WCX checks its own old bindings
 and offers a confirmed repair if any are stale. It never silently modifies
 user configuration. A built-in Settings button is also available:
   Files > Pack > Configure... > Repair WCX associations (WIM F5).
@@ -54,6 +54,10 @@ Preview editing status:
   delete any existing image index except the last. WIMGAPI
   Apply/Capture is slow on multi-GB images. Experimental folder-only
   fast Mount/Commit is OFF by default.
+- Native ISO F5 uses cancellable Windows CopyFileExW staging,
+  reports real copy progress and supports long paths/UNC. The original image
+  is replaced only after verification. Adding new files to arbitrary ISO/UDF
+  Bridge or hybrid boot images is not yet supported.
 - Plain ISO9660/Joliet: tightly constrained additions, replacements,
   and deletions on supported validated layouts, not arbitrary boot ISO.
 - UDF-only Type-1: selected experimental file/directory modifications.
