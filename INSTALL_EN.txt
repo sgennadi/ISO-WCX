@@ -31,6 +31,22 @@ confirmations. ZIP/RAR/7z, existing user buttons and external plugins are
 not assigned to ISO-WCX. Previously installed extra files are not removed
 by the stock INF installer. No CMD, PowerShell or extra DLL is needed.
 
+Built-in association repair after upgrades (Preview)
+---------------------------------------------------
+Total Commander's pluginst.inf cannot uninstall older WCX registrations.
+ISO-WCX includes a built-in Settings button:
+  Files > Pack > Configure... > Repair WCX associations (WIM F5).
+The native WCX detects stale 0/192/222/bare-path registrations, normalizes
+only this plugin's extensions to flags 158, removes duplicate bindings of
+the same plugin, and invalidates the derived PackerPlugins64 cache.
+It first previews changes, requests confirmation and backs up original INIs.
+RedirectSection, UTF-8 BOM and UTF-16LE are supported; conflicting
+third-party WCX registrations and all user buttons/configuration are left
+untouched. Fully restart Total Commander after repair. No helper EXE
+or installer script is required. If an old capability mask hides the
+Configure button, re-register only the WIM extension once in TC's UI.
+
+
 Preview editing status:
 - Standard unsplit WIM: add/replace/delete files and directories and
   delete any existing image index except the last. WIMGAPI
