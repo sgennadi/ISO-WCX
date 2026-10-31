@@ -217,6 +217,22 @@ fs::path module_path(HINSTANCE module) {
           "Both 32-bit WCX and 64-bit WCX64 must be installed");
     return path;
 }
+// A custom TC PluginBaseDir can be outside the Total Commander install tree.
+// Derive the portable/INI base from the running HOST, never from the WCX DLL
+// location. Refuse to edit TC's configuration from a foreign WCX host.
+fs::path running_totalcmd_directory() {
+    std::wstring executable(32768,L'\0');
+    const auto length=GetModuleFileNameW(
+        nullptr,executable.data(),static_cast<DWORD>(executable.size()));
+    check(length>0 && length<executable.size(),
+          "Cannot locate running Total Commander");
+    executable.resize(length);
+    const fs::path path(executable);
+    const auto name=fold(path.filename().wstring());
+    check(name==L"totalcmd.exe" || name==L"totalcmd64.exe",
+          "WCX association repair requires a Total Commander process");
+    return path.parent_path();
+}
 std::string backup_suffix() {
     SYSTEMTIME t{};
     GetLocalTime(&t);
@@ -271,7 +287,7 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
                              bool quiet_when_clean) {
     try {
         const auto dll=module_path(instance);
-        const auto tc_dir=dll.parent_path().parent_path().parent_path().parent_path();
+        const auto tc_dir=running_totalcmd_directory();
         const auto primary=load(discover_ini(tc_dir));
         const auto assoc_path=redirect(primary,L"PackerPlugins");
         const auto cache_path=redirect(primary,L"PackerPlugins64");
