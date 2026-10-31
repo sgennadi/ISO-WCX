@@ -182,6 +182,32 @@ int wmain(int argc,wchar_t** argv) {
         const auto image=root/L"edited.iso";
         save(image,fixture());
         const auto input=root/L"source";
+        // Real TC F5 with the old ISO panel retained. If input and archive
+        // entries have equal byte length, replace only the existing extent:
+        // no new sectors, directories or volume-descriptor modifications.
+        write_source(input/L"HELLO.TXT","NEW!!");
+        const auto before_equal=load(image);
+        auto fast_arc=image.wstring(),fast_src=input.wstring();
+        std::wstring fast_sub;
+        wchar_t fast_list[]=L"HELLO.TXT\0\0";
+        OpenW fast_panel{};
+        fast_panel.ArcName=fast_arc.data();
+        const HANDLE fast_handle=open(&fast_panel);
+        need(fast_handle && fast_panel.OpenResult==0,
+             "ISO fast F5 cannot retain an open TC panel");
+        const int fast_result=pack(fast_arc.data(),fast_sub.data(),
+                                   fast_src.data(),fast_list,2);
+        need(close(fast_handle)==0,"ISO fast F5 CloseArchive failed");
+        need(fast_result==0,"real WCX F5 same-size replacement failed");
+        const auto after_equal=load(image);
+        need(after_equal.size()==before_equal.size() &&
+             std::memcmp(after_equal.data()+21*2048,"NEW!!",5)==0 &&
+             std::equal(after_equal.begin(),after_equal.begin()+21*2048,
+                        before_equal.begin()) &&
+             std::equal(after_equal.begin()+21*2048+5,after_equal.end(),
+                        before_equal.begin()+21*2048+5),
+             "WCX equal-length ISO F5 changed metadata, file layout or size");
+        save(image,fixture());
         write_source(input/L"HELLO.TXT","top-level-file");
         write_source(input/L"DOCS"/L"ONE.TXT","nested-file");
         auto arc=image.wstring(),src=input.wstring();
