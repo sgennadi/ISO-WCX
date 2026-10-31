@@ -488,14 +488,32 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         write(incoming/L"HELLO.TXT","replacement");write(incoming/L"ADDED.TXT","new-file");
         std::wstring packed=original.wstring(),src=incoming.wstring(),sub=L"image1";
         wchar_t add_list[]=L"HELLO.TXT\0ADDED.TXT\0\0";
+        // Simulate the real Total Commander lifecycle: its WIM panel may
+        // hold a read-only WCX archive handle while PackFiles replaces the
+        // original. ReplaceFileW then leaves an old-data backup which MUST
+        // be released by CloseArchive, not by deleting a live WIMGAPI mount.
+        OpenW active_panel{};
+        active_panel.ArcName=packed.data();
+        const HANDLE panel_handle=open(&active_panel);
+        if(!panel_handle || active_panel.OpenResult!=0)return 93;
         // WCX callback registration may happen on another thread than packing.
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         int packed_result=-1;
         std::thread worker([&]{packed_result=pack(packed.data(),sub.data(),src.data(),add_list,0);});
         worker.join();
         set_progress(INVALID_HANDLE_VALUE,nullptr);
+        // Close the host's retained WIM panel BEFORE inspecting scratch.
+        const int panel_closed=close(panel_handle);
+        if(panel_closed!=0)return 94;
         if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";return 21;}
         if(!pack_progress_calls.load())return 26;
+        for(const auto& entry:fs::directory_iterator(root)) {
+            if(entry.path().filename().wstring().starts_with(L".iso-wcx-edit-")) {
+                std::wcerr<<L"CloseArchive left private WIM staging at "
+                          <<entry.path().wstring()<<L"\n";
+                return 95;
+            }
+        }
         // Regression: Total Commander creates an *empty folder* through the
         // same PackFilesW API as a file. Verify the index survives correctly.
         fs::create_directories(incoming/L"NEW_EMPTY_FOLDER");
