@@ -662,6 +662,45 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         if(!content(L"image1\\HELLO.TXT",data)||data!="replacement"||
            !content(L"image1\\ADDED.TXT",data)||data!="new-file"||
            !content(L"image2\\HELLO.TXT",data)||data!="hello-two")return 22;
+        // Regression: TC F5 copies actual files into an existing WIM folder.
+        // F7's synthetic folder creation does not exercise this file path.
+        const auto incoming_files=root/L"Incoming Files - Тест";
+        write(incoming_files/L"F5 copied.txt","F5 add new file");
+        write(incoming_files/L"folder.bin","F5 replace existing");
+        write(incoming_files/L"Русский файл.txt","Unicode file bytes");
+        const auto existing_source=incoming_files/L"F5 copied.txt";
+        std::wstring nested_sub=L"image1\\Nested";
+        std::wstring nested_source=incoming_files.wstring();
+        wchar_t nested_list[]=L"F5 copied.txt\0folder.bin\0Русский файл.txt\0\0";
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int f5_result=pack(packed.data(),nested_sub.data(),
+                                 nested_source.data(),nested_list,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(f5_result!=0) {
+            std::cerr<<"WIM nested F5 PackFilesW returned "<<f5_result<<"\n";
+            return 111;
+        }
+        if(!content(L"image1\\Nested\\F5 copied.txt",data)||
+           data!="F5 add new file"||
+           !content(L"image1\\Nested\\folder.bin",data)||
+           data!="F5 replace existing"||
+           !content(L"image1\\Nested\\Русский файл.txt",data)||
+           data!="Unicode file bytes")return 112;
+        // Test F8 on an individual file, not only whole folders.
+        wchar_t f8_file_list[]=L"image1\\Nested\\F5 copied.txt\0\0";
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int f8_file_result=erase(packed.data(),f8_file_list);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(f8_file_result!=0) {
+            std::cerr<<"WIM file F8 DeleteFilesW returned "<<f8_file_result<<"\n";
+            return 113;
+        }
+        if(content(L"image1\\Nested\\F5 copied.txt",data) ||
+           !fs::exists(existing_source) ||
+           !content(L"image1\\Nested\\folder.bin",data) ||
+           data!="F5 replace existing" ||
+           !content(L"image1\\Nested\\Русский файл.txt",data) ||
+           data!="Unicode file bytes")return 114;
         // Total Commander can send an empty folder with the trailing
         // "*.*" wildcard. Previously WCX left the '*' in edit_path()
         // and raised "unsafe archive edit character" instead of deleting.
