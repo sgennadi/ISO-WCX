@@ -2,6 +2,7 @@
 #include "iso_wcx/archive_edit.hpp"
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <random>
 #include <mutex>
 #include <vector>
@@ -208,7 +209,12 @@ public:
         std::filesystem::remove_all(workspace,ec);
 #endif
     }
-    void commit(const EditProgress& progress) {
+    // The optional hook runs at the LAST safe moment, after cancellation
+    // and identity checks, but before ReplaceFileW needs exclusive access.
+    // Callers such as the WIM WCX adapter can release their own readers here
+    // without invalidating a TC panel on failed preflight or cancellation.
+    void commit(const EditProgress& progress,
+                const std::function<void()>& before_replace = {}) {
         edit_tick(progress);
 #ifdef _WIN32
         HANDLE f=CreateFileW(output.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
@@ -219,6 +225,7 @@ public:
         // distinct from LastWriteTime; the latter can be set back by a writer.
         edit_tick(progress);
         assert_source_unchanged();
+        if(before_replace)before_replace();
         // MoveFileExW drops the old file's NTFS DACL and any named streams
         // absent from the replacement. ReplaceFileW merges those properties,
         // including protected DACLs, and still performs a same-volume rename.
@@ -282,6 +289,7 @@ public:
         }
 #else
         assert_source_unchanged();
+        if(before_replace)before_replace();
         std::filesystem::rename(output,image_);
 #endif
     }
