@@ -79,7 +79,8 @@ std::wstring WimOpenProgress::headline() const {
         std::lock_guard lock(edit_mutex_);
         if(!edit_stage_.empty())return edit_stage_;
         return mode_==Mode::Deleting?L"Preparing WIM deletion":
-                                     L"Preparing WIM update";
+               mode_==Mode::OpticalEditing?L"Preparing ISO/UDF update":
+                                           L"Preparing WIM update";
     }
     if(publishing_.load())return L"Preparing the file list";
     const auto index=image_.load(),count=image_count_.load();
@@ -91,7 +92,8 @@ std::wstring WimOpenProgress::headline() const {
 std::wstring WimOpenProgress::describe() const {
     std::wstring result;
     if(mode_!=Mode::Opening) {
-        result=L"Checkpoint  "+std::to_wstring(edit_percent_.load())+L"%";
+        result=(mode_==Mode::OpticalEditing?L"Progress  ":L"Checkpoint  ")+
+               std::to_wstring(edit_percent_.load())+L"%";
     } else if(publishing_.load()) {
         const auto total=total_entries_.load();
         const auto done=std::min(published_.load(),total);
@@ -207,7 +209,8 @@ void WimOpenProgress::run() noexcept {
         config.cxWidth=360;
         config.pszMainIcon=TD_INFORMATION_ICON;
         config.pszWindowTitle=mode_==Mode::Deleting?
-            L"ISO-WCX | Deleting from WIM":mode_==Mode::Editing?
+            L"ISO-WCX | Deleting from WIM":mode_==Mode::OpticalEditing?
+            L"ISO-WCX | Updating ISO/UDF":mode_==Mode::Editing?
             L"ISO-WCX | Updating WIM":L"ISO-WCX | Opening WIM";
         const auto initial_heading=headline();
         const auto initial_content=describe();
@@ -218,7 +221,13 @@ void WimOpenProgress::run() noexcept {
             L"Read-only operation. Your image stays unchanged.";
         config.pszExpandedControlText=L"Details";
         config.pszCollapsedControlText=L"Hide details";
-        config.pszExpandedInformation=mode_!=Mode::Opening?
+        config.pszExpandedInformation=mode_==Mode::OpticalEditing?
+            L"ISO/UDF updates use a private working copy. File copying, "
+            L"directory writing and verification finish before replacing "
+            L"the original. The copy phase reports bytes transferred; "
+            L"later values are stage checkpoints. Cancelling keeps the "
+            L"source image unchanged.":
+            mode_!=Mode::Opening?
             L"Changes are prepared in a private working copy and verified "
             L"before replacing the original image.\n\n"
             L"The bar shows reported operation checkpoints, not a time estimate. "
