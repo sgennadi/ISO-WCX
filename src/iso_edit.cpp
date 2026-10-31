@@ -9,6 +9,9 @@
 #include <memory>
 #include <set>
 #include <sstream>
+#ifdef _WIN32
+#include <winioctl.h>
+#endif
 
 namespace iso_wcx { namespace {
 using Bytes=std::vector<unsigned char>;
@@ -325,6 +328,102 @@ void copy_bytes(std::istream& in,std::fstream& out,std::uint64_t size,const Edit
     Bytes b(1024*1024);while(size){edit_tick(progress);auto count=std::min<std::uint64_t>(size,b.size());in.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(count));need(bool(in),"source shortened during ISO edit");out.write(reinterpret_cast<const char*>(b.data()),static_cast<std::streamsize>(count));if(!out)throw std::runtime_error("ISO output write failed");size-=count;}
 }
 
+// Optional CoW block clone, never a hard link. If the filesystem does not
+// support FSCTL_DUPLICATE_EXTENTS_TO_FILE, discard the partial stage and
+// fall back to CopyFileExW. The original ISO is never opened for writing.
+#ifdef _WIN32
+class IsoCloneHandle {
+    HANDLE handle_=INVALID_HANDLE_VALUE;
+public:
+    explicit IsoCloneHandle(HANDLE handle):handle_(handle) {}
+    ~IsoCloneHandle(){close();}
+    IsoCloneHandle(const IsoCloneHandle&)=delete;
+    IsoCloneHandle& operator=(const IsoCloneHandle&)=delete;
+    bool valid() const noexcept {return handle_!=INVALID_HANDLE_VALUE;}
+    HANDLE get() const noexcept {return handle_;}
+    bool close() noexcept {
+        if(!valid())return true;
+        const HANDLE old=handle_;
+        handle_=INVALID_HANDLE_VALUE;
+        return CloseHandle(old)!=0;
+    }
+};
+bool try_clone_iso_blocks(const std::filesystem::path& original,
+                          const std::filesystem::path& output,
+                          std::uint64_t size,const EditProgress& progress,
+                          const OpticalEditStatus& status) {
+    constexpr std::uint64_t alignment=64ull*1024u;
+    constexpr std::uint64_t chunk=64ull*1024u*1024u;
+    if(size<64ull*1024u*1024u ||
+       size>static_cast<std::uint64_t>(
+           std::numeric_limits<LONGLONG>::max()))
+        return false;
+    const auto src=workspace_cleanup::extended_path(original);
+    const auto dst=workspace_cleanup::extended_path(output);
+    IsoCloneHandle source(CreateFileW(src.c_str(),GENERIC_READ,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+    if(!source.valid())return false;
+    IsoCloneHandle stage(CreateFileW(dst.c_str(),GENERIC_READ|GENERIC_WRITE,0,
+        nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));
+    if(!stage.valid())return false;
+    LARGE_INTEGER actual{},end{};
+    end.QuadPart=static_cast<LONGLONG>(size);
+    bool cloned=GetFileSizeEx(source.get(),&actual)!=0 &&
+                actual.QuadPart==end.QuadPart &&
+                SetFilePointerEx(stage.get(),end,nullptr,FILE_BEGIN)!=0 &&
+                SetEndOfFile(stage.get())!=0;
+    const auto aligned=(size/alignment)*alignment;
+    for(std::uint64_t offset=0;cloned && offset<aligned;) {
+        edit_tick(progress);
+        if(status && !status(L"Cloning ISO data blocks",
+                             static_cast<unsigned>(offset*75u/size)))
+            throw EditCancelled();
+        const auto length=std::min<std::uint64_t>(
+            aligned-offset,chunk);
+        DUPLICATE_EXTENTS_DATA data{};
+        data.FileHandle=source.get();
+        data.SourceFileOffset.QuadPart=static_cast<LONGLONG>(offset);
+        data.TargetFileOffset.QuadPart=static_cast<LONGLONG>(offset);
+        data.ByteCount.QuadPart=static_cast<LONGLONG>(length);
+        DWORD unused=0;
+        cloned=DeviceIoControl(stage.get(),FSCTL_DUPLICATE_EXTENTS_TO_FILE,
+                               &data,sizeof(data),nullptr,0,
+                               &unused,nullptr)!=0;
+        offset+=length;
+    }
+    // ISO sectors are 2 KiB, so the final extent may not be 64-KiB aligned.
+    // Copy the exact remaining 1..65535 bytes; no additional full-image read.
+    if(cloned && aligned<size) {
+        LARGE_INTEGER at{};
+        at.QuadPart=static_cast<LONGLONG>(aligned);
+        cloned=SetFilePointerEx(source.get(),at,nullptr,FILE_BEGIN)!=0 &&
+               SetFilePointerEx(stage.get(),at,nullptr,FILE_BEGIN)!=0;
+        std::array<unsigned char,64u*1024u> tail{};
+        const auto bytes=static_cast<DWORD>(size-aligned);
+        DWORD read=0,written=0;
+        if(cloned)cloned=ReadFile(source.get(),tail.data(),bytes,&read,nullptr)!=0 &&
+                          read==bytes &&
+                          WriteFile(stage.get(),tail.data(),bytes,&written,nullptr)!=0 &&
+                          written==bytes;
+    }
+    if(cloned) {
+        edit_tick(progress);
+        if(status && !status(L"ISO data blocks cloned",75))
+            throw EditCancelled();
+    }
+    // Close handles before filesystem::remove / CopyFileExW fallback.
+    cloned=stage.close() && cloned;
+    cloned=source.close() && cloned;
+    if(cloned && std::filesystem::file_size(output)==size)return true;
+    std::error_code ec;
+    std::filesystem::remove(output,ec);
+    if(ec)throw std::runtime_error(
+        "cannot remove incomplete ISO block-clone stage");
+    return false;
+}
+#endif
+
 // Clone the original ISO with the Windows copy engine when available.
 // CopyFileExW can use local kernel/server-side copy acceleration and issues
 // cancellation checks at bounded intervals. It also avoids thousands of
@@ -380,7 +479,9 @@ void clone_iso_stage(const std::filesystem::path& original,
     if(status && !status(L"Preparing ISO copy",0))throw EditCancelled();
 #ifdef _WIN32
     (void)input;
-    (void)size;
+    // On supported NTFS/ReFS, clone full data extents without reading them.
+    // Other filesystems and smaller ISO files use CopyFileExW unchanged.
+    if(try_clone_iso_blocks(original,output,size,progress,status))return;
     IsoCloneProgress state{&progress,&status};
     // ISO files can live inside deep TC profile folders or UNC shares.
     // Preserve long-path support when using the Windows native copy engine.
