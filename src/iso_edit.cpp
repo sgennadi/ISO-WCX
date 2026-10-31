@@ -484,7 +484,7 @@ Bytes compact_bridge_directory(
 void edit_iso_udf_bridge_delete(
         const std::filesystem::path& path,Image& iso,
         const std::vector<ArchiveChange>& changes,
-        const EditProgress& progress) {
+        const EditProgress& progress,const OpticalEditStatus& status) {
     need(iso.udf_bridge && iso.boot_lbas.empty(),
          "bootable ISO/UDF Bridge deletion is not supported");
     need(!changes.empty() && changes.size()<=4096,
@@ -543,14 +543,10 @@ void edit_iso_udf_bridge_delete(
     preflight_udf_bridge_file_deletes(path,files);
     EditTransaction tx(path);
     {
+        clone_iso_stage(path,tx.output,iso.file,iso.size,progress,status);
         std::fstream stage(tx.output,std::ios::binary|std::ios::in|
-                           std::ios::out|std::ios::trunc);
-        need(bool(stage),"cannot create private ISO/UDF Bridge transaction");
-        iso.file.clear();iso.file.seekg(0);
-        copy_bytes(iso.file,stage,iso.size,progress);
-        need(bool(stage),"cannot clone ISO/UDF Bridge into private workspace");
-        stage.flush();
-        need(bool(stage),"cannot flush original bridge bytes into stage");
+                           std::ios::out);
+        need(bool(stage),"cannot open private ISO/UDF Bridge transaction");
         for(const auto& [key,edit]:dirs) {
             (void)key;
             edit_tick(progress);
@@ -606,7 +602,8 @@ bool intersect(std::uint64_t a,std::uint64_t a_bytes,
 
 void edit_iso_udf_bridge_equal_length(
     const std::filesystem::path& path,Image& iso,
-    const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
+    const std::vector<ArchiveChange>& changes,const EditProgress& progress,
+    const OpticalEditStatus& status) {
     need(iso.udf_bridge,"not an ISO/UDF bridge");
     need(iso.boot_lbas.empty(),
          "bootable ISO/UDF Bridge editing requires further boot-range checks");
@@ -683,12 +680,11 @@ void edit_iso_udf_bridge_equal_length(
     // Full sibling copy and byte-restricted patches: no UDF/ISO metadata,
     // file extents or boot sectors are modified by this operation.
     EditTransaction tx(path);
-    std::fstream out(tx.output,std::ios::in|std::ios::out|
-                     std::ios::binary|std::ios::trunc);
-    need(bool(out),"cannot create staged bridge ISO");
-    iso.file.clear();
-    iso.file.seekg(0);
-    copy_bytes(iso.file,out,iso.size,progress);
+    clone_iso_stage(path,tx.output,iso.file,iso.size,progress,status);
+    std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary);
+    need(bool(out),"cannot open staged bridge ISO");
+    if(status && !status(L"Replacing ISO/UDF bridge file data",82))
+        throw EditCancelled();
     Bytes chunk(1024*1024);
     for(const auto& item:patches) {
         edit_tick(progress);
@@ -766,7 +762,8 @@ void edit_iso_udf_bridge_equal_length(
 // the exact directory sectors holding the removed records. Do not reclaim.
 void unlink_boot_iso_files(const std::filesystem::path& path,
                            Image& iso,const std::vector<ArchiveChange>& changes,
-                           const EditProgress& progress) {
+                           const EditProgress& progress,
+                           const OpticalEditStatus& status) {
     need(iso.system_nonzero && !iso.udf_bridge,
          "boot-preserving unlink requires ISO9660 without a UDF bridge");
     need(!changes.empty() && changes.size()<=256,
@@ -875,12 +872,11 @@ void unlink_boot_iso_files(const std::filesystem::path& path,
     for(const auto lba:iso.boot_lbas)
         preserved_boot.emplace(lba,iso.read(std::uint64_t(lba)*block,block));
     EditTransaction tx(path);
-    std::fstream output(tx.output,std::ios::in|std::ios::out|
-                       std::ios::binary|std::ios::trunc);
-    need(bool(output),"cannot create staged bootable ISO");
-    iso.file.clear();
-    iso.file.seekg(0);
-    copy_bytes(iso.file,output,iso.size,progress);
+    clone_iso_stage(path,tx.output,iso.file,iso.size,progress,status);
+    std::fstream output(tx.output,std::ios::in|std::ios::out|std::ios::binary);
+    need(bool(output),"cannot open staged bootable ISO");
+    if(status && !status(L"Updating ISO directory records",88))
+        throw EditCancelled();
     for(const auto& [position,sector]:sectors) {
         edit_tick(progress);
         output.seekp(static_cast<std::streamoff>(position),std::ios::beg);
@@ -941,16 +937,16 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         // before any original bytes are modified.
         if(std::any_of(changes.begin(),changes.end(),
                        [](const ArchiveChange& c){return c.remove;})) {
-            edit_iso_udf_bridge_delete(path,image,changes,progress);
+            edit_iso_udf_bridge_delete(path,image,changes,progress,status);
             return;
         }
-        edit_iso_udf_bridge_equal_length(path,image,changes,progress);
+        edit_iso_udf_bridge_equal_length(path,image,changes,progress,status);
         return;
     }
     if(image.system_nonzero) {
         // Never remaster isohybrid MBR/GPT or move El Torito sectors.
         // This path accepts only already-existing regular-file deletions.
-        unlink_boot_iso_files(path,image,changes,progress);
+        unlink_boot_iso_files(path,image,changes,progress,status);
         return;
     }
     // Creating a directory that is already present is idempotent. Avoid
