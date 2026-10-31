@@ -144,6 +144,80 @@ def main(binary, reader=None):
             r=subprocess.run(args,capture_output=True,text=True,env=env)
             assert (r.returncode==0)==ok,(r.stdout,r.stderr,op,name)
             if not ok:assert image.read_bytes()==before,'original changed on failure'
+        # Same-length F5 must NOT append payload sectors or regenerate ISO
+        # directory records. Only the existing data bytes may differ.
+        source.write_bytes(b'RENEW')
+        image.write_bytes(fixture())
+        prior=image.read_bytes()
+        run('add','HELLO.TXT')
+        updated=image.read_bytes()
+        assert len(updated)==len(prior), 'same-size F5 expanded the ISO'
+        assert updated[:21*B]==prior[:21*B] and \
+               updated[21*B+5:]==prior[21*B+5:],(
+            'same-size ISO F5 changed directory, padding or other metadata')
+        assert read_image(image)['HELLO.TXT']==b'RENEW'
+        assert not any(root.glob('.iso-wcx-edit-*')),(
+            'same-size ISO fast replacement leaked staging files')
+        # Abort after the data has been written in the private stage but
+        # before atomic commit. The original image remains byte-identical.
+        image.write_bytes(fixture())
+        prior=image.read_bytes()
+        run('latecancel','HELLO.TXT',False)
+        assert image.read_bytes()==prior, 'late ISO F5 cancellation changed original'
+        assert not any(root.glob('.iso-wcx-edit-*')),(
+            'cancelled same-size ISO fast path left a scratch folder')
+        # Both ISO9660 and Joliet alias the same unchanged physical extent.
+        image.write_bytes(fixture(joliet=True))
+        prior=image.read_bytes()
+        run('add','café.txt')
+        updated=image.read_bytes()
+        assert len(updated)==len(prior), 'Joliet same-size F5 expanded ISO'
+        assert updated[:21*B]==prior[:21*B] and \
+               updated[21*B+5:]==prior[21*B+5:],(
+            'same-size Joliet F5 rewrote either namespace')
+        assert read_image(image)['HELLO.TXT']==b'RENEW'
+        assert read_image(image,True)['café.txt']==b'RENEW'
+        # Two independent file extents can be replaced in a single F5
+        # without a remaster or unrelated directory edits.
+        two=bytearray(fixture())
+        listing=(iso_record(20,B,2,b'\0')+
+                 iso_record(20,B,2,b'\1')+
+                 iso_record(21,5,0,b'HELLO.TXT;1')+
+                 iso_record(23,5,0,b'SECOND.TXT;1'))
+        two[20*B:21*B]=bytes(B)
+        two[20*B:20*B+len(listing)]=listing
+        two[23*B:23*B+5]=b'other'
+        image.write_bytes(two)
+        original=image.read_bytes()
+        result=subprocess.run([
+            binary,str(image),'batch',
+            'add','HELLO.TXT',str(source),
+            'add','SECOND.TXT',str(source)],
+            capture_output=True,text=True)
+        assert result.returncode==0,(result.stdout,result.stderr)
+        updated=image.read_bytes()
+        assert len(updated)==len(original), 'batch same-size F5 grew the ISO'
+        for i,(a,b) in enumerate(zip(original,updated)):
+            if a!=b:
+                assert 21*B<=i<21*B+5 or 23*B<=i<23*B+5,(
+                    'batched ISO replacement changed unrelated sector')
+        assert read_image(image)['HELLO.TXT']==b'RENEW'
+        assert read_image(image)['SECOND.TXT']==b'RENEW'
+        # Aliased sectors must use the old full writer: replacing HELLO
+        # may not silently overwrite another file sharing the same data.
+        aliased=bytearray(fixture())
+        listing=(iso_record(20,B,2,b'\0')+
+                 iso_record(20,B,2,b'\1')+
+                 iso_record(21,5,0,b'HELLO.TXT;1')+
+                 iso_record(21,5,0,b'ALIAS.TXT;1'))
+        aliased[20*B:21*B]=bytes(B)
+        aliased[20*B:20*B+len(listing)]=listing
+        image.write_bytes(aliased)
+        run('add','HELLO.TXT')
+        assert read_image(image)['ALIAS.TXT']==b'world',(
+            'same-size ISO fast path damaged another file sharing its extent')
+        assert read_image(image)['HELLO.TXT']==b'RENEW'
+        source.write_bytes(b'new content'*1000)
         image.write_bytes(fixture());run('add','HELLO.TXT');run('add','DOCS/NEW.TXT');run('mkdir','EMPTY');run('mkdir','AAA');run('mkdir','DOCS/Z_CHILD');run('mkdir','DOCS/A_CHILD')
         expected={'HELLO.TXT':source.read_bytes(),'DOCS/':None,'DOCS/NEW.TXT':source.read_bytes(),'EMPTY/':None,'AAA/':None,'DOCS/Z_CHILD/':None,'DOCS/A_CHILD/':None}
         assert read_image(image)==expected
