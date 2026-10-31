@@ -193,12 +193,39 @@ void no_reparse(const std::filesystem::path& root,
 // WIMApplyImage may restore Windows system-folder DACLs that deny ordinary
 // recursive deletion. Delete selected entries only through the same scoped,
 // reparse-safe NTFS cleanup engine used by private WIM workspaces.
+// The WIMGAPI Apply/Capture percentages are checkpoints, not a claim that
+// recursive deletion has a known total. Report an exact visited-entry count
+// and honor cancellation at the start and every 128 deleted-tree entries.
+struct WimDeleteStatus {
+    Callback& wim;
+    const WimEditStatus& status;
+    unsigned checkpoint;
+    static bool poll(void* opaque,std::uint64_t visited) noexcept {
+        auto& state=*static_cast<WimDeleteStatus*>(opaque);
+        try {
+            state.wim.tick();
+            if(!state.status)return true;
+            const auto label=L"Delete from WIM: visited "+
+                std::to_wstring(visited)+L" entries";
+            return state.status(label.c_str(),state.checkpoint);
+        }catch(...) {
+            return false;
+        }
+    }
+};
 void remove_staged_wim_entry(const std::filesystem::path& workspace,
                              const std::filesystem::path& expanded,
-                             const std::filesystem::path& target) {
+                             const std::filesystem::path& target,
+                             Callback& callback,
+                             const WimEditStatus& status,
+                             unsigned checkpoint) {
+    WimDeleteStatus state{callback,status,checkpoint};
+    workspace_cleanup::DeletePulse pulse{
+        &WimDeleteStatus::poll,&state};
     const auto result=workspace_cleanup::remove_expanded_entry(
-        workspace,expanded,target);
+        workspace,expanded,target,&pulse);
     if(result.clean)return;
+    if(result.error==ERROR_CANCELLED)throw EditCancelled();
     const auto detail="WIM staged delete failed (Win32 "+
         std::to_string(result.error)+")";
     if(result.unsafe)
@@ -712,7 +739,8 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                            error==ERROR_PATH_NOT_FOUND)
                             throw EditUnsupported("WIM entry to delete was not found");
                     }
-                    remove_staged_wim_entry(tx.workspace,expanded,target);
+                    remove_staged_wim_entry(tx.workspace,expanded,target,
+                                            callback,status,apply_end);
                     continue;
                 }
                 if(c.directory){std::filesystem::create_directories(target);continue;}
@@ -720,7 +748,8 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 std::filesystem::create_directories(target.parent_path());
                 if(std::filesystem::exists(target)){
                     if(std::filesystem::is_directory(target))throw EditUnsupported("cannot replace a directory with a file");
-                    remove_staged_wim_entry(tx.workspace,expanded,target);
+                    remove_staged_wim_entry(tx.workspace,expanded,target,
+                                            callback,status,apply_end);
                 }
                 checked(CopyFileW(c.source.c_str(),target.c_str(),TRUE),"copy replacement into WIM workspace");
             }
