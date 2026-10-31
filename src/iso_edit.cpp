@@ -1102,6 +1102,16 @@ bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
         const auto physical_size=sectors*block;
         for(const auto* other:all) {
             if(other==patch.node)continue;
+            // Primary and Joliet directories may occupy DIFFERENT sectors.
+            // The logical node stores the primary extent in lba/size, while
+            // its paired supplementary directory is in joliet_lba/size.
+            // Never patch bytes of either namespace's directory records.
+            if(image.joliet && other->directory && other->joliet_size &&
+               overlaps(patch.offset,physical_size,
+                        std::uint64_t(other->joliet_lba)*block,
+                        ((std::uint64_t(other->joliet_size)+block-1)/block)*block))
+                throw EditUnsupported(
+                    "ISO file shares a sector with Joliet directory metadata");
             const auto other_size=
                 ((std::uint64_t(other->size)+block-1)/block)*block;
             if(overlaps(patch.offset,physical_size,
