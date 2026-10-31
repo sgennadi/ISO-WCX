@@ -40,6 +40,10 @@ inline std::wstring& edit_cleanup_warning_slot() {
     thread_local std::wstring warning;
     return warning;
 }
+inline std::filesystem::path& edit_cleanup_warning_workspace_slot() {
+    thread_local std::filesystem::path workspace;
+    return workspace;
+}
 inline void note_edit_cleanup_failure(
         const std::filesystem::path& workspace,
         const workspace_cleanup::Result& report) noexcept {
@@ -53,6 +57,7 @@ inline void note_edit_cleanup_failure(
             issue+=L"\nPossible active mount or unsafe path: no deletion attempted.";
         issue+=L"\nThe source image was not modified by cleanup.";
         edit_cleanup_warning_slot()=issue;
+        edit_cleanup_warning_workspace_slot()=workspace;
         OutputDebugStringW((L"ISO-WCX cleanup: "+issue+L"\n").c_str());
     }catch(...) {}
 }
@@ -61,6 +66,7 @@ inline std::wstring take_edit_cleanup_warning() noexcept {
         auto& slot=edit_cleanup_warning_slot();
         auto result=std::move(slot);
         slot.clear();
+        edit_cleanup_warning_workspace_slot().clear();
         return result;
     }catch(...) {return {};}
 }
@@ -79,6 +85,20 @@ inline void retry_deferred_edit_workspace_cleanup() noexcept {
             if(!state.unsafe)
                 defer_edit_workspace_cleanup(workspace);
             note_edit_cleanup_failure(workspace,state);
+        }
+        // A previous destructor may have emitted an error while the final
+        // WIMGAPI/TC handle was still open. Only the LAST cleanup result
+        // should be shown to the user. A read-only symlink_status does not
+        // follow any junction substituted at a private workspace path.
+        auto& warned=edit_cleanup_warning_workspace_slot();
+        if(!warned.empty()) {
+            std::error_code ec;
+            const auto state=std::filesystem::symlink_status(warned,ec);
+            if(state.type()==std::filesystem::file_type::not_found &&
+               (!ec || ec==std::errc::no_such_file_or_directory)) {
+                edit_cleanup_warning_slot().clear();
+                warned.clear();
+            }
         }
     }catch(...) {}
 }
