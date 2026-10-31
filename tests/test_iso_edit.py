@@ -1,6 +1,7 @@
 """Exercise transactional ISO writes, independent readback and refused layouts."""
 import ctypes
 import ctypes.util
+import os
 import pathlib
 import struct
 import subprocess
@@ -137,10 +138,10 @@ def independent_read(path):
 def main(binary, reader=None):
     with tempfile.TemporaryDirectory() as temp:
         root=pathlib.Path(temp);image=root/'test.iso';source=root/'replacement';source.write_bytes(b'new content'*1000)
-        def run(op,name,ok=True):
+        def run(op,name,ok=True,env=None):
             before=image.read_bytes();args=[binary,str(image),op,name]
             if op not in ('delete','mkdir'):args.append(str(source))
-            r=subprocess.run(args,capture_output=True,text=True)
+            r=subprocess.run(args,capture_output=True,text=True,env=env)
             assert (r.returncode==0)==ok,(r.stdout,r.stderr,op,name)
             if not ok:assert image.read_bytes()==before,'original changed on failure'
         image.write_bytes(fixture());run('add','HELLO.TXT');run('add','DOCS/NEW.TXT');run('mkdir','EMPTY');run('mkdir','AAA');run('mkdir','DOCS/Z_CHILD');run('mkdir','DOCS/A_CHILD')
@@ -250,31 +251,35 @@ def main(binary, reader=None):
             else:struct.pack_into('<I',b,16*B+158,0xffffffff)
             image.write_bytes(b);run('add','NEW.TXT',False)
     if sys.platform == 'win32':
-        # A real ISO is commonly 5-8 GiB. This bounded test has a 64-MiB
-        # cloneable prefix followed by a nonaligned 2-KiB tail. The native
-        # writer may use NTFS/ReFS CoW or fall back to CopyFileEx depending
-        # on the runner filesystem. Both must preserve the old source bytes.
-        image.write_bytes(fixture())
-        original_bytes=64*1024*1024+B
-        trailer=b'TAILSAFE'*256
-        with image.open('r+b') as stream:
-            stream.truncate(original_bytes)
-            stream.seek(16*B+80)
-            sectors=original_bytes//B
-            stream.write(sectors.to_bytes(4,'little')+
-                         sectors.to_bytes(4,'big'))
-            stream.seek(original_bytes-B)
-            stream.write(trailer)
-        run('add','CLONED.TXT')
-        with image.open('rb') as stream:
-            stream.seek(original_bytes-B)
-            assert stream.read(B)==trailer,(
-                'ISO clone or fallback corrupted the 2-KiB tail')
-        assert read_image(image)['CLONED.TXT']==source.read_bytes(),(
-            'ISO F5 large source yielded wrong copied file payload')
-        validate_path_tables(image)
-        assert not any(root.glob('.iso-wcx-edit-*')),(
-            'large ISO F5 left an abandoned private staging folder')
+        # Exercise both the optional NTFS/ReFS CoW route and the guaranteed
+        # CopyFileEx fallback. A 2-KiB tail must survive the aligned 64-MiB
+        # clone boundary, independent of which filesystem CI runs on.
+        for force_fallback in (False,True):
+            image.write_bytes(fixture())
+            original_bytes=64*1024*1024+B
+            trailer=b'TAILSAFE'*256
+            with image.open('r+b') as stream:
+                stream.truncate(original_bytes)
+                stream.seek(16*B+80)
+                sectors=original_bytes//B
+                stream.write(sectors.to_bytes(4,'little')+
+                             sectors.to_bytes(4,'big'))
+                stream.seek(original_bytes-B)
+                stream.write(trailer)
+            env=None
+            if force_fallback:
+                env=os.environ.copy()
+                env['ISO_WCX_ISO_DISABLE_BLOCK_CLONE']='1'
+            run('add','CLONED.TXT',env=env)
+            with image.open('rb') as stream:
+                stream.seek(original_bytes-B)
+                assert stream.read(B)==trailer,(
+                    'ISO CoW or CopyFileEx fallback corrupted the 2-KiB tail')
+            assert read_image(image)['CLONED.TXT']==source.read_bytes(),(
+                'ISO large-image F5 payload differs from source')
+            validate_path_tables(image)
+            assert not any(root.glob('.iso-wcx-edit-*')),(
+                'large ISO F5 left an abandoned private staging folder')
     print('PASS: ISO replace/add/delete, nested paths, Joliet, independent reader, boot preservation, cancellation and refusal rollback')
 
 if __name__=='__main__':main(sys.argv[1],sys.argv[2] if len(sys.argv)>2 else None)
