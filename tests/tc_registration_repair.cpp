@@ -71,7 +71,7 @@ int main() {
 
         // Do not take over another working WIM handler if both are present.
         const std::wstring foreign=
-            L"[PackerPlugins]\nwim=2,C:\\ThirdParty\\wim.wcx\n"+
+            std::wstring(L"[PackerPlugins]\nwim=2,C:\\ThirdParty\\wim.wcx\n")+
             L"wim=192,"+old+L"\niso=158,"+current+L"\n";
         const auto blocked=repair_packer_plugins(foreign,current);
         need(!blocked.changed && blocked.conflicts.size()==1 &&
