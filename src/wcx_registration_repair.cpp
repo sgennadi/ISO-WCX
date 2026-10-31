@@ -10,6 +10,7 @@
 #include "iso_wcx/wcx_updater.hpp"
 #include <windows.h>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cstdint>
 #include <climits>
@@ -266,7 +267,8 @@ const wchar_t* label(bool ru,const wchar_t* en,const wchar_t* russian) {
 }
 } // namespace
 
-void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian) {
+void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
+                             bool quiet_when_clean) {
     try {
         const auto dll=module_path(instance);
         const auto tc_dir=dll.parent_path().parent_path().parent_path().parent_path();
@@ -287,6 +289,7 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian) {
             for(const auto& ext:fixed.conflicts)summary+=ext+L" ";
         }
         if(!fixed.changed) {
+            if(quiet_when_clean)return;
             summary+=label(russian,
                 L"\nNo obsolete ISO-WCX binding was found. Nothing changed.",
                 L"\nУстаревших привязок ISO-WCX нет. Изменений нет.");
@@ -342,12 +345,39 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian) {
         MessageBoxW(parent,message.c_str(),L"ISO-WCX Associations",
                     MB_OK|MB_ICONINFORMATION);
     }catch(const std::exception& e) {
+        if(quiet_when_clean)return; // Do not interrupt normal WIM opening.
         std::wstring error=L"Association repair was not completed.\n";
         const auto message=std::string(e.what());
         for(unsigned char c:message)error.push_back(static_cast<wchar_t>(c));
         MessageBoxW(parent,error.c_str(),L"ISO-WCX Associations",
                     MB_OK|MB_ICONWARNING);
     }
+}
+// The standard Total Commander INF cannot remove old WCX associations. On
+// the FIRST WIM open after reinstall, silently detect stale ISO-WCX records
+// and offer a confirmed repair if needed. Do not slow down subsequent opens
+// or show messages in tests, services or unrelated archive hosts.
+void offer_tc_association_repair_once() {
+    static std::atomic<bool> inspected{false};
+    if(inspected.exchange(true,std::memory_order_relaxed))return;
+    wchar_t process[MAX_PATH]{};
+    const auto n=GetModuleFileNameW(nullptr,process,MAX_PATH);
+    if(!n || n>=MAX_PATH)return;
+    const auto* base=std::wcsrchr(process,L'\\');
+    base=base?base+1:process;
+    if(_wcsicmp(base,L"TOTALCMD.EXE")!=0 &&
+       _wcsicmp(base,L"TOTALCMD64.EXE")!=0)return;
+    wchar_t disabled[4]{};
+    if(GetEnvironmentVariableW(L"ISO_WCX_DISABLE_ASSOC_REPAIR",
+                               disabled,4)==1 && disabled[0]==L'1')return;
+    HMODULE dll=nullptr;
+    if(!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&offer_tc_association_repair_once),
+            &dll))return;
+    const bool ru=PRIMARYLANGID(GetUserDefaultUILanguage())==LANG_RUSSIAN;
+    repair_tc_registrations(GetActiveWindow(),dll,ru,true);
 }
 } // namespace iso_wcx
 #endif
