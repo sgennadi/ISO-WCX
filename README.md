@@ -60,6 +60,22 @@ ZIP remains handled by Total Commander's normal ZIP reader. This is a
 preventive fix; actual speed on a specific TC installation still requires a
 real-host comparison. The previously released Stable v0.21.0 is unchanged.
 
+**AMI UEFI NTFS compatibility (Preview):** When extracting an ISO/WIM
+file onto a local NTFS destination, the WCX now creates an exclusive
+random `.part` file and reserves its **full logical length** with
+`SetFilePointerEx` + `SetEndOfFile` *before* writing the first data block.
+This can reduce fragmentation that triggers the AMI UEFI NTFS firmware
+read bug. It **does not fix AMI firmware** or guarantee one physical
+extent on a fragmented USB drive. Non-NTFS locations and unsupported
+reservation fall back to ordinary streaming. The destination is still
+replaced only after a complete, verified extraction; cancellation and
+read errors remove only the private stage. Set
+`ISO_WCX_NTFS_PREALLOCATE=0` to disable the optimization; opt into
+read-only extent counts in the Windows debug log with
+`ISO_WCX_NTFS_EXTENTS=1`. Windows x86/x64 tests cover the optimization,
+zero-length files, safe collisions, cancellation and fallback.
+See [Preview details](PREVIEW.md#ami-uefi-ntfs-firmware-read-workaround-preview).
+
 **No separate setup EXE, parser DLL, unpacker, PowerShell script or mounting
 service is needed.** Existing native helper CLIs are development/test programs,
 not dependencies of the WCX installation.
