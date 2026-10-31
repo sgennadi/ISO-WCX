@@ -400,8 +400,8 @@ void report_workspace_cleanup_warning(const std::wstring& reason) noexcept {
         if(_wcsicmp(filename,L"TOTALCMD.EXE")!=0 &&
            _wcsicmp(filename,L"TOTALCMD64.EXE")!=0)return;
         const auto text=std::wstring(
-            L"ISO-WCX has finished the archive edit, but could not "
-            L"delete all temporary extracted Windows files.\n\n")+
+            L"The WIM operation has ended, but ISO-WCX could not "
+            L"remove all temporary private Windows-image files.\n\n")+
             reason+
             L"\n\nClose any panel opened inside this folder. "
             L"The plugin will retry after the archive is closed. "
@@ -525,8 +525,10 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             };
             iso_wcx::edit_wim(image,changes,progress,status);
             }
-            report_workspace_cleanup_warning(
-                iso_wcx::take_edit_cleanup_warning());
+            // Do not report a transient ACL/handle error here. The native
+            // WIMGAPI and per-operation handles have only just closed;
+            // the WCX entrypoint retries cleanup after returning from this
+            // function, then shows a warning ONLY if recovery is still needed.
         }
         else iso_wcx::edit_fat(image,changes,progress);
         return 0;
@@ -554,6 +556,8 @@ void retry_wim_cleanup_after_edit(const std::wstring& archive) noexcept {
     try {
         if(!wim_extension(std::filesystem::path(archive)))return;
         iso_wcx::retry_deferred_edit_workspace_cleanup();
+        report_workspace_cleanup_warning(
+            iso_wcx::take_edit_cleanup_warning());
     }catch(...) {}
 }
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
