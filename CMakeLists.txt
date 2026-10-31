@@ -484,6 +484,19 @@ if(BUILD_TESTING)
   add_executable(copy_transaction_tests tests/copy_transaction.cpp)
   target_link_libraries(copy_transaction_tests PRIVATE iso_disc)
   add_test(NAME copy_transaction_rollback COMMAND copy_transaction_tests)
+  if(WIN32)
+    # Native NTFS reservation for AMI UEFI firmware compatibility. No
+    # executable helper is bundled in the single universal WCX ZIP.
+    add_executable(ntfs_preallocation_tests tests/ntfs_preallocation.cpp)
+    target_include_directories(ntfs_preallocation_tests PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_compile_definitions(ntfs_preallocation_tests PRIVATE
+      WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    add_test(NAME ntfs_uefi_ami_preallocate_atomic_extract
+      COMMAND ntfs_preallocation_tests)
+    set_tests_properties(ntfs_uefi_ami_preallocate_atomic_extract PROPERTIES
+      SKIP_RETURN_CODE 77 TIMEOUT 90)
+  endif()
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
     add_test(NAME clonecd_track_smoke
