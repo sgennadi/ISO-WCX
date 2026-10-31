@@ -12,6 +12,7 @@
 #include <cwctype>
 #include <cwchar>
 #include <windows.h>
+#include <commctrl.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -356,7 +357,54 @@ template<class Char> std::vector<std::wstring> edit_list(const Char* list) {
     }return out;
 }
 // WCX error codes cannot explain why PackFiles or DeleteFiles failed.
-// Display a useful reason only inside interactive TC, never in headless CI.
+// Reuse the same native TaskDialog styling as the WIM edit/open indicator.
+// Defer ComCtl32 loading to the interactive error path; headless WCX users
+// must never need desktop UI components or extra runtime dependencies.
+void show_edit_warning(const wchar_t* title,const wchar_t* heading,
+                       const std::wstring& message,
+                       const std::wstring& details,
+                       const wchar_t* footer) noexcept {
+    try {
+        const HWND parent=GetActiveWindow();
+        const HMODULE controls=LoadLibraryExW(
+            L"comctl32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if(controls) {
+            using TaskDialogIndirectFn=HRESULT (WINAPI*)(
+                const TASKDIALOGCONFIG*,int*,int*,BOOL*);
+            const auto show=reinterpret_cast<TaskDialogIndirectFn>(
+                GetProcAddress(controls,"TaskDialogIndirect"));
+            if(show) {
+                TASKDIALOGCONFIG config{};
+                config.cbSize=sizeof(config);
+                config.hwndParent=parent;
+                if(parent)config.dwFlags=TDF_POSITION_RELATIVE_TO_WINDOW;
+                config.dwCommonButtons=TDCBF_OK_BUTTON;
+                config.pszMainIcon=TD_WARNING_ICON;
+                config.cxWidth=360;
+                config.pszWindowTitle=title;
+                config.pszMainInstruction=heading;
+                config.pszContent=message.c_str();
+                config.pszExpandedInformation=details.c_str();
+                config.pszExpandedControlText=L"Details";
+                config.pszCollapsedControlText=L"Hide details";
+                config.pszFooter=footer;
+                const HRESULT result=show(&config,nullptr,nullptr,nullptr);
+                FreeLibrary(controls);
+                if(SUCCEEDED(result))return;
+            }else {
+                FreeLibrary(controls);
+            }
+        }
+        // Older hosts still get the complete diagnostic, never a blank error.
+        const std::wstring fallback=std::wstring(heading)+L"\n\n"+message+
+            L"\n\n"+details+L"\n\n"+footer;
+        MessageBoxW(parent,fallback.c_str(),title,
+                    MB_OK|MB_ICONWARNING|MB_TASKMODAL);
+    }catch(...) {
+        OutputDebugStringW(L"ISO-WCX: failed to display archive edit warning");
+    }
+}
+// Display actionable errors only inside interactive TC, never in headless CI.
 void report_edit_error(const char* description,bool remove) noexcept {
     try {
         wchar_t host[MAX_PATH]{};
@@ -371,24 +419,21 @@ void report_edit_error(const char* description,bool remove) noexcept {
         try { reason=from_bytes(description,CP_UTF8); }
         catch(...) { reason=L"Unsupported or invalid filesystem layout"; }
         if(reason.size()>800) reason.resize(800);
-        std::wstring text=remove
-            ? L"The selected entry was NOT deleted.\n\n"
-            : L"The requested file or directory was NOT added/replaced.\n\n";
-        text+=reason;
-        text+=L"\n\nNo successful edit was reported. Unsupported ISO/UDF "
-              L"Bridge, Rock Ridge and protected boot layouts need "
-              L"a synchronized metadata writer. If a WIM mount failed, "
-              L"inspect its recovery workspace before retrying.";
-        MessageBoxW(nullptr,text.c_str(),
-                    remove?L"ISO-WCX - Delete failed":L"ISO-WCX - Edit failed",
-                    MB_OK|MB_ICONWARNING|MB_TASKMODAL);
+        const std::wstring details=
+            L"Unsupported ISO/UDF Bridge, Rock Ridge and protected boot "
+            L"layouts need a synchronized metadata writer. If a WIM mount "
+            L"failed, inspect its recovery workspace before retrying.";
+        show_edit_warning(
+            remove?L"ISO-WCX | Delete failed":L"ISO-WCX | Edit failed",
+            remove?L"Deletion was not completed":L"Image update was not completed",
+            reason,details,
+            L"No successful edit was reported. The original image is protected.");
     }catch(...) {
         OutputDebugStringW(L"ISO-WCX: failed to display archive edit error");
     }
 }
-// Report a cleanup warning separately from the edit result: the WIM may
-// already have been committed successfully while Windows still holds a
-// private scratch handle. Do not instruct users to repeat the edit.
+// Cleanup failure is separate from the edit result: the WIM may already
+// have been committed successfully when Windows still holds a scratch handle.
 void report_workspace_cleanup_warning(const std::wstring& reason) noexcept {
     if(reason.empty())return;
     try {
@@ -399,15 +444,17 @@ void report_workspace_cleanup_warning(const std::wstring& reason) noexcept {
         filename=filename?filename+1:host;
         if(_wcsicmp(filename,L"TOTALCMD.EXE")!=0 &&
            _wcsicmp(filename,L"TOTALCMD64.EXE")!=0)return;
-        const auto text=std::wstring(
-            L"The WIM operation has ended, but ISO-WCX could not "
-            L"remove all temporary private Windows-image files.\n\n")+
-            reason+
-            L"\n\nClose any panel opened inside this folder. "
-            L"The plugin will retry after the archive is closed. "
+        const std::wstring details=reason.substr(0,1600)+
+            L"\n\nClose any panel opened inside the temporary folder. "
             L"Do not manually delete a mounted WIM image.";
-        MessageBoxW(nullptr,text.c_str(),L"ISO-WCX - Temporary WIM files",
-                    MB_OK|MB_ICONWARNING|MB_TASKMODAL);
+        show_edit_warning(
+            L"ISO-WCX | Temporary WIM files",
+            L"Temporary files need cleanup",
+            L"The WIM operation has ended, but ISO-WCX could not remove "
+            L"all private Windows-image files.",
+            details,
+            L"ISO-WCX will retry cleanup after the archive is closed. "
+            L"The image operation may already be saved.");
     }catch(...) {}
 }
 int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::wstring& source,
