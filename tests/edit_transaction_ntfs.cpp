@@ -353,8 +353,23 @@ int main() {
             fs::create_directory(deferred);
             fs::create_directory(deferred/"mounted");
             write_bytes(deferred/"original-archive.backup","PRIVATE-STAGED-BACKUP");
+            // The WIMGAPI registry may be unavailable on runner images.
+            // If the native API affirmatively reports no mount, the first
+            // cleanup call must finish ALL work, not misread a stale
+            // GetLastError after deleting the empty mounted placeholder.
+            auto native_state=iso_wcx::wim_detail::PrivateMountState::Unknown;
+            if(const HMODULE api=LoadLibraryExW(
+                   L"wimgapi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+                native_state=iso_wcx::wim_detail::inspect_private_mount(
+                    api,deferred/"mounted",deferred);
+                FreeLibrary(api);
+            }
+            SetLastError(ERROR_ACCESS_DENIED);
             iso_wcx::defer_edit_workspace_cleanup(deferred);
             iso_wcx::retry_deferred_edit_workspace_cleanup();
+            if(native_state==iso_wcx::wim_detail::PrivateMountState::Unmounted)
+                need(!fs::exists(deferred),
+                     "confirmed empty WIMGAPI mount stage was only partially cleaned");
             if(fs::exists(deferred)) {
                 // WIMGAPI can confirm an empty dummy mount and unlink it
                 // before the ordinary backup deletion completes. Such a
