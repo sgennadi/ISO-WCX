@@ -334,10 +334,11 @@ void copy_bytes(std::istream& in,std::fstream& out,std::uint64_t size,const Edit
 #ifdef _WIN32
 struct IsoCloneProgress {
     const EditProgress* callback=nullptr;
+    const OpticalEditStatus* status=nullptr;
     std::uint64_t next_check=0;
     bool aborted=false;
 };
-DWORD CALLBACK iso_clone_callback(LARGE_INTEGER,
+DWORD CALLBACK iso_clone_callback(LARGE_INTEGER total,
                                   LARGE_INTEGER transferred,
                                   LARGE_INTEGER,LARGE_INTEGER,
                                   DWORD,DWORD,HANDLE,HANDLE,
@@ -345,10 +346,21 @@ DWORD CALLBACK iso_clone_callback(LARGE_INTEGER,
     auto& state=*static_cast<IsoCloneProgress*>(context);
     const auto done=static_cast<std::uint64_t>(
         std::max<LONGLONG>(0,transferred.QuadPart));
-    if(done<state.next_check)return PROGRESS_CONTINUE;
+    const bool final_chunk=total.QuadPart>0 &&
+                            transferred.QuadPart>=total.QuadPart;
+    if(done<state.next_check && !final_chunk)return PROGRESS_CONTINUE;
     state.next_check=done+16ull*1024ull*1024ull;
     try {
         if(state.callback && *state.callback && !(*state.callback)()) {
+            state.aborted=true;
+            return PROGRESS_CANCEL;
+        }
+        const auto pct=total.QuadPart>0?
+            static_cast<unsigned>(std::min<std::uint64_t>(
+                75u,done*75u/static_cast<std::uint64_t>(total.QuadPart))):
+            0u;
+        if(state.status && *state.status &&
+           !(*state.status)(L"Copying ISO image to private workspace",pct)) {
             state.aborted=true;
             return PROGRESS_CANCEL;
         }
@@ -362,12 +374,14 @@ DWORD CALLBACK iso_clone_callback(LARGE_INTEGER,
 void clone_iso_stage(const std::filesystem::path& original,
                      const std::filesystem::path& output,
                      std::ifstream& input,std::uint64_t size,
-                     const EditProgress& progress) {
+                     const EditProgress& progress,
+                     const OpticalEditStatus& status) {
     edit_tick(progress);
+    if(status && !status(L"Preparing ISO copy",0))throw EditCancelled();
 #ifdef _WIN32
     (void)input;
     (void)size;
-    IsoCloneProgress state{&progress};
+    IsoCloneProgress state{&progress,&status};
     if(!CopyFileExW(original.c_str(),output.c_str(),
                     &iso_clone_callback,&state,nullptr,
                     COPY_FILE_FAIL_IF_EXISTS)) {
@@ -913,8 +927,11 @@ void unlink_boot_iso_files(const std::filesystem::path& path,
     tx.commit(progress);
 }
 }
-void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
-    edit_tick(progress);Image image(path,true,true);
+void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,
+              const EditProgress& progress,const OpticalEditStatus& status) {
+    edit_tick(progress);
+    if(status && !status(L"Inspecting ISO filesystem",0))throw EditCancelled();
+    Image image(path,true,true);
     if(image.system_nonzero && image.udf_bridge)
         throw EditUnsupported("hybrid ISO/UDF Bridge editing remains unsupported");
     if(image.udf_bridge) {
@@ -987,7 +1004,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     // byte, without allocating a staged ISO or resetting its timestamps.
     if(!changed)return;
     EditTransaction tx(path);
-    clone_iso_stage(path,tx.output,image.file,image.size,progress);
+    clone_iso_stage(path,tx.output,image.file,image.size,progress,status);
     std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary);
     need(bool(out),"cannot reopen private ISO stage for editing");
     out.seekp(0,std::ios::end);
@@ -995,7 +1012,21 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     std::uint64_t next=image.size/block;
     std::vector<Node*> all{image.root.get()},dirs{image.root.get()};
     for(std::size_t i=0;i<all.size();++i){for(auto& c:all[i]->children){all.push_back(c.get());if(c->directory)dirs.push_back(c.get());}need(all.size()<=200000&&dirs.size()<=65535,"ISO edit tree too large");}
-    for(auto* n:all)if(!n->source.empty()){need(next+(std::uint64_t(n->size)+block-1)/block<0xffffffffu,"ISO size limit");n->lba=static_cast<std::uint32_t>(next);std::ifstream source(n->source,std::ios::binary);copy_bytes(source,out,n->size,progress);auto pad=(block-n->size%block)%block;write(out,Bytes(pad));next+=(std::uint64_t(n->size)+block-1)/block;}
+    std::uint64_t total_payload=0,payload_written=0;
+    for(const auto* n:all)if(!n->source.empty())total_payload+=n->size;
+    for(auto* n:all)if(!n->source.empty()){
+        need(next+(std::uint64_t(n->size)+block-1)/block<0xffffffffu,"ISO size limit");
+        n->lba=static_cast<std::uint32_t>(next);
+        std::ifstream source(n->source,std::ios::binary);
+        copy_bytes(source,out,n->size,progress);
+        auto pad=(block-n->size%block)%block;write(out,Bytes(pad));
+        next+=(std::uint64_t(n->size)+block-1)/block;
+        payload_written+=n->size;
+        const unsigned pct=total_payload?76u+static_cast<unsigned>(
+            payload_written*16u/total_payload):92u;
+        if(status && !status(L"Writing ISO file data",pct))throw EditCancelled();
+    }
+    if(status && !status(L"Updating ISO directory tables",93))throw EditCancelled();
     for(unsigned view=0;view<(image.joliet?2u:1u);++view){
         for(auto* d:dirs){d->new_size[view]=static_cast<std::uint32_t>(directory_data(*d,view).size());need(next+d->new_size[view]/block<0xffffffffu,"ISO size limit");d->new_lba[view]=static_cast<std::uint32_t>(next);next+=d->new_size[view]/block;}
         for(auto* d:dirs){edit_tick(progress);write(out,directory_data(*d,view));}
@@ -1029,6 +1060,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     }
     for(auto& [lba,vd]:image.descriptors){both(vd,80,static_cast<std::uint32_t>(next));out.seekp(std::uint64_t(lba)*block);write(out,vd);}
     out.flush();need(bool(out),"ISO flush failed");out.close();image.file.close();
+    if(status && !status(L"Verifying ISO changes",96))throw EditCancelled();
     // Reparse the staged namespaces and independently check every requested
     // result against the newly written directory/path table metadata. Do
     // NOT replace the original ISO on a false-success F8/Delete, missing
@@ -1064,6 +1096,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                      "staged ISO file size differs from added source");
         }
     }
+    if(status && !status(L"Committing verified ISO",99))throw EditCancelled();
     tx.commit(progress);
 }
 }
