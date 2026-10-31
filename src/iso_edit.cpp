@@ -1049,6 +1049,7 @@ bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
         std::uint64_t offset=0;
         std::uint64_t length=0;
         const Node* node=nullptr;
+        bool identical=false;
     };
     std::vector<Patch> patches;
     patches.reserve(changes.size());
@@ -1159,10 +1160,48 @@ bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
             }
         }
     }
-    // Empty-file replacements leave the bytes and metadata untouched.
+    // Avoid staging an entire multi-gigabyte ISO when F5 copies an existing
+    // small file whose contents are already byte-identical. Bound the total
+    // comparison to 32 MiB so this optimization cannot turn a large-source
+    // replacement into a second full-image read. The normal verified writer
+    // remains available for larger files or changed data.
+    constexpr std::uint64_t comparison_limit=32ull*1024ull*1024ull;
+    std::vector<char> compare_input(256*1024),compare_archive(compare_input.size());
+    std::uint64_t compared=0;
+    for(auto& patch:patches) {
+        edit_tick(progress);
+        if(patch.length==0) {patch.identical=true;continue;}
+        if(patch.length>comparison_limit-compared)continue;
+        std::ifstream input(patch.source,std::ios::binary);
+        need(bool(input),"cannot open ISO replacement for comparison");
+        image.file.clear();
+        image.file.seekg(static_cast<std::streamoff>(patch.offset));
+        need(bool(image.file),"cannot seek ISO comparison extent");
+        patch.identical=true;
+        for(std::uint64_t remaining=patch.length;remaining;) {
+            edit_tick(progress);
+            const auto count=static_cast<std::streamsize>(
+                std::min<std::uint64_t>(remaining,compare_input.size()));
+            input.read(compare_input.data(),count);
+            image.file.read(compare_archive.data(),count);
+            need(input.gcount()==count && image.file.gcount()==count,
+                 "short read while comparing ISO replacement");
+            if(std::memcmp(compare_input.data(),compare_archive.data(),
+                           static_cast<std::size_t>(count))!=0) {
+                patch.identical=false;
+                break;
+            }
+            remaining-=static_cast<std::uint64_t>(count);
+        }
+        compared+=patch.length;
+    }
     if(std::all_of(patches.begin(),patches.end(),
-                   [](const Patch& patch){return patch.length==0;}))
+                   [](const Patch& patch){return patch.identical;})) {
+        if(status && !status(L"ISO file contents already match",99))
+            throw EditCancelled();
+        edit_tick(progress);
         return true;
+    }
     EditTransaction tx(path);
     clone_iso_stage(path,tx.output,image.file,image.size,progress,status);
     std::fstream stage(tx.output,std::ios::in|std::ios::out|std::ios::binary);
@@ -1172,6 +1211,12 @@ bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
     for(const auto& patch:patches)total+=patch.length;
     for(const auto& patch:patches) {
         edit_tick(progress);
+        // The whole-archive stage already contains identical file bytes.
+        // Avoid rewriting CoW extents for unchanged members of a batch.
+        if(patch.identical) {
+            done+=patch.length;
+            continue;
+        }
         std::ifstream input(patch.source,std::ios::binary);
         need(bool(input),"cannot open ISO replacement input");
         stage.clear();
