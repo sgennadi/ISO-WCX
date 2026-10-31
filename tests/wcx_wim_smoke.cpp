@@ -664,14 +664,14 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
            !content(L"image2\\HELLO.TXT",data)||data!="hello-two")return 22;
         // Regression: TC F5 copies actual files into an existing WIM folder.
         // F7's synthetic folder creation does not exercise this file path.
-        const auto incoming_files=root/L"Incoming Files - Тест";
+        const auto incoming_files=root/L"Incoming Files - \u0422\u0435\u0441\u0442";
         write(incoming_files/L"F5 copied.txt","F5 add new file");
         write(incoming_files/L"folder.bin","F5 replace existing");
-        write(incoming_files/L"Русский файл.txt","Unicode file bytes");
+        write(incoming_files/L"\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt","Unicode file bytes");
         const auto existing_source=incoming_files/L"F5 copied.txt";
         std::wstring nested_sub=L"image1\\Nested";
         std::wstring nested_source=incoming_files.wstring();
-        wchar_t nested_list[]=L"F5 copied.txt\0folder.bin\0Русский файл.txt\0\0";
+        wchar_t nested_list[]=L"F5 copied.txt\0folder.bin\0\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt\0\0";
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         const int f5_result=pack(packed.data(),nested_sub.data(),
                                  nested_source.data(),nested_list,0);
@@ -684,7 +684,7 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
            data!="F5 add new file"||
            !content(L"image1\\Nested\\folder.bin",data)||
            data!="F5 replace existing"||
-           !content(L"image1\\Nested\\Русский файл.txt",data)||
+           !content(L"image1\\Nested\\\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt",data)||
            data!="Unicode file bytes")return 112;
         // Test F8 on an individual file, not only whole folders.
         wchar_t f8_file_list[]=L"image1\\Nested\\F5 copied.txt\0\0";
@@ -699,7 +699,7 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
            !fs::exists(existing_source) ||
            !content(L"image1\\Nested\\folder.bin",data) ||
            data!="F5 replace existing" ||
-           !content(L"image1\\Nested\\Русский файл.txt",data) ||
+           !content(L"image1\\Nested\\\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt",data) ||
            data!="Unicode file bytes")return 114;
         // Total Commander can send an empty folder with the trailing
         // "*.*" wildcard. Previously WCX left the '*' in edit_path()
