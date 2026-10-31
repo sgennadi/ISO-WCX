@@ -290,6 +290,57 @@ int wmain(int argc,wchar_t** argv) {
         };
         verify_data(L"DOCS\\COPIED.BIN","native ISO F5 copy bytes");
         verify_data(L"DOCS\\HELLO.TXT","native ISO F5 overwrite bytes");
+        // A real F5 directory selection can contain ONLY the parent in
+        // AddList. WCX must include all descendants, including empty
+        // directories. The preflight must happen before any ISO mutation.
+        const auto folder_source=root/L"Selected folders";
+        write_source(folder_source/L"SELECTED"/L"INSIDE.TXT",
+                     "ISO F5 selected directory data");
+        write_source(folder_source/L"SELECTED"/L"DEEP"/L"MORE.BIN",
+                     "ISO F5 nested directory data");
+        fs::create_directories(folder_source/L"SELECTED"/L"EMPTY");
+        auto folder_dir=folder_source.wstring();
+        wchar_t selected_folder[]=L"SELECTED\0\0";
+        need(pack(arc.data(),f5_sub.data(),folder_dir.data(),
+                  selected_folder,2)==0,
+             "ISO F5 selected directory did not pack recursively");
+        names=list_names(image,open,header,process,close);
+        need(names.contains(L"DOCS\\SELECTED") &&
+             names.contains(L"DOCS\\SELECTED\\DEEP") &&
+             names.contains(L"DOCS\\SELECTED\\EMPTY") &&
+             names.contains(L"DOCS\\SELECTED\\INSIDE.TXT") &&
+             names.contains(L"DOCS\\SELECTED\\DEEP\\MORE.BIN"),
+             "ISO F5 selected directory lost child files or empty folders");
+        verify_data(L"DOCS\\SELECTED\\INSIDE.TXT",
+                    "ISO F5 selected directory data");
+        verify_data(L"DOCS\\SELECTED\\DEEP\\MORE.BIN",
+                    "ISO F5 nested directory data");
+        // Some TC versions send both the parent and its children in the
+        // same AddList. Deduplicate identical sources and preserve content.
+        wchar_t duplicate_tree[]=
+            L"SELECTED\\INSIDE.TXT\0SELECTED\0"
+            L"SELECTED\\DEEP\\MORE.BIN\0\0";
+        need(pack(arc.data(),f5_sub.data(),folder_dir.data(),
+                  duplicate_tree,2)==0,
+             "ISO F5 duplicate source entries could not be coalesced");
+        names=list_names(image,open,header,process,close);
+        need(names.contains(L"DOCS\\SELECTED\\DEEP\\MORE.BIN"),
+             "ISO F5 duplicate selection lost nested file");
+        verify_data(L"DOCS\\SELECTED\\DEEP\\MORE.BIN",
+                    "ISO F5 nested directory data");
+        // Optional Windows symlink privilege: when creation is permitted,
+        // a reparse point inside F5 source must be refused atomically.
+        std::error_code link_error;
+        fs::create_directory_symlink(
+            folder_source/L"SELECTED",folder_source/L"BAD-LINK",link_error);
+        if(!link_error) {
+            const auto unchanged=load(image);
+            wchar_t unsafe_folder[]=L"BAD-LINK\0\0";
+            need(pack(arc.data(),f5_sub.data(),folder_dir.data(),
+                      unsafe_folder,2)!=0 &&
+                 load(image)==unchanged,
+                 "ISO F5 followed a reparse point or changed image on refusal");
+        }
         // F8 delete of just one file must preserve the second new file.
         wchar_t f8_copied[]=L"DOCS\\COPIED.BIN\0\0";
         need(delW(arc.data(),f8_copied)==0,
