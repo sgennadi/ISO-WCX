@@ -578,9 +578,9 @@ void fast_mount_folder_edit(
             throw EditUnsupported("fast WIM change verification failed: "+failure);
     }
     report(L"Commit verified fast WIM",99);
-    // A panel reopened during the edit could again hold the old archive.
-    WimArchive::release_open_readers(path);
-    tx.commit(progress);
+    // Commit validates the original source and cancellation BEFORE releasing
+    // the host's WIM reader handles. Failed or cancelled edits keep them live.
+    tx.commit(progress,[&]{ WimArchive::release_open_readers(path); });
 }
 }
 void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,
@@ -605,11 +605,9 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         if(edits.contains(index))
             throw EditUnsupported("cannot edit a WIM image index scheduled for deletion");
 
-    // A Total Commander WIM panel keeps native WIMGAPI readers open until
-    // CloseArchive. Those handles block editing the same image on Windows.
-    // Release our OWN reader handles now (never third-party handles); stale
-    // panels can still list entries but must reopen before extracting.
-    WimArchive::release_open_readers(path);
+    // Keep a live Total Commander WIM panel readable during preflight and
+    // expensive Apply/Capture. Release readers only after cancellation checks
+    // at the final atomic replacement boundary in EditTransaction::commit.
 
     // F8 often selects a stale entry after an earlier edit, or Total Commander
     // passes a folder wildcard that names an absent directory. Check the
@@ -855,8 +853,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         }
     }
     report(L"Commit verified WIM",99);
-    WimArchive::release_open_readers(path);
-    tx.commit(progress);
+    tx.commit(progress,[&]{ WimArchive::release_open_readers(path); });
     // No cancellation or throwing callbacks after the atomic commit.
 }
 }
