@@ -653,6 +653,39 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
            load(original)!=case_before_repeated_f7 ||
            wim_legacy_staging_calls.load()!=legacy_before_case)
             return 118;
+        // A new folder requested BELOW an existing WIM file is impossible.
+        // Refuse during read-only metadata preflight, never after an
+        // expensive full-image Apply/Capture.
+        const auto invalid_parents=root/L"Invalid F7 parents";
+        fs::create_directories(invalid_parents/L"HELLO.TXT"/L"CHILD");
+        fs::create_directories(invalid_parents/L"nested"/L"NEW_CHILD");
+        auto invalid_source=invalid_parents.wstring();
+        const auto before_parent_refusal=load(original);
+        const auto stage_before_parent=wim_legacy_staging_calls.load();
+        wchar_t under_file[]=L"HELLO.TXT\CHILD\0\0";
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int under_file_result=pack(packed.data(),sub.data(),
+            invalid_source.data(),under_file,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(under_file_result==0 ||
+           load(original)!=before_parent_refusal ||
+           wim_legacy_staging_calls.load()!=stage_before_parent)
+            return 121;
+        // NTFS parent casing also matters: do not pass a case-conflicting
+        // new child to the legacy writer.
+        wchar_t parent_case[]=L"nested\NEW_CHILD\0\0";
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int parent_case_result=pack(packed.data(),sub.data(),
+            invalid_source.data(),parent_case,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(parent_case_result==0 ||
+           load(original)!=before_parent_refusal ||
+           wim_legacy_staging_calls.load()!=stage_before_parent)
+            return 122;
+        for(const auto& item:fs::directory_iterator(root))
+            if(item.path().filename().wstring().starts_with(
+                   L".iso-wcx-edit-"))
+                return 123;
         // Cancel during a long apply before replacing the original WIM.
         fs::create_directories(incoming/L"CANCEL_FOLDER");
         wchar_t cancel_list[]=L"CANCEL_FOLDER\0\0";
