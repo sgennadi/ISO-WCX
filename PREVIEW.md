@@ -10,9 +10,164 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
+## WCX reinstallation and old association cleanup (Preview)
+
+The official Total Commander `pluginst.inf` **does not support an uninstall
+or pre-install cleanup hook**. Installing a new WCX DLL can leave older
+`[PackerPlugins]` entries (including bare paths or flags `192`/`222`)
+that prevent TC from invoking F5 for WIM even when `PackFilesW` works.
+
+On the first WIM open after an upgrade, the Preview DLL automatically
+checks for obsolete ISO-WCX masks and offers repair only when it finds
+changes. It requires confirmation and never silently overwrites user INIs.
+The Preview DLL also ships a **native Repair WCX associations** control
+inside **Files > Pack > Configure... > ISO-WCX Settings** (no additional
+installer EXE, PowerShell, CMD or DLL). It detects only ISO-WCX-owned records,
+normalizes masks to `158`, removes duplicate extension keys for that plugin,
+and invalidates the derived `[PackerPlugins64]` checksum. It preserves
+third-party WCX registrations, conflicting associations, arbitrary custom
+TC configuration, INI encodings and redirected INI sections. The user reviews
+the changes and confirms before backup-first INI replacement, then **fully
+restarts Total Commander**. `pluginst.inf` itself cannot perform this step
+silently during installation.
+
+## AMI UEFI NTFS firmware-read workaround (Preview)
+
+Some AMI UEFI firmware ships a broken NTFS file reader (version `0x10000`).
+For a file split over multiple NTFS cluster runs, a short UEFI read ending
+exactly on a run boundary can park the firmware's cursor at an unrelated
+cluster. Later UEFI reads may return **wrong bytes** while Windows and Linux
+correctly read the same unchanged file. See
+[Pete Batard's analysis](https://github.com/pbatard/AmiNtfsBug).
+
+**ISO-WCX mitigation:** On Windows, for each ordinary file extracted onto
+NTFS, `Disc::copy` creates a new, random, same-directory
+`.iso-wcx-*.part` file with Win32 `CREATE_NEW`. It sets the final
+logical size using `SetFilePointerEx` followed by `SetEndOfFile`
+**before the first streamed write**, then opens that exact file with
+`std::ios::in|std::ios::out|std::ios::binary` (no `trunc`).
+This requests early NTFS cluster allocation instead of repeatedly growing
+the file across many small write chunks. After closing and validating the
+file, the existing atomic sibling rename commits it to the destination.
+
+The original file, ISO and WIM are unchanged during this process; the
+temporary file is removed on cancellation, incomplete source reads,
+malformed extents, full disk or write failure. All non-NTFS destinations
+and preallocation-rejecting drivers use the previous normal streamed
+writer, without installing any external DLL, EXE or filesystem driver.
+
+This mitigation **does not guarantee physical contiguity**. If the target
+NTFS USB volume is already severely fragmented, NTFS may still allocate
+multiple extents. There is no change to AMI firmware, Windows' NTFS driver,
+ISO/WIM editing or the boot configuration of the USB device. A successfully
+extracted file can still trigger the firmware defect, so a real UEFI boot
+test on affected hardware is required. This is also **not** an NTFS
+defragmenter or a bootable USB creation feature.
+
+Controls for diagnostics/troubleshooting:
+
+- `ISO_WCX_NTFS_PREALLOCATE=0`: disable reservation; default is enabled on
+  supported NTFS outputs, and all other filesystems retain legacy streaming.
+- `ISO_WCX_NTFS_EXTENTS=1`: optionally query read-only
+  `FSCTL_GET_RETRIEVAL_POINTERS` after a completed extraction and report
+  the NTFS extent count to Windows `OutputDebugStringW`. No warning is
+  shown for unrelated files, and query failure never fails an extraction.
+
+CI includes Windows Win32 and x64 preallocation tests (full file length
+before first write, non-truncating buffered output, zero-filled tail,
+CREATE_NEW collision safety, opt-out and empty files) and the existing
+`copy_transaction_rollback` test, which now checks the live size of a
+cancelled `.part` stage. Linux extraction behavior is unchanged.
+
+## WIM scratch cleanup after F7/F8 (protected Windows NTFS tree)
+
+A WCX WIM edit can stage `<WIM folder>/.iso-wcx-edit-<random>-<random>/expanded`.
+This is a FULL **WIMApplyImage extraction**, **not** a mounted WIM. DISM's
+`/Get-MountedWimInfo` is expected to show nothing for this case. The
+`expanded` tree may look like a normal Windows installation, with
+`Windows`, `Users`, `Program Files`, read-only/system attributes, hard
+links, ACL-protected directories and NTFS junctions.
+
+**Preview fix:** the old `Cleanup` destructor discarded Windows deletion
+errors without reporting the retained workspace. WIM output is captured
+with original metadata; only *after* capture, ISO-WCX now removes the
+ephemeral expanded tree through a link-aware, privilege-scoped Windows
+cleanup routine. Source image ACLs and saved WIM data are never changed.
+Separate edited indexes get separate staging trees to prevent stale
+cross-index copies. The private workspace gets a final cleanup after the
+WIMGAPI handles have closed, and a deferred retry on WCX `CloseArchive`
+if another process temporarily holds a backup open.
+
+Open Total Commander WIM panels retain WIMGAPI read handles. ISO-WCX
+releases its own handles only at the final verified atomic-replacement step,
+**after** all cancellation and source-identity checks. A cancelled F7/F8
+therefore leaves the original WIM and its open read-only panel usable. After
+successful replacement, the old panel listing is intentionally stale and must
+be reopened before testing or extracting files; the plugin refuses to read
+stale entries instead of mixing old filenames with new content. A real WCX
+integration test exercises a retained panel, cancellation before recapture,
+late cancellation after verification, and successful commit + `CloseArchive`.
+
+Only private transaction folder names generated by ISO-WCX are eligible.
+A `mounted` directory is checked against native WIMGAPI mount state;
+nonempty/registered/uncertain mounts are preserved and **never** recursively
+deleted. Any final cleanup failure displays its blocked path and Windows
+error in interactive Total Commander. Do not manually use recursive
+`takeown`, `icacls`, `rmdir` or `DISM /Cleanup-Mountpoints` on arbitrary
+Windows-like staging trees without checking all junctions and ownership.
+Existing workspaces left by **older processes** are **not** automatically
+cleaned or scanned, to avoid deleting a recovery copy.
+
+This is Preview-only until Win32/x64 CI and actual Total Commander Windows
+image testing pass. Genuine 7-GiB `install.wim` still requires field validation.
+
+## ONE universal pluginst.inf ZIP (both TC architectures)
+
+**Project requirement (do not split):** GitHub Actions publishes a single
+`ISO-WCX-Installable-Preview` artifact containing exactly
+`ISO-WCX-preview.zip` for either 32-bit or 64-bit Total Commander.
+No separate x86/x64 installer ZIPs, no EXE, CMD or PowerShell installer.
+
+The ZIP contains `pluginst.inf`, `ISO-WCX.wcx` (Win32),
+`ISO-WCX.wcx64` (x64), and documentation. A single
+`pluginst.inf` entry `file=ISO-WCX.wcx` tells Total Commander to load
+`ISO-WCX.wcx64` for its 64-bit edition and `ISO-WCX.wcx` for the
+32-bit edition. Although both modules are shipped and extracted by the
+stock INF installer, **only the correctly matching one is loaded**.
+
+After unpacking the outer Actions artifact, open the inner installer ZIP
+using **Enter** in Total Commander and accept the native `pluginst.inf`
+installation. It advertises 23 supported image extensions. TC can prompt
+per extension; the INF cannot force silent bulk registration, remove older
+binaries, or conditionally extract only one architecture. Existing
+ZIP/RAR/7z associations, toolbars, custom commands and unrelated plugins
+must stay unchanged. CI enforces the single-ZIP requirement and both
+native PE machine types.
+
+To prevent sluggish normal ZIP opens, the Preview plugin no longer advertises
+`PK_CAPS_BY_CONTENT`. The cached/native WCX capability mask changes from
+Stable `222` to Preview `158`, and both `CanYouHandleThisFile(W)` and
+`OpenArchive(W)` immediately refuse unrelated extensions. The updater also
+does not start solely because Total Commander queries WCX capabilities.
+ZIP remains handled by Total Commander. Native Win32/x64 smoke tests
+check that repeated `GetPackerCaps`, `CanYouHandleThisFileW` and
+`OpenArchiveW` calls bypass a 64-MiB ZIP-signature fixture without
+probing its contents. This microbenchmark is not a substitute for a
+real Total Commander ZIP timing comparison.
+
+For WIM files at least **64 MiB**, the separate native opening indicator
+appears only after **1.2 seconds**. It shows the current WIM index,
+discovered metadata entries and elapsed time. When WCX finishes scanning
+the WIM, it shows an exact percentage and entry count as TC receives
+`ReadHeader` results. During extraction, TC displays byte progress;
+during WIM edits, WIMGAPI Apply/Capture, rebuild and validation stages
+report progress to TC. Cancel is cooperative: an already-running
+synchronous WIMGAPI call can delay acknowledgement. Real 7 GiB
+`install.wim` GUI validation remains pending.
+
 ## If Total Commander says `File iso.wcx not found!`
 
-This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.wcx`; it does **not** indicate that `ISO-WCX.wcx` or its adjacent 64-bit `ISO-WCX.wcx64` is missing. The automatic installer cannot remove existing old plugin associations. In Configuration > Options > Packer > Configure packer extension WCXs, select `iso`, delete **only** the obsolete missing ISO.WCX entry, then click **New type...** and choose the installed `ISO-WCX.wcx`. If the **Delete** button in that association dialog does nothing, run the bundled optional `ISO-WCX-RemoveAssociation.ps1` with `-IniPath "C:\\path\\wincmd.ini" -Extension iso` to preview, then close TC and add `-Apply` to remove **only that ISO-WCX association** with a backup. For an obsolete `iso.wcx` use the separate `ISO-WCX-Repair.ps1`. These tools preserve user toolbar buttons, unrelated extensions and INI encoding. They are **not needed** to run the plugin. Restart Total Commander and retry with Ctrl+PgDn. Do not type `222,` in the DLL filename field. See [INSTALL_RU.txt](INSTALL_RU.txt) and [INSTALL_EN.txt](INSTALL_EN.txt).
+This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.wcx`; it does **not** indicate that `ISO-WCX.wcx` or the matching edition's `ISO-WCX.wcx64` is missing. The automatic installer cannot remove existing old plugin associations. In Configuration > Options > Packer > Configure packer extension WCXs, select `iso`, delete **only** the obsolete missing ISO.WCX entry, then click **New type...** and choose the installed `ISO-WCX.wcx` (Win32) or `ISO-WCX.wcx64` (x64). If the **Delete** button in that association dialog does nothing, run the optional repository helper `ISO-WCX-RemoveAssociation.ps1` with `-IniPath "C:\\path\\wincmd.ini" -Extension iso` to preview, then close TC and add `-Apply` to remove **only that ISO-WCX association** with a backup. For an obsolete `iso.wcx` use the separate `ISO-WCX-Repair.ps1`. These tools preserve user toolbar buttons, unrelated extensions and INI encoding. They are **not needed** to run the plugin. Restart Total Commander and retry with Ctrl+PgDn. Do not type capability masks (`222,` in old Stable, `158,` in Preview) in the DLL filename field. See [INSTALL_RU.txt](INSTALL_RU.txt) and [INSTALL_EN.txt](INSTALL_EN.txt).
 
 ## Supported in the preview
 
@@ -55,9 +210,32 @@ CLI tool: `disc_inspect image.iso` or `disc_inspect image.iso --extract OUTPUT`.
 
 ## Installing in Total Commander
 
-Download the **ISO-WCX-Installable-Preview** artifact from successful GitHub Actions runs. Unzip the outer GitHub artifact archive, then open `ISO-WCX-preview.zip` directly in Total Commander; `pluginst.inf` prompts installation. Alternatively configure `.iso`, `.img` or `.bin` manually under **Configuration > Options > Packer > Configure packer extension WCXs**. Only use `.bin` images in the supported single-track layouts above.
+Download the **ISO-WCX-Installable-Preview** artifact from a successful
+[Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml).
+Unpack the GitHub artifact wrapper, then open the enclosed
+`ISO-WCX-preview.zip` directly in Total Commander with **Enter**.
+Confirm the `pluginst.inf` installation. Both native plugin binaries
+are included; TC chooses Win32 WCX or x64 WCX64 itself.
 
-CI builds both Windows WCX architectures, runs parser, extraction and DeleteFiles tests, and packages ISO-WCX.wcx, ISO-WCX.wcx64, pluginst.inf, instructions and two **optional** safe-association PowerShell helpers. No Setup.exe, third-party DLL, PowerShell or CMD program is required to use the WCX plugin.
+### WIM and ISO editing in Preview
+
+| Image | Supported modifications | Limits |
+| --- | --- | --- |
+| Standard unsplit WIM | Create/replace/delete files and directories within existing indexes; delete an image index except the last | WIMGAPI Apply/Capture can take many minutes and require NTFS staging, free disk and privileges. Fast Mount/Commit for creation of folders only is **experimental and off by default**. |
+| Plain ISO9660/Joliet | Constrained addition, replacement, deletion and byte-exact no-op for already existing folders | Rock Ridge and incompatible layouts remain read-only; not a general-purpose ISO remaster. |\n| Hybrid boot ISO9660/Joliet (Preview) | Delete existing regular files by unlinking directory records only | Keep system-area MBR/GPT, El Torito sectors and payload bytes unchanged. No directory deletion, additions, resizing, Rock Ridge or UDF Bridge. |
+| UDF-only Type-1 | Selected file and directory creations, file replacement and logical deletion | Experimental, validated physical Type-1 metadata and sufficient space only. |
+| ISO/UDF Bridge | Narrow synchronized file replacement/deletion when both namespaces remain valid | No general directory creation or hybrid boot editing. |
+| ESD / SWM | Read and extract only | Editing is not supported. |
+
+The restricted **hybrid-boot ISO/Joliet file unlink code from PR #65**
+is now integrated into this **combined Preview** (PR #68). It remains
+experimental, requires real BIOS/UEFI boot testing and never securely
+erases unlinked payload bytes. See [boot-preserving unlink constraints](docs/iso-hybrid-unlink.md).
+Test only on disposable copies of installation images. Folder deletion from Total
+Commander may involve special trailing wildcard tokens; the Preview WCX
+normalizes those only at the terminal directory selection to avoid unsafe
+file changes. Large WIM enumeration has an asynchronous native progress
+dialog, but performance and cancellation still need real-host testing.
 
 ## Native HDD images inside WCX (v0.13 preview)
 

@@ -1,0 +1,697 @@
+#pragma once
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <aclapi.h>
+#include <algorithm>
+#include <cwctype>
+#include <cwchar>
+#include <cstdint>
+#include <cstring>
+#include <initializer_list>
+#include <iterator>
+#include <filesystem>
+#include <string>
+#include <vector>
+#include "iso_wcx/wim_mount_state.hpp"
+
+namespace iso_wcx::workspace_cleanup {
+namespace fs=std::filesystem;
+
+// Only private, randomly named EditTransaction workspaces may be removed.
+// In particular NEVER aim this helper at a Windows volume, a source WIM,
+// or an arbitrary user-selected directory.
+inline bool private_workspace_name(const fs::path& root) noexcept {
+    try {
+        const auto name=root.filename().wstring();
+        constexpr wchar_t prefix[]=L".iso-wcx-edit-";
+        if(!name.starts_with(prefix))return false;
+        const auto rest=name.substr((sizeof(prefix)/sizeof(wchar_t))-1u);
+        const auto dash=rest.find(L'-');
+        if(dash==std::wstring::npos || !dash || dash+1>=rest.size())
+            return false;
+        for(wchar_t c:rest)
+            if(c!=L'-' && (c<L'0'||c>L'9'))return false;
+        return true;
+    }catch(...) {return false;}
+}
+struct Result {
+    bool clean=false;
+    bool unsafe=false;
+    DWORD error=ERROR_SUCCESS;
+    fs::path blocked;
+};
+inline std::wstring extended_path(const fs::path& p) {
+    const auto value=fs::absolute(p).lexically_normal().wstring();
+    if(value.starts_with(L"\\\\?\\"))return value;
+    if(value.starts_with(L"\\\\"))return L"\\\\?\\UNC\\"+value.substr(2);
+    return L"\\\\?\\"+value;
+}
+inline DWORD attributes(const fs::path& p) {
+    return GetFileAttributesW(extended_path(p).c_str());
+}
+
+class CleanupPrivileges {
+    HANDLE source_=nullptr;
+    HANDLE elevated_=nullptr;
+    bool original_thread_token_=false;
+public:
+    CleanupPrivileges() noexcept {
+        if(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY|TOKEN_DUPLICATE|
+                           TOKEN_IMPERSONATE,TRUE,&source_)) {
+            original_thread_token_=true;
+        }else if(GetLastError()!=ERROR_NO_TOKEN ||
+                 !OpenProcessToken(GetCurrentProcess(),
+                                   TOKEN_QUERY|TOKEN_DUPLICATE,&source_)) {
+            return;
+        }
+        if(!DuplicateTokenEx(source_,TOKEN_QUERY|TOKEN_ADJUST_PRIVILEGES|
+                             TOKEN_IMPERSONATE,nullptr,SecurityImpersonation,
+                             TokenImpersonation,&elevated_))return;
+        for(const wchar_t* privilege:{L"SeRestorePrivilege",L"SeBackupPrivilege"}) {
+            TOKEN_PRIVILEGES entry{};
+            entry.PrivilegeCount=1;
+            if(!LookupPrivilegeValueW(nullptr,privilege,
+                                     &entry.Privileges[0].Luid))return;
+            entry.Privileges[0].Attributes=SE_PRIVILEGE_ENABLED;
+            SetLastError(ERROR_SUCCESS);
+            if(!AdjustTokenPrivileges(elevated_,FALSE,&entry,0,nullptr,nullptr) ||
+               GetLastError()!=ERROR_SUCCESS)return;
+        }
+        if(!SetThreadToken(nullptr,elevated_))return;
+        active_=true;
+    }
+    ~CleanupPrivileges() {
+        if(active_)SetThreadToken(nullptr,original_thread_token_?source_:nullptr);
+        if(elevated_)CloseHandle(elevated_);
+        if(source_)CloseHandle(source_);
+    }
+    CleanupPrivileges(const CleanupPrivileges&)=delete;
+    CleanupPrivileges& operator=(const CleanupPrivileges&)=delete;
+private:
+    bool active_=false;
+};
+
+// A Windows image restores original NTFS ACLs. Those ACLs may deny delete
+// even to the process which applied the image. Changing the ACL *after*
+// capture is safe for the disposable expanded workspace only. Never grant
+// access to Everyone or alter DACLs of reparse points / hardlinked files.
+inline DWORD enable_temporary_directory_access(const fs::path& directory) {
+    const DWORD attr=attributes(directory);
+    if(attr==INVALID_FILE_ATTRIBUTES)return GetLastError();
+    if((attr&FILE_ATTRIBUTE_DIRECTORY)==0 ||
+       (attr&FILE_ATTRIBUTE_REPARSE_POINT)!=0)
+        return ERROR_ACCESS_DENIED;
+    HANDLE token=nullptr;
+    if(!OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&token)) {
+        if(GetLastError()!=ERROR_NO_TOKEN ||
+           !OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token))
+            return GetLastError();
+    }
+    DWORD length=0;
+    (void)GetTokenInformation(token,TokenUser,nullptr,0,&length);
+    if(length<sizeof(TOKEN_USER) || length>65536) {
+        CloseHandle(token);
+        return ERROR_INVALID_DATA;
+    }
+    std::vector<BYTE> buffer(length);
+    if(!GetTokenInformation(token,TokenUser,buffer.data(),length,&length)) {
+        const DWORD error=GetLastError();
+        CloseHandle(token);
+        return error;
+    }
+    CloseHandle(token);
+    auto* user=reinterpret_cast<TOKEN_USER*>(buffer.data());
+    EXPLICIT_ACCESSW ace{};
+    ace.grfAccessPermissions=FILE_ALL_ACCESS;
+    ace.grfAccessMode=GRANT_ACCESS;
+    ace.grfInheritance=NO_INHERITANCE;  // no propagation outside this object
+    ace.Trustee.TrusteeForm=TRUSTEE_IS_SID;
+    ace.Trustee.TrusteeType=TRUSTEE_IS_USER;
+    ace.Trustee.ptstrName=static_cast<LPWSTR>(user->User.Sid);
+    PACL acl=nullptr;
+    const DWORD prepared=SetEntriesInAclW(1,&ace,nullptr,&acl);
+    if(prepared!=ERROR_SUCCESS)return prepared;
+    auto path=extended_path(directory);
+    const DWORD result=SetNamedSecurityInfoW(path.data(),SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,nullptr,acl,nullptr);
+    LocalFree(acl);
+    return result;
+}
+inline void failure(Result& result,const fs::path& path,DWORD error) {
+    if(result.blocked.empty()) {
+        result.blocked=path;
+        result.error=error?error:ERROR_GEN_FAILURE;
+    }
+}
+// F8 deletion of a large WIM directory needs bounded, cooperative cancellation
+// without allocating a callback for every Windows file. The status callback
+// is invoked for the root and at most once per 128 visited entries; cleanup
+// without a pulse remains unaffected.
+struct DeletePulse {
+    using Callback=bool (*)(void*,std::uint64_t);
+    Callback callback=nullptr;
+    void* context=nullptr;
+    std::uint64_t visited=0;
+    bool notify(const fs::path& entry,Result& result) noexcept {
+        if(!callback)return true;
+        ++visited;
+        if(visited!=1 && (visited%128u)!=0u)return true;
+        bool proceed=false;
+        try { proceed=callback(context,visited); }catch(...) {}
+        if(proceed)return true;
+        failure(result,entry,ERROR_CANCELLED);
+        return false;
+    }
+};
+inline bool delete_entry(const fs::path& path,Result& result,
+                         DeletePulse* pulse=nullptr) {
+    if(pulse && !pulse->notify(path,result))return false;
+    const auto native=extended_path(path);
+    DWORD attr=GetFileAttributesW(native.c_str());
+    if(attr==INVALID_FILE_ATTRIBUTES) {
+        const DWORD code=GetLastError();
+        if(code==ERROR_FILE_NOT_FOUND||code==ERROR_PATH_NOT_FOUND)return true;
+        failure(result,path,code);return false;
+    }
+    const bool directory=(attr&FILE_ATTRIBUTE_DIRECTORY)!=0;
+    const bool reparse=(attr&FILE_ATTRIBUTE_REPARSE_POINT)!=0;
+    if(directory&&!reparse) {
+        const auto wildcard=native+L"\\*";
+        WIN32_FIND_DATAW item{};
+        HANDLE search=FindFirstFileW(wildcard.c_str(),&item);
+        if(search==INVALID_HANDLE_VALUE && GetLastError()==ERROR_ACCESS_DENIED) {
+            // Directory-level DACL adjustment only, *not* per-file changes:
+            // source WIM security descriptors were already captured.
+            if(enable_temporary_directory_access(path)==ERROR_SUCCESS)
+                search=FindFirstFileW(wildcard.c_str(),&item);
+        }
+        if(search==INVALID_HANDLE_VALUE) {
+            const DWORD code=GetLastError();
+            if(code!=ERROR_FILE_NOT_FOUND) {
+                failure(result,path,code);return false;
+            }
+        }else {
+            bool done=true;
+            do {
+                if(wcscmp(item.cFileName,L".")==0 ||
+                   wcscmp(item.cFileName,L"..")==0)continue;
+                if(!delete_entry(path/item.cFileName,result,pulse)) {
+                    done=false;break;
+                }
+            }while(FindNextFileW(search,&item));
+            const DWORD find_error=GetLastError();
+            FindClose(search);
+            if(!done)return false;
+            if(find_error!=ERROR_NO_MORE_FILES) {
+                failure(result,path,find_error);return false;
+            }
+        }
+    }
+    if(attr&FILE_ATTRIBUTE_READONLY) {
+        // Clearing the read-only bit is allowed only under our private
+        // workspace. Do not modify a reparse-point target's permissions.
+        if(reparse) {
+            // Setting attrs on a reparse point can follow the target.
+            // Try unlinking the directory entry without changing attrs.
+        }else if(!SetFileAttributesW(native.c_str(),
+                   attr&~FILE_ATTRIBUTE_READONLY)) {
+            const DWORD code=GetLastError();
+            if(code!=ERROR_ACCESS_DENIED || !directory) {
+                failure(result,path,code);return false;
+            }
+            const DWORD acl=enable_temporary_directory_access(path);
+            if(acl!=ERROR_SUCCESS) {
+                failure(result,path,acl);return false;
+            }
+            if(!SetFileAttributesW(native.c_str(),attr&~FILE_ATTRIBUTE_READONLY)) {
+                failure(result,path,GetLastError());return false;
+            }
+        }
+    }
+    const auto unlink=[&]() {
+        return directory?RemoveDirectoryW(native.c_str()):
+                         DeleteFileW(native.c_str());
+    };
+    if(unlink())return true;
+    DWORD code=GetLastError();
+    if(!reparse && directory && code==ERROR_ACCESS_DENIED &&
+       enable_temporary_directory_access(path)==ERROR_SUCCESS) {
+        if(unlink())return true;
+        code=GetLastError();
+    }
+    // DELETE_CHILD granted on our private parent can authorize unlinking
+    // protected NTFS files or reparse-point directory entries. Do not
+    // rewrite ACLs on files: their hardlinks may have other paths.
+    if(code==ERROR_ACCESS_DENIED) {
+        const DWORD parent_attr=attributes(path.parent_path());
+        if(parent_attr!=INVALID_FILE_ATTRIBUTES &&
+           (parent_attr&FILE_ATTRIBUTE_DIRECTORY) &&
+           !(parent_attr&FILE_ATTRIBUTE_REPARSE_POINT) &&
+           enable_temporary_directory_access(path.parent_path())==
+               ERROR_SUCCESS) {
+            if(unlink())return true;
+            code=GetLastError();
+        }
+    }
+    failure(result,path,code);
+    return false;
+}
+// A directory created by WIMApplyImage is only scratch storage. Unlike a
+// mount, it is safe to discard its ACL-protected Windows folders AFTER
+// WIMCaptureImage has finished. Use the same link-safe delete engine.
+// Deleting a Windows system file may require granting DELETE_CHILD on its
+// surviving parent directory. The generic scratch cleaner can change that
+// private parent's DACL; BEFORE WIMCaptureImage we MUST restore it so the
+// newly captured Windows image keeps the original security descriptor.
+struct SurvivingDaclSnapshot {
+    fs::path directory;
+    PSECURITY_DESCRIPTOR original=nullptr;
+    PACL original_acl=nullptr;
+    SECURITY_DESCRIPTOR_CONTROL original_control{};
+    bool ready=false;
+    explicit SurvivingDaclSnapshot(fs::path p) : directory(std::move(p)) {}
+    ~SurvivingDaclSnapshot() {
+        if(original)LocalFree(original);
+    }
+    SurvivingDaclSnapshot(const SurvivingDaclSnapshot&)=delete;
+    SurvivingDaclSnapshot& operator=(const SurvivingDaclSnapshot&)=delete;
+
+    DWORD capture() {
+        auto native=extended_path(directory);
+        const DWORD err=GetNamedSecurityInfoW(native.data(),SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,nullptr,nullptr,&original_acl,
+            nullptr,&original);
+        if(err!=ERROR_SUCCESS)return err;
+        DWORD revision=0;
+        if(!GetSecurityDescriptorControl(
+               original,&original_control,&revision))
+            return GetLastError();
+        BOOL present=FALSE,defaulted=FALSE;
+        PACL verified=nullptr;
+        if(!GetSecurityDescriptorDacl(
+               original,&present,&verified,&defaulted))
+            return GetLastError();
+        // A missing DACL cannot be faithfully reconstructed by the normal
+        // SetNamedSecurityInfo API. Refuse editing instead of weakening it.
+        if(!present)return ERROR_INVALID_SECURITY_DESCR;
+        ready=true;
+        return ERROR_SUCCESS;
+    }
+    DWORD restore_if_changed() {
+        if(!ready)return ERROR_INVALID_SECURITY_DESCR;
+        auto native=extended_path(directory);
+        PSECURITY_DESCRIPTOR current=nullptr;
+        PACL current_acl=nullptr;
+        auto err=GetNamedSecurityInfoW(native.data(),SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,nullptr,nullptr,&current_acl,
+            nullptr,&current);
+        bool identical=false;
+        if(err==ERROR_SUCCESS) {
+            SECURITY_DESCRIPTOR_CONTROL control{};
+            DWORD revision=0;
+            if(!GetSecurityDescriptorControl(current,&control,&revision))
+                err=GetLastError();
+            else {
+                const bool same_protection=
+                    ((control^original_control)&SE_DACL_PROTECTED)==0;
+                const bool same_acl=
+                    (original_acl==nullptr && current_acl==nullptr) ||
+                    (original_acl!=nullptr && current_acl!=nullptr &&
+                     original_acl->AclSize==current_acl->AclSize &&
+                     std::memcmp(original_acl,current_acl,
+                                 original_acl->AclSize)==0);
+                identical=same_protection && same_acl;
+            }
+        }
+        if(current)LocalFree(current);
+        if(identical)return ERROR_SUCCESS;
+        // Restore even when the post-delete DACL could not be read. An
+        // unsuccessful restore aborts the edit BEFORE any WIM recapture.
+        const DWORD info=DACL_SECURITY_INFORMATION |
+            ((original_control&SE_DACL_PROTECTED)?
+              PROTECTED_DACL_SECURITY_INFORMATION:
+              UNPROTECTED_DACL_SECURITY_INFORMATION);
+        return SetNamedSecurityInfoW(native.data(),SE_FILE_OBJECT,info,
+            nullptr,nullptr,original_acl,nullptr);
+    }
+};
+// Remove one selected entry INSIDE a disposable WIMApplyImage tree. Unlike
+// whole-workspace cleanup this is used for an F8/Delete or file replacement
+// before recapture. It must never unlink the expanded root, traverse a
+// junction/reparse ancestor, or touch an unrelated path.
+inline Result remove_expanded_entry(const fs::path& root,
+                                    const fs::path& expanded,
+                                    const fs::path& entry,
+                                    DeletePulse* pulse=nullptr) noexcept {
+    Result report{};
+    try {
+        const auto workspace=fs::absolute(root).lexically_normal();
+        const auto image_tree=fs::absolute(expanded).lexically_normal();
+        const auto selected=fs::absolute(entry).lexically_normal();
+        const auto name=image_tree.filename().wstring();
+        bool has_dot_components=false;
+        for(const auto& part:entry)
+            if(part==fs::path(L"..") || part==fs::path(L".")) {
+                has_dot_components=true;break;
+            }
+        const auto prefix=std::mismatch(
+            image_tree.begin(),image_tree.end(),
+            selected.begin(),selected.end());
+        if(!private_workspace_name(workspace) ||
+           image_tree.parent_path()!=workspace ||
+           !(name==L"expanded" || name.starts_with(L"expanded-image-")) ||
+           prefix.first!=image_tree.end() ||
+           prefix.second==selected.end() ||
+           has_dot_components) {
+            report.unsafe=true;
+            failure(report,entry,ERROR_INVALID_NAME);
+            return report;
+        }
+        const DWORD root_attr=attributes(workspace);
+        const DWORD image_attr=attributes(image_tree);
+        if(root_attr==INVALID_FILE_ATTRIBUTES ||
+           image_attr==INVALID_FILE_ATTRIBUTES ||
+           !(root_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           !(image_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           (root_attr&FILE_ATTRIBUTE_REPARSE_POINT) ||
+           (image_attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+            report.unsafe=true;
+            failure(report,expanded,ERROR_ACCESS_DENIED);
+            return report;
+        }
+        const DWORD mounted_attr=attributes(workspace/L"mounted");
+        const DWORD mounted_error=mounted_attr==INVALID_FILE_ATTRIBUTES?
+            GetLastError():ERROR_SUCCESS;
+        if(mounted_attr!=INVALID_FILE_ATTRIBUTES ||
+           (mounted_error!=ERROR_FILE_NOT_FOUND &&
+            mounted_error!=ERROR_PATH_NOT_FOUND)) {
+            report.unsafe=true;
+            failure(report,workspace/L"mounted",ERROR_BUSY);
+            return report;
+        }
+        // Check every ancestor between expanded and the selected entry.
+        // The last component may itself be a link: delete_entry unlinks
+        // reparse entries without descending into the external target.
+        auto part=prefix.second;
+        fs::path parent=image_tree;
+        for(;part!=selected.end();++part) {
+            if(std::next(part)==selected.end())break;
+            parent/=*part;
+            const DWORD attr=attributes(parent);
+            if(attr==INVALID_FILE_ATTRIBUTES ||
+               !(attr&FILE_ATTRIBUTE_DIRECTORY) ||
+               (attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+                report.unsafe=true;
+                failure(report,parent,ERROR_ACCESS_DENIED);
+                return report;
+            }
+        }
+        const DWORD target_attr=attributes(selected);
+        if(target_attr==INVALID_FILE_ATTRIBUTES) {
+            failure(report,selected,GetLastError());
+            return report;
+        }
+        CleanupPrivileges privileges;
+        SurvivingDaclSnapshot surviving_parent(selected.parent_path());
+        const DWORD snapshot_error=surviving_parent.capture();
+        if(snapshot_error!=ERROR_SUCCESS) {
+            failure(report,surviving_parent.directory,snapshot_error);
+            return report; // No DACL changes and no partial deletion
+        }
+        report.clean=delete_entry(selected,report,pulse);
+        const DWORD restore_error=surviving_parent.restore_if_changed();
+        if(restore_error!=ERROR_SUCCESS) {
+            // Do not recapture an image with altered Windows folder ACLs.
+            report.clean=false;
+            report.unsafe=true;
+            report.blocked=surviving_parent.directory;
+            report.error=restore_error;
+        }
+    }catch(...) {
+        failure(report,entry,ERROR_GEN_FAILURE);
+    }
+    return report;
+}
+// Copy an F5 source into one private WIMApplyImage tree. Windows images often
+// protect directories (e.g. System32) against file creation, even when the
+// plugin has SeRestorePrivilege. Grant temporary access ONLY to the parent
+// of the new destination, and restore its exact original DACL BEFORE capture.
+// Never follow reparse ancestors or write outside the private apply tree.
+inline Result copy_into_expanded(const fs::path& root,
+                                 const fs::path& expanded,
+                                 const fs::path& source,
+                                 const fs::path& destination) noexcept {
+    Result report{};
+    try {
+        const auto workspace=fs::absolute(root).lexically_normal();
+        const auto image_tree=fs::absolute(expanded).lexically_normal();
+        const auto target=fs::absolute(destination).lexically_normal();
+        const auto name=image_tree.filename().wstring();
+        bool dot_component=false;
+        for(const auto& part:destination)
+            if(part==fs::path(L".") || part==fs::path(L"..")) {
+                dot_component=true;
+                break;
+            }
+        const auto prefix=std::mismatch(
+            image_tree.begin(),image_tree.end(),
+            target.begin(),target.end());
+        if(!private_workspace_name(workspace) ||
+           image_tree.parent_path()!=workspace ||
+           !(name==L"expanded" || name.starts_with(L"expanded-image-")) ||
+           prefix.first!=image_tree.end() ||
+           prefix.second==target.end() ||
+           dot_component) {
+            report.unsafe=true;
+            failure(report,destination,ERROR_INVALID_NAME);
+            return report;
+        }
+        const DWORD src_attr=attributes(source);
+        if(src_attr==INVALID_FILE_ATTRIBUTES ||
+           (src_attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))) {
+            failure(report,source,src_attr==INVALID_FILE_ATTRIBUTES?
+                    GetLastError():ERROR_ACCESS_DENIED);
+            return report;
+        }
+        const DWORD root_attr=attributes(workspace);
+        const DWORD tree_attr=attributes(image_tree);
+        if(root_attr==INVALID_FILE_ATTRIBUTES ||
+           tree_attr==INVALID_FILE_ATTRIBUTES ||
+           !(root_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           !(tree_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           (root_attr&FILE_ATTRIBUTE_REPARSE_POINT) ||
+           (tree_attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+            report.unsafe=true;
+            failure(report,expanded,ERROR_ACCESS_DENIED);
+            return report;
+        }
+        const DWORD mount_attr=attributes(workspace/L"mounted");
+        const DWORD mount_err=mount_attr==INVALID_FILE_ATTRIBUTES?
+            GetLastError():ERROR_SUCCESS;
+        if(mount_attr!=INVALID_FILE_ATTRIBUTES ||
+           (mount_err!=ERROR_FILE_NOT_FOUND &&
+            mount_err!=ERROR_PATH_NOT_FOUND)) {
+            report.unsafe=true;
+            failure(report,workspace/L"mounted",ERROR_BUSY);
+            return report;
+        }
+        auto node=prefix.second;
+        fs::path parent=image_tree;
+        for(;node!=target.end();++node) {
+            if(std::next(node)==target.end())break;
+            parent/=*node;
+            const DWORD attr=attributes(parent);
+            if(attr==INVALID_FILE_ATTRIBUTES ||
+               !(attr&FILE_ATTRIBUTE_DIRECTORY) ||
+               (attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+                report.unsafe=true;
+                failure(report,parent,ERROR_ACCESS_DENIED);
+                return report;
+            }
+        }
+        const DWORD parent_attr=attributes(target.parent_path());
+        if(parent_attr==INVALID_FILE_ATTRIBUTES ||
+           !(parent_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           (parent_attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+            report.unsafe=true;
+            failure(report,target.parent_path(),ERROR_ACCESS_DENIED);
+            return report;
+        }
+        const auto src=extended_path(source);
+        const auto dst=extended_path(target);
+        const DWORD dst_attr=attributes(target);
+        if(dst_attr!=INVALID_FILE_ATTRIBUTES) {
+            failure(report,target,ERROR_ALREADY_EXISTS);
+            return report;
+        }
+        const DWORD dst_err=GetLastError();
+        if(dst_err!=ERROR_FILE_NOT_FOUND &&
+           dst_err!=ERROR_PATH_NOT_FOUND) {
+            failure(report,target,dst_err);
+            return report;
+        }
+        if(CopyFileW(src.c_str(),dst.c_str(),TRUE)) {
+            report.clean=true;
+            return report;
+        }
+        DWORD copy_error=GetLastError();
+        if(copy_error!=ERROR_ACCESS_DENIED) {
+            failure(report,target,copy_error);
+            return report;
+        }
+        CleanupPrivileges privileges;
+        SurvivingDaclSnapshot original_parent(target.parent_path());
+        const DWORD saved=original_parent.capture();
+        if(saved!=ERROR_SUCCESS) {
+            failure(report,target.parent_path(),saved);
+            return report;
+        }
+        const DWORD granted=enable_temporary_directory_access(
+            target.parent_path());
+        if(granted==ERROR_SUCCESS) {
+            report.clean=CopyFileW(src.c_str(),dst.c_str(),TRUE)!=FALSE;
+            if(!report.clean)copy_error=GetLastError();
+        } else {
+            copy_error=granted;
+        }
+        const DWORD restored=original_parent.restore_if_changed();
+        if(restored!=ERROR_SUCCESS) {
+            report.clean=false;
+            report.unsafe=true; // Never capture with an altered parent DACL.
+            report.blocked=target.parent_path();
+            report.error=restored;
+            return report;
+        }
+        if(!report.clean)failure(report,target,copy_error);
+    }catch(...) {
+        failure(report,destination,ERROR_GEN_FAILURE);
+    }
+    return report;
+}
+inline Result cleanup_expanded(
+        const fs::path& root,const fs::path& expanded) noexcept {
+    Result report{};
+    try {
+        const auto name=expanded.filename().wstring();
+        if(!private_workspace_name(root) ||
+           fs::absolute(expanded.parent_path()).lexically_normal() !=
+           fs::absolute(root).lexically_normal() ||
+           !(name==L"expanded" || name.starts_with(L"expanded-image-"))) {
+            report.unsafe=true;
+            failure(report,expanded,ERROR_INVALID_NAME);
+            return report;
+        }
+        const DWORD mount_attr=attributes(root/L"mounted");
+        if(mount_attr!=INVALID_FILE_ATTRIBUTES ||
+           (GetLastError()!=ERROR_FILE_NOT_FOUND &&
+            GetLastError()!=ERROR_PATH_NOT_FOUND)) {
+            report.unsafe=true;
+            failure(report,root/L"mounted",ERROR_BUSY);
+            return report;
+        }
+        const DWORD root_attr=attributes(root);
+        if(root_attr==INVALID_FILE_ATTRIBUTES ||
+           !(root_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           (root_attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+            report.unsafe=true;
+            failure(report,root,ERROR_ACCESS_DENIED);
+            return report;
+        }
+        CleanupPrivileges privileges;
+        report.clean=delete_entry(expanded,report);
+    }catch(...) {
+        failure(report,expanded,ERROR_GEN_FAILURE);
+    }
+    return report;
+}
+
+inline Result cleanup(const fs::path& root) noexcept {
+    Result report{};
+    try {
+        if(!private_workspace_name(root)) {
+            report.unsafe=true;
+            failure(report,root,ERROR_INVALID_NAME);
+            return report;
+        }
+        auto attr=attributes(root);
+        if(attr==INVALID_FILE_ATTRIBUTES) {
+            const DWORD code=GetLastError();
+            if(code==ERROR_FILE_NOT_FOUND||code==ERROR_PATH_NOT_FOUND) {
+                report.clean=true;return report;
+            }
+            failure(report,root,code);return report;
+        }
+        if(!(attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           (attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+            report.unsafe=true;
+            failure(report,root,ERROR_ACCESS_DENIED);
+            return report;
+        }
+        // A genuine WIM mount is never equivalent to a disposable Windows
+        // tree. DISM may list no mounts even though native WIMGAPI does.
+        const auto mount=root/L"mounted";
+        const DWORD mount_attr=attributes(mount);
+        // Win32 GetLastError is only meaningful for the GetFileAttributesW
+        // failure that directly preceded it. Record it NOW: a successful
+        // fs::remove of an empty, unregistered "mounted" directory does not
+        // clear the thread's previous LastError.
+        const DWORD mount_lookup_error=mount_attr==INVALID_FILE_ATTRIBUTES?
+            GetLastError():ERROR_SUCCESS;
+        if(mount_attr!=INVALID_FILE_ATTRIBUTES) {
+            if((mount_attr&FILE_ATTRIBUTE_REPARSE_POINT) ||
+               !(mount_attr&FILE_ATTRIBUTE_DIRECTORY)) {
+                report.unsafe=true;
+                failure(report,mount,ERROR_ACCESS_DENIED);
+                return report;
+            }
+            const HMODULE api=LoadLibraryExW(
+                L"wimgapi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if(!api) {
+                report.unsafe=true;
+                failure(report,mount,GetLastError());
+                return report;
+            }
+            const auto state=wim_detail::inspect_private_mount(api,mount,root);
+            FreeLibrary(api);
+            if(state!=wim_detail::PrivateMountState::Unmounted) {
+                report.unsafe=true;
+                failure(report,mount,ERROR_BUSY);
+                return report;
+            }
+            // A failed mount may leave an EMPTY, unregistered directory.
+            // Only that exact disposable mount root can be removed. Never
+            // recurse into a nonempty Windows tree or a live WIMGAPI mount.
+            std::error_code ec;
+            if(!fs::is_empty(mount,ec) || ec) {
+                report.unsafe=true;
+                failure(report,mount,ERROR_DIR_NOT_EMPTY);
+                return report;
+            }
+            ec.clear();
+            if(!fs::remove(mount,ec) || ec) {
+                failure(report,mount,ec?static_cast<DWORD>(ec.value()):
+                                          ERROR_ACCESS_DENIED);
+                return report;
+            }
+        }
+        // Do not inspect GetLastError AFTER the mount directory was
+        // successfully deleted; that value may still contain an unrelated
+        // WIMGAPI or filesystem error. Validate only the original lookup.
+        if(mount_lookup_error!=ERROR_SUCCESS &&
+           mount_lookup_error!=ERROR_FILE_NOT_FOUND &&
+           mount_lookup_error!=ERROR_PATH_NOT_FOUND) {
+            failure(report,mount,mount_lookup_error);return report;
+        }
+        CleanupPrivileges privileges;
+        report.clean=delete_entry(root,report);
+    }catch(...) {
+        failure(report,root,ERROR_GEN_FAILURE);
+    }
+    return report;
+}
+} // namespace iso_wcx::workspace_cleanup
+#endif

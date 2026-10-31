@@ -2,6 +2,7 @@
 #ifdef _WIN32
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/archive_edit.hpp"
+#include "iso_wcx/edit_transaction.hpp"
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/wim_parts.hpp"
 #include "wcx_wim_open_progress.hpp"
@@ -11,6 +12,7 @@
 #include <cwctype>
 #include <cwchar>
 #include <windows.h>
+#include <commctrl.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -26,7 +28,7 @@
 namespace {
 constexpr int E_END_ARCHIVE=10,E_BAD_ARCHIVE=13,E_UNKNOWN_FORMAT=14,E_ECREATE=16,E_EABORTED=21,E_SMALL_BUF=20,E_NO_FILES=22;
 constexpr int PK_SKIP=0,PK_TEST=1,PK_EXTRACT=2;
-constexpr int PK_CAPS_BY_CONTENT=64,PK_CAPS_SEARCHTEXT=128;
+constexpr int PK_CAPS_SEARCHTEXT=128;
 constexpr int E_NOT_SUPPORTED=24;
 constexpr int ATTR_DIR=0x10,ATTR_ARCHIVE=0x20;
 
@@ -171,6 +173,23 @@ namespace {
 // The fast CanYouHandleThisFile probe must not load 100K+ WIMGAPI entries.
 // Total Commander can call it immediately before OpenArchive, otherwise
 // opening a large install.wim needlessly scans every index twice.
+// Content probing is intentionally restricted to image extensions.  Never
+// attempt the heavyweight Disc parser on ZIP/RAR/7z or arbitrary files.
+// PK_CAPS_BY_CONTENT is disabled in GetPackerCaps so TC itself will not
+// load ISO-WCX while opening unrelated archive types.
+bool probe_image_extension(const std::filesystem::path& file) {
+    auto ext=file.extension().wstring();
+    std::transform(ext.begin(),ext.end(),ext.begin(),
+                   [](wchar_t c){return std::towlower(c);});
+    for(const std::wstring_view image : {
+        L".iso",L".udf",L".cue",L".bin",L".ccd",L".nrg",
+        L".mds",L".mdx",L".mdf",L".cso",L".zso",L".isz",L".daa",
+        L".img",L".raw",L".vhd",L".vhdx",L".wim",L".esd",L".swm",
+        L".ima",L".vfd",L".flp",L".bif",L".imz",L".chd"}) {
+        if(ext==image)return true;
+    }
+    return false;
+}
 bool wim_extension(const std::filesystem::path& file) {
     auto ext=file.extension().wstring();
     std::transform(ext.begin(),ext.end(),ext.begin(),
@@ -205,6 +224,21 @@ bool wim_open_dialog_enabled(const std::filesystem::path& file) noexcept {
         return std::filesystem::file_size(file)>=64ull*1024ull*1024ull;
     }catch(...) {return false;}
 }
+// F7 pack progress can stay at 0% while WIMGAPI is inside synchronous
+// Apply/Capture. The self-owned TaskDialog only runs in a real TC GUI
+// process, never when DLL tests, services or CLI tools call PackFiles.
+bool wim_edit_dialog_enabled() noexcept {
+    wchar_t host[MAX_PATH]{};
+    const DWORD n=GetModuleFileNameW(nullptr,host,MAX_PATH);
+    if(!n||n>=MAX_PATH)return false;
+    const wchar_t* filename=std::wcsrchr(host,L'\\');
+    filename=filename?filename+1:host;
+    if(_wcsicmp(filename,L"TOTALCMD.EXE")!=0 &&
+       _wcsicmp(filename,L"TOTALCMD64.EXE")!=0)return false;
+    wchar_t setting[8]{};
+    return !(GetEnvironmentVariableW(L"ISO_WCX_WIM_EDIT_PROGRESS",setting,8)==1
+             && setting[0]==L'0');
+}
 std::unique_ptr<State> open_state(const std::filesystem::path& path) {
     if(!wim_extension(path))return std::make_unique<State>(path);
     auto indicator=std::make_unique<iso_wcx::WimOpenProgress>(
@@ -218,12 +252,16 @@ std::unique_ptr<State> open_state(const std::filesystem::path& path) {
 
 #define WCX_EXPORT extern "C" __declspec(dllexport)
 WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
-    iso_wcx::schedule_update_check();
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
     try {
         if(!d->ArcName)return nullptr;
-        auto state=open_state(std::filesystem::path(d->ArcName));
+        const std::filesystem::path path(d->ArcName);
+        if(!probe_image_extension(path))return nullptr;
+        iso_wcx::schedule_update_check();
+        if(wim_extension(path))
+            iso_wcx::offer_tc_association_repair_once();
+        auto state=open_state(path);
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
     }catch(const iso_wcx::WimOpenCancelled&){
@@ -232,12 +270,16 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
     }catch(...){return nullptr;}
 }
 WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
-    iso_wcx::schedule_update_check();
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
     try {
         if(!d->ArcName)return nullptr;
-        auto state=open_state(std::filesystem::path(from_bytes(d->ArcName,CP_ACP)));
+        const std::filesystem::path path(from_bytes(d->ArcName,CP_ACP));
+        if(!probe_image_extension(path))return nullptr;
+        iso_wcx::schedule_update_check();
+        if(wim_extension(path))
+            iso_wcx::offer_tc_association_repair_once();
+        auto state=open_state(path);
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
     }catch(const iso_wcx::WimOpenCancelled&){
@@ -274,7 +316,16 @@ WCX_EXPORT int __stdcall ProcessFile(HANDLE handle,int operation,char* path,char
     }catch(...){return E_BAD_ARCHIVE;}
 }
 WCX_EXPORT int __stdcall CloseArchive(HANDLE handle) {
-    delete reinterpret_cast<State*>(handle);return 0;
+    try {
+        // The old WIM backup may still be held by the archive reader until
+        // TC exits the virtual WIM panel. Release the handle FIRST, then
+        // retry cleaning ONLY workspaces created by this plugin process.
+        delete reinterpret_cast<State*>(handle);
+        iso_wcx::retry_deferred_edit_workspace_cleanup();
+        return 0;
+    }catch(...) {
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT void __stdcall SetProcessDataProcW(HANDLE handle,ProgressW proc) {
     if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_w.store(proc);return;}
@@ -309,12 +360,56 @@ template<class Char> std::vector<std::wstring> edit_list(const Char* list) {
         if constexpr(std::is_same_v<Char,wchar_t>)out.emplace_back(list,n);else out.push_back(from_bytes(list,CP_ACP));list+=n+1;
     }return out;
 }
-// WCX error return codes do not carry a reason string. Total Commander can
-// otherwise appear to do nothing when a selected ISO is an unsupported
-// ISO/UDF Bridge, Rock Ridge layout, or a protected boot resource.
-// Show one actionable message only inside the interactive TC host; never
-// display blocking dialogs in standalone smoke tests or background services.
-void report_delete_error(const char* description) noexcept {
+// WCX error codes cannot explain why PackFiles or DeleteFiles failed.
+// Reuse the same native TaskDialog styling as the WIM edit/open indicator.
+// Defer ComCtl32 loading to the interactive error path; headless WCX users
+// must never need desktop UI components or extra runtime dependencies.
+void show_edit_warning(const wchar_t* title,const wchar_t* heading,
+                       const std::wstring& message,
+                       const std::wstring& details,
+                       const wchar_t* footer) noexcept {
+    try {
+        const HWND parent=GetActiveWindow();
+        const HMODULE controls=LoadLibraryExW(
+            L"comctl32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if(controls) {
+            using TaskDialogIndirectFn=HRESULT (WINAPI*)(
+                const TASKDIALOGCONFIG*,int*,int*,BOOL*);
+            const auto show=reinterpret_cast<TaskDialogIndirectFn>(
+                GetProcAddress(controls,"TaskDialogIndirect"));
+            if(show) {
+                TASKDIALOGCONFIG config{};
+                config.cbSize=sizeof(config);
+                config.hwndParent=parent;
+                if(parent)config.dwFlags=TDF_POSITION_RELATIVE_TO_WINDOW;
+                config.dwCommonButtons=TDCBF_OK_BUTTON;
+                config.pszMainIcon=TD_WARNING_ICON;
+                config.cxWidth=360;
+                config.pszWindowTitle=title;
+                config.pszMainInstruction=heading;
+                config.pszContent=message.c_str();
+                config.pszExpandedInformation=details.c_str();
+                config.pszExpandedControlText=L"Details";
+                config.pszCollapsedControlText=L"Hide details";
+                config.pszFooter=footer;
+                const HRESULT result=show(&config,nullptr,nullptr,nullptr);
+                FreeLibrary(controls);
+                if(SUCCEEDED(result))return;
+            }else {
+                FreeLibrary(controls);
+            }
+        }
+        // Older hosts still get the complete diagnostic, never a blank error.
+        const std::wstring fallback=std::wstring(heading)+L"\n\n"+message+
+            L"\n\n"+details+L"\n\n"+footer;
+        MessageBoxW(parent,fallback.c_str(),title,
+                    MB_OK|MB_ICONWARNING|MB_TASKMODAL);
+    }catch(...) {
+        OutputDebugStringW(L"ISO-WCX: failed to display archive edit warning");
+    }
+}
+// Display actionable errors only inside interactive TC, never in headless CI.
+void report_edit_error(const char* description,bool remove) noexcept {
     try {
         wchar_t host[MAX_PATH]{};
         const DWORD length=GetModuleFileNameW(nullptr,host,MAX_PATH);
@@ -328,34 +423,78 @@ void report_delete_error(const char* description) noexcept {
         try { reason=from_bytes(description,CP_UTF8); }
         catch(...) { reason=L"Unsupported or invalid filesystem layout"; }
         if(reason.size()>800) reason.resize(800);
-        std::wstring text=L"The selected entry was NOT deleted.\n\n";
-        text+=reason;
-        text+=L"\n\nNo successful edit was reported. Unsupported ISO/UDF "
-              L"Bridge, Rock Ridge and protected boot layouts need "
-              L"a synchronized metadata writer. If a WIM mount failed, "
-              L"inspect its recovery workspace before retrying.";
-        MessageBoxW(nullptr,text.c_str(),L"ISO-WCX - Delete failed",
-                    MB_OK|MB_ICONWARNING|MB_TASKMODAL);
+        const std::wstring details=
+            L"Unsupported ISO/UDF Bridge, Rock Ridge and protected boot "
+            L"layouts need a synchronized metadata writer. If a WIM mount "
+            L"failed, inspect its recovery workspace before retrying.";
+        show_edit_warning(
+            remove?L"ISO-WCX | Delete failed":L"ISO-WCX | Edit failed",
+            remove?L"Deletion was not completed":L"Image update was not completed",
+            reason,details,
+            L"No successful edit was reported. The original image is protected.");
     }catch(...) {
-        OutputDebugStringW(L"ISO-WCX: failed to display delete error");
+        OutputDebugStringW(L"ISO-WCX: failed to display archive edit error");
     }
+}
+// Cleanup failure is separate from the edit result: the WIM may already
+// have been committed successfully when Windows still holds a scratch handle.
+void report_workspace_cleanup_warning(const std::wstring& reason) noexcept {
+    if(reason.empty())return;
+    try {
+        wchar_t host[MAX_PATH]{};
+        const DWORD length=GetModuleFileNameW(nullptr,host,MAX_PATH);
+        if(!length || length>=MAX_PATH)return;
+        const wchar_t* filename=std::wcsrchr(host,L'\\');
+        filename=filename?filename+1:host;
+        if(_wcsicmp(filename,L"TOTALCMD.EXE")!=0 &&
+           _wcsicmp(filename,L"TOTALCMD64.EXE")!=0)return;
+        const std::wstring details=reason.substr(0,1600)+
+            L"\n\nClose any panel opened inside the temporary folder. "
+            L"Do not manually delete a mounted WIM image.";
+        show_edit_warning(
+            L"ISO-WCX | Temporary WIM files",
+            L"Temporary files need cleanup",
+            L"The WIM operation has ended, but ISO-WCX could not remove "
+            L"all private Windows-image files.",
+            details,
+            L"ISO-WCX will retry cleanup after the archive is closed. "
+            L"The image operation may already be saved.");
+    }catch(...) {}
 }
 int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::wstring& source,
             const std::vector<std::wstring>& names,bool remove,int flags) {
     try {
         // No move packing: source files are never removed by this plugin.
-        if(flags&1)return E_NOT_SUPPORTED;
+        // Never report a previous edit's cleanup failure as the current one.
+        (void)iso_wcx::take_edit_cleanup_warning();
+        // WCX PK_PACK_MOVE_FILES=1 means Total Commander asks us to delete
+        // source files AFTER packing. Do not silently perform a copy and call
+        // it a move, or return the generic unexplained error. F5 Copy uses
+        // 0 or PK_PACK_SAVE_PATHS=2 and is fully supported.
+        if(!remove && (flags&1)) {
+            report_edit_error(
+                "Move to archive was requested. ISO-WCX supports Copy (F5), "
+                "but cannot delete the source files after packing. "
+                "Choose Copy instead of Move; no source file was changed.",false);
+            return E_NOT_SUPPORTED;
+        }
+        // PK_PACK_ENCRYPT=4 must never be silently ignored when the archive
+        // format does not provide an encryption implementation.
+        if(!remove && (flags&4)) {
+            report_edit_error("Encrypted packing is not supported; no files were changed.",false);
+            return E_NOT_SUPPORTED;
+        }
         std::lock_guard lock(edit_mutex);
         std::filesystem::path image(archive);auto ext=image.extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return std::towlower(c);});
         if(ext!=L".iso"&&ext!=L".udf"&&ext!=L".wim"&&
            ext!=L".ima"&&ext!=L".img"&&ext!=L".vfd"&&
            ext!=L".flp"&&ext!=L".bif"&&ext!=L".raw"&&
            ext!=L".vhd"&&ext!=L".vhdx") {
-            if(remove)report_delete_error("Unsupported archive extension for deletion");
+            report_edit_error("Unsupported archive extension for editing",remove);
             return E_NOT_SUPPORTED;
         }
         if(!std::filesystem::exists(image)) {
-            if(remove)report_delete_error("Archive file no longer exists");
+            report_edit_error("Archive file no longer exists",remove);
             return E_NOT_SUPPORTED;
         }
         std::vector<iso_wcx::ArchiveChange> changes;
@@ -382,8 +521,11 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             auto relative=iso_wcx::edit_path(edit_utf8(name));
             iso_wcx::ArchiveChange c;c.path=subpath.empty()?relative:iso_wcx::edit_path(iso_wcx::edit_path(edit_utf8(subpath))+"/"+relative);c.remove=remove;
             if(!remove){c.source=std::filesystem::path(source)/std::filesystem::u8path(relative);auto status=std::filesystem::symlink_status(c.source);
-                if(!std::filesystem::is_regular_file(status)&&!std::filesystem::is_directory(status))return E_NOT_SUPPORTED;
-                const DWORD attributes=GetFileAttributesW(c.source.c_str());if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))return E_NOT_SUPPORTED;
+                if(!std::filesystem::is_regular_file(status)&&!std::filesystem::is_directory(status))
+                    throw iso_wcx::EditUnsupported("Source must be a regular file or directory");
+                const DWORD attributes=GetFileAttributesW(c.source.c_str());
+                if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))
+                    throw iso_wcx::EditUnsupported("Source is missing or contains a reparse point");
                 c.directory=std::filesystem::is_directory(status);
             }changes.push_back(std::move(c));
         }
@@ -419,7 +561,7 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             changes=std::move(normalized);
         }
         if(changes.empty()) {
-            if(remove)report_delete_error("No entries were passed to DeleteFiles");
+            report_edit_error("No entries were passed to the archive editor",remove);
             return E_NO_FILES;
         }
         auto wide=archive;auto ansi=to_ansi(archive);const auto pw=pack_progress_w.load();const auto pa=pack_progress_a.load();
@@ -427,63 +569,121 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         if(ext==L".iso"||ext==L".udf")
              iso_wcx::edit_optical(image,changes,progress);
         else if(ext==L".wim") {
+            // TC's plugin progress window can remain at 0% when creating
+            // folders (F7). The delayed native UI remains responsive during
+            // WIMGAPI calls and preserves real stage/cancel checkpoints.
+            // Use the same presentation for F7 creation and F8 deletion;
+            // retain TC callbacks for host progress and cancellation.
+            // Scope the GUI to close its TaskDialog before displaying a
+            // pending scratch cleanup warning.
+            {
+            iso_wcx::WimOpenProgress indicator(
+                wim_edit_dialog_enabled(),
+                remove?iso_wcx::WimOpenProgress::Mode::Deleting:
+                       iso_wcx::WimOpenProgress::Mode::Editing);
             const auto status=[&](const wchar_t* stage,unsigned percent){
-                // The WCX callback uses negative Size for direct 1..100%.
-                // Display the active WIM stage instead of the same archive
-                // filename for five minutes. Unicode first, never both.
+                if(!indicator.on_edit(stage,percent))return false;
+                // WCX callback uses negative Size for direct 1..100%.
+                // Keep it for standard TC progress and cancellation too.
                 const int pct=-static_cast<int>(std::clamp(percent,1u,99u));
-                auto label=std::wstring(L"WIM: ")+stage;
+                auto label=std::wstring(L"WIM: ")+(stage?stage:L"Working");
                 if(pw)return pw(label.data(),pct)!=0;
                 if(pa){auto narrow=to_ansi(label);return pa(narrow.data(),pct)!=0;}
                 return true;
             };
             iso_wcx::edit_wim(image,changes,progress,status);
+            }
+            // Do not report a transient ACL/handle error here. The native
+            // WIMGAPI and per-operation handles have only just closed;
+            // the WCX entrypoint retries cleanup after returning from this
+            // function, then shows a warning ONLY if recovery is still needed.
         }
         else iso_wcx::edit_fat(image,changes,progress);
         return 0;
     }catch(const iso_wcx::EditCancelled&){return E_EABORTED;}
      catch(const iso_wcx::EditUnsupported& e) {
-         if(remove) report_delete_error(e.what());
+         report_edit_error(e.what(),remove);
          return E_NOT_SUPPORTED;
      }catch(const std::filesystem::filesystem_error& e) {
-         if(remove) report_delete_error(e.what());
+         report_edit_error(e.what(),remove);
          return E_ECREATE;
      }catch(const std::exception& e) {
-         if(remove) report_delete_error(e.what());
+         report_edit_error(e.what(),remove);
          return E_BAD_ARCHIVE;
      }catch(...) {
-         if(remove) report_delete_error("unknown failure");
+         report_edit_error("unknown failure",remove);
          return E_BAD_ARCHIVE;
      }
 }
 }
+// A cancelled native WIM mount can release its last WIMGAPI handle during
+// stack unwinding. Retry cleanup AFTER the edit function has returned and
+// all private image handles/destructors have completed. CloseArchive still
+// provides another retry if TC keeps a backup open.
+void retry_wim_cleanup_after_edit(const std::wstring& archive) noexcept {
+    try {
+        if(!wim_extension(std::filesystem::path(archive)))return;
+        iso_wcx::retry_deferred_edit_workspace_cleanup();
+        report_workspace_cleanup_warning(
+            iso_wcx::take_edit_cleanup_warning());
+    }catch(...) {}
+}
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
-    try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(archive,sub?sub:L"",source,edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
+    try {
+        if(!archive||!source)return E_NOT_SUPPORTED;
+        const int result=do_edit(archive,sub?sub:L"",source,
+                                 edit_list(list),false,flags);
+        retry_wim_cleanup_after_edit(archive);
+        return result;
+    }catch(const std::exception& e) {
+        report_edit_error(e.what(),false);return E_BAD_ARCHIVE;
+    }catch(...) {
+        report_edit_error("Unable to parse the Unicode file list",false);
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* list,int flags) {
-    try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),from_bytes(sub,CP_ACP),from_bytes(source,CP_ACP),edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
+    try {
+        if(!archive||!source)return E_NOT_SUPPORTED;
+        const auto name=from_bytes(archive,CP_ACP);
+        const int result=do_edit(name,from_bytes(sub,CP_ACP),
+                                 from_bytes(source,CP_ACP),
+                                 edit_list(list),false,flags);
+        retry_wim_cleanup_after_edit(name);
+        return result;
+    }catch(const std::exception& e) {
+        report_edit_error(e.what(),false);return E_BAD_ARCHIVE;
+    }catch(...) {
+        report_edit_error("Unable to parse the ANSI file list",false);
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
     try {
         if(!archive) return E_NOT_SUPPORTED;
-        return do_edit(archive,L"",L"",edit_list(list),true,0);
+        const int result=do_edit(archive,L"",L"",edit_list(list),true,0);
+        retry_wim_cleanup_after_edit(archive);
+        return result;
     }catch(const std::exception& e) {
-        report_delete_error(e.what());
+        report_edit_error(e.what(),true);
         return E_BAD_ARCHIVE;
     }catch(...) {
-        report_delete_error("Could not parse Unicode delete list");
+        report_edit_error("Could not parse Unicode delete list",true);
         return E_BAD_ARCHIVE;
     }
 }
 WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
     try {
         if(!archive) return E_NOT_SUPPORTED;
-        return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);
+        const auto name=from_bytes(archive,CP_ACP);
+        const int result=do_edit(name,L"",L"",edit_list(list),true,0);
+        retry_wim_cleanup_after_edit(name);
+        return result;
     }catch(const std::exception& e) {
-        report_delete_error(e.what());
+        report_edit_error(e.what(),true);
         return E_BAD_ARCHIVE;
     }catch(...) {
-        report_delete_error("Could not parse ANSI delete list");
+        report_edit_error("Could not parse ANSI delete list",true);
         return E_BAD_ARCHIVE;
     }
 }
@@ -491,24 +691,27 @@ WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
     try { iso_wcx::configure_updates(parent,module); } catch(...) {}
 }
 WCX_EXPORT int __stdcall GetPackerCaps() {
-    iso_wcx::schedule_update_check();
-    return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT|2|4|8|16; // 16=PK_CAPS_OPTIONS
+    // TC asks for flags at startup, including when the user only opens ZIPs.
+    // Do not start the update checker until an actual image is opened/probed.
+    return PK_CAPS_SEARCHTEXT|2|4|8|16; // 158, no global BY_CONTENT ZIP interception
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
-    iso_wcx::schedule_update_check();
     if(!path)return 0;
     try {
         const std::filesystem::path source(path);
+        if(!probe_image_extension(source))return 0;
+        iso_wcx::schedule_update_check();
         if(wim_extension(source))return quick_wim_probe(source)?1:0;
         iso_wcx::Disc test(source);
         return 1;
     }catch(...){return 0;}
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFile(char* path) {
-    iso_wcx::schedule_update_check();
     if(!path)return 0;
     try {
         const std::filesystem::path source(from_bytes(path,CP_ACP));
+        if(!probe_image_extension(source))return 0;
+        iso_wcx::schedule_update_check();
         if(wim_extension(source))return quick_wim_probe(source)?1:0;
         iso_wcx::Disc test(source);
         return 1;

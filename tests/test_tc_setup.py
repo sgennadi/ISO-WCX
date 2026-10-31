@@ -74,7 +74,7 @@ def test_missing_legacy_and_repeat(binary: pathlib.Path):
         assert not backups(ini), "Dry run created backup"
         invoke(helper, tc, ini, target)
         text = read_ini(ini)
-        assert f"iso=222,{target / 'ISO-WCX.wcx'}" in text
+        assert f"iso=158,{target / 'ISO-WCX.wcx'}" in text
         assert "cue=128,C:\\Existing\\cue.wcx" in text
         assert "other=5,C:\\Existing\\other.wcx" in text
         assert "Keep=unchanged" in text
@@ -104,7 +104,7 @@ def test_keep_existing_user_plugin_and_force(binary: pathlib.Path):
         assert f"iso=192,{legacy}" in read_ini(ini), "Overwrote working legacy plugin"
         assert "cue=64,C:\\Other\\cue.wcx" in read_ini(ini)
         invoke(helper, tc, ini, target, "--force-iso")
-        assert f"iso=222,{target / 'ISO-WCX.wcx'}" in read_ini(ini)
+        assert f"iso=158,{target / 'ISO-WCX.wcx'}" in read_ini(ini)
         assert legacy.read_bytes() == b"existing user plugin", "Deleted legacy binary"
 
 
@@ -128,7 +128,7 @@ def test_redirected_sections(binary: pathlib.Path):
         before_primary = ini.read_bytes()
         invoke(helper, tc, ini, target)
         assert ini.read_bytes() == before_primary, "Should only touch redirected files"
-        assert f"iso=222,{target / 'ISO-WCX.wcx'}" in read_ini(assoc)
+        assert f"iso=158,{target / 'ISO-WCX.wcx'}" in read_ini(assoc)
         assert "rar=7,C:\\Working\\rar.wcx" in read_ini(assoc)
         assert "$checksum$" not in read_ini(cache)
         assert "exts=iso*rar*" in read_ini(cache)
@@ -152,7 +152,7 @@ def test_existing_iso_wcx_stale_capability_mask(binary: pathlib.Path):
         )
         invoke(helper, tc, ini, target)
         after = read_ini(ini)
-        assert f"iso=222,{filename}" in after
+        assert f"iso=158,{filename}" in after
         assert "Buttonbar=C:\\Custom\\mybuttons.bar" in after
         assert "rar=777,C:\\Other\\rar.wcx" in after
         assert "$checksum$=" not in after

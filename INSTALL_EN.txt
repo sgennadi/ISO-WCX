@@ -11,6 +11,65 @@ Installation (no additional tools)
    These are the 32-bit and 64-bit versions of the same WCX plugin.
 4. Restart Total Commander and open an ISO, VHD or VHDX with Ctrl+PgDn.
 
+Preview: ONE universal ZIP for Total Commander 32-bit and 64-bit
+--------------------------------------------------------------
+Project-wide distribution rule: ONE ISO-WCX-preview.zip installation archive
+for BOTH Total Commander editions. No separate x86/x64 ZIPs or setup EXE.
+
+Download ISO-WCX-Installable-Preview from a successful GitHub Actions run.
+Extract the Actions artifact wrapper; open its ISO-WCX-preview.zip using
+Enter directly inside Total Commander and accept pluginst.inf.
+
+The one installer archive contains pluginst.inf, ISO-WCX.wcx (Win32),
+ISO-WCX.wcx64 (x64) and documentation. TC LOADS only the matching module.
+The native installer extracts both versions from the common ZIP; with no
+standalone installer, pluginst.inf cannot choose which file to extract.
+
+All 23 supported image extensions are offered by pluginst.inf, but TC may
+display an association prompt for each. The INF format cannot bypass those
+confirmations. ZIP/RAR/7z, existing user buttons and external plugins are
+not assigned to ISO-WCX. Previously installed extra files are not removed
+by the stock INF installer. No CMD, PowerShell or extra DLL is needed.
+
+Built-in association repair after upgrades (Preview)
+---------------------------------------------------
+Total Commander's pluginst.inf cannot uninstall older WCX registrations.
+On the first WIM open after an update, ISO-WCX checks its own old bindings
+and offers a confirmed repair if any are stale. It never silently modifies
+user configuration. A built-in Settings button is also available:
+  Files > Pack > Configure... > Repair WCX associations (WIM F5).
+The native WCX detects stale 0/192/222/bare-path registrations, normalizes
+only this plugin's extensions to flags 158, removes duplicate bindings of
+the same plugin, and invalidates the derived PackerPlugins64 cache.
+It first previews changes, requests confirmation and backs up original INIs.
+RedirectSection, UTF-8 BOM and UTF-16LE are supported; conflicting
+third-party WCX registrations and all user buttons/configuration are left
+untouched. Fully restart Total Commander after repair. No helper EXE
+or installer script is required. If an old capability mask hides the
+Configure button, re-register only the WIM extension once in TC's UI.
+
+
+Preview editing status:
+- Standard unsplit WIM: add/replace/delete files and directories and
+  delete any existing image index except the last. WIMGAPI
+  Apply/Capture is slow on multi-GB images. Experimental folder-only
+  fast Mount/Commit is OFF by default.
+- Plain ISO9660/Joliet: tightly constrained additions, replacements,
+  and deletions on supported validated layouts, not arbitrary boot ISO.
+- UDF-only Type-1: selected experimental file/directory modifications.
+- ISO/UDF Bridge: only narrowly validated file operations.
+- Hybrid bootable ISO: Preview can unlink existing regular files only,
+  preserving MBR/GPT system area, El Torito sectors and file payloads.
+  Directory deletion, add/resize, Rock Ridge and bootable UDF Bridges
+  remain unsupported. Test disposable copies and verify BIOS/UEFI boot.
+- ESD/SWM remains read-only. Edit copies of important images only.
+
+ZIP speed fix in Preview: ISO-WCX no longer advertises the global
+PK_CAPS_BY_CONTENT (64) capability, and its probe/OpenArchive reject
+ZIP/RAR/7z before scanning an image. Preview capabilities now have
+mask 158 rather than Stable v0.21.0 mask 222; TC's normal ZIP support
+remains intact. Verify actual ZIP timing after installing this Preview.
+
 No setup EXE, repair CMD, PowerShell script, external parser DLL, virtual
 disk mount, driver, or standalone disk extraction program is necessary.
 The WCX binaries include ISO/UDF, supported virtual-disk readers and
@@ -96,7 +155,7 @@ If Total Commander says "File iso.wcx not found!" pointing to an old
 A DLL cannot change a missing DLL's association before Total Commander
 has loaded it. This is a one-time settings correction, not an
 additional required program. The leading "192," (legacy) or
-"222," (current ISO-WCX GetPackerCaps) in wincmd.ini represents
+"222," (Stable v0.21.0) or "158," (new Preview) in wincmd.ini represents
 Total Commander capability flags, NOT part of the DLL path. Never
 type these numeric flags in the file selection dialog.
 

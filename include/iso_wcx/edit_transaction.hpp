@@ -2,14 +2,108 @@
 #include "iso_wcx/archive_edit.hpp"
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <random>
+#include <mutex>
+#include <vector>
+#include <algorithm>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "iso_wcx/private_workspace_cleanup.hpp"
 #endif
 namespace iso_wcx {
+#ifdef _WIN32
+// A WCX listing may keep the old original WIM file open until CloseArchive.
+// ReplaceFileW can therefore leave its private original-archive.backup busy
+// until the user exits the WIM panel. Remember only THIS process's OWN
+// workspaces; never scan unrelated filesystem directories or global mounts.
+inline std::mutex& deferred_edit_cleanup_mutex() {
+    static std::mutex lock;
+    return lock;
+}
+inline std::vector<std::filesystem::path>& deferred_edit_cleanup_paths() {
+    static std::vector<std::filesystem::path> paths;
+    return paths;
+}
+inline void defer_edit_workspace_cleanup(
+        const std::filesystem::path& path) noexcept {
+    try {
+        std::lock_guard lock(deferred_edit_cleanup_mutex());
+        auto& list=deferred_edit_cleanup_paths();
+        if(std::find(list.begin(),list.end(),path)==list.end())
+            list.push_back(path);
+    }catch(...) {}
+}
+inline std::wstring& edit_cleanup_warning_slot() {
+    thread_local std::wstring warning;
+    return warning;
+}
+inline std::filesystem::path& edit_cleanup_warning_workspace_slot() {
+    thread_local std::filesystem::path workspace;
+    return workspace;
+}
+inline void note_edit_cleanup_failure(
+        const std::filesystem::path& workspace,
+        const workspace_cleanup::Result& report) noexcept {
+    try {
+        auto issue=L"Temporary WIM workspace could not be fully removed:\n"+
+                   workspace.wstring();
+        if(!report.blocked.empty())
+            issue+=L"\nBlocked entry: "+report.blocked.wstring();
+        issue+=L"\nWindows error: "+std::to_wstring(report.error);
+        if(report.unsafe)
+            issue+=L"\nPossible active mount or unsafe path: no deletion attempted.";
+        issue+=L"\nThe source image was not modified by cleanup.";
+        edit_cleanup_warning_slot()=issue;
+        edit_cleanup_warning_workspace_slot()=workspace;
+        OutputDebugStringW((L"ISO-WCX cleanup: "+issue+L"\n").c_str());
+    }catch(...) {}
+}
+inline std::wstring take_edit_cleanup_warning() noexcept {
+    try {
+        auto& slot=edit_cleanup_warning_slot();
+        auto result=std::move(slot);
+        slot.clear();
+        edit_cleanup_warning_workspace_slot().clear();
+        return result;
+    }catch(...) {return {};}
+}
+inline void retry_deferred_edit_workspace_cleanup() noexcept {
+    try {
+        std::vector<std::filesystem::path> retry;
+        {
+            std::lock_guard lock(deferred_edit_cleanup_mutex());
+            retry.swap(deferred_edit_cleanup_paths());
+        }
+        for(const auto& workspace:retry) {
+            const auto state=workspace_cleanup::cleanup(workspace);
+            if(state.clean)continue;
+            // Unknown/registered WIM mounts are never deleted or added to
+            // generic retry loops: manual mount recovery is required.
+            if(!state.unsafe)
+                defer_edit_workspace_cleanup(workspace);
+            note_edit_cleanup_failure(workspace,state);
+        }
+        // A previous destructor may have emitted an error while the final
+        // WIMGAPI/TC handle was still open. Only the LAST cleanup result
+        // should be shown to the user. A read-only symlink_status does not
+        // follow any junction substituted at a private workspace path.
+        auto& warned=edit_cleanup_warning_workspace_slot();
+        if(!warned.empty()) {
+            std::error_code ec;
+            const auto state=std::filesystem::symlink_status(warned,ec);
+            if(state.type()==std::filesystem::file_type::not_found &&
+               (!ec || ec==std::errc::no_such_file_or_directory)) {
+                edit_cleanup_warning_slot().clear();
+                warned.clear();
+            }
+        }
+    }catch(...) {}
+}
+#endif
 inline void edit_tick(const EditProgress& progress) {
     if(progress && !progress()) throw EditCancelled();
 }
@@ -91,10 +185,36 @@ public:
     }
     ~EditTransaction() {
         if(preserve_workspace_)return;
+#ifdef _WIN32
+        // WIMApplyImage preserves ACLs/ownership for the re-captured image.
+        // Once WIMGAPI handles close, use a scoped privileged cleaner for
+        // OUR disposable clone (including its expanded Windows tree).
+        // The cleaner never follows reparse points or touches real mounts.
+        workspace_cleanup::Result result{};
+        for(unsigned retry=0;retry<3;++retry) {
+            result=workspace_cleanup::cleanup(workspace);
+            if(result.clean)return;
+            if(result.unsafe)break;
+            if(result.error!=ERROR_SHARING_VIOLATION &&
+               result.error!=ERROR_LOCK_VIOLATION &&
+               result.error!=ERROR_ACCESS_DENIED)break;
+            Sleep(125u*(retry+1u));
+        }
+        note_edit_cleanup_failure(workspace,result);
+        // A busy archive/backup may be released when TC leaves its WIM
+        // panel. Only self-created, verified private paths are deferred.
+        if(!result.unsafe)defer_edit_workspace_cleanup(workspace);
+#else
         std::error_code ec;
         std::filesystem::remove_all(workspace,ec);
+#endif
     }
-    void commit(const EditProgress& progress) {
+    // The optional hook runs at the LAST safe moment, after cancellation
+    // and identity checks, but before ReplaceFileW needs exclusive access.
+    // Callers such as the WIM WCX adapter can release their own readers here
+    // without invalidating a TC panel on failed preflight or cancellation.
+    void commit(const EditProgress& progress,
+                const std::function<void()>& before_replace = {}) {
         edit_tick(progress);
 #ifdef _WIN32
         HANDLE f=CreateFileW(output.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
@@ -105,6 +225,7 @@ public:
         // distinct from LastWriteTime; the latter can be set back by a writer.
         edit_tick(progress);
         assert_source_unchanged();
+        if(before_replace)before_replace();
         // MoveFileExW drops the old file's NTFS DACL and any named streams
         // absent from the replacement. ReplaceFileW merges those properties,
         // including protected DACLs, and still performs a same-volume rename.
@@ -168,6 +289,7 @@ public:
         }
 #else
         assert_source_unchanged();
+        if(before_replace)before_replace();
         std::filesystem::rename(output,image_);
 #endif
     }

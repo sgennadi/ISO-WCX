@@ -1,6 +1,9 @@
 // Integration tests for transactional extraction, cancellation and read errors.
 // Deliberately uses the public Disc API instead of mocking the disk reader.
 #include "iso_wcx/disc.hpp"
+#ifdef _WIN32
+#include "iso_wcx/ntfs_preallocation.hpp"
+#endif
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -84,11 +87,36 @@ int main() {
         insist(disc.items().size()==1 && disc.items()[0].size==kPayload,"bad test image catalog");
         write_string(result,"ORIGINAL FILE - MUST SURVIVE CANCELLATION");
         std::size_t callback_calls=0;
+#ifdef _WIN32
+        bool saw_full_ntfs_reservation=false;
+        const bool expect_ntfs_reservation=
+            iso_wcx::ntfs_preallocation::enabled() &&
+            iso_wcx::ntfs_preallocation::is_ntfs(folder);
+#endif
         bool completed=disc.copy(0,result,[&](std::uint64_t bytes) {
             ++callback_calls;
+#ifdef _WIN32
+            // Inspect the live sibling .part BEFORE the first 1 MiB callback
+            // aborts. Under NTFS the temporary 3 MiB output must already
+            // have its full logical size, even though it is being written
+            // in many smaller extents/chunks. This tests Disc::copy rather
+            // than only the low-level Win32 preparation helper.
+            for(const auto& stage:fs::directory_iterator(folder)) {
+                const auto name=stage.path().filename().string();
+                if(name.find(".iso-wcx-")==std::string::npos ||
+                   !name.ends_with(".part"))continue;
+                if(fs::file_size(stage.path())==kPayload)
+                    saw_full_ntfs_reservation=true;
+            }
+#endif
             return bytes<1024*1024; // cancel after first chunk is written to staging
         });
         insist(!completed && callback_calls==1,"cancel callback did not abort copy");
+#ifdef _WIN32
+        if(expect_ntfs_reservation)
+            insist(saw_full_ntfs_reservation,
+                   "Disc::copy did not reserve the full NTFS output before streaming");
+#endif
         insist(content(result)=="ORIGINAL FILE - MUST SURVIVE CANCELLATION",
                "original destination truncated after cancellation");
         no_staging_files(folder);

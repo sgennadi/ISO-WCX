@@ -37,6 +37,7 @@ struct HeaderExW {
     char Reserved[1024];
 };
 using PackFn=int(__stdcall*)(wchar_t*,wchar_t*,wchar_t*,wchar_t*,int);
+using PackerCapsFn=int(__stdcall*)();
 using DeleteFn=int(__stdcall*)(wchar_t*,wchar_t*);
 using OpenFn=HANDLE(__stdcall*)(OpenW*);
 using ReadFn=int(__stdcall*)(HANDLE,HeaderExW*);
@@ -52,12 +53,16 @@ using WimCloseFn=BOOL(WINAPI*)(HANDLE);
 static std::atomic<unsigned> pack_progress_calls{0};
 static std::atomic<unsigned> wim_percent_calls{0};
 static std::atomic<unsigned> wim_stage_calls{0};
+static std::atomic<unsigned> wim_legacy_staging_calls{0};
+static std::atomic<unsigned> wim_delete_metadata_preflight_calls{0};
+static std::atomic<bool> cancel_wim_delete_preflight{false};
 static std::atomic<unsigned> wim_fast_mount_stages{0};
 static std::atomic<unsigned> wim_recovery_notes_seen{0};
 static fs::path wim_recovery_test_root;
 static std::atomic<bool> cancel_fast_mounted_edit{false};
 static std::atomic<bool> cancel_fast_after_commit{false};
 static std::atomic<bool> cancel_next_wim{false};
+static std::atomic<bool> cancel_wim_before_commit{false};
 
 // The Preview settings test must not leave any per-user WIM configuration
 // changed on its Windows runner, even when a regression fails.
@@ -108,6 +113,14 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
         ++wim_percent_calls;
         if(stage && std::wstring_view(stage).starts_with(L"WIM: "))
             ++wim_stage_calls;
+        if(stage && std::wstring_view(stage).find(L"Prepare NTFS staging")!=
+            std::wstring_view::npos)
+            ++wim_legacy_staging_calls;
+        if(stage && std::wstring_view(stage).find(L"Check WIM delete targets")!=
+            std::wstring_view::npos) {
+            ++wim_delete_metadata_preflight_calls;
+            if(cancel_wim_delete_preflight.load())return 0;
+        }
         if(stage && std::wstring_view(stage).find(
                 L"Create WIM folders without applying image") !=
                 std::wstring_view::npos) {
@@ -144,6 +157,9 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
         if(cancel_next_wim.load() && stage &&
            std::wstring_view(stage).find(L"Extract WIM image")!=std::wstring_view::npos)
             return 0;
+        if(cancel_wim_before_commit.load() && stage &&
+           std::wstring_view(stage).find(L"Commit verified WIM")!=std::wstring_view::npos)
+            return 0;
         if(cancel_fast_mounted_edit.load() && stage &&
            std::wstring_view(stage).find(L"Create WIM folders without applying image")!=
                std::wstring_view::npos)
@@ -170,7 +186,7 @@ std::string load(const fs::path& filename) {
     std::ifstream file(filename,std::ios::binary);
     return {std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
 }
-int wmain(int argc,wchar_t** argv) {
+static int run_wim_smoke(int argc,wchar_t** argv) {
     const bool fast_mount_test=argc>=3 &&
         std::wstring_view(argv[2])==L"--fast-mount";
     const bool audit_fixture_test=argc==4 &&
@@ -320,11 +336,16 @@ int wmain(int argc,wchar_t** argv) {
                 PROCESS_INFORMATION process{};
                 if(!CreateProcessW(validator.c_str(),command_line.data(),
                                    nullptr,nullptr,FALSE,0,nullptr,
-                                   root.c_str(),&startup,&process))
+                                   root.c_str(),&startup,&process)) {
+                    std::wcerr << L"Preflight subprocess failed to launch: "
+                               << GetLastError() << L"\n";
                     return 70;
+                }
                 CloseHandle(process.hThread);
                 const DWORD wait=WaitForSingleObject(process.hProcess,60000);
                 if(wait!=WAIT_OBJECT_0) {
+                    std::wcerr << L"WIM preflight timed out: " << test_argument
+                               << L" (wait " << wait << L")\n";
                     TerminateProcess(process.hProcess,71);
                     WaitForSingleObject(process.hProcess,5000);
                     CloseHandle(process.hProcess);
@@ -333,14 +354,26 @@ int wmain(int argc,wchar_t** argv) {
                 DWORD exit_code=0;
                 const BOOL got_exit=GetExitCodeProcess(process.hProcess,&exit_code);
                 CloseHandle(process.hProcess);
-                if(!got_exit || exit_code!=2)return 72;
+                if(!got_exit || exit_code!=2) {
+                    std::wcerr << L"WIM preflight " << test_argument
+                               << L" exited " << exit_code
+                               << L" (GetExitCodeProcess " << got_exit
+                               << L")\n";
+                    return 72;
+                }
                 if(load(original)!=pristine_bytes ||
-                   fs::last_write_time(original)!=pristine_time)
+                   fs::last_write_time(original)!=pristine_time) {
+                    std::wcerr << L"WIM source changed after preflight "
+                               << test_argument << L"\n";
                     return 73;
+                }
                 for(const auto& entry:fs::directory_iterator(root))
                     if(entry.path().filename().wstring().starts_with(
-                           L".iso-wcx-real-validation-"))
+                           L".iso-wcx-real-validation-")) {
+                        std::wcerr << L"Preflight left private workspace: "
+                                   << entry.path() << L"\n";
                         return 74; // Never leave a failed pre-WCX clone.
+                    }
                 return 0;
             };
             if(const int failure=reject_cleanly(L"256"))
@@ -454,20 +487,102 @@ int wmain(int argc,wchar_t** argv) {
         if(!verify(renamed)||!verify(swm.parent_path()/L"RENAMED.swm"))return 19;
         // Transactional WIM changes through the real WCX ABI.
         auto pack=bind<PackFn>(dll,"PackFilesW");auto erase=bind<DeleteFn>(dll,"DeleteFilesW");
+        const auto caps=bind<PackerCapsFn>(dll,"GetPackerCaps");
         auto set_progress=bind<SetProgressFn>(dll,"SetProcessDataProcW");
         if(!pack||!erase||!set_progress)return 20;
+        // F5 into an existing WIM is blocked by Total Commander before
+        // PackFilesW if the registered WCX flags lack PK_CAPS_MODIFY (2).
+        // The mask must be 158: MODIFY|MULTIPLE|DELETE|OPTIONS|SEARCHTEXT;
+        // do NOT advertise NEW (1), encrypted packing or ZIP-by-content.
+        if(!caps || caps()!=158 || !(caps()&2))return 115;
         const auto incoming=root/L"incoming";
         write(incoming/L"HELLO.TXT","replacement");write(incoming/L"ADDED.TXT","new-file");
         std::wstring packed=original.wstring(),src=incoming.wstring(),sub=L"image1";
         wchar_t add_list[]=L"HELLO.TXT\0ADDED.TXT\0\0";
+        // Simulate the real Total Commander lifecycle: its WIM panel may
+        // hold a read-only WCX archive handle while PackFiles replaces the
+        // original. ReplaceFileW then leaves an old-data backup which MUST
+        // be released by CloseArchive, not by deleting a live WIMGAPI mount.
+        OpenW active_panel{};
+        active_panel.ArcName=packed.data();
+        HANDLE panel_handle=open(&active_panel);
+        if(!panel_handle || active_panel.OpenResult!=0)return 93;
+        // A cancelled F8 preflight must never invalidate an already open
+        // WIM panel. It has not committed any changes and should still test
+        // and extract the original files without forcing the user to reopen.
+        const auto before_rejected_edit=load(original);
+        wchar_t abort_preflight_entry[]=L"image1\\HELLO.TXT\0\0";
+        cancel_wim_delete_preflight.store(true);
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int rejected_edit=erase(packed.data(),abort_preflight_entry);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        cancel_wim_delete_preflight.store(false);
+        if(rejected_edit!=21 || load(original)!=before_rejected_edit) {
+            close(panel_handle);return 99;
+        }
+        bool panel_still_readable=false;
+        for(unsigned n=0;n<100000;++n) {
+            HeaderExW entry{};
+            const int code=read(panel_handle,&entry);
+            if(code==10)break;
+            if(code!=0){close(panel_handle);return 100;}
+            if(std::wstring_view(entry.FileName)==L"image1\\HELLO.TXT") {
+                panel_still_readable=process(panel_handle,1,nullptr,nullptr)==0;
+                break;
+            }
+            if(process(panel_handle,0,nullptr,nullptr)!=0) {
+                close(panel_handle);return 101;
+            }
+        }
+        if(!panel_still_readable) {close(panel_handle);return 102;}
+        // A fresh panel is deliberately kept open across the successful
+        // replacement below, which MUST invalidate its original streams.
+        if(close(panel_handle)!=0)return 103;
+        active_panel.OpenResult=0;
+        panel_handle=open(&active_panel);
+        if(!panel_handle || active_panel.OpenResult!=0)return 104;
         // WCX callback registration may happen on another thread than packing.
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         int packed_result=-1;
         std::thread worker([&]{packed_result=pack(packed.data(),sub.data(),src.data(),add_list,0);});
         worker.join();
         set_progress(INVALID_HANDLE_VALUE,nullptr);
+        // The old TC panel may still have stale filenames. It must NEVER
+        // extract those against the newly committed image. Only a fresh
+        // OpenArchive can read the replacement WIM.
+        if(packed_result==0) {
+            bool found_stale_file=false,blocked_stale_read=false;
+            for(;;) {
+                HeaderExW item{};
+                const int code=read(panel_handle,&item);
+                if(code==10)break;
+                if(code!=0){close(panel_handle);return 96;}
+                if(std::wstring_view(item.FileName)==L"image1\\HELLO.TXT") {
+                    found_stale_file=true;
+                    blocked_stale_read=process(panel_handle,1,nullptr,nullptr)!=0;
+                    break;
+                }
+                if(process(panel_handle,0,nullptr,nullptr)!=0) {
+                    close(panel_handle);return 97;
+                }
+            }
+            if(!found_stale_file || !blocked_stale_read) {
+                close(panel_handle);
+                return 98;
+            }
+        }
+        // Close the host's retained WIM panel BEFORE inspecting scratch.
+        const int panel_closed=close(panel_handle);
+        if(panel_closed!=0)return 94;
         if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";return 21;}
         if(!pack_progress_calls.load())return 26;
+        for(const auto& entry:fs::directory_iterator(root)) {
+            if(entry.path().filename().wstring().starts_with(L".iso-wcx-edit-")) {
+                std::wcerr<<L"CloseArchive left private WIM staging at "
+                          <<entry.path().wstring()<<L"\n";
+                return 95;
+            }
+        }
         // Regression: Total Commander creates an *empty folder* through the
         // same PackFilesW API as a file. Verify the index survives correctly.
         fs::create_directories(incoming/L"NEW_EMPTY_FOLDER");
@@ -489,6 +604,44 @@ int wmain(int argc,wchar_t** argv) {
         cancel_next_wim.store(false);
         if(cancel_rc!=21 || load(original)!=before_cancel)
             return 33; // A cancelled edit must leave WIM byte-identical.
+        // Late F7 cancellation happens AFTER the expensive WIM Apply/Capture
+        // and output verification, but BEFORE the atomic ReplaceFileW. The
+        // existing TC panel must remain readable; releasing WIMGAPI handles
+        // before this checkpoint was needlessly breaking open panels.
+        {
+            const auto before_late=load(original);
+            fs::create_directories(incoming/L"LATE_CANCEL_FOLDER");
+            wchar_t late_list[]=L"LATE_CANCEL_FOLDER\0\0";
+            OpenW late_panel{};
+            late_panel.ArcName=packed.data();
+            const HANDLE live=open(&late_panel);
+            if(!live || late_panel.OpenResult!=0)return 105;
+            cancel_wim_before_commit.store(true);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int late_rc=pack(packed.data(),sub.data(),src.data(),
+                                   late_list,0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            cancel_wim_before_commit.store(false);
+            if(late_rc!=21 || load(original)!=before_late) {
+                close(live);return 106;
+            }
+            bool tested=false;
+            for(unsigned n=0;n<100000;++n) {
+                HeaderExW item{};
+                const int code=read(live,&item);
+                if(code==10)break;
+                if(code!=0){close(live);return 107;}
+                if(std::wstring_view(item.FileName)==L"image1\\HELLO.TXT") {
+                    tested=process(live,1,nullptr,nullptr)==0;
+                    break;
+                }
+                if(process(live,0,nullptr,nullptr)!=0){
+                    close(live);return 108;
+                }
+            }
+            if(close(live)!=0)return 109;
+            if(!tested)return 110;
+        }
         {
             OpenW args{};args.ArcName=packed.data();
             HANDLE h=open(&args);
@@ -516,6 +669,47 @@ int wmain(int argc,wchar_t** argv) {
         if(!content(L"image1\\HELLO.TXT",data)||data!="replacement"||
            !content(L"image1\\ADDED.TXT",data)||data!="new-file"||
            !content(L"image2\\HELLO.TXT",data)||data!="hello-two")return 22;
+        // Regression: TC F5 copies actual files into an existing WIM folder.
+        // F7's synthetic folder creation does not exercise this file path.
+        const auto incoming_files=root/L"Incoming Files - \u0422\u0435\u0441\u0442";
+        write(incoming_files/L"F5 copied.txt","F5 add new file");
+        write(incoming_files/L"folder.bin","F5 replace existing");
+        write(incoming_files/L"\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt","Unicode file bytes");
+        const auto existing_source=incoming_files/L"F5 copied.txt";
+        std::wstring nested_sub=L"image1\\Nested";
+        std::wstring nested_source=incoming_files.wstring();
+        wchar_t nested_list[]=L"F5 copied.txt\0folder.bin\0\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt\0\0";
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int f5_result=pack(packed.data(),nested_sub.data(),
+                                 nested_source.data(),nested_list,2);
+        // WCX PK_PACK_SAVE_PATHS=2 is a normal TC F5 option. Do not
+        // confuse this bit with PK_PACK_MOVE_FILES=1 (F6/move).
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(f5_result!=0) {
+            std::cerr<<"WIM nested F5 PackFilesW returned "<<f5_result<<"\n";
+            return 111;
+        }
+        if(!content(L"image1\\Nested\\F5 copied.txt",data)||
+           data!="F5 add new file"||
+           !content(L"image1\\Nested\\folder.bin",data)||
+           data!="F5 replace existing"||
+           !content(L"image1\\Nested\\\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt",data)||
+           data!="Unicode file bytes")return 112;
+        // Test F8 on an individual file, not only whole folders.
+        wchar_t f8_file_list[]=L"image1\\Nested\\F5 copied.txt\0\0";
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int f8_file_result=erase(packed.data(),f8_file_list);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(f8_file_result!=0) {
+            std::cerr<<"WIM file F8 DeleteFilesW returned "<<f8_file_result<<"\n";
+            return 113;
+        }
+        if(content(L"image1\\Nested\\F5 copied.txt",data) ||
+           !fs::exists(existing_source) ||
+           !content(L"image1\\Nested\\folder.bin",data) ||
+           data!="F5 replace existing" ||
+           !content(L"image1\\Nested\\\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt",data) ||
+           data!="Unicode file bytes")return 114;
         // Total Commander can send an empty folder with the trailing
         // "*.*" wildcard. Previously WCX left the '*' in edit_path()
         // and raised "unsafe archive edit character" instead of deleting.
@@ -570,6 +764,52 @@ int wmain(int argc,wchar_t** argv) {
             close(h);
             if(found_dir)return 87;
         }
+        // Regression: WIM DeleteFiles used to report success for an absent
+        // path because recursive cleanup intentionally accepts a missing
+        // target. Never spend a full Apply/Capture claiming to delete nothing
+        // and never mutate the original source on such a request.
+        wchar_t missing_folder[]=L"image1\\NOT_PRESENT\\*.*\0\0";
+        const auto before_missing=load(original);
+        const auto staging_before=wim_legacy_staging_calls.load();
+        const auto checks_before=wim_delete_metadata_preflight_calls.load();
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int missing_rc=erase(packed.data(),missing_folder);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(missing_rc==0 || load(original)!=before_missing)return 88;
+        if(wim_legacy_staging_calls.load()!=staging_before ||
+           wim_delete_metadata_preflight_calls.load()<=checks_before)
+            return 90; // Missing path was refused BEFORE Apply/Capture.
+        if(!content(L"image1\\HELLO.TXT",data)||data!="replacement")
+            return 89;
+
+        // Cancel during metadata preflight: no WIM staging and no source
+        // changes, even when the directory DOES exist in the source.
+        wchar_t existing_folder[]=L"image1\\HELLO.TXT\0\0";
+        const auto before_preflight_cancel=load(original);
+        const auto staging_before_cancel=wim_legacy_staging_calls.load();
+        cancel_wim_delete_preflight.store(true);
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int preflight_cancel_rc=erase(packed.data(),existing_folder);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        cancel_wim_delete_preflight.store(false);
+        if(preflight_cancel_rc!=21 ||
+           wim_legacy_staging_calls.load()!=staging_before_cancel ||
+           load(original)!=before_preflight_cancel)
+            return 91;
+
+        // A multi-index F8 batch must preflight ALL requested paths before
+        // starting even the first Apply/Capture. A real entry in image1 and
+        // a missing entry in image2 must not partly delete image1.
+        wchar_t atomic_batch[]=L"image1\\HELLO.TXT\0image2\\DOES_NOT_EXIST\0\0";
+        const auto before_atomic_batch=load(original);
+        const auto staging_before_batch=wim_legacy_staging_calls.load();
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int atomic_batch_rc=erase(packed.data(),atomic_batch);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(atomic_batch_rc==0 || load(original)!=before_atomic_batch ||
+           wim_legacy_staging_calls.load()!=staging_before_batch)
+            return 92;
+
         // Unsafe wildcard tokens elsewhere in the path are never globs:
         // they must not change the original WIM on a refused delete.
         wchar_t invalid_wildcard[]=L"image1\\FOO*BAR\0\0";
@@ -712,7 +952,15 @@ int wmain(int argc,wchar_t** argv) {
                 return 50;
             for(const auto& item:fs::directory_iterator(root)) {
                 const auto name=item.path().filename().wstring();
-                if(name.starts_with(L".iso-wcx-edit-"))return 51;
+                if(name.starts_with(L".iso-wcx-edit-")) {
+                    std::wcerr<<L"Cancelled WIM edit left private stage: "
+                              <<item.path()<<L"\n";
+                    for(const auto& child:fs::directory_iterator(item.path())) {
+                        std::wcerr<<L"  retained: "
+                                  <<child.path().filename().wstring()<<L"\n";
+                    }
+                    return 51;
+                }
             }
 
             // Cancellation AFTER WIMCommitImageHandle and unmount, but
@@ -830,6 +1078,14 @@ int wmain(int argc,wchar_t** argv) {
         std::cerr<<"WIM WCX test error: "<<e.what()<<"\n";
         return 12;
     }
+}
+
+int wmain(int argc,wchar_t** argv) {
+    const int result=run_wim_smoke(argc,argv);
+    if(result!=0)
+        std::cerr<<"WIM WCX smoke FAILED (diagnostic exit code "
+                 <<result<<")\n";
+    return result;
 }
 #endif
 

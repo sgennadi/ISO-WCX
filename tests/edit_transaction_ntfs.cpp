@@ -107,6 +107,43 @@ static void set_protected_dacl(const fs::path& path) {
     need(error == ERROR_SUCCESS, "set protected DACL");
 }
 
+// A user-owned test folder that permits reading and changing its own DACL,
+// but denies ordinary FILE_ADD_FILE. This reproduces an applied Windows
+// System32 parent without requiring changes to actual system directories.
+static void set_copy_restricted_dacl(const fs::path& path) {
+    HANDLE token=nullptr;
+    need(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token)!=FALSE,
+         "open user token for WIM F5 fixture");
+    DWORD bytes=0;
+    (void)GetTokenInformation(token,TokenUser,nullptr,0,&bytes);
+    need(bytes>=sizeof(TOKEN_USER),"measure WIM F5 test user SID");
+    std::vector<BYTE> buffer(bytes);
+    const BOOL got=GetTokenInformation(token,TokenUser,
+                                       buffer.data(),bytes,&bytes);
+    CloseHandle(token);
+    need(got!=FALSE,"get WIM F5 test user SID");
+    const auto* user=reinterpret_cast<const TOKEN_USER*>(buffer.data());
+    EXPLICIT_ACCESSW access{};
+    access.grfAccessPermissions=READ_CONTROL|WRITE_DAC|
+        FILE_LIST_DIRECTORY|FILE_TRAVERSE|FILE_READ_ATTRIBUTES|
+        FILE_READ_EA|SYNCHRONIZE;
+    access.grfAccessMode=SET_ACCESS;
+    access.grfInheritance=NO_INHERITANCE;
+    access.Trustee.TrusteeForm=TRUSTEE_IS_SID;
+    access.Trustee.TrusteeType=TRUSTEE_IS_USER;
+    access.Trustee.ptstrName=static_cast<LPWSTR>(user->User.Sid);
+    PACL acl=nullptr;
+    const DWORD made=SetEntriesInAclW(1,&access,nullptr,&acl);
+    need(made==ERROR_SUCCESS,"prepare WIM F5 restricted parent DACL");
+    auto native=path.wstring();
+    const DWORD error=SetNamedSecurityInfoW(native.data(),SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,nullptr,acl,nullptr);
+    LocalFree(acl);
+    SetLastError(error);
+    need(error==ERROR_SUCCESS,"protect WIM F5 parent directory");
+}
+
 static std::wstring dacl_sddl(const fs::path& path) {
     DWORD count = 0;
     (void)GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION,
@@ -333,6 +370,356 @@ int main() {
                  dacl_sddl(colliding_name) == old_acl,
                  "backup-named archive lost ADS/DACL");
             fs::remove(colliding_name);
+        }
+        // Simulate a private backup that was locked until TC closed its
+        // WIM archive handle. The WCX CloseArchive path calls the same
+        // deferred cleanup hook after releasing its reader.
+        {
+            const auto deferred=root/".iso-wcx-edit-4101-9202";
+            fs::create_directory(deferred);
+            write_bytes(deferred/"original-archive.backup","OLD-WIM-CLONE");
+            iso_wcx::defer_edit_workspace_cleanup(deferred);
+            iso_wcx::retry_deferred_edit_workspace_cleanup();
+            need(!fs::exists(deferred),
+                 "CloseArchive-style deferred backup cleanup left workspace");
+        }
+        // DISM can be empty for native WIMGAPI. A private mount-like folder
+        // must be checked with WIMGetMountedImageInfo before cleanup.
+        {
+            const auto deferred=root/".iso-wcx-edit-4101-9203";
+            fs::create_directory(deferred);
+            fs::create_directory(deferred/"mounted");
+            write_bytes(deferred/"original-archive.backup","PRIVATE-STAGED-BACKUP");
+            // The WIMGAPI registry may be unavailable on runner images.
+            // If the native API affirmatively reports no mount, the first
+            // cleanup call must finish ALL work, not misread a stale
+            // GetLastError after deleting the empty mounted placeholder.
+            auto native_state=iso_wcx::wim_detail::PrivateMountState::Unknown;
+            if(const HMODULE api=LoadLibraryExW(
+                   L"wimgapi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+                native_state=iso_wcx::wim_detail::inspect_private_mount(
+                    api,deferred/"mounted",deferred);
+                FreeLibrary(api);
+            }
+            SetLastError(ERROR_ACCESS_DENIED);
+            iso_wcx::defer_edit_workspace_cleanup(deferred);
+            iso_wcx::retry_deferred_edit_workspace_cleanup();
+            if(native_state==iso_wcx::wim_detail::PrivateMountState::Unmounted)
+                need(!fs::exists(deferred),
+                     "confirmed empty WIMGAPI mount stage was only partially cleaned");
+            if(fs::exists(deferred)) {
+                // WIMGAPI can confirm an empty dummy mount and unlink it
+                // before the ordinary backup deletion completes. Such a
+                // completed unmount is safe, unlike an active mounted tree.
+                const auto mounted=deferred/"mounted";
+                if(fs::exists(mounted)) {
+                    need(fs::is_empty(mounted),
+                         "native cleanup entered nonempty WIM mount");
+                    const auto unknown=
+                        iso_wcx::workspace_cleanup::cleanup(deferred);
+                    if(!unknown.clean) {
+                        need(unknown.unsafe && fs::exists(mounted),
+                             "WIMGAPI-unknown mount was modified");
+                        // Only TEST code may remove this exact synthetic
+                        // empty directory, independently of WIMGAPI.
+                        need(fs::remove(mounted),
+                             "cannot remove fixture-created empty mount");
+                    }
+                }
+                const auto cleaned=
+                    iso_wcx::workspace_cleanup::cleanup(deferred);
+                if(!cleaned.clean) {
+                    std::wcerr<<L"Private stage cleanup: blocked="
+                              <<cleaned.blocked.wstring()
+                              <<L" error="<<cleaned.error
+                              <<L" unsafe="<<cleaned.unsafe<<L"\n";
+                }
+                need(cleaned.clean && !fs::exists(deferred),
+                     "unmounted temporary stage was not fully cleaned");
+            }
+        }
+        // A native WIMGAPI mount marker with arbitrary content is NEVER a
+        // disposable expanded tree, even if DISM says there are no mounts.
+        // The source WIM and that directory must remain byte-identical.
+        {
+            const auto suspicious=root/L".iso-wcx-edit-4101-9204";
+            fs::create_directories(suspicious/L"mounted"/L"Windows");
+            write_bytes(suspicious/L"mounted"/L"Windows"/L"KEEP.TXT",
+                        "DO-NOT-TOUCH-MOUNT");
+            auto result=iso_wcx::workspace_cleanup::cleanup(suspicious);
+            need(!result.clean && result.unsafe,
+                 "WIM cleanup accepted a nonempty mount placeholder");
+            need(read_bytes(suspicious/L"mounted"/L"Windows"/L"KEEP.TXT")==
+                     "DO-NOT-TOUCH-MOUNT",
+                 "WIM cleanup traversed a possible mounted WIM tree");
+            fs::remove_all(suspicious);
+        }
+        // Arbitrary user paths are never valid ISO-WCX workspaces, even if
+        // they contain an expanded-looking Windows directory.
+        {
+            const auto outside=root/L"not-an-isowcx-workspace";
+            fs::create_directories(outside);
+            write_bytes(outside/L"KEEP.TXT","KEEP-USER-DATA");
+            auto result=iso_wcx::workspace_cleanup::cleanup(outside);
+            need(result.unsafe && !result.clean &&
+                 read_bytes(outside/L"KEEP.TXT")=="KEEP-USER-DATA",
+                 "cleanup accepted an arbitrary user-selected directory");
+            fs::remove_all(outside);
+        }
+        // This is a miniature WIMApplyImage output: Windows folders,
+        // restored protected ACLs, read-only / hidden files and a private
+        // NTFS tree which must be deleted without modifying the source.
+        {
+            fs::path expanded_root;
+            {
+                iso_wcx::EditTransaction tx(archive);
+                expanded_root=tx.workspace;
+                const auto sys=tx.workspace/L"expanded"/L"Windows"/L"System32";
+                fs::create_directories(sys);
+                const auto protected_file=sys/L"protected.dll";
+                write_bytes(protected_file,"WIM-STAGING-ONLY");
+                // Prepare all content/attributes before restoring the
+                // protected System32 DACL. That ACL intentionally makes
+                // later nonprivileged mutations unsafe in this fixture.
+                need(SetFileAttributesW(protected_file.c_str(),
+                     FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_HIDDEN)!=FALSE,
+                     "mark temporary WIM file readonly/hidden");
+                set_protected_dacl(sys);
+                // Link to OUTSIDE the ephemeral workspace must be unlinked
+                // without traversing the target. Skip if the OS has not
+                // enabled developer-mode symlink creation.
+                const auto outside=root/L"symlink-target";
+                fs::create_directories(outside);
+                write_bytes(outside/L"keep.txt","KEEP-OUTSIDE");
+                const auto link=tx.workspace/L"expanded"/L"external-junction";
+                constexpr DWORD allow_unprivileged=0x2u;
+                (void)CreateSymbolicLinkW(link.c_str(),outside.c_str(),
+                       SYMBOLIC_LINK_FLAG_DIRECTORY|allow_unprivileged);
+            }
+            if(fs::exists(expanded_root)) {
+                std::wcerr<<L"Expanded WIM scratch diagnostic:\n"
+                          <<iso_wcx::take_edit_cleanup_warning()<<L"\n";
+            }
+            need(!fs::exists(expanded_root),
+                 "WIM expanded Windows tree with protected ACL was not cleaned");
+            need(read_bytes(root/L"symlink-target"/L"keep.txt")==
+                     "KEEP-OUTSIDE",
+                 "WIM cleanup traversed outside the private workspace");
+            fs::remove_all(root/L"symlink-target");
+        }
+        // WIM F5 copies into protected NTFS parents: never modify DACLs
+        // of the original WIM or leave a temporary full-access ACE on the
+        // surviving System32 parent before WIMCaptureImage.
+        {
+            const auto input=root/L"F5 protected input.txt";
+            write_bytes(input,"F5-PROTECTED-NONEMPTY");
+            iso_wcx::EditTransaction tx(archive);
+            const auto expanded=tx.workspace/L"expanded";
+            const auto system=expanded/L"Windows"/L"System32";
+            fs::create_directories(system);
+            set_copy_restricted_dacl(system);
+            const auto original_acl=dacl_sddl(system);
+            const auto dst=system/L"F5 copied.txt";
+            const auto added=iso_wcx::workspace_cleanup::
+                copy_into_expanded(tx.workspace,expanded,input,dst);
+            need(added.clean && fs::is_regular_file(dst) &&
+                 read_bytes(dst)=="F5-PROTECTED-NONEMPTY",
+                 "WIM F5 could not create file in protected System32");
+            need(dacl_sddl(system)==original_acl,
+                 "WIM F5 leaked temporary parent DACL into captured image");
+            const auto outside=root/L"F5-WIM-OUTSIDE.txt";
+            const auto escaped=iso_wcx::workspace_cleanup::
+                copy_into_expanded(tx.workspace,expanded,input,outside);
+            need(escaped.unsafe && !escaped.clean && !fs::exists(outside),
+                 "WIM F5 wrote outside the private expanded tree");
+            const auto mounted=tx.workspace/L"mounted";
+            fs::create_directory(mounted);
+            const auto blocked=iso_wcx::workspace_cleanup::
+                copy_into_expanded(tx.workspace,expanded,input,
+                                   system/L"blocked.txt");
+            need(blocked.unsafe && !fs::exists(system/L"blocked.txt"),
+                 "WIM F5 copied while an active mount marker existed");
+            need(fs::remove(mounted),"remove WIM F5 synthetic mount marker");
+            // The test input lives outside the private WIM transaction and
+            // must be removed explicitly before the final leak assertion.
+            need(fs::remove(input),"remove WIM F5 source fixture");
+        }
+        // Scoped WIM F8 delete regression: use exactly the disposable
+        // WIMApplyImage tree, never the original WIM or an outside path.
+        {
+            iso_wcx::EditTransaction tx(archive);
+            const auto expanded=tx.workspace/L"expanded";
+            const auto system=expanded/L"Windows"/L"System32";
+            fs::create_directories(system);
+            const auto protected_file=system/L"readonly.dll";
+            write_bytes(protected_file,"RECAPTURE-DELETE");
+            need(SetFileAttributesW(protected_file.c_str(),
+                  FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_HIDDEN)!=FALSE,
+                  "mark WIM delete target readonly and hidden");
+            set_protected_dacl(system);
+            const auto original_system_acl=dacl_sddl(system);
+            auto removed=iso_wcx::workspace_cleanup::remove_expanded_entry(
+                tx.workspace,expanded,protected_file);
+            need(removed.clean && !fs::exists(protected_file),
+                 "scoped WIM F8 failed to remove protected readonly file");
+            // This folder will still exist during WIMCaptureImage. A temporary
+            // DELETE_CHILD grant must never leak into the saved image.
+            need(dacl_sddl(system)==original_system_acl,
+                 "scoped WIM F8 changed surviving System32 protected DACL");
+
+            // Deleting protected directories also requires NTFS DACL repair
+            // confined to the private WIM workspace.
+            const auto protected_dir=expanded/L"Windows";
+            removed=iso_wcx::workspace_cleanup::remove_expanded_entry(
+                tx.workspace,expanded,protected_dir);
+            need(removed.clean && !fs::exists(protected_dir),
+                 "scoped WIM F8 failed to remove protected system folder");
+            need(fs::exists(expanded),
+                 "scoped deletion accidentally removed the expanded root");
+
+            const auto foreign=root/"WIM-OUTSIDE-DELETE.txt";
+            write_bytes(foreign,"MUST-SURVIVE");
+            const auto outside=iso_wcx::workspace_cleanup::
+                remove_expanded_entry(tx.workspace,expanded,foreign);
+            need(outside.unsafe && !outside.clean &&
+                 read_bytes(foreign)=="MUST-SURVIVE",
+                 "scoped WIM delete touched an external file");
+
+            const auto whole_root=iso_wcx::workspace_cleanup::
+                remove_expanded_entry(tx.workspace,expanded,expanded);
+            need(whole_root.unsafe && !whole_root.clean && fs::exists(expanded),
+                 "scoped WIM delete allowed deleting the expanded root");
+
+            const auto dotdot=iso_wcx::workspace_cleanup::
+                remove_expanded_entry(tx.workspace,expanded,
+                    expanded/L"sub"/L".."/L"target");
+            need(dotdot.unsafe && !dotdot.clean,
+                 "scoped WIM delete accepted a dotdot path");
+
+            const auto link=expanded/L"external-link";
+            const auto outside_folder=root/"WIM-EXTERNAL-DELETE";
+            fs::create_directories(outside_folder);
+            write_bytes(outside_folder/L"keep.txt","DO-NOT-DELETE");
+            const BOOL made_link=CreateSymbolicLinkW(
+                link.c_str(),outside_folder.c_str(),
+                SYMBOLIC_LINK_FLAG_DIRECTORY|0x2u);
+            if(made_link) {
+                const auto via_link=iso_wcx::workspace_cleanup::
+                    remove_expanded_entry(tx.workspace,expanded,
+                        link/L"keep.txt");
+                need(via_link.unsafe && !via_link.clean &&
+                     read_bytes(outside_folder/L"keep.txt")=="DO-NOT-DELETE",
+                     "scoped WIM delete followed an external reparse ancestor");
+                const auto unlink=iso_wcx::workspace_cleanup::
+                    remove_expanded_entry(tx.workspace,expanded,link);
+                need(unlink.clean && !fs::exists(link) &&
+                     read_bytes(outside_folder/L"keep.txt")=="DO-NOT-DELETE",
+                     "scoped WIM delete failed to safely unlink reparse entry");
+            }
+
+            // Never touch selected entries while any native mount marker
+            // exists; even a DISM-empty WIMGAPI mount may remain active.
+            const auto mounted=tx.workspace/L"mounted";
+            fs::create_directories(mounted);
+            write_bytes(expanded/L"target.txt","KEEP-WHILE-MOUNTED");
+            const auto during_mount=iso_wcx::workspace_cleanup::
+                remove_expanded_entry(tx.workspace,expanded,
+                    expanded/L"target.txt");
+            need(during_mount.unsafe && !during_mount.clean &&
+                 read_bytes(expanded/L"target.txt")=="KEEP-WHILE-MOUNTED",
+                 "scoped WIM delete ignored a possible active mount");
+            need(fs::remove(mounted),
+                 "remove synthetic empty mount marker after scoped test");
+            const auto after_mount=iso_wcx::workspace_cleanup::
+                remove_expanded_entry(tx.workspace,expanded,
+                    expanded/L"target.txt");
+            need(after_mount.clean && !fs::exists(expanded/L"target.txt"),
+                 "scoped WIM delete failed after removing mount marker");
+            fs::remove_all(outside_folder);
+            fs::remove(foreign);
+        }
+        // WIM F8 cooperative cancellation regression: walking a large
+        // Windows-image directory must allow the user to cancel without
+        // recapturing or replacing the source archive. Retain the ability
+        // to finish deletion after the user initiates a new operation.
+        {
+            const auto original_data=read_bytes(archive);
+            fs::path workspace;
+            {
+                iso_wcx::EditTransaction tx(archive);
+                workspace=tx.workspace;
+                const auto expanded=tx.workspace/L"expanded";
+                const auto large=expanded/L"Windows"/L"LargeDirectory";
+                fs::create_directories(large);
+                for(unsigned i=0;i<256;++i)
+                    write_bytes(large/("entry-"+std::to_string(i)+".dat"),"DATA");
+                unsigned polls=0;
+                iso_wcx::workspace_cleanup::DeletePulse cancel{
+                    +[](void* context,std::uint64_t visited)->bool {
+                        ++*static_cast<unsigned*>(context);
+                        return visited<128u;
+                    },&polls};
+                const auto interrupted=
+                    iso_wcx::workspace_cleanup::remove_expanded_entry(
+                        tx.workspace,expanded,large,&cancel);
+                need(!interrupted.clean &&
+                     interrupted.error==ERROR_CANCELLED && polls==2 &&
+                     cancel.visited==128,
+                     "large WIM F8 delete did not stop at a safe checkpoint");
+                need(fs::exists(large),
+                     "cancelled staged WIM deletion removed its own root");
+                need(read_bytes(archive)==original_data,
+                     "cancelled staged WIM delete modified source archive");
+                unsigned finish_polls=0;
+                iso_wcx::workspace_cleanup::DeletePulse finish{
+                    +[](void* context,std::uint64_t)->bool {
+                        ++*static_cast<unsigned*>(context);
+                        return true;
+                    },&finish_polls};
+                const auto complete=
+                    iso_wcx::workspace_cleanup::remove_expanded_entry(
+                        tx.workspace,expanded,large,&finish);
+                need(complete.clean && !fs::exists(large) &&
+                     finish_polls>=1,
+                     "large WIM F8 delete did not complete after cancelled stage");
+            }
+            need(!fs::exists(workspace) &&
+                 read_bytes(archive)==original_data,
+                 "cancelled WIM F8 transaction leaked a stage or changed source");
+        }
+        // Simulate a file handle held by TC until CloseArchive. A complete
+        // cleanup must be retried AFTER the handle is released.
+        {
+            // Do not carry a prior synthetic mount warning into this
+            // independent locked-backup regression.
+            (void)iso_wcx::take_edit_cleanup_warning();
+            fs::path temporary;
+            HANDLE hold=INVALID_HANDLE_VALUE;
+            {
+                iso_wcx::EditTransaction tx(archive);
+                temporary=tx.workspace;
+                const auto busy=temporary/L"original-archive.backup";
+                write_bytes(busy,"LOCKED-SNAPSHOT");
+                hold=CreateFileW(busy.c_str(),GENERIC_READ,0,nullptr,
+                                  OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+                need(hold!=INVALID_HANDLE_VALUE,"lock WCX private backup");
+            }
+            need(fs::exists(temporary),
+                 "locked WIM stage was unexpectedly deleted");
+            need(!iso_wcx::edit_cleanup_warning_slot().empty(),
+                 "locked WIM backup did not retain a pending cleanup warning");
+            // The first retry still has a real sharing violation. It must
+            // preserve the backup AND keep the warning actionable.
+            iso_wcx::retry_deferred_edit_workspace_cleanup();
+            need(fs::exists(temporary) &&
+                 !iso_wcx::edit_cleanup_warning_slot().empty(),
+                 "active locked backup warning disappeared prematurely");
+            CloseHandle(hold);
+            iso_wcx::retry_deferred_edit_workspace_cleanup();
+            need(!fs::exists(temporary),
+                 "CloseArchive deferred backup cleanup did not complete");
+            need(iso_wcx::take_edit_cleanup_warning().empty(),
+                 "successful deferred cleanup showed a stale warning to TC");
         }
         for (const auto& entry : fs::directory_iterator(root))
             need(entry.path() == archive, "transaction leaked workspace");

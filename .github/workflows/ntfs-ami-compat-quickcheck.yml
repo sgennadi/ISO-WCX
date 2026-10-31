@@ -1,0 +1,32 @@
+name: AMI UEFI NTFS extraction compatibility quickcheck
+
+on:
+  pull_request:
+    paths:
+      - 'src/disc.cpp'
+      - 'include/iso_wcx/ntfs_preallocation.hpp'
+      - 'tests/ntfs_preallocation.cpp'
+      - 'tests/copy_transaction.cpp'
+      - 'CMakeLists.txt'
+      - '.github/workflows/ntfs-ami-compat-quickcheck.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  win32-and-x64:
+    name: AMI NTFS staged extraction / ${{ matrix.arch }}
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [Win32, x64]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure Visual Studio 2026 C++26
+        run: cmake -S . -B build-ntfs -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26
+      - name: Compile native NTFS and transactional extraction tests
+        run: cmake --build build-ntfs --config Release --target ntfs_preallocation_tests copy_transaction_tests --parallel 2
+      - name: Verify NTFS preallocation and cancellation rollback
+        run: ctest --test-dir build-ntfs -C Release --output-on-failure -R "^(ntfs_uefi_ami_preallocate_atomic_extract|copy_transaction_rollback)$"

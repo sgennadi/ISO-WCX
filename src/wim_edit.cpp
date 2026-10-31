@@ -5,6 +5,7 @@
 #include "iso_wcx/wim_parts.hpp"
 #include "iso_wcx/wim_mount_fast_plan.hpp"
 #include "iso_wcx/wim_mount_recovery.hpp"
+#include "iso_wcx/wim_mount_state.hpp"
 #include <msxml6.h>
 #include <map>
 #include <mutex>
@@ -14,10 +15,12 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 
 namespace iso_wcx { namespace {
@@ -166,14 +169,69 @@ void preserve_metadata(HMODULE m,HANDLE old_image,HANDLE new_image){
     checked(api<BOOL(WINAPI*)(HANDLE,void*,DWORD)>(m,"WIMSetImageInformation")(new_image,xml.data(),static_cast<DWORD>((xml.size()+1)*sizeof(wchar_t))),"write WIM XML");
 }
 std::filesystem::path relative_path(const std::string& text){return std::filesystem::u8path(edit_path(text));}
-void no_reparse(const std::filesystem::path& root,const std::filesystem::path& relative){
-    auto path=root;for(const auto& part:relative){path/=part;DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){auto err=GetLastError();checked(err==ERROR_FILE_NOT_FOUND||err==ERROR_PATH_NOT_FOUND,"cannot inspect WIM edit path");continue;}if(attr&FILE_ATTRIBUTE_REPARSE_POINT)throw EditUnsupported("editing through WIM reparse points is not supported");}
+// Reject reparse ancestors even when deleting a selected symlink/junction.
+// A reparse LEAF is safe to unlink via remove_expanded_entry(), which never
+// descends into its target. Folder creation and replacement stay strict.
+void no_reparse(const std::filesystem::path& root,
+                const std::filesystem::path& relative,
+                bool allow_leaf_reparse=false) {
+    auto path=root;
+    for(auto it=relative.begin();it!=relative.end();++it) {
+        path/=*it;
+        const DWORD attr=GetFileAttributesW(path.c_str());
+        if(attr==INVALID_FILE_ATTRIBUTES) {
+            const DWORD error=GetLastError();
+            checked(error==ERROR_FILE_NOT_FOUND ||
+                    error==ERROR_PATH_NOT_FOUND,"cannot inspect WIM edit path");
+            continue;
+        }
+        if((attr&FILE_ATTRIBUTE_REPARSE_POINT) &&
+           !(allow_leaf_reparse && std::next(it)==relative.end()))
+            throw EditUnsupported("editing through WIM reparse points is not supported");
+    }
 }
-void remove_tree(const std::filesystem::path& path){
-    DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES)return;
-    if((attr&FILE_ATTRIBUTE_DIRECTORY)&&!(attr&FILE_ATTRIBUTE_REPARSE_POINT))for(const auto& item:std::filesystem::directory_iterator(path))remove_tree(item.path());
-    checked(SetFileAttributesW(path.c_str(),attr&~FILE_ATTRIBUTE_READONLY),"clear temporary read-only flag");
-    checked((attr&FILE_ATTRIBUTE_DIRECTORY)?RemoveDirectoryW(path.c_str()):DeleteFileW(path.c_str()),"remove WIM entry");
+// WIMApplyImage may restore Windows system-folder DACLs that deny ordinary
+// recursive deletion. Delete selected entries only through the same scoped,
+// reparse-safe NTFS cleanup engine used by private WIM workspaces.
+// The WIMGAPI Apply/Capture percentages are checkpoints, not a claim that
+// recursive deletion has a known total. Report an exact visited-entry count
+// and honor cancellation at the start and every 128 deleted-tree entries.
+struct WimDeleteStatus {
+    Callback& wim;
+    const WimEditStatus& status;
+    unsigned checkpoint;
+    static bool poll(void* opaque,std::uint64_t visited) noexcept {
+        auto& state=*static_cast<WimDeleteStatus*>(opaque);
+        try {
+            state.wim.tick();
+            if(!state.status)return true;
+            const auto label=L"Delete from WIM: visited "+
+                std::to_wstring(visited)+L" entries";
+            return state.status(label.c_str(),state.checkpoint);
+        }catch(...) {
+            return false;
+        }
+    }
+};
+void remove_staged_wim_entry(const std::filesystem::path& workspace,
+                             const std::filesystem::path& expanded,
+                             const std::filesystem::path& target,
+                             Callback& callback,
+                             const WimEditStatus& status,
+                             unsigned checkpoint) {
+    WimDeleteStatus state{callback,status,checkpoint};
+    workspace_cleanup::DeletePulse pulse{
+        &WimDeleteStatus::poll,&state};
+    const auto result=workspace_cleanup::remove_expanded_entry(
+        workspace,expanded,target,&pulse);
+    if(result.clean)return;
+    if(result.error==ERROR_CANCELLED)throw EditCancelled();
+    const auto detail="WIM staged delete failed (Win32 "+
+        std::to_string(result.error)+")";
+    if(result.unsafe)
+        throw EditUnsupported(detail+
+            ": unsafe path, active mount or reparse ancestor");
+    throw std::runtime_error(detail);
 }
 
 // The fast folder-only path is deliberately opt-in during initial field
@@ -402,11 +460,17 @@ void fast_mount_folder_edit(
             if(!mount(image.h,folder.c_str(),
                       WIM_FLAG_MOUNT_FAST|WIM_FLAG_NO_RP_FIX)) {
                 const DWORD error=GetLastError();
-                // A failed mount might still leave a registered reparse point.
-                // Preserve its staged WIM and path for administrator recovery.
-                tx.preserve();
+                // Failed WIMMountImageHandle does not imply a live mount.
+                // Previously we ALWAYS preserved a multi-GB clone, even
+                // when the Windows driver registered nothing (DISM empty).
+                // Only discard our private stage if the native WIMGAPI
+                // registry AND reparse-point check conclusively say safe.
+                if(wim_detail::inspect_private_mount(
+                        dll,folder,tx.workspace)!=
+                   wim_detail::PrivateMountState::Unmounted)
+                    tx.preserve();
                 throw std::runtime_error("WIM fast mount failed (Win32 "+
-                    std::to_string(error)+"); staged workspace: "+
+                    std::to_string(error)+"); workspace: "+
                     tx.workspace.string());
             }
             mounted=true;
@@ -435,9 +499,12 @@ void fast_mount_folder_edit(
             unmount_attempted=true;
             if(!unmount(image.h,0)) {
                 const DWORD error=GetLastError();
-                tx.preserve();
+                if(wim_detail::inspect_private_mount(
+                       dll,folder,tx.workspace)!=
+                   wim_detail::PrivateMountState::Unmounted)
+                    tx.preserve();
                 throw std::runtime_error("WIM fast unmount failed (Win32 "+
-                    std::to_string(error)+"); recover mounted workspace: "+
+                    std::to_string(error)+"); recover workspace if mounted: "+
                     tx.workspace.string());
             }
             mounted=false;
@@ -445,14 +512,47 @@ void fast_mount_folder_edit(
             if(mounted && !unmount_attempted) {
                 unmount_attempted=true;
                 if(!unmount(image.h,0)) {
-                    tx.preserve();
+                    if(wim_detail::inspect_private_mount(
+                           dll,folder,tx.workspace)!=
+                       wim_detail::PrivateMountState::Unmounted)
+                        tx.preserve();
                     throw std::runtime_error(
                         "WIM mounted workspace could not be discarded; "
                         "do NOT delete or rename its image before recovery: "+
                         tx.workspace.string());
                 }
             }
+            // A successful unmount can still leave a native registration or
+            // reparse point; never let EditTransaction recursively delete it.
+            if(wim_detail::inspect_private_mount(dll,folder,tx.workspace)!=
+               wim_detail::PrivateMountState::Unmounted) {
+                tx.preserve();
+                throw std::runtime_error(
+                    "WIM mount remains registered after cancel; preserve "+
+                    tx.workspace.string());
+            }
             throw;
+        }
+    }
+    // WIMGAPI handles are closed here. Recheck its OWN native mount registry:
+    // DISM may return an empty list even for orphaned WIMGAPI mount points.
+    // Only remove an EMPTY mount directory; never recursively unlink a
+    // mounted Windows tree or invoke global WIMDeleteImageMounts.
+    if(wim_detail::inspect_private_mount(dll,folder,tx.workspace)!=
+       wim_detail::PrivateMountState::Unmounted) {
+        tx.preserve();
+        throw std::runtime_error(
+            "WIM mount cleanup incomplete: preserved "+
+            tx.workspace.string());
+    }
+    {
+        std::error_code ec;
+        const bool removed=std::filesystem::remove(folder,ec);
+        if(!removed || ec) {
+            tx.preserve();
+            throw std::runtime_error(
+                "WIM mount directory is not empty after unmount: preserve "+
+                tx.workspace.string());
         }
     }
     // The mount and all WIMGAPI handles must be closed before independent
@@ -478,7 +578,9 @@ void fast_mount_folder_edit(
             throw EditUnsupported("fast WIM change verification failed: "+failure);
     }
     report(L"Commit verified fast WIM",99);
-    tx.commit(progress);
+    // Commit validates the original source and cancellation BEFORE releasing
+    // the host's WIM reader handles. Failed or cancelled edits keep them live.
+    tx.commit(progress,[&]{ WimArchive::release_open_readers(path); });
 }
 }
 void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,
@@ -497,6 +599,56 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         auto digits=top.substr(5);if(digits.empty()||digits.size()>3||digits[0]=='0'||digits.find_first_not_of("0123456789")!=std::string::npos)throw EditUnsupported("invalid WIM index");unsigned index=static_cast<unsigned>(std::stoul(digits));if(!index||index>images)throw EditUnsupported("creating WIM indexes is not supported yet");
         if(slash==std::string::npos){if(!c.remove)throw EditUnsupported("cannot replace an image index");deleted.insert(index);}else{c.path=p.substr(slash+1);edits[index].push_back(std::move(c));}}
     if(deleted.size()==images)throw EditUnsupported("cannot delete the last WIM image");
+    // A mixed request must not silently discard edits to an index that is
+    // removed in the same transaction. Fail before cloning/applying the WIM.
+    for(const unsigned index:deleted)
+        if(edits.contains(index))
+            throw EditUnsupported("cannot edit a WIM image index scheduled for deletion");
+
+    // Keep a live Total Commander WIM panel readable during preflight and
+    // expensive Apply/Capture. Release readers only after cancellation checks
+    // at the final atomic replacement boundary in EditTransaction::commit.
+
+    // F8 often selects a stale entry after an earlier edit, or Total Commander
+    // passes a folder wildcard that names an absent directory. Check the
+    // SOURCE metadata BEFORE WIMApplyImage/WIMCaptureImage or creating a
+    // transaction. A nonexistent item must not launch a multi-gigabyte
+    // Apply/Capture merely to return an error after several minutes.
+    //
+    // Only DELETE needs this source scan. File additions and replacements
+    // retain their previous fast path; a valid deletion is still verified
+    // independently after capture. WIMGAPI may block inside WIMLoadImage,
+    // so report the metadata stage without claiming a fabricated percentage.
+    for(const auto& [index, changes_for_index]:edits) {
+        std::unordered_set<std::string> pending;
+        const auto prefix="image"+std::to_string(index)+"/";
+        for(const auto& change:changes_for_index)
+            if(change.remove)pending.insert(prefix+change.path);
+        if(pending.empty())continue;
+
+        const auto message=L"Check WIM delete targets (image "+
+                           std::to_wstring(index)+L")";
+        report(message.c_str(),2);
+        ULONGLONG last_update=0;
+        WimArchive source_listing(path,index,
+            [&](std::uint32_t,std::size_t entries) {
+                edit_tick(progress);
+                if(!status)return;
+                const ULONGLONG now=GetTickCount64();
+                if(last_update!=0 && now-last_update<250u)return;
+                last_update=now;
+                const auto label=L"Check WIM delete targets: image "+
+                                 std::to_wstring(index)+L", "+
+                                 std::to_wstring(entries)+L" paths";
+                if(!status(label.c_str(),2))throw EditCancelled();
+            });
+        for(const auto& item:source_listing.items()) {
+            if(pending.erase(item.path) && pending.empty())break;
+        }
+        if(!pending.empty())
+            throw EditUnsupported(
+                "WIM entry to delete was not found in source metadata");
+    }
     // Strict experimental opt-in until real machine WIM mount and crash
     // recovery have been validated. Normal users retain Apply/Capture.
     if(fast_mount_requested()) {
@@ -536,9 +688,40 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 callback.tick();
                 continue;
             }
-            const auto expanded=tx.workspace/L"expanded";
+            // Each edited index gets its OWN apply tree. If Windows keeps
+            // one tree locked, later indexes must never see stale content.
+            const auto expanded=tx.workspace/
+                (edits.size()==1 ? L"expanded" :
+                 (L"expanded-image-"+std::to_wstring(index)));
             std::filesystem::create_directory(expanded);
-            struct Cleanup {std::filesystem::path path;~Cleanup(){try{remove_tree(path);}catch(...){}}}cleanup{expanded};
+            struct Cleanup {
+                std::filesystem::path root,path;
+                const WimEditStatus& status;
+                unsigned percent;
+                ~Cleanup() noexcept {
+                    // WIMGAPI Capture has returned; all image data and ACLs
+                    // are already recorded in the output WIM. The temporary
+                    // Windows tree can now be removed using SeRestorePrivilege
+                    // without changing the captured image's NTFS security.
+                    try {
+                        if(status) (void)status(L"Cleanup expanded WIM staging",
+                                                percent);
+                        const auto result=
+                            workspace_cleanup::cleanup_expanded(root,path);
+                        if(!result.clean) {
+                            OutputDebugStringW((
+                                L"ISO-WCX: deferred WIM expanded cleanup: "+
+                                path.wstring()+L" blocked="+
+                                result.blocked.wstring()+L" error="+
+                                std::to_wstring(result.error)+L"\n").c_str());
+                        }
+                    }catch(...) {}
+                    // On an incomplete cleanup EditTransaction will retry
+                    // the entire private workspace after WIMGAPI handles
+                    // are released (and again on WCX CloseArchive).
+                }
+            }cleanup{tx.workspace,expanded,status,
+                      begin+(end-begin)*94u/100u};
             const unsigned apply_end=begin+(end-begin)*55u/100u;
             callback.begin_stage(L"Extract WIM image "+number,begin,apply_end-begin);
             const BOOL applied=api<BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMApplyImage")(image.h,expanded.c_str(),2u|0x100u);
@@ -546,16 +729,50 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             callback.begin_stage(L"Edit WIM image "+number,apply_end,0);
             for(const auto& c:edits[index]){
                 callback.tick();
-                auto relative=relative_path(c.path);no_reparse(expanded,relative);auto target=expanded/relative;
-                if(c.remove){remove_tree(target);continue;}
+                auto relative=relative_path(c.path);
+                no_reparse(expanded,relative,c.remove);
+                auto target=expanded/relative;
+                if(c.remove) {
+                    // This private NTFS removal is intentionally recursive for selected
+                    // cleanup, but a user F8/Delete request must NOT succeed
+                    // if the selected WIM entry was already absent. Otherwise
+                    // we recapture a large install.wim and report a fake
+                    // successful deletion of nothing.
+                    const DWORD attr=GetFileAttributesW(target.c_str());
+                    if(attr==INVALID_FILE_ATTRIBUTES) {
+                        const DWORD error=GetLastError();
+                        if(error==ERROR_FILE_NOT_FOUND ||
+                           error==ERROR_PATH_NOT_FOUND)
+                            throw EditUnsupported("WIM entry to delete was not found");
+                    }
+                    remove_staged_wim_entry(tx.workspace,expanded,target,
+                                            callback,status,apply_end);
+                    continue;
+                }
                 if(c.directory){std::filesystem::create_directories(target);continue;}
                 checked(std::filesystem::is_regular_file(std::filesystem::symlink_status(c.source)),"source must be a regular file");
                 std::filesystem::create_directories(target.parent_path());
                 if(std::filesystem::exists(target)){
                     if(std::filesystem::is_directory(target))throw EditUnsupported("cannot replace a directory with a file");
-                    remove_tree(target);
+                    remove_staged_wim_entry(tx.workspace,expanded,target,
+                                            callback,status,apply_end);
                 }
-                checked(CopyFileW(c.source.c_str(),target.c_str(),TRUE),"copy replacement into WIM workspace");
+                // WIMApplyImage restores Windows' protected NTFS DACLs.
+                // A normal F5 CopyFileW may fail with ACCESS_DENIED even
+                // when F7/F8 work. Only the private expanded parent may
+                // receive a temporary create-file ACE; restore its original
+                // DACL before WIMCaptureImage records security descriptors.
+                const auto copied=workspace_cleanup::copy_into_expanded(
+                    tx.workspace,expanded,c.source,target);
+                if(!copied.clean) {
+                    const auto detail="WIM F5 file copy failed (Win32 "+
+                        std::to_string(copied.error)+
+                        ") while writing "+c.path;
+                    if(copied.unsafe)
+                        throw EditUnsupported(detail+
+                            ": unsafe path, mount, or parent NTFS ACL could not be restored");
+                    throw std::runtime_error(detail);
+                }
             }
             callback.begin_stage(L"Rebuild WIM image "+number,apply_end,end-apply_end);
             HANDLE captured=api<HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMCaptureImage")(output.h,expanded.c_str(),2u|0x100u);
@@ -651,7 +868,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         }
     }
     report(L"Commit verified WIM",99);
-    tx.commit(progress);
+    tx.commit(progress,[&]{ WimArchive::release_open_readers(path); });
     // No cancellation or throwing callbacks after the atomic commit.
 }
 }

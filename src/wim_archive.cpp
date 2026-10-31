@@ -39,6 +39,7 @@ static_assert(sizeof(WimFindData)==(sizeof(void*)==4 ? 656u : 672u),
 #include <string>
 #include <utility>
 #include <vector>
+#include <mutex>
 
 namespace iso_wcx {
 namespace {
@@ -113,6 +114,29 @@ bool end_of_find(DWORD code) noexcept {
            code == ERROR_PATH_NOT_FOUND ||
            code == ERROR_NO_MORE_FILES ||
            code == ERROR_NO_MORE_ITEMS;
+}
+// The WCX host may keep a WIM panel open across PackFiles/DeleteFiles. Its
+// WIMGAPI archive handles can block the atomic ReplaceFileW at commit time.
+// Track completed readers only; lock ordering is registry -> read_mutex_.
+// Existing directory listings remain displayable but are invalid for extract
+// after their source WIM has been replaced.
+struct LiveWimReader {
+    WimArchive* reader=nullptr;
+    std::wstring source_key;
+};
+std::mutex& live_wim_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+std::vector<LiveWimReader>& live_wim_readers() {
+    static std::vector<LiveWimReader> readers;
+    return readers;
+}
+std::wstring wim_reader_key(const std::filesystem::path& input) {
+    return std::filesystem::absolute(input).lexically_normal().wstring();
+}
+bool same_wim_reader_key(const std::wstring& a,const std::wstring& b) {
+    return CompareStringOrdinal(a.c_str(),-1,b.c_str(),-1,TRUE)==CSTR_EQUAL;
 }
 } // namespace
 
@@ -317,9 +341,47 @@ WimArchive::WimArchive(const std::filesystem::path& image,
         }
         if (scan_progress) scan_progress(index, entries_.size());
     }
+    // Register only after a fully successful native enumeration. Destruction
+    // removes the reader before any WIMGAPI module/handle teardown.
+    {
+        std::lock_guard lock(live_wim_mutex());
+        live_wim_readers().push_back({this,wim_reader_key(input)});
+    }
 }
 
-WimArchive::~WimArchive() = default;
+WimArchive::~WimArchive() {
+    std::lock_guard lock(live_wim_mutex());
+    auto& readers=live_wim_readers();
+    std::erase_if(readers,[this](const LiveWimReader& entry) {
+        return entry.reader==this;
+    });
+}
+
+void WimArchive::release_open_readers(const std::filesystem::path& image) {
+    const auto requested=wim_reader_key(image);
+    std::lock_guard lock(live_wim_mutex());
+    for(const auto& reader:live_wim_readers()) {
+        if(!same_wim_reader_key(reader.source_key,requested))continue;
+        auto* current=reader.reader;
+        std::lock_guard read_lock(current->read_mutex_);
+        if(current->invalidated_by_edit_)continue;
+        // An active WIMReadImageFile completes under read_mutex_ before
+        // its archive image handles are closed. New extraction requests
+        // fail explicitly until TC reopens the edited WIM.
+        current->invalidated_by_edit_=true;
+        for(auto& handle:current->api_->images) {
+            if(!is_valid(handle))continue;
+            if(!current->api_->close(handle))
+                fail_windows("could not release active WIM panel image handle");
+            handle=nullptr;
+        }
+        if(is_valid(current->api_->archive)) {
+            if(!current->api_->close(current->api_->archive))
+                fail_windows("could not release active WIM panel archive handle");
+            current->api_->archive=nullptr;
+        }
+    }
+}
 
 bool WimArchive::read(
     std::size_t item_index,
@@ -328,6 +390,8 @@ bool WimArchive::read(
             !entries_[item_index].directory,
             "invalid WIM file index");
     std::lock_guard<std::mutex> lock(read_mutex_);
+    require(!invalidated_by_edit_,
+            "WIM was edited while this Total Commander panel was open; reopen the WIM to extract files");
     const auto& file = entries_[item_index];
     const auto& location = locations_[item_index];
     require(location.image_index != 0 &&

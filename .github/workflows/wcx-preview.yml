@@ -14,6 +14,7 @@ on:
       - 'INSTALL_*.txt'
       - 'ISO-WCX-Repair*'
       - 'ISO-WCX-RemoveAssociation.ps1'
+      - 'ISO-WCX-AssociateAll*'
       - 'pluginst.inf'
       - 'README.md'
       - 'PREVIEW.md'
@@ -55,6 +56,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'WCX association repair regression failed' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_unassociate_wcx.ps1
           if ($LASTEXITCODE -ne 0) { throw 'WCX selective association removal regression failed' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_associate_all_wcx.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'WCX bulk association and ZIP isolation regression failed' }
       # Build the developer-only real-WIM validator on both architectures,
       # but ship it separately from the auto-installable Total Commander ZIP.
       - name: Upload real-WIM validator (developer utility)
@@ -111,34 +114,75 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
         run: ctest --test-dir build-sanitized --output-on-failure
   package:
-    name: Total Commander ZIP installer
+    name: Total Commander combined INF ZIP installer
     needs: windows
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Collect x86 and x64 plugins
+      - name: Collect both native WCX architectures
         uses: actions/download-artifact@v8
         with:
           pattern: ISO-WCX-*-preview
           path: package
           merge-multiple: true
-      - name: Build auto-installable Total Commander package
+      - name: Verify 32-bit and 64-bit modules and build native INF ZIP
+        shell: bash
         run: |
+          set -euo pipefail
           test -s package/ISO-WCX.wcx
           test -s package/ISO-WCX.wcx64
-          # Exactly two self-contained WCX DLLs; exclude *additional*
-          # third-party shared libraries from this self-contained package.
-          if find package -maxdepth 1 -type f \( -iname '*.dll' -o -iname '*.so*' -o -iname '*.dylib' \) | grep -q .; then
-            echo "Unexpected third-party shared library in ISO-WCX installer" >&2
+          # Both modules share the base name. TC automatically loads WCX64
+          # when running x64; Win32 loads the WCX from file= in pluginst.inf.
+          grep -qx 'type=wcx' pluginst.inf
+          grep -qx 'file=ISO-WCX.wcx' pluginst.inf
+          grep -qx 'defaultdir=ISO-WCX' pluginst.inf
+          grep -q '^defaultextension=iso,udf,' pluginst.inf
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          for name, machine in [('ISO-WCX.wcx', 0x14c), ('ISO-WCX.wcx64', 0x8664)]:
+              data = (Path('package') / name).read_bytes()
+              assert len(data) > 256 and data[:2] == b'MZ', name
+              pos = struct.unpack_from('<I', data, 0x3c)[0]
+              assert pos + 6 <= len(data), name
+              assert data[pos:pos+4] == b'PE\x00\x00', name
+              assert struct.unpack_from('<H', data, pos+4)[0] == machine, name
+          PY
+          if [ "$(find package -maxdepth 1 -type f \( -iname '*.wcx' -o -iname '*.wcx64' \) | wc -l)" -ne 2 ]; then
+            echo 'Both and only the two expected native WCX modules are required' >&2
             exit 1
           fi
-          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-Repair.ps1 ISO-WCX-RemoveAssociation.ps1 package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-Repair.ps1 ISO-WCX-RemoveAssociation.ps1 ISO-WCX.wcx ISO-WCX.wcx64)
+          if find package -maxdepth 1 -type f \( -iname '*.dll' -o -iname '*.exe' -o -iname '*.cmd' -o -iname '*.ps1' \) | grep -q .; then
+            echo 'No additional DLL or installer program is permitted' >&2
+            exit 1
+          fi
+          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip \
+            pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt \
+            THIRD_PARTY_NOTICES.txt ISO-WCX.wcx ISO-WCX.wcx64)
           unzip -t ISO-WCX-preview.zip
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'THIRD_PARTY_NOTICES.txt'
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-Repair.ps1'
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-RemoveAssociation.ps1'
-      - name: Upload combined preview installer
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'pluginst.inf'
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX.wcx'
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX.wcx64'
+          if [ "$(unzip -Z1 ISO-WCX-preview.zip | grep -Ei '\.wcx(64)?$' | wc -l)" -ne 2 ]; then
+            echo 'Combined INF installer contains an unexpected WCX module' >&2
+            exit 1
+          fi
+          if unzip -Z1 ISO-WCX-preview.zip | grep -Ei '\.(dll|cmd|ps1|exe)$'; then
+            echo 'Unexpected extra program/script in native INF package' >&2
+            exit 1
+          fi
+      - name: Validate the single universal TC installer ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/test_native_installer_zips.py ISO-WCX-preview.zip
+          count="$(find . -maxdepth 1 -type f -name 'ISO-WCX*.zip' | wc -l)"
+          if [ "$count" -ne 1 ]; then
+            echo "Exactly one universal installable ZIP is allowed; found $count" >&2
+            exit 1
+          fi
+      - name: Upload the only native universal INF installer
         uses: actions/upload-artifact@v7
         with:
           name: ISO-WCX-Installable-Preview

@@ -171,6 +171,14 @@ int wmain(int argc,wchar_t** argv) {
              names.contains(L"DOCS\\ONE.TXT"),
              "WCX failed to list packed test files");
 
+        // Idempotent native PackFilesW mkdir must not rebuild a complete
+        // ISO or append redundant directory/path table sectors.
+        const auto before_repeat=load(image);
+        wchar_t repeat_folder[]=L"DOCS\0\0";
+        need(pack(arc.data(),sub.data(),src.data(),repeat_folder,0)==0 &&
+             load(image)==before_repeat,
+             "PackFilesW remastered ISO for an already existing folder");
+
         // TC sometimes supplies both a folder and its children in the same
         // NUL-separated DeleteFilesW request. One parent delete must win.
         wchar_t recursive[]=L"DOCS\\ONE.TXT\0DOCS\\*.*\0\0";
@@ -191,6 +199,18 @@ int wmain(int argc,wchar_t** argv) {
         need(delW(arc.data(),missing)==24 &&
              load(image)==prior,
              "missing file silently succeeded or changed source ISO");
+
+        // Repeating the F8 selection after deleting the directory must
+        // NOT report a successful ISO rewrite. The terminal wildcard is
+        // only a directory selection token, never a filename glob.
+        wchar_t stale_folder[]=L"DOCS\\*.*\0\0";
+        need(delW(arc.data(),stale_folder)==24 &&
+             load(image)==prior,
+             "stale ISO directory F8 delete changed the archive or succeeded");
+        wchar_t unsafe_glob[]=L"FOO*BAR\\ONE.TXT\0\0";
+        need(delW(arc.data(),unsafe_glob)==24 &&
+             load(image)==prior,
+             "ISO wildcard inside a filename bypassed edit path validation");
 
         // TC's ANSI ABI is still used by older callers.
         std::string mbcs=image.string();
