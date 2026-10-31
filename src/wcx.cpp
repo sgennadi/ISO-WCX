@@ -510,6 +510,31 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             report_edit_error("Archive file no longer exists",remove);
             return E_NOT_SUPPORTED;
         }
+        // Keep TC's operation callback responsive while expanding large F5
+        // directory trees. This is a scanned ENTRY COUNT, not a fabricated
+        // percentage: the total is unknown until enumeration finishes.
+        // Abort happens before any ISO/WIM staging or source modification.
+        auto wide=archive;
+        auto ansi=to_ansi(archive);
+        const auto pw=pack_progress_w.load();
+        const auto pa=pack_progress_a.load();
+        const auto progress=[&]{
+            if(pw)return pw(wide.data(),0)!=0;
+            if(pa)return pa(ansi.data(),0)!=0;
+            return true;
+        };
+        std::size_t examined_sources=0;
+        const auto source_scan_tick=[&]() {
+            ++examined_sources;
+            if(examined_sources!=1 && examined_sources%128!=0)return;
+            auto message=L"ISO-WCX: Scanning F5 source entries "+
+                         std::to_wstring(examined_sources);
+            if(pw && !pw(message.data(),0))throw iso_wcx::EditCancelled();
+            if(!pw && pa) {
+                auto narrow=to_ansi(message);
+                if(!pa(narrow.data(),0))throw iso_wcx::EditCancelled();
+            }
+        };
         std::vector<iso_wcx::ArchiveChange> changes;
         // TC may pass only the selected folder in AddList. Expand the
         // complete directory tree so F5 does not silently pack an empty
@@ -547,6 +572,7 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             if(changes.size()>=100000)
                 throw iso_wcx::EditUnsupported(
                     "F5 folder has over 100000 entries");
+            source_scan_tick();
             iso_wcx::ArchiveChange change;
             change.path=std::move(target);
             change.source=source_path;
@@ -647,8 +673,6 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             report_edit_error("No entries were passed to the archive editor",remove);
             return E_NO_FILES;
         }
-        auto wide=archive;auto ansi=to_ansi(archive);const auto pw=pack_progress_w.load();const auto pa=pack_progress_a.load();
-        const auto progress=[&]{if(pw)return pw(wide.data(),0)!=0;if(pa)return pa(ansi.data(),0)!=0;return true;};
         if(ext==L".iso"||ext==L".udf") {
             // F5 can spend minutes cloning a multi-GiB ISO. Reuse the
             // delayed native progress dialog used for WIM but label it
