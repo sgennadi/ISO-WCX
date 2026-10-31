@@ -259,7 +259,13 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
         const std::filesystem::path path(d->ArcName);
         if(!probe_image_extension(path))return nullptr;
         iso_wcx::schedule_update_check();
-        if(wim_extension(path))
+        // F5 can be disabled by a stale TC WCX capability mask before
+        // PackFilesW is called. Probe on first open of ISO/UDF as well as
+        // WIM, without changing any third-party registration automatically.
+        auto open_ext=path.extension().wstring();
+        std::transform(open_ext.begin(),open_ext.end(),open_ext.begin(),
+            [](wchar_t c){return std::towlower(c);});
+        if(wim_extension(path) || open_ext==L".iso" || open_ext==L".udf")
             iso_wcx::offer_tc_association_repair_once();
         auto state=open_state(path);
         d->OpenResult=0;
@@ -277,7 +283,13 @@ WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
         const std::filesystem::path path(from_bytes(d->ArcName,CP_ACP));
         if(!probe_image_extension(path))return nullptr;
         iso_wcx::schedule_update_check();
-        if(wim_extension(path))
+        // F5 can be disabled by a stale TC WCX capability mask before
+        // PackFilesW is called. Probe on first open of ISO/UDF as well as
+        // WIM, without changing any third-party registration automatically.
+        auto open_ext=path.extension().wstring();
+        std::transform(open_ext.begin(),open_ext.end(),open_ext.begin(),
+            [](wchar_t c){return std::towlower(c);});
+        if(wim_extension(path) || open_ext==L".iso" || open_ext==L".udf")
             iso_wcx::offer_tc_association_repair_once();
         auto state=open_state(path);
         d->OpenResult=0;
