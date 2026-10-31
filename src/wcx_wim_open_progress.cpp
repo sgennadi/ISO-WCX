@@ -75,9 +75,11 @@ std::wstring elapsed_label(ULONGLONG milliseconds) {
 
 std::wstring WimOpenProgress::headline() const {
     if(cancelled_.load())return L"Stopping safely...";
-    if(mode_==Mode::Editing) {
+    if(mode_!=Mode::Opening) {
         std::lock_guard lock(edit_mutex_);
-        return edit_stage_.empty()?L"Preparing WIM update":edit_stage_;
+        if(!edit_stage_.empty())return edit_stage_;
+        return mode_==Mode::Deleting?L"Preparing WIM deletion":
+                                     L"Preparing WIM update";
     }
     if(publishing_.load())return L"Preparing the file list";
     const auto index=image_.load(),count=image_count_.load();
@@ -88,7 +90,7 @@ std::wstring WimOpenProgress::headline() const {
 
 std::wstring WimOpenProgress::describe() const {
     std::wstring result;
-    if(mode_==Mode::Editing) {
+    if(mode_!=Mode::Opening) {
         result=L"Checkpoint  "+std::to_wstring(edit_percent_.load())+L"%";
     } else if(publishing_.load()) {
         const auto total=total_entries_.load();
@@ -102,7 +104,7 @@ std::wstring WimOpenProgress::describe() const {
     // and Cancel button do not jump while the user is trying to click.
     if(cancelled_.load())
         result+=L"\n\nWaiting for Windows to reach a safe stopping point.";
-    else if(mode_==Mode::Editing)
+    else if(mode_!=Mode::Opening)
         result+=L"\n\nWorking on this step. Large images can take several minutes.";
     else
         result+=L"\n\nReading directory information from the image.";
@@ -128,7 +130,7 @@ HRESULT CALLBACK WimOpenProgress::dialog_callback(
                 break;
             }
             {
-                if(self->mode_==Mode::Editing || self->publishing_.load()) {
+                if(self->mode_!=Mode::Opening || self->publishing_.load()) {
                     if(!self->progress_is_determinate_) {
                         SendMessageW(window,TDM_SET_MARQUEE_PROGRESS_BAR,FALSE,0);
                         SendMessageW(window,TDM_SET_PROGRESS_BAR_RANGE,0,
@@ -136,7 +138,7 @@ HRESULT CALLBACK WimOpenProgress::dialog_callback(
                         self->progress_is_determinate_=true;
                     }
                     const auto total=self->total_entries_.load();
-                    if(self->mode_==Mode::Editing) {
+                    if(self->mode_!=Mode::Opening) {
                         SendMessageW(window,TDM_SET_PROGRESS_BAR_POS,
                                      self->edit_percent_.load(),0);
                     } else if(total) {
@@ -190,7 +192,7 @@ void WimOpenProgress::run() noexcept {
             // Don't flash a dialog for tiny boot.wim or immediately cached
             // archives. Both sides of this wait are woken by the destructor.
             if (wake_.wait_for(lock,std::chrono::milliseconds(
-                    mode_==Mode::Editing?700:1200),
+                    mode_!=Mode::Opening?700:1200),
                                [this]{return finished_.load();}))
                 return;
         }
@@ -204,18 +206,19 @@ void WimOpenProgress::run() noexcept {
         config.dwCommonButtons=TDCBF_CANCEL_BUTTON;
         config.cxWidth=360;
         config.pszMainIcon=TD_INFORMATION_ICON;
-        config.pszWindowTitle=mode_==Mode::Editing?
+        config.pszWindowTitle=mode_==Mode::Deleting?
+            L"ISO-WCX | Deleting from WIM":mode_==Mode::Editing?
             L"ISO-WCX | Updating WIM":L"ISO-WCX | Opening WIM";
         const auto initial_heading=headline();
         const auto initial_content=describe();
         config.pszMainInstruction=initial_heading.c_str();
         config.pszContent=initial_content.c_str();
-        config.pszFooter=mode_==Mode::Editing?
+        config.pszFooter=mode_!=Mode::Opening?
             L"Original image protected until verification completes.":
             L"Read-only operation. Your image stays unchanged.";
         config.pszExpandedControlText=L"Details";
         config.pszCollapsedControlText=L"Hide details";
-        config.pszExpandedInformation=mode_==Mode::Editing?
+        config.pszExpandedInformation=mode_!=Mode::Opening?
             L"Changes are prepared in a private working copy and verified "
             L"before replacing the original image.\n\n"
             L"The bar shows reported operation checkpoints, not a time estimate. "

@@ -24,7 +24,7 @@ public:
     // Reuse the responsive, delayed TaskDialog thread for a WIM edit.
     // TC does not reliably refresh its own pack progress during F7.
     // The edit dialog is never shown by tests, services or non-TC hosts.
-    enum class Mode { Opening, Editing };
+    enum class Mode { Opening, Editing, Deleting };
     explicit WimOpenProgress(bool enabled,Mode mode=Mode::Opening) noexcept;
     ~WimOpenProgress() noexcept;
     WimOpenProgress(const WimOpenProgress&) = delete;

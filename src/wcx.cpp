@@ -505,14 +505,15 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             // TC's plugin progress window can remain at 0% when creating
             // folders (F7). The delayed native UI remains responsive during
             // WIMGAPI calls and preserves real stage/cancel checkpoints.
-            // Do not show another dialog for Delete (F8), whose TC
-            // progress callback already works on the user's machine.
+            // Use the same presentation for F7 creation and F8 deletion;
+            // retain TC callbacks for host progress and cancellation.
             // Scope the GUI to close its TaskDialog before displaying a
             // pending scratch cleanup warning.
             {
             iso_wcx::WimOpenProgress indicator(
-                !remove && wim_edit_dialog_enabled(),
-                iso_wcx::WimOpenProgress::Mode::Editing);
+                wim_edit_dialog_enabled(),
+                remove?iso_wcx::WimOpenProgress::Mode::Deleting:
+                       iso_wcx::WimOpenProgress::Mode::Editing);
             const auto status=[&](const wchar_t* stage,unsigned percent){
                 if(!indicator.on_edit(stage,percent))return false;
                 // WCX callback uses negative Size for direct 1..100%.
