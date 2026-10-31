@@ -39,6 +39,13 @@ struct Cleanup {
         fs::remove_all(path,ignored);
     }
 };
+struct WorkingDirectory {
+    fs::path original=fs::current_path();
+    ~WorkingDirectory() {
+        std::error_code ignored;
+        fs::current_path(original,ignored);
+    }
+};
 } // namespace
 
 int main() {
@@ -56,6 +63,20 @@ int main() {
         need(SetEnvironmentVariableW(L"ISO_WCX_NTFS_PREALLOCATE",nullptr)!=0,
              "cannot enable default NTFS reservation");
         constexpr std::uint64_t bytes=4ull*1024ull*1024ull;
+        {
+            WorkingDirectory restore;
+            fs::current_path(root);
+            need(ntfs::is_ntfs({}) && ntfs::is_ntfs(L"."),
+                 "relative output lost local NTFS detection");
+            fs::create_directory(L"relative-subdir");
+            for(const auto& relative:{fs::path(L"relative.part"),
+                                     fs::path(L"relative-subdir/nested.part")}) {
+                const auto stage=ntfs::create_stage(relative,bytes);
+                need(stage.created && stage.ntfs && stage.preallocated &&
+                     fs::file_size(relative)==bytes,
+                     "relative NTFS stage was not reserved before streaming");
+            }
+        }
         const auto file=root/"boot-content.part";
         auto created=ntfs::create_stage(file,bytes);
         need(created.created && created.ntfs && created.preallocated,

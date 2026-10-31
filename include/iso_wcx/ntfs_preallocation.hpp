@@ -46,8 +46,12 @@ inline bool diagnostic_enabled() noexcept {
 
 inline bool is_ntfs(const fs::path& parent) noexcept {
     try {
+        // A bare destination filename has an empty parent. Resolve it (and
+        // other relative paths) against the same working directory used by
+        // CreateFileW, otherwise valid local NTFS output loses preallocation.
+        const auto absolute_parent=fs::absolute(parent.empty()?fs::path(L"."):parent);
         wchar_t volume[MAX_PATH]{};
-        if(!GetVolumePathNameW(parent.c_str(),volume,MAX_PATH))
+        if(!GetVolumePathNameW(absolute_parent.c_str(),volume,MAX_PATH))
             return false;
         // The AMI firmware issue concerns booting from a local NTFS disk.
         // A UNC/SMB share may also report NTFS, but reserving a large
