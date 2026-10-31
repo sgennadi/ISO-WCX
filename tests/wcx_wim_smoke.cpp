@@ -218,6 +218,10 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         write(first/L"EmptyFile.bin","");
         write(first/L"Nested"/L"folder.bin","nested-data");
         fs::create_directories(first/L"Empty");
+        // Preserve real Unicode names in the WIMGAPI-captured source.
+        // NTFS treats these differently-cased spellings as the same folder.
+        fs::create_directories(first/L"\u041F\u0430\u043F\u043A\u0430");
+        fs::create_directories(first/L"\u0394\u03BF\u03BA\u03B9\u03BC\u03AE");
         write(second/L"HELLO.TXT","hello-two");
         write(second/L"SECOND.TXT","second-image");
         // Incompressible distinct resources force multiple SWM parts.
@@ -653,6 +657,43 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
            load(original)!=case_before_repeated_f7 ||
            wim_legacy_staging_calls.load()!=legacy_before_case)
             return 118;
+        // The old F7 fast no-op used ASCII-only lowercasing, silently
+        // missing Cyrillic and Greek Windows/NTFS case aliases. Reject the
+        // aliases on source metadata alone: never start Apply/Capture.
+        for(const auto* alias : {
+                L"\u043F\u0430\u043F\u043A\u0430",
+                L"\u03B4\u03BF\u03BA\u03B9\u03BC\u03AE"}) {
+            fs::create_directories(incoming/alias);
+            std::wstring alias_selection(alias);
+            alias_selection.push_back(L'\0');
+            alias_selection.push_back(L'\0');
+            const auto unchanged=load(original);
+            const auto write_time=fs::last_write_time(original);
+            const auto staging_count=wim_legacy_staging_calls.load();
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int alias_result=pack(packed.data(),sub.data(),src.data(),
+                                        alias_selection.data(),0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            if(alias_result==0 || load(original)!=unchanged ||
+               fs::last_write_time(original)!=write_time ||
+               wim_legacy_staging_calls.load()!=staging_count)
+                return 124;
+        }
+        // Unicode case aliases in ANCESTOR directories must also fail
+        // before an expensive staging tree or capture.
+        fs::create_directories(
+            incoming/L"\u043F\u0430\u043F\u043A\u0430"/L"NEW_CHILD");
+        wchar_t unicode_parent[]=
+            L"\u043F\u0430\u043F\u043A\u0430\\NEW_CHILD\0\0";
+        const auto unchanged_parent=load(original);
+        const auto staging_before_unicode=wim_legacy_staging_calls.load();
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int unicode_parent_rc=pack(packed.data(),sub.data(),src.data(),
+                                         unicode_parent,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(unicode_parent_rc==0 || load(original)!=unchanged_parent ||
+           wim_legacy_staging_calls.load()!=staging_before_unicode)
+            return 125;
         // A new folder requested BELOW an existing WIM file is impossible.
         // Refuse during read-only metadata preflight, never after an
         // expensive full-image Apply/Capture.
