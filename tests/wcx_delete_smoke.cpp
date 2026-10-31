@@ -365,13 +365,22 @@ int wmain(int argc,wchar_t** argv) {
             if(entry.path().filename().wstring().starts_with(L".iso-wcx-edit-"))
                 need(false,"cancelled ISO F5 left a private edit workspace");
         }
-        // Idempotent native PackFilesW mkdir must not rebuild a complete
-        // ISO or append redundant directory/path table sectors.
+        // F5 of a NONEMPTY folder must update all children (tested above).
+        // Test mkdir idempotency separately using a truly EMPTY source
+        // directory: copying it twice must not rewrite an unchanged ISO.
+        fs::create_directories(input/L"EMPTY_REPEAT");
+        wchar_t repeat_folder[]=L"EMPTY_REPEAT\0\0";
+        need(pack(arc.data(),sub.data(),src.data(),repeat_folder,0)==0,
+             "PackFilesW could not add empty ISO directory");
+        names=list_names(image,open,header,process,close);
+        need(names.contains(L"EMPTY_REPEAT"),
+             "PackFilesW omitted the new empty ISO directory");
         const auto before_repeat=load(image);
-        wchar_t repeat_folder[]=L"DOCS\0\0";
+        const auto before_repeat_time=fs::last_write_time(image);
         need(pack(arc.data(),sub.data(),src.data(),repeat_folder,0)==0 &&
-             load(image)==before_repeat,
-             "PackFilesW remastered ISO for an already existing folder");
+             load(image)==before_repeat &&
+             fs::last_write_time(image)==before_repeat_time,
+             "Repeated empty folder F5 unexpectedly remastered ISO");
 
         // TC sometimes supplies both a folder and its children in the same
         // NUL-separated DeleteFilesW request. One parent delete must win.
