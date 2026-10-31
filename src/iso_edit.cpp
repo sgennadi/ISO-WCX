@@ -1068,7 +1068,6 @@ bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
                 });
             if(child==node->children.end())return false;
             node=child->get();
-            if(node->directory && parts.peek()!=EOF)continue;
         }
         if(node==image.root.get() || node->directory)return false;
         if(!targeted.insert(node).second)return false;
@@ -1126,7 +1125,10 @@ bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
             const auto length=std::uint64_t(le(vd,132));
             for(const auto table_lba:{
                     std::uint64_t(le(vd,140)),
-                    std::uint64_t(le(vd,148,4,true))}) {
+                    (std::uint64_t(vd[148])<<24) |
+                    (std::uint64_t(vd[149])<<16) |
+                    (std::uint64_t(vd[150])<<8) |
+                    std::uint64_t(vd[151])}) {
                 if(table_lba &&
                    overlaps(patch.offset,physical_size,table_lba*block,
                             ((length+block-1)/block)*block))
