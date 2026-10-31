@@ -668,16 +668,16 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         });
     if(folder_only) {
         bool all_present=true;
-        const auto fold_ascii=[](std::string text) {
-            for(char& c:text)
-                if(c>='A'&&c<='Z')c=char(c-'A'+'a');
-            return text;
-        };
+        // Match the same Unicode case rules as the mounted-WIM planner
+        // and case-insensitive Windows filesystems. ASCII-only folding
+        // missed Cyrillic/Greek aliases and could trigger a full WIM
+        // Apply/Capture for a path that already exists with other casing.
+        const auto fold_path=&wim_detail::windows_case_key;
         for(const auto& [index,folders]:edits) {
             std::unordered_map<std::string,std::string> desired;
             for(const auto& folder:folders) {
                 const auto full="image"+std::to_string(index)+"/"+folder.path;
-                const auto key=fold_ascii(full);
+                const auto key=fold_path(full);
                 const auto [entry,inserted]=desired.emplace(key,full);
                 if(!inserted && entry->second!=full)
                     throw EditUnsupported(
@@ -696,7 +696,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                     slash=full.find('/',slash+1)) {
                     const auto parent=full.substr(0,slash);
                     const auto [at,added]=ancestors.emplace(
-                        fold_ascii(parent),parent);
+                        fold_path(parent),parent);
                     if(!added && at->second!=parent)
                         throw EditUnsupported(
                             "WIM F7 contains case-conflicting parent folders");
@@ -720,7 +720,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 });
             for(const auto& item:listing.items()) {
                 edit_tick(progress);
-                const auto folded=fold_ascii(item.path);
+                const auto folded=fold_path(item.path);
                 const auto parent=ancestors.find(folded);
                 if(parent!=ancestors.end()) {
                     if(parent->second!=item.path)
