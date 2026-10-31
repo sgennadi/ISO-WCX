@@ -494,8 +494,42 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         // be released by CloseArchive, not by deleting a live WIMGAPI mount.
         OpenW active_panel{};
         active_panel.ArcName=packed.data();
-        const HANDLE panel_handle=open(&active_panel);
+        HANDLE panel_handle=open(&active_panel);
         if(!panel_handle || active_panel.OpenResult!=0)return 93;
+        // A cancelled F8 preflight must never invalidate an already open
+        // WIM panel. It has not committed any changes and should still test
+        // and extract the original files without forcing the user to reopen.
+        const auto before_rejected_edit=load(original);
+        wchar_t abort_preflight_entry[]=L"image1\\HELLO.TXT\0\0";
+        cancel_wim_delete_preflight.store(true);
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int rejected_edit=erase(packed.data(),abort_preflight_entry);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        cancel_wim_delete_preflight.store(false);
+        if(rejected_edit!=21 || load(original)!=before_rejected_edit) {
+            close(panel_handle);return 99;
+        }
+        bool panel_still_readable=false;
+        for(unsigned n=0;n<100000;++n) {
+            HeaderExW entry{};
+            const int code=read(panel_handle,&entry);
+            if(code==10)break;
+            if(code!=0){close(panel_handle);return 100;}
+            if(std::wstring_view(entry.FileName)==L"image1\\HELLO.TXT") {
+                panel_still_readable=process(panel_handle,1,nullptr,nullptr)==0;
+                break;
+            }
+            if(process(panel_handle,0,nullptr,nullptr)!=0) {
+                close(panel_handle);return 101;
+            }
+        }
+        if(!panel_still_readable) {close(panel_handle);return 102;}
+        // A fresh panel is deliberately kept open across the successful
+        // replacement below, which MUST invalidate its original streams.
+        if(close(panel_handle)!=0)return 103;
+        active_panel.OpenResult=0;
+        panel_handle=open(&active_panel);
+        if(!panel_handle || active_panel.OpenResult!=0)return 104;
         // WCX callback registration may happen on another thread than packing.
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         int packed_result=-1;
