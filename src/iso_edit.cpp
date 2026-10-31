@@ -325,6 +325,77 @@ void copy_bytes(std::istream& in,std::fstream& out,std::uint64_t size,const Edit
     Bytes b(1024*1024);while(size){edit_tick(progress);auto count=std::min<std::uint64_t>(size,b.size());in.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(count));need(bool(in),"source shortened during ISO edit");out.write(reinterpret_cast<const char*>(b.data()),static_cast<std::streamsize>(count));if(!out)throw std::runtime_error("ISO output write failed");size-=count;}
 }
 
+// Clone the original ISO with the Windows copy engine when available.
+// CopyFileExW can use local kernel/server-side copy acceleration and issues
+// cancellation checks at bounded intervals. It also avoids thousands of
+// 1-MiB WCX callbacks while duplicating a multi-gigabyte optical image.
+// The original is NEVER opened for writing; any partial clone stays inside
+// EditTransaction's private workspace and is removed on rollback.
+#ifdef _WIN32
+struct IsoCloneProgress {
+    const EditProgress* callback=nullptr;
+    std::uint64_t next_check=0;
+    bool aborted=false;
+};
+DWORD CALLBACK iso_clone_callback(LARGE_INTEGER,
+                                  LARGE_INTEGER transferred,
+                                  LARGE_INTEGER,LARGE_INTEGER,
+                                  DWORD,DWORD,HANDLE,HANDLE,
+                                  LPVOID context) {
+    auto& state=*static_cast<IsoCloneProgress*>(context);
+    const auto done=static_cast<std::uint64_t>(
+        std::max<LONGLONG>(0,transferred.QuadPart));
+    if(done<state.next_check)return PROGRESS_CONTINUE;
+    state.next_check=done+16ull*1024ull*1024ull;
+    try {
+        if(state.callback && *state.callback && !(*state.callback)()) {
+            state.aborted=true;
+            return PROGRESS_CANCEL;
+        }
+    }catch(...) {
+        state.aborted=true;
+        return PROGRESS_CANCEL;
+    }
+    return PROGRESS_CONTINUE;
+}
+#endif
+void clone_iso_stage(const std::filesystem::path& original,
+                     const std::filesystem::path& output,
+                     std::ifstream& input,std::uint64_t size,
+                     const EditProgress& progress) {
+    edit_tick(progress);
+#ifdef _WIN32
+    (void)input;
+    (void)size;
+    IsoCloneProgress state{&progress};
+    if(!CopyFileExW(original.c_str(),output.c_str(),
+                    &iso_clone_callback,&state,nullptr,
+                    COPY_FILE_FAIL_IF_EXISTS)) {
+        if(state.aborted)throw EditCancelled();
+        throw std::runtime_error("ISO staging copy failed (Win32 "+
+                                 std::to_string(GetLastError())+")");
+    }
+    edit_tick(progress);
+    // The private working copy is modified before replacement. An original
+    // ISO marked read-only may be read, but its staged clone must be writable.
+    const auto attributes=GetFileAttributesW(output.c_str());
+    if(attributes==INVALID_FILE_ATTRIBUTES ||
+       ((attributes&FILE_ATTRIBUTE_READONLY) &&
+        !SetFileAttributesW(output.c_str(),
+                            attributes&~FILE_ATTRIBUTE_READONLY)))
+        throw std::runtime_error("cannot make private ISO stage writable");
+#else
+    (void)original;
+    std::fstream stage(output,std::ios::in|std::ios::out|
+                               std::ios::binary|std::ios::trunc);
+    need(bool(stage),"cannot create private ISO stage");
+    input.clear();
+    input.seekg(0);
+    copy_bytes(input,stage,size,progress);
+    stage.flush();
+    need(bool(stage),"cannot flush private ISO stage");
+#endif
+}
 struct BridgeIsoVisible {
     bool directory=false;
     std::uint64_t offset=0;
@@ -915,7 +986,12 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     // The source is already validated; no-op mkdir must preserve it byte for
     // byte, without allocating a staged ISO or resetting its timestamps.
     if(!changed)return;
-    EditTransaction tx(path);std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary|std::ios::trunc);need(bool(out),"cannot create staged ISO");image.file.clear();image.file.seekg(0);copy_bytes(image.file,out,image.size,progress);
+    EditTransaction tx(path);
+    clone_iso_stage(path,tx.output,image.file,image.size,progress);
+    std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary);
+    need(bool(out),"cannot reopen private ISO stage for editing");
+    out.seekp(0,std::ios::end);
+    need(bool(out),"cannot seek end of private ISO stage");
     std::uint64_t next=image.size/block;
     std::vector<Node*> all{image.root.get()},dirs{image.root.get()};
     for(std::size_t i=0;i<all.size();++i){for(auto& c:all[i]->children){all.push_back(c.get());if(c->directory)dirs.push_back(c.get());}need(all.size()<=200000&&dirs.size()<=65535,"ISO edit tree too large");}
