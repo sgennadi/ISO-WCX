@@ -250,36 +250,36 @@ def main(binary, reader=None):
                 b[20*B:20*B+len(record)]=record
             else:struct.pack_into('<I',b,16*B+158,0xffffffff)
             image.write_bytes(b);run('add','NEW.TXT',False)
-    if sys.platform == 'win32':
-        # Exercise both the optional NTFS/ReFS CoW route and the guaranteed
-        # CopyFileEx fallback. A 2-KiB tail must survive the aligned 64-MiB
-        # clone boundary, independent of which filesystem CI runs on.
-        for force_fallback in (False,True):
-            image.write_bytes(fixture())
-            original_bytes=64*1024*1024+B
-            trailer=b'TAILSAFE'*256
-            with image.open('r+b') as stream:
-                stream.truncate(original_bytes)
-                stream.seek(16*B+80)
-                sectors=original_bytes//B
-                stream.write(sectors.to_bytes(4,'little')+
-                             sectors.to_bytes(4,'big'))
-                stream.seek(original_bytes-B)
-                stream.write(trailer)
-            env=None
-            if force_fallback:
-                env=os.environ.copy()
-                env['ISO_WCX_ISO_DISABLE_BLOCK_CLONE']='1'
-            run('add','CLONED.TXT',env=env)
-            with image.open('rb') as stream:
-                stream.seek(original_bytes-B)
-                assert stream.read(B)==trailer,(
-                    'ISO CoW or CopyFileEx fallback corrupted the 2-KiB tail')
-            assert read_image(image)['CLONED.TXT']==source.read_bytes(),(
-                'ISO large-image F5 payload differs from source')
-            validate_path_tables(image)
-            assert not any(root.glob('.iso-wcx-edit-*')),(
-                'large ISO F5 left an abandoned private staging folder')
+        if sys.platform == 'win32':
+            # Exercise both the optional NTFS/ReFS CoW route and the guaranteed
+            # CopyFileEx fallback. A 2-KiB tail must survive the aligned 64-MiB
+            # clone boundary, independent of which filesystem CI runs on.
+            for force_fallback in (False,True):
+                image.write_bytes(fixture())
+                original_bytes=64*1024*1024+B
+                trailer=b'TAILSAFE'*256
+                with image.open('r+b') as stream:
+                    stream.truncate(original_bytes)
+                    stream.seek(16*B+80)
+                    sectors=original_bytes//B
+                    stream.write(sectors.to_bytes(4,'little')+
+                                 sectors.to_bytes(4,'big'))
+                    stream.seek(original_bytes-B)
+                    stream.write(trailer)
+                env=None
+                if force_fallback:
+                    env=os.environ.copy()
+                    env['ISO_WCX_ISO_DISABLE_BLOCK_CLONE']='1'
+                run('add','CLONED.TXT',env=env)
+                with image.open('rb') as stream:
+                    stream.seek(original_bytes-B)
+                    assert stream.read(B)==trailer,(
+                        'ISO CoW or CopyFileEx fallback corrupted the 2-KiB tail')
+                assert read_image(image)['CLONED.TXT']==source.read_bytes(),(
+                    'ISO large-image F5 payload differs from source')
+                validate_path_tables(image)
+                assert not any(root.glob('.iso-wcx-edit-*')),(
+                    'large ISO F5 left an abandoned private staging folder')
     print('PASS: ISO replace/add/delete, nested paths, Joliet, independent reader, boot preservation, cancellation and refusal rollback')
 
 if __name__=='__main__':main(sys.argv[1],sys.argv[2] if len(sys.argv)>2 else None)
