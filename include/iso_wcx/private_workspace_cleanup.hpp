@@ -238,6 +238,88 @@ inline bool delete_entry(const fs::path& path,Result& result) {
 // A directory created by WIMApplyImage is only scratch storage. Unlike a
 // mount, it is safe to discard its ACL-protected Windows folders AFTER
 // WIMCaptureImage has finished. Use the same link-safe delete engine.
+// Remove one selected entry INSIDE a disposable WIMApplyImage tree. Unlike
+// whole-workspace cleanup this is used for an F8/Delete or file replacement
+// before recapture. It must never unlink the expanded root, traverse a
+// junction/reparse ancestor, or touch an unrelated path.
+inline Result remove_expanded_entry(const fs::path& root,
+                                    const fs::path& expanded,
+                                    const fs::path& entry) noexcept {
+    Result report{};
+    try {
+        const auto workspace=fs::absolute(root).lexically_normal();
+        const auto image_tree=fs::absolute(expanded).lexically_normal();
+        const auto selected=fs::absolute(entry).lexically_normal();
+        const auto name=image_tree.filename().wstring();
+        bool has_dot_components=false;
+        for(const auto& part:entry)
+            if(part==fs::path(L"..") || part==fs::path(L".")) {
+                has_dot_components=true;break;
+            }
+        const auto prefix=std::mismatch(
+            image_tree.begin(),image_tree.end(),
+            selected.begin(),selected.end());
+        if(!private_workspace_name(workspace) ||
+           image_tree.parent_path()!=workspace ||
+           !(name==L"expanded" || name.starts_with(L"expanded-image-")) ||
+           prefix.first!=image_tree.end() ||
+           prefix.second==selected.end() ||
+           has_dot_components) {
+            report.unsafe=true;
+            failure(report,entry,ERROR_INVALID_NAME);
+            return report;
+        }
+        const DWORD root_attr=attributes(workspace);
+        const DWORD image_attr=attributes(image_tree);
+        if(root_attr==INVALID_FILE_ATTRIBUTES ||
+           image_attr==INVALID_FILE_ATTRIBUTES ||
+           !(root_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           !(image_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           (root_attr&FILE_ATTRIBUTE_REPARSE_POINT) ||
+           (image_attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+            report.unsafe=true;
+            failure(report,expanded,ERROR_ACCESS_DENIED);
+            return report;
+        }
+        const DWORD mounted_attr=attributes(workspace/L"mounted");
+        const DWORD mounted_error=mounted_attr==INVALID_FILE_ATTRIBUTES?
+            GetLastError():ERROR_SUCCESS;
+        if(mounted_attr!=INVALID_FILE_ATTRIBUTES ||
+           (mounted_error!=ERROR_FILE_NOT_FOUND &&
+            mounted_error!=ERROR_PATH_NOT_FOUND)) {
+            report.unsafe=true;
+            failure(report,workspace/L"mounted",ERROR_BUSY);
+            return report;
+        }
+        // Check every ancestor between expanded and the selected entry.
+        // The last component may itself be a link: delete_entry unlinks
+        // reparse entries without descending into the external target.
+        auto part=prefix.second;
+        fs::path parent=image_tree;
+        for(;part!=selected.end();++part) {
+            if(std::next(part)==selected.end())break;
+            parent/=*part;
+            const DWORD attr=attributes(parent);
+            if(attr==INVALID_FILE_ATTRIBUTES ||
+               !(attr&FILE_ATTRIBUTE_DIRECTORY) ||
+               (attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+                report.unsafe=true;
+                failure(report,parent,ERROR_ACCESS_DENIED);
+                return report;
+            }
+        }
+        const DWORD target_attr=attributes(selected);
+        if(target_attr==INVALID_FILE_ATTRIBUTES) {
+            failure(report,selected,GetLastError());
+            return report;
+        }
+        CleanupPrivileges privileges;
+        report.clean=delete_entry(selected,report);
+    }catch(...) {
+        failure(report,entry,ERROR_GEN_FAILURE);
+    }
+    return report;
+}
 inline Result cleanup_expanded(
         const fs::path& root,const fs::path& expanded) noexcept {
     Result report{};
