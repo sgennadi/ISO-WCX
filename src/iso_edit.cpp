@@ -1324,6 +1324,74 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     // Fast path for replacing existing same-length file data. Never change
     // an ISO directory record, path table, descriptor, or volume byte count.
     if(try_replace_iso_same_size(path,image,changes,progress,status))return;
+    // Folder-only F5 additions (and mixed folder + file selections) bypass
+    // the extent-only fast replace optimization. On a repeat copy, every
+    // entry may ALREADY match the archive. Probe only bounded file data
+    // BEFORE creating an EditTransaction, so a multi-GB ISO is not cloned
+    // merely to rewrite its existing directory records and timestamps.
+    // A missing/changed entry falls through to the verified full writer.
+    const auto identical_copy_tree=[&]() -> bool {
+        if(changes.empty())return false;
+        constexpr std::uint64_t max_compared=32ull*1024ull*1024ull;
+        std::uint64_t compared=0;
+        std::vector<char> source_buffer(256*1024);
+        std::vector<char> image_buffer(source_buffer.size());
+        for(const auto& change:changes) {
+            edit_tick(progress);
+            if(change.remove)return false;
+            const auto normalized=edit_path(change.path);
+            const Node* node=image.root.get();
+            std::istringstream parts(normalized);
+            std::string part;
+            while(std::getline(parts,part,'/')) {
+                const auto key=upper(part);
+                const auto match=std::find_if(
+                    node->children.begin(),node->children.end(),
+                    [&](const auto& entry) {
+                        return upper(entry->logical)==key;
+                    });
+                if(match==node->children.end())return false;
+                node=match->get();
+            }
+            if(node==image.root.get() ||
+               node->directory!=change.directory)return false;
+            if(change.directory)continue;
+            need(std::filesystem::is_regular_file(
+                     std::filesystem::symlink_status(change.source)),
+                 "ISO F5 source must remain a regular file");
+            std::error_code error;
+            if(std::filesystem::equivalent(change.source,path,error))
+                throw EditUnsupported("ISO cannot be its own F5 source");
+            if(std::filesystem::file_size(change.source)!=node->size ||
+               node->size>max_compared-compared)
+                return false;
+            std::ifstream incoming(change.source,std::ios::binary);
+            need(bool(incoming),"cannot open F5 source for ISO comparison");
+            image.file.clear();
+            image.file.seekg(static_cast<std::streamoff>(
+                std::uint64_t(node->lba)*block));
+            need(bool(image.file),"cannot seek ISO comparison file");
+            for(std::uint64_t remaining=node->size;remaining;) {
+                edit_tick(progress);
+                const auto count=static_cast<std::streamsize>(
+                    std::min<std::uint64_t>(remaining,source_buffer.size()));
+                incoming.read(source_buffer.data(),count);
+                image.file.read(image_buffer.data(),count);
+                need(incoming.gcount()==count && image.file.gcount()==count,
+                     "short read while comparing repeated ISO F5");
+                if(std::memcmp(source_buffer.data(),image_buffer.data(),
+                               static_cast<std::size_t>(count))!=0)
+                    return false;
+                remaining-=static_cast<std::uint64_t>(count);
+            }
+            compared+=node->size;
+        }
+        if(status && !status(L"ISO selected files already match",99))
+            throw EditCancelled();
+        edit_tick(progress);
+        return true;
+    };
+    if(identical_copy_tree())return;
     // Creating a directory that is already present is idempotent. Avoid
     // copying/rebuilding an entire multi-gigabyte ISO and growing its path
     // tables on a request that changes no directory or file metadata.
