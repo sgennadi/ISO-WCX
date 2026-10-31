@@ -259,6 +259,8 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
         const std::filesystem::path path(d->ArcName);
         if(!probe_image_extension(path))return nullptr;
         iso_wcx::schedule_update_check();
+        if(wim_extension(path))
+            iso_wcx::offer_tc_association_repair_once();
         auto state=open_state(path);
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
@@ -275,6 +277,8 @@ WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
         const std::filesystem::path path(from_bytes(d->ArcName,CP_ACP));
         if(!probe_image_extension(path))return nullptr;
         iso_wcx::schedule_update_check();
+        if(wim_extension(path))
+            iso_wcx::offer_tc_association_repair_once();
         auto state=open_state(path);
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
