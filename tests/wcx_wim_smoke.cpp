@@ -61,6 +61,7 @@ static fs::path wim_recovery_test_root;
 static std::atomic<bool> cancel_fast_mounted_edit{false};
 static std::atomic<bool> cancel_fast_after_commit{false};
 static std::atomic<bool> cancel_next_wim{false};
+static std::atomic<bool> cancel_wim_before_commit{false};
 
 // The Preview settings test must not leave any per-user WIM configuration
 // changed on its Windows runner, even when a regression fails.
@@ -154,6 +155,9 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
         }
         if(cancel_next_wim.load() && stage &&
            std::wstring_view(stage).find(L"Extract WIM image")!=std::wstring_view::npos)
+            return 0;
+        if(cancel_wim_before_commit.load() && stage &&
+           std::wstring_view(stage).find(L"Commit verified WIM")!=std::wstring_view::npos)
             return 0;
         if(cancel_fast_mounted_edit.load() && stage &&
            std::wstring_view(stage).find(L"Create WIM folders without applying image")!=
@@ -593,6 +597,44 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         cancel_next_wim.store(false);
         if(cancel_rc!=21 || load(original)!=before_cancel)
             return 33; // A cancelled edit must leave WIM byte-identical.
+        // Late F7 cancellation happens AFTER the expensive WIM Apply/Capture
+        // and output verification, but BEFORE the atomic ReplaceFileW. The
+        // existing TC panel must remain readable; releasing WIMGAPI handles
+        // before this checkpoint was needlessly breaking open panels.
+        {
+            const auto before_late=load(original);
+            fs::create_directories(incoming/L"LATE_CANCEL_FOLDER");
+            wchar_t late_list[]=L"LATE_CANCEL_FOLDER\0\0";
+            OpenW late_panel{};
+            late_panel.ArcName=packed.data();
+            const HANDLE live=open(&late_panel);
+            if(!live || late_panel.OpenResult!=0)return 105;
+            cancel_wim_before_commit.store(true);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int late_rc=pack(packed.data(),sub.data(),src.data(),
+                                   late_list,0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            cancel_wim_before_commit.store(false);
+            if(late_rc!=21 || load(original)!=before_late) {
+                close(live);return 106;
+            }
+            bool tested=false;
+            for(unsigned n=0;n<100000;++n) {
+                HeaderExW item{};
+                const int code=read(live,&item);
+                if(code==10)break;
+                if(code!=0){close(live);return 107;}
+                if(std::wstring_view(item.FileName)==L"image1\\HELLO.TXT") {
+                    tested=process(live,1,nullptr,nullptr)==0;
+                    break;
+                }
+                if(process(live,0,nullptr,nullptr)!=0){
+                    close(live);return 108;
+                }
+            }
+            if(close(live)!=0)return 109;
+            if(!tested)return 110;
+        }
         {
             OpenW args{};args.ArcName=packed.data();
             HANDLE h=open(&args);
