@@ -662,7 +662,7 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         auto invalid_source=invalid_parents.wstring();
         const auto before_parent_refusal=load(original);
         const auto stage_before_parent=wim_legacy_staging_calls.load();
-        wchar_t under_file[]=L"HELLO.TXT\CHILD\0\0";
+        wchar_t under_file[]=L"HELLO.TXT\\CHILD\0\0";
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         const int under_file_result=pack(packed.data(),sub.data(),
             invalid_source.data(),under_file,0);
@@ -673,7 +673,7 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
             return 121;
         // NTFS parent casing also matters: do not pass a case-conflicting
         // new child to the legacy writer.
-        wchar_t parent_case[]=L"nested\NEW_CHILD\0\0";
+        wchar_t parent_case[]=L"nested\\NEW_CHILD\0\0";
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         const int parent_case_result=pack(packed.data(),sub.data(),
             invalid_source.data(),parent_case,0);
