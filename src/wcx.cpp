@@ -463,7 +463,23 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         // No move packing: source files are never removed by this plugin.
         // Never report a previous edit's cleanup failure as the current one.
         (void)iso_wcx::take_edit_cleanup_warning();
-        if(flags&1)return E_NOT_SUPPORTED;
+        // WCX PK_PACK_MOVE_FILES=1 means Total Commander asks us to delete
+        // source files AFTER packing. Do not silently perform a copy and call
+        // it a move, or return the generic unexplained error. F5 Copy uses
+        // 0 or PK_PACK_SAVE_PATHS=2 and is fully supported.
+        if(!remove && (flags&1)) {
+            report_edit_error(
+                "Move to archive was requested. ISO-WCX supports Copy (F5), "
+                "but cannot delete the source files after packing. "
+                "Choose Copy instead of Move; no source file was changed.",false);
+            return E_NOT_SUPPORTED;
+        }
+        // PK_PACK_ENCRYPT=4 must never be silently ignored when the archive
+        // format does not provide an encryption implementation.
+        if(!remove && (flags&4)) {
+            report_edit_error("Encrypted packing is not supported; no files were changed.",false);
+            return E_NOT_SUPPORTED;
+        }
         std::lock_guard lock(edit_mutex);
         std::filesystem::path image(archive);auto ext=image.extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return std::towlower(c);});
         if(ext!=L".iso"&&ext!=L".udf"&&ext!=L".wim"&&
