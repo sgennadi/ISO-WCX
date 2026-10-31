@@ -1032,6 +1032,199 @@ void unlink_boot_iso_files(const std::filesystem::path& path,
     tx.commit(progress);
 }
 }
+// Fast F5 replacement for a *plain* ISO9660/Joliet tree. Existing file
+// extents can be overwritten in a private same-volume CoW/CopyFileEx stage
+// without extending the image or rewriting any directory/path table/PVD.
+// Disallow mixed operations, boot catalogs, shared sectors and intersecting
+// filesystem metadata; those keep using the previously verified full writer.
+bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
+                               const std::vector<ArchiveChange>& changes,
+                               const EditProgress& progress,
+                               const OpticalEditStatus& status) {
+    if(changes.empty() || image.udf_bridge || image.system_nonzero ||
+       !image.boot_lbas.empty())return false;
+    struct Patch {
+        std::string path;
+        std::filesystem::path source;
+        std::uint64_t offset=0;
+        std::uint64_t length=0;
+        const Node* node=nullptr;
+    };
+    std::vector<Patch> patches;
+    patches.reserve(changes.size());
+    std::set<const Node*> targeted;
+    for(const auto& change:changes) {
+        edit_tick(progress);
+        if(change.remove || change.directory)return false;
+        const auto normalized=edit_path(change.path);
+        const Node* node=image.root.get();
+        std::istringstream parts(normalized);
+        std::string part;
+        while(std::getline(parts,part,'/')) {
+            const auto key=upper(part);
+            const auto child=std::find_if(node->children.begin(),
+                node->children.end(),[&](const auto& candidate) {
+                    return upper(candidate->logical)==key;
+                });
+            if(child==node->children.end())return false;
+            node=child->get();
+            if(node->directory && parts.peek()!=EOF)continue;
+        }
+        if(node==image.root.get() || node->directory)return false;
+        if(!targeted.insert(node).second)return false;
+        protect_boot(*node,image.boot_lbas);
+        need(std::filesystem::is_regular_file(
+                 std::filesystem::symlink_status(change.source)),
+             "ISO replacement source must be a regular file");
+        if(std::filesystem::file_size(change.source)!=node->size)
+            return false; // Normal writer handles unequal-size replacements.
+        std::error_code equivalent_error;
+        if(std::filesystem::equivalent(change.source,path,equivalent_error))
+            throw EditUnsupported("ISO cannot be its own replacement source");
+        patches.push_back({
+            normalized,change.source,std::uint64_t(node->lba)*block,
+            node->size,node
+        });
+    }
+    const auto overlaps=[](std::uint64_t a,std::uint64_t size_a,
+                           std::uint64_t b,std::uint64_t size_b) {
+        return size_a && size_b && a<b+size_b && b<a+size_a;
+    };
+    // Fail closed on shared physical sectors: another directory/file could
+    // alias the target extent and silently change after an in-place write.
+    std::vector<const Node*> all{image.root.get()};
+    for(std::size_t i=0;i<all.size();++i)
+        for(const auto& child:all[i]->children)all.push_back(child.get());
+    for(const auto& patch:patches) {
+        if(patch.offset<16ull*block ||
+           patch.offset+patch.length>image.size)return false;
+        const auto sectors=(patch.length+block-1)/block;
+        const auto physical_size=sectors*block;
+        for(const auto* other:all) {
+            if(other==patch.node)continue;
+            const auto other_size=
+                ((std::uint64_t(other->size)+block-1)/block)*block;
+            if(overlaps(patch.offset,physical_size,
+                        std::uint64_t(other->lba)*block,other_size))
+                return false;
+        }
+        for(const auto& other:patches) {
+            if(other.node==patch.node)continue;
+            if(overlaps(patch.offset,physical_size,other.offset,
+                        ((other.length+block-1)/block)*block))
+                return false;
+        }
+        // Volume descriptor sequence, including its terminator.
+        const auto last_descriptor=image.descriptors.empty()?16u:
+            image.descriptors.back().first;
+        if(overlaps(patch.offset,physical_size,16ull*block,
+                    (std::uint64_t(last_descriptor)+2u-16u)*block))
+            return false;
+        // Path tables are not represented as Node children.
+        for(const auto& [lba,vd]:image.descriptors) {
+            (void)lba;
+            const auto length=std::uint64_t(le(vd,132));
+            for(const auto table_lba:{
+                    std::uint64_t(le(vd,140)),
+                    std::uint64_t(le(vd,148,4,true))}) {
+                if(table_lba &&
+                   overlaps(patch.offset,physical_size,table_lba*block,
+                            ((length+block-1)/block)*block))
+                    return false;
+            }
+        }
+    }
+    // Empty-file replacements leave the bytes and metadata untouched.
+    if(std::all_of(patches.begin(),patches.end(),
+                   [](const Patch& patch){return patch.length==0;}))
+        return true;
+    EditTransaction tx(path);
+    clone_iso_stage(path,tx.output,image.file,image.size,progress,status);
+    std::fstream stage(tx.output,std::ios::in|std::ios::out|std::ios::binary);
+    need(bool(stage),"cannot open same-length ISO stage");
+    std::vector<char> buffer(1024*1024);
+    std::uint64_t total=0,done=0;
+    for(const auto& patch:patches)total+=patch.length;
+    for(const auto& patch:patches) {
+        edit_tick(progress);
+        std::ifstream input(patch.source,std::ios::binary);
+        need(bool(input),"cannot open ISO replacement input");
+        stage.clear();
+        stage.seekp(static_cast<std::streamoff>(patch.offset));
+        need(bool(stage),"cannot seek original ISO file extent");
+        for(std::uint64_t remaining=patch.length;remaining;) {
+            edit_tick(progress);
+            const auto count=static_cast<std::streamsize>(
+                std::min<std::uint64_t>(remaining,buffer.size()));
+            input.read(buffer.data(),count);
+            need(input.gcount()==count,"short read of ISO replacement input");
+            stage.write(buffer.data(),count);
+            need(bool(stage),"ISO same-length extent write failed");
+            remaining-=static_cast<std::uint64_t>(count);
+            done+=static_cast<std::uint64_t>(count);
+            if(status && !status(L"Replacing existing ISO file data",
+                                 76u+static_cast<unsigned>(done*17u/total)))
+                throw EditCancelled();
+        }
+    }
+    stage.flush();
+    need(bool(stage),"cannot flush same-length ISO replacement");
+    stage.close();
+    image.file.close();
+    if(status && !status(L"Verifying ISO replacement bytes",96))
+        throw EditCancelled();
+    // Independently reopen ISO/Joliet and byte-compare every changed extent
+    // against its input before committing. No metadata tables were touched.
+    Image verified(tx.output);
+    need(verified.size==image.size &&
+         verified.joliet==image.joliet && !verified.udf_bridge,
+         "same-length ISO staging changed filesystem geometry");
+    std::ifstream check(tx.output,std::ios::binary);
+    need(bool(check),"cannot reopen ISO stage for verification");
+    std::vector<char> actual(buffer.size());
+    for(const auto& patch:patches) {
+        edit_tick(progress);
+        const Node* node=verified.root.get();
+        std::istringstream parts(patch.path);
+        std::string part;
+        while(std::getline(parts,part,'/')) {
+            const auto key=upper(part);
+            const auto child=std::find_if(node->children.begin(),
+                node->children.end(),[&](const auto& candidate){
+                    return upper(candidate->logical)==key;
+                });
+            need(child!=node->children.end(),
+                 "ISO replacement name disappeared from staged directory");
+            node=child->get();
+        }
+        need(!node->directory && node->size==patch.length &&
+             std::uint64_t(node->lba)*block==patch.offset,
+             "ISO replacement changed original file geometry");
+        std::ifstream input(patch.source,std::ios::binary);
+        need(bool(input),"cannot reopen replacement input for verification");
+        check.clear();
+        check.seekg(static_cast<std::streamoff>(patch.offset));
+        need(bool(check),"cannot seek ISO stage verification extent");
+        for(std::uint64_t remaining=patch.length;remaining;) {
+            edit_tick(progress);
+            const auto count=static_cast<std::streamsize>(
+                std::min<std::uint64_t>(remaining,buffer.size()));
+            input.read(buffer.data(),count);
+            check.read(actual.data(),count);
+            need(input.gcount()==count && check.gcount()==count &&
+                 std::memcmp(buffer.data(),actual.data(),
+                             static_cast<std::size_t>(count))==0,
+                 "ISO staged file bytes differ from replacement input");
+            remaining-=static_cast<std::uint64_t>(count);
+        }
+    }
+    check.close();
+    verified.file.close();
+    if(status && !status(L"Committing same-size ISO replacement",99))
+        throw EditCancelled();
+    tx.commit(progress);
+    return true;
+}
 void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,
               const EditProgress& progress,const OpticalEditStatus& status) {
     edit_tick(progress);
@@ -1058,6 +1251,9 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         unlink_boot_iso_files(path,image,changes,progress,status);
         return;
     }
+    // Fast path for replacing existing same-length file data. Never change
+    // an ISO directory record, path table, descriptor, or volume byte count.
+    if(try_replace_iso_same_size(path,image,changes,progress,status))return;
     // Creating a directory that is already present is idempotent. Avoid
     // copying/rebuilding an entire multi-gigabyte ISO and growing its path
     // tables on a request that changes no directory or file metadata.
