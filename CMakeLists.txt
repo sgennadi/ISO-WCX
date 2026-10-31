@@ -311,6 +311,11 @@ if(BUILD_TESTING)
   target_include_directories(update_policy_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME native_updater_release_metadata_validation COMMAND update_policy_tests)
 endif()
+if(BUILD_TESTING)
+  add_executable(tc_registration_repair_tests tests/tc_registration_repair.cpp)
+  target_include_directories(tc_registration_repair_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME tc_wcx_owned_association_upgrade COMMAND tc_registration_repair_tests)
+endif()
 
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -337,7 +342,7 @@ endif()
 
 if(WIN32)
   add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp
-    src/wcx_wim_open_progress.cpp)
+    src/wcx_registration_repair.cpp src/wcx_wim_open_progress.cpp)
   # Do not statically import ComCtl32/TaskDialogIndirect: WCX DLL loading
   # must succeed in headless tools and CI before any GUI code is needed.
   target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32 user32)
