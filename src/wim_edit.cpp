@@ -649,6 +649,78 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             throw EditUnsupported(
                 "WIM entry to delete was not found in source metadata");
     }
+    // F7 can request an existing empty directory. The historical fallback
+    // would spend minutes applying and recapturing a multi-GB WIM even when
+    // EVERY requested folder already exists. Use the native read-only
+    // metadata API first: no mount, workspace, backup or WIM writes.
+    //
+    // Deliberately exclude file changes, deletes, and index removals. A WIM
+    // source may contain case-insensitive NTFS aliases: accept a no-op only
+    // for the EXACT spelling, reject file/directory conflicts, and never
+    // mistake a differently-cased directory for a newly creatable path.
+    const bool folder_only = deleted.empty() && !edits.empty() &&
+        std::all_of(edits.begin(),edits.end(),[](const auto& indexed) {
+            return !indexed.second.empty() &&
+                   std::all_of(indexed.second.begin(),indexed.second.end(),
+                       [](const ArchiveChange& change) {
+                           return !change.remove && change.directory;
+                       });
+        });
+    if(folder_only) {
+        bool all_present=true;
+        const auto fold_ascii=[](std::string text) {
+            for(char& c:text)
+                if(c>='A'&&c<='Z')c=char(c-'A'+'a');
+            return text;
+        };
+        for(const auto& [index,folders]:edits) {
+            std::unordered_map<std::string,std::string> desired;
+            for(const auto& folder:folders) {
+                const auto full="image"+std::to_string(index)+"/"+folder.path;
+                const auto key=fold_ascii(full);
+                const auto [entry,inserted]=desired.emplace(key,full);
+                if(!inserted && entry->second!=full)
+                    throw EditUnsupported(
+                        "WIM F7 contains case-conflicting directory names");
+            }
+            std::unordered_set<std::string> missing;
+            for(const auto& [folded,original]:desired)
+                missing.insert(original);
+            const std::wstring stage=L"Check WIM existing folders: image "+
+                std::to_wstring(index);
+            report(stage.c_str(),2);
+            ULONGLONG last_report=0;
+            WimArchive listing(path,index,
+                [&](std::uint32_t,std::size_t count) {
+                    edit_tick(progress);
+                    if(!status)return;
+                    const auto now=GetTickCount64();
+                    if(last_report && now-last_report<250u)return;
+                    last_report=now;
+                    const std::wstring label=L"Check WIM existing folders: image "+
+                        std::to_wstring(index)+L", "+std::to_wstring(count)+
+                        L" entries";
+                    if(!status(label.c_str(),2))throw EditCancelled();
+                });
+            for(const auto& item:listing.items()) {
+                edit_tick(progress);
+                const auto match=desired.find(fold_ascii(item.path));
+                if(match==desired.end())continue;
+                if(match->second!=item.path)
+                    throw EditUnsupported(
+                        "WIM F7 conflicts with an existing differently-cased entry");
+                if(!item.directory)
+                    throw EditUnsupported(
+                        "WIM F7 cannot replace an existing file with a directory");
+                missing.erase(item.path);
+            }
+            if(!missing.empty())all_present=false;
+        }
+        if(all_present) {
+            report(L"WIM folders already exist: no Apply/Capture needed",99);
+            return;
+        }
+    }
     // Strict experimental opt-in until real machine WIM mount and crash
     // recovery have been validated. Normal users retain Apply/Capture.
     if(fast_mount_requested()) {
