@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <cwchar>
+#include <cstdint>
 #include <cstring>
 #include <initializer_list>
 #include <iterator>
@@ -146,7 +147,29 @@ inline void failure(Result& result,const fs::path& path,DWORD error) {
         result.error=error?error:ERROR_GEN_FAILURE;
     }
 }
-inline bool delete_entry(const fs::path& path,Result& result) {
+// F8 deletion of a large WIM directory needs bounded, cooperative cancellation
+// without allocating a callback for every Windows file. The status callback
+// is invoked for the root and at most once per 128 visited entries; cleanup
+// without a pulse remains unaffected.
+struct DeletePulse {
+    using Callback=bool (*)(void*,std::uint64_t);
+    Callback callback=nullptr;
+    void* context=nullptr;
+    std::uint64_t visited=0;
+    bool notify(const fs::path& entry,Result& result) noexcept {
+        if(!callback)return true;
+        ++visited;
+        if(visited!=1 && (visited%128u)!=0u)return true;
+        bool proceed=false;
+        try { proceed=callback(context,visited); }catch(...) {}
+        if(proceed)return true;
+        failure(result,entry,ERROR_CANCELLED);
+        return false;
+    }
+};
+inline bool delete_entry(const fs::path& path,Result& result,
+                         DeletePulse* pulse=nullptr) {
+    if(pulse && !pulse->notify(path,result))return false;
     const auto native=extended_path(path);
     DWORD attr=GetFileAttributesW(native.c_str());
     if(attr==INVALID_FILE_ATTRIBUTES) {
@@ -176,7 +199,7 @@ inline bool delete_entry(const fs::path& path,Result& result) {
             do {
                 if(wcscmp(item.cFileName,L".")==0 ||
                    wcscmp(item.cFileName,L"..")==0)continue;
-                if(!delete_entry(path/item.cFileName,result)) {
+                if(!delete_entry(path/item.cFileName,result,pulse)) {
                     done=false;break;
                 }
             }while(FindNextFileW(search,&item));
@@ -322,7 +345,8 @@ struct SurvivingDaclSnapshot {
 // junction/reparse ancestor, or touch an unrelated path.
 inline Result remove_expanded_entry(const fs::path& root,
                                     const fs::path& expanded,
-                                    const fs::path& entry) noexcept {
+                                    const fs::path& entry,
+                                    DeletePulse* pulse=nullptr) noexcept {
     Result report{};
     try {
         const auto workspace=fs::absolute(root).lexically_normal();
@@ -398,7 +422,7 @@ inline Result remove_expanded_entry(const fs::path& root,
             failure(report,surviving_parent.directory,snapshot_error);
             return report; // No DACL changes and no partial deletion
         }
-        report.clean=delete_entry(selected,report);
+        report.clean=delete_entry(selected,report,pulse);
         const DWORD restore_error=surviving_parent.restore_if_changed();
         if(restore_error!=ERROR_SUCCESS) {
             // Do not recapture an image with altered Windows folder ACLs.
