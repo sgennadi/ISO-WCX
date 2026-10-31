@@ -90,6 +90,34 @@ int main() {
         const auto migrated=repair_packer_plugins(unicode,current);
         need(migrated.changed && migrated.text.find(L"wim=158,"+current)!=
              std::wstring::npos,"Unicode legacy path not migrated");
+        // Reinstalling on a portable Total Commander must not rewrite
+        // already-correct %COMMANDER_PATH% bindings as absolute machine paths.
+        const std::wstring portable=
+            L"[PackerPlugins]\r\n"
+            L"wim=158,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
+            L"esd=158,C:/Program Files/TotalCmd/plugins/wcx/ISO-WCX/ISO-WCX.wcx\r\n"
+            L"[Buttonbar]\r\nButtonbar=portable.bar\r\n";
+        const auto preserved=repair_packer_plugins(portable,current);
+        need(!preserved.changed && preserved.text==portable,
+             "repair converted valid portable or slash-normalized paths");
+        const std::wstring mixed_duplicates=
+            L"[PackerPlugins]\r\n"
+            L"wim=222,C:\\Old\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
+            L"WIM=158,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
+            L"[Buttonbar]\r\nButtonbar=portable.bar\r\n";
+        const auto picked=repair_packer_plugins(mixed_duplicates,current);
+        need(picked.changed && picked.duplicates_removed==1 &&
+             picked.extensions.size()==1 &&
+             picked.text.find(L"wim=222,")==std::wstring::npos &&
+             picked.text.find(
+                 L"WIM=158,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx")
+                 !=std::wstring::npos,
+             "duplicate migration did not prefer the valid portable WCX");
+        need(picked.text.find(L"[Buttonbar]\r\nButtonbar=portable.bar")!=
+             std::wstring::npos,
+             "migration damaged unrelated TC buttonbar configuration");
+        need(!repair_packer_plugins(picked.text,current).changed,
+             "portable duplicate cleanup is not idempotent");
         std::cout<<"PASS: WCX old masks and duplicate cleanup, foreign plugin "
                    "preservation, idempotence, x64 cache, Unicode and user INI\n";
         return 0;
