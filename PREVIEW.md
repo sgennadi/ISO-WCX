@@ -10,6 +10,54 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
+## AMI UEFI NTFS firmware-read workaround (Preview)
+
+Some AMI UEFI firmware ships a broken NTFS file reader (version `0x10000`).
+For a file split over multiple NTFS cluster runs, a short UEFI read ending
+exactly on a run boundary can park the firmware's cursor at an unrelated
+cluster. Later UEFI reads may return **wrong bytes** while Windows and Linux
+correctly read the same unchanged file. See
+[Pete Batard's analysis](https://github.com/pbatard/AmiNtfsBug).
+
+**ISO-WCX mitigation:** On Windows, for each ordinary file extracted onto
+NTFS, `Disc::copy` creates a new, random, same-directory
+`.iso-wcx-*.part` file with Win32 `CREATE_NEW`. It sets the final
+logical size using `SetFilePointerEx` followed by `SetEndOfFile`
+**before the first streamed write**, then opens that exact file with
+`std::ios::in|std::ios::out|std::ios::binary` (no `trunc`).
+This requests early NTFS cluster allocation instead of repeatedly growing
+the file across many small write chunks. After closing and validating the
+file, the existing atomic sibling rename commits it to the destination.
+
+The original file, ISO and WIM are unchanged during this process; the
+temporary file is removed on cancellation, incomplete source reads,
+malformed extents, full disk or write failure. All non-NTFS destinations
+and preallocation-rejecting drivers use the previous normal streamed
+writer, without installing any external DLL, EXE or filesystem driver.
+
+This mitigation **does not guarantee physical contiguity**. If the target
+NTFS USB volume is already severely fragmented, NTFS may still allocate
+multiple extents. There is no change to AMI firmware, Windows' NTFS driver,
+ISO/WIM editing or the boot configuration of the USB device. A successfully
+extracted file can still trigger the firmware defect, so a real UEFI boot
+test on affected hardware is required. This is also **not** an NTFS
+defragmenter or a bootable USB creation feature.
+
+Controls for diagnostics/troubleshooting:
+
+- `ISO_WCX_NTFS_PREALLOCATE=0`: disable reservation; default is enabled on
+  supported NTFS outputs, and all other filesystems retain legacy streaming.
+- `ISO_WCX_NTFS_EXTENTS=1`: optionally query read-only
+  `FSCTL_GET_RETRIEVAL_POINTERS` after a completed extraction and report
+  the NTFS extent count to Windows `OutputDebugStringW`. No warning is
+  shown for unrelated files, and query failure never fails an extraction.
+
+CI includes Windows Win32 and x64 preallocation tests (full file length
+before first write, non-truncating buffered output, zero-filled tail,
+CREATE_NEW collision safety, opt-out and empty files) and the existing
+`copy_transaction_rollback` test, which now checks the live size of a
+cancelled `.part` stage. Linux extraction behavior is unchanged.
+
 ## WIM scratch cleanup after F7/F8 (protected Windows NTFS tree)
 
 A WCX WIM edit can stage `<WIM folder>/.iso-wcx-edit-<random>-<random>/expanded`.
