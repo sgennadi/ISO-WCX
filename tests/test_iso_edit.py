@@ -249,6 +249,32 @@ def main(binary, reader=None):
                 b[20*B:20*B+len(record)]=record
             else:struct.pack_into('<I',b,16*B+158,0xffffffff)
             image.write_bytes(b);run('add','NEW.TXT',False)
+    if sys.platform == 'win32':
+        # A real ISO is commonly 5-8 GiB. This bounded test has a 64-MiB
+        # cloneable prefix followed by a nonaligned 2-KiB tail. The native
+        # writer may use NTFS/ReFS CoW or fall back to CopyFileEx depending
+        # on the runner filesystem. Both must preserve the old source bytes.
+        image.write_bytes(fixture())
+        original_bytes=64*1024*1024+B
+        trailer=b'TAILSAFE'*256
+        with image.open('r+b') as stream:
+            stream.truncate(original_bytes)
+            stream.seek(16*B+80)
+            sectors=original_bytes//B
+            stream.write(sectors.to_bytes(4,'little')+
+                         sectors.to_bytes(4,'big'))
+            stream.seek(original_bytes-B)
+            stream.write(trailer)
+        run('add','CLONED.TXT')
+        with image.open('rb') as stream:
+            stream.seek(original_bytes-B)
+            assert stream.read(B)==trailer,(
+                'ISO clone or fallback corrupted the 2-KiB tail')
+        assert read_image(image)['CLONED.TXT']==source.read_bytes(),(
+            'ISO F5 large source yielded wrong copied file payload')
+        validate_path_tables(image)
+        assert not any(root.glob('.iso-wcx-edit-*')),(
+            'large ISO F5 left an abandoned private staging folder')
     print('PASS: ISO replace/add/delete, nested paths, Joliet, independent reader, boot preservation, cancellation and refusal rollback')
 
 if __name__=='__main__':main(sys.argv[1],sys.argv[2] if len(sys.argv)>2 else None)
