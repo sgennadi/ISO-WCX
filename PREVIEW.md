@@ -81,6 +81,16 @@ cancelled `.part` stage. Linux extraction behavior is unchanged.
 
 ## WIM scratch cleanup after F7/F8 (protected Windows NTFS tree)
 
+**Repeat F7 for an existing folder (Preview):** When every operation in a
+batch is directory creation and all selected directories already exist with
+identical spelling in their WIM indexes, the writer now checks WIMGAPI
+metadata and returns without applying/capturing an image or creating a
+private `.iso-wcx-edit-*` workspace. Differently-cased names and file/folder
+conflicts are refused before staging. The preflight is cancellable and does
+not modify the WIM. Large-image metadata enumeration can still be slow.
+Creating genuinely new directories still uses the legacy Apply/Capture mode
+unless the separately gated fast WIM mount option is explicitly enabled.
+
 A WCX WIM edit can stage `<WIM folder>/.iso-wcx-edit-<random>-<random>/expanded`.
 This is a FULL **WIMApplyImage extraction**, **not** a mounted WIM. DISM's
 `/Get-MountedWimInfo` is expected to show nothing for this case. The

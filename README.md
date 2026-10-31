@@ -171,6 +171,15 @@ reassociate the WCX plugin so Total Commander refreshes its capability flags.
 
 ## Experimental fast WIM folder creation (development Preview after v0.21.0)
 
+**Existing WIM folders (new Preview no-op):** A repeated F7 that selects only
+already-existing directories now performs a read-only per-image metadata
+preflight and exits before allocating a staging workspace or running WIMGAPI
+Apply/Capture. This works with the native fast-mount checkbox OFF. The check
+rejects conflicting files or case-only aliases and honors cancellation.
+It can still take time to enumerate metadata in a large `install.wim`;
+**new** folders still require the normal Apply/Capture edit or the explicit
+experimental fast mount path below.
+
 The new WIMGAPI **mount-and-commit** path can avoid applying and recapturing
 the complete WIM for a batch of empty directories in one image index.
 It is **opt-in only**, either from the new checkbox in
