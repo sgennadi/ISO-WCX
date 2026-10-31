@@ -240,6 +240,18 @@ same-length replacement/deletion and boot-preserving deletion. A Windows
 regression exercises both automatic cloning and forced CopyFileEx fallback
 on a 64-MiB + 2-KiB image, verifying the last sector and edited file data.
 
+**Fast same-length F5 replacement:** When every selected source replaces an
+existing regular file with exactly the same length in plain ISO9660/Joliet,
+ISO-WCX modifies only those file-data extents in its verified private copy.
+It does **not** append sectors, rewrite ISO/Joliet directory records, or
+change the on-disc volume size. Source data is independently compared against
+the staged result before atomic commit. Shared/overlapping extents, other
+filesystem metadata and boot structures are excluded; mixed additions,
+removals and size-changing replacements continue through the existing safe
+writer. This is not a direct write to the original ISO. Automated tests check
+byte-for-byte preservation outside the intended data extents, Joliet aliases,
+multiple replacements, retained Total Commander panels and late cancellation.
+
 **Not a universal ISO remaster:** adding files to an ISO/UDF Bridge, hybrid
 MBR/GPT ISO, or Rock Ridge layout remains unsupported unless a synchronized
 writer can guarantee both namespaces and boot structures survive. Plain
