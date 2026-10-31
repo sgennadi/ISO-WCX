@@ -757,7 +757,22 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                     remove_staged_wim_entry(tx.workspace,expanded,target,
                                             callback,status,apply_end);
                 }
-                checked(CopyFileW(c.source.c_str(),target.c_str(),TRUE),"copy replacement into WIM workspace");
+                // WIMApplyImage restores Windows' protected NTFS DACLs.
+                // A normal F5 CopyFileW may fail with ACCESS_DENIED even
+                // when F7/F8 work. Only the private expanded parent may
+                // receive a temporary create-file ACE; restore its original
+                // DACL before WIMCaptureImage records security descriptors.
+                const auto copied=workspace_cleanup::copy_into_expanded(
+                    tx.workspace,expanded,c.source,target);
+                if(!copied.clean) {
+                    const auto detail="WIM F5 file copy failed (Win32 "+
+                        std::to_string(copied.error)+
+                        ") while writing "+c.path;
+                    if(copied.unsafe)
+                        throw EditUnsupported(detail+
+                            ": unsafe path, mount, or parent NTFS ACL could not be restored");
+                    throw std::runtime_error(detail);
+                }
             }
             callback.begin_stage(L"Rebuild WIM image "+number,apply_end,end-apply_end);
             HANDLE captured=api<HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMCaptureImage")(output.h,expanded.c_str(),2u|0x100u);
