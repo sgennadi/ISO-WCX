@@ -22,6 +22,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -510,6 +511,48 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             return E_NOT_SUPPORTED;
         }
         std::vector<iso_wcx::ArchiveChange> changes;
+        // TC may pass only the selected folder in AddList. Expand the
+        // complete directory tree so F5 does not silently pack an empty
+        // folder and report success. Validate all entries before a writer
+        // creates any staging file; never traverse NTFS reparse points.
+        std::unordered_map<std::string,std::filesystem::path> packed_sources;
+        const auto append_source=[&](std::string target,
+                                     const std::filesystem::path& source_path) {
+            target=iso_wcx::edit_path(std::move(target));
+            const auto source_status=std::filesystem::symlink_status(source_path);
+            const bool is_directory=std::filesystem::is_directory(source_status);
+            if(!is_directory &&
+               !std::filesystem::is_regular_file(source_status))
+                throw iso_wcx::EditUnsupported(
+                    "F5 source must be a regular file or directory");
+            const DWORD attr=GetFileAttributesW(source_path.c_str());
+            if(attr==INVALID_FILE_ATTRIBUTES ||
+               (attr&FILE_ATTRIBUTE_REPARSE_POINT))
+                throw iso_wcx::EditUnsupported(
+                    "F5 source is missing or contains a reparse point");
+            std::string key=target;
+            std::transform(key.begin(),key.end(),key.begin(),
+                [](unsigned char ch) {
+                    return ch>='A'&&ch<='Z'?char(ch-'A'+'a'):char(ch);
+                });
+            const auto [entry,inserted]=packed_sources.emplace(key,source_path);
+            if(!inserted) {
+                std::error_code error;
+                if(!std::filesystem::equivalent(
+                       entry->second,source_path,error))
+                    throw iso_wcx::EditUnsupported(
+                        "Different F5 sources resolve to the same archive path");
+                return;
+            }
+            if(changes.size()>=100000)
+                throw iso_wcx::EditUnsupported(
+                    "F5 folder has over 100000 entries");
+            iso_wcx::ArchiveChange change;
+            change.path=std::move(target);
+            change.source=source_path;
+            change.directory=is_directory;
+            changes.push_back(std::move(change));
+        };
         for(auto name:names){
             if(remove) {
                 // TC may send "folder\\*.*", "folder\\*", or the same
@@ -530,16 +573,44 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
                         name.pop_back();
                 }
             }
-            auto relative=iso_wcx::edit_path(edit_utf8(name));
-            iso_wcx::ArchiveChange c;c.path=subpath.empty()?relative:iso_wcx::edit_path(iso_wcx::edit_path(edit_utf8(subpath))+"/"+relative);c.remove=remove;
-            if(!remove){c.source=std::filesystem::path(source)/std::filesystem::u8path(relative);auto status=std::filesystem::symlink_status(c.source);
-                if(!std::filesystem::is_regular_file(status)&&!std::filesystem::is_directory(status))
-                    throw iso_wcx::EditUnsupported("Source must be a regular file or directory");
-                const DWORD attributes=GetFileAttributesW(c.source.c_str());
-                if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))
-                    throw iso_wcx::EditUnsupported("Source is missing or contains a reparse point");
-                c.directory=std::filesystem::is_directory(status);
-            }changes.push_back(std::move(c));
+            const auto relative=iso_wcx::edit_path(edit_utf8(name));
+            const auto target=subpath.empty()?relative:
+                iso_wcx::edit_path(iso_wcx::edit_path(edit_utf8(subpath))+
+                                   "/"+relative);
+            if(remove) {
+                iso_wcx::ArchiveChange change;
+                change.path=target;
+                change.remove=true;
+                changes.push_back(std::move(change));
+                continue;
+            }
+            const auto input=std::filesystem::path(source)/
+                             std::filesystem::u8path(relative);
+            append_source(target,input);
+            if(!std::filesystem::is_directory(
+                   std::filesystem::symlink_status(input)))
+                continue;
+            for(auto child=std::filesystem::recursive_directory_iterator(
+                    input,std::filesystem::directory_options::none);
+                child!=std::filesystem::recursive_directory_iterator{};
+                ++child) {
+                // Do not descend into a junction/link even transiently.
+                // append_source will fail the entire operation safely.
+                const auto attributes=GetFileAttributesW(
+                    child->path().c_str());
+                if(attributes==INVALID_FILE_ATTRIBUTES ||
+                   (attributes&FILE_ATTRIBUTE_REPARSE_POINT))
+                    child.disable_recursion_pending();
+                const auto suffix_u8=
+                    child->path().lexically_relative(input).generic_u8string();
+                if(suffix_u8.empty())
+                    throw iso_wcx::EditUnsupported(
+                        "F5 source entry is not relative to selected directory");
+                const std::string suffix(
+                    reinterpret_cast<const char*>(suffix_u8.data()),
+                    suffix_u8.size());
+                append_source(target+"/"+suffix,child->path());
+            }
         }
         if(remove && changes.size()>1) {
             // TC may include both a directory and every one of its children
