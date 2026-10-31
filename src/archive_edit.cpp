@@ -26,7 +26,8 @@ std::string edit_path(std::string p) {
 }
 void edit_optical(const std::filesystem::path& image,
                   const std::vector<ArchiveChange>& changes,
-                  const EditProgress& progress) {
+                  const EditProgress& progress,
+                  const OpticalEditStatus& status) {
     std::ifstream in(image,std::ios::binary);
     if(!in) throw EditUnsupported("cannot open optical archive for editing");
     bool has_iso9660=false;
@@ -43,7 +44,10 @@ void edit_optical(const std::filesystem::path& image,
         }
     }
     in.close();
-    if(has_iso9660) edit_iso(image,changes,progress);
-    else edit_udf(image,changes,progress);
+    if(has_iso9660) edit_iso(image,changes,progress,status);
+    else {
+        if(status && !status(L"Updating UDF image",0))throw EditCancelled();
+        edit_udf(image,changes,progress);
+    }
 }
 }
