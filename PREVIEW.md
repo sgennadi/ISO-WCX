@@ -10,6 +10,24 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
+## WCX reinstallation and old association cleanup (Preview)
+
+The official Total Commander `pluginst.inf` **does not support an uninstall
+or pre-install cleanup hook**. Installing a new WCX DLL can leave older
+`[PackerPlugins]` entries (including bare paths or flags `192`/`222`)
+that prevent TC from invoking F5 for WIM even when `PackFilesW` works.
+
+The Preview DLL therefore ships a **native Repair WCX associations** control
+inside **Files > Pack > Configure... > ISO-WCX Settings** (no additional
+installer EXE, PowerShell, CMD or DLL). It detects only ISO-WCX-owned records,
+normalizes masks to `158`, removes duplicate extension keys for that plugin,
+and invalidates the derived `[PackerPlugins64]` checksum. It preserves
+third-party WCX registrations, conflicting associations, arbitrary custom
+TC configuration, INI encodings and redirected INI sections. The user reviews
+the changes and confirms before backup-first INI replacement, then **fully
+restarts Total Commander**. `pluginst.inf` itself cannot perform this step
+silently during installation.
+
 ## AMI UEFI NTFS firmware-read workaround (Preview)
 
 Some AMI UEFI firmware ships a broken NTFS file reader (version `0x10000`).
