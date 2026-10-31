@@ -502,6 +502,30 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         std::thread worker([&]{packed_result=pack(packed.data(),sub.data(),src.data(),add_list,0);});
         worker.join();
         set_progress(INVALID_HANDLE_VALUE,nullptr);
+        // The old TC panel may still have stale filenames. It must NEVER
+        // extract those against the newly committed image. Only a fresh
+        // OpenArchive can read the replacement WIM.
+        if(packed_result==0) {
+            bool found_stale_file=false,blocked_stale_read=false;
+            for(;;) {
+                HeaderExW item{};
+                const int code=read(panel_handle,&item);
+                if(code==10)break;
+                if(code!=0){close(panel_handle);return 96;}
+                if(std::wstring_view(item.FileName)==L"image1\\HELLO.TXT") {
+                    found_stale_file=true;
+                    blocked_stale_read=process(panel_handle,1,nullptr,nullptr)!=0;
+                    break;
+                }
+                if(process(panel_handle,0,nullptr,nullptr)!=0) {
+                    close(panel_handle);return 97;
+                }
+            }
+            if(!found_stale_file || !blocked_stale_read) {
+                close(panel_handle);
+                return 98;
+            }
+        }
         // Close the host's retained WIM panel BEFORE inspecting scratch.
         const int panel_closed=close(panel_handle);
         if(panel_closed!=0)return 94;
