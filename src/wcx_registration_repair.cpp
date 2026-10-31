@@ -340,6 +340,13 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
             catch(...) {throw;}
         }
         bool assoc_committed=false,cache_committed=false;
+        // The confirmation dialog can stay open while TC or another process
+        // changes settings. Verify BOTH sources before replacing EITHER one.
+        check(load(assoc.path).bytes==assoc.bytes,
+              "PackerPlugins changed before repair; no INI replaced");
+        if(cache_path!=assoc_path && saved_cache.changed)
+            check(load(cached.path).bytes==cached.bytes,
+                  "PackerPlugins64 changed before repair; no INI replaced");
         try {
             store(assoc,saved_assoc.text);
             assoc_committed=true;
@@ -351,7 +358,8 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
             // Never overwrite third-party edits when a before-write identity
             // check failed. Restore only files this operation DID replace.
             std::error_code ignored;
-            if(assoc_committed)
+            if(assoc_committed &&
+               load(assoc.path).bytes==encoded(saved_assoc.text,assoc.coding))
                 fs::copy_file(backup,assoc.path,
                     fs::copy_options::overwrite_existing,ignored);
             if(cache_committed && !cache_backup.empty())
