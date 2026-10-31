@@ -4,6 +4,7 @@
 #endif
 #include <windows.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -22,6 +23,20 @@ using PackFn = int (__stdcall*)(wchar_t*,wchar_t*,wchar_t*,wchar_t*,int);
 using DeleteWFn = int (__stdcall*)(wchar_t*,wchar_t*);
 using DeleteAFn = int (__stdcall*)(char*,char*);
 using CapsFn = int (__stdcall*)();
+using SetPackProgressFn = void (__stdcall*)(HANDLE,int (__stdcall*)(wchar_t*,int));
+static std::atomic<unsigned> iso_stage_updates{0};
+static std::atomic<unsigned> iso_highest_percent{0};
+static int __stdcall record_iso_progress(wchar_t*,int size) {
+    if(size<0) {
+        iso_stage_updates.fetch_add(1,std::memory_order_relaxed);
+        const auto percent=static_cast<unsigned>(-size);
+        auto previous=iso_highest_percent.load(std::memory_order_relaxed);
+        while(percent>previous &&
+              !iso_highest_percent.compare_exchange_weak(
+                  previous,percent,std::memory_order_relaxed)) {}
+    }
+    return 1;
+}
 struct OpenW {
     wchar_t* ArcName; int OpenMode,OpenResult;
     wchar_t* CmtBuf; int CmtBufSize,CmtSize,CmtState;
@@ -149,6 +164,8 @@ int wmain(int argc,wchar_t** argv) {
         const auto delW=reinterpret_cast<DeleteWFn>(sym("DeleteFilesW"));
         const auto delA=reinterpret_cast<DeleteAFn>(sym("DeleteFiles"));
         const auto caps=reinterpret_cast<CapsFn>(sym("GetPackerCaps"));
+        const auto setpack=reinterpret_cast<SetPackProgressFn>(
+            sym("SetProcessDataProcW"));
         const auto open=reinterpret_cast<OpenFn>(sym("OpenArchiveW"));
         const auto header=reinterpret_cast<HeaderFn>(sym("ReadHeaderExW"));
         const auto process=reinterpret_cast<ProcessFn>(sym("ProcessFileW"));
@@ -188,8 +205,14 @@ int wmain(int argc,wchar_t** argv) {
         const HANDLE original_panel=open(&retained);
         need(original_panel && retained.OpenResult==0,
              "WCX cannot retain an ISO panel while copying via F5");
+        iso_stage_updates.store(0);
+        iso_highest_percent.store(0);
+        setpack(INVALID_HANDLE_VALUE,&record_iso_progress);
         const int f5_status=pack(arc.data(),f5_sub.data(),f5_dir.data(),
                                  f5_list,2);
+        setpack(INVALID_HANDLE_VALUE,nullptr);
+        need(iso_stage_updates.load()>0 && iso_highest_percent.load()>=90,
+             "ISO F5 never published native optical stage progress to TC");
         need(close(original_panel)==0,
              "WCX CloseArchive failed after editing an open ISO panel");
         need(f5_status==0,
