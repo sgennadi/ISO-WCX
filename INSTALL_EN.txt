@@ -34,7 +34,9 @@ by the stock INF installer. No CMD, PowerShell or extra DLL is needed.
 Built-in association repair after upgrades (Preview)
 ---------------------------------------------------
 Total Commander's pluginst.inf cannot uninstall older WCX registrations.
-ISO-WCX includes a built-in Settings button:
+On the first WIM open after an update, ISO-WCX checks its own old bindings
+and offers a confirmed repair if any are stale. It never silently modifies
+user configuration. A built-in Settings button is also available:
   Files > Pack > Configure... > Repair WCX associations (WIM F5).
 The native WCX detects stale 0/192/222/bare-path registrations, normalizes
 only this plugin's extensions to flags 158, removes duplicate bindings of
