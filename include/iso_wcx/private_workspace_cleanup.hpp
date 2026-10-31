@@ -301,6 +301,12 @@ inline Result cleanup(const fs::path& root) noexcept {
         // tree. DISM may list no mounts even though native WIMGAPI does.
         const auto mount=root/L"mounted";
         const DWORD mount_attr=attributes(mount);
+        // Win32 GetLastError is only meaningful for the GetFileAttributesW
+        // failure that directly preceded it. Record it NOW: a successful
+        // fs::remove of an empty, unregistered "mounted" directory does not
+        // clear the thread's previous LastError.
+        const DWORD mount_lookup_error=mount_attr==INVALID_FILE_ATTRIBUTES?
+            GetLastError():ERROR_SUCCESS;
         if(mount_attr!=INVALID_FILE_ATTRIBUTES) {
             if((mount_attr&FILE_ATTRIBUTE_REPARSE_POINT) ||
                !(mount_attr&FILE_ATTRIBUTE_DIRECTORY)) {
@@ -338,9 +344,13 @@ inline Result cleanup(const fs::path& root) noexcept {
                 return report;
             }
         }
-        const DWORD missing=GetLastError();
-        if(missing!=ERROR_FILE_NOT_FOUND && missing!=ERROR_PATH_NOT_FOUND) {
-            failure(report,mount,missing);return report;
+        // Do not inspect GetLastError AFTER the mount directory was
+        // successfully deleted; that value may still contain an unrelated
+        // WIMGAPI or filesystem error. Validate only the original lookup.
+        if(mount_lookup_error!=ERROR_SUCCESS &&
+           mount_lookup_error!=ERROR_FILE_NOT_FOUND &&
+           mount_lookup_error!=ERROR_PATH_NOT_FOUND) {
+            failure(report,mount,mount_lookup_error);return report;
         }
         CleanupPrivileges privileges;
         report.clean=delete_entry(root,report);
