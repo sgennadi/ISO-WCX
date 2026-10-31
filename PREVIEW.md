@@ -219,10 +219,14 @@ are included; TC chooses Win32 WCX or x64 WCX64 itself.
 
 ### Fast native ISO F5 staging and progress (Preview)
 
-Supported ISO9660/Joliet writes now use cancellable Windows `CopyFileExW`
-for the private same-volume working copy, including long paths and UNC shares.
-This reduces the cost of repeated 1-MiB user-mode reads and enables Windows
-copy acceleration where the filesystem supports it. A delayed, responsive
+Supported ISO9660/Joliet writes now try NTFS/ReFS copy-on-write block
+cloning (64-KiB aligned, with an exact tail copy) before the cancellable
+Windows `CopyFileExW` fallback for the private same-volume working copy.
+This can avoid physically copying multi-gigabyte ISO content on supported
+volumes. Long paths and UNC are supported in the fallback; performance depends
+on the filesystem. Set `ISO_WCX_ISO_DISABLE_BLOCK_CLONE=1` in the Total Commander
+process environment before launch to disable only this optional optimization
+without disabling safe F5 editing or the progress/cancellation UI. A delayed, responsive
 ISO/UDF TaskDialog reports copy bytes (0-75%), payload writing, filesystem
 metadata regeneration, independent readback and atomic commit. TC's own WCX
 progress callback also receives exact stage percentages.
@@ -230,9 +234,11 @@ progress callback also receives exact stage percentages.
 Automated real-WCX tests exercise TC F5 (`PK_PACK_SAVE_PATHS`) into a nested
 ISO folder while the old panel is still open; multi-file replacement, byte
 readback through WCX extraction, single-file F8, and cancellation with a
-byte-identical original ISO and no abandoned private workspace. The same
-native copy optimization is used for the *narrow supported* ISO/UDF Bridge
-same-length replacement/deletion and boot-preserving deletion.
+byte-identical original ISO and no abandoned private workspace. The same private
+clone/fallback logic is used for the *narrow supported* ISO/UDF Bridge
+same-length replacement/deletion and boot-preserving deletion. A Windows
+regression exercises both automatic cloning and forced CopyFileEx fallback
+on a 64-MiB + 2-KiB image, verifying the last sector and edited file data.
 
 **Not a universal ISO remaster:** adding files to an ISO/UDF Bridge, hybrid
 MBR/GPT ISO, or Rock Ridge layout remains unsupported unless a synchronized
@@ -244,7 +250,8 @@ ISO9660/Joliet and validated UDF-only Type-1 have different write limits.
 | Image | Supported modifications | Limits |
 | --- | --- | --- |
 | Standard unsplit WIM | Create/replace/delete files and directories within existing indexes; delete an image index except the last | WIMGAPI Apply/Capture can take many minutes and require NTFS staging, free disk and privileges. Fast Mount/Commit for creation of folders only is **experimental and off by default**. |
-| Plain ISO9660/Joliet | Constrained addition, replacement, deletion and byte-exact no-op for already existing folders | Rock Ridge and incompatible layouts remain read-only; not a general-purpose ISO remaster. |\n| Hybrid boot ISO9660/Joliet (Preview) | Delete existing regular files by unlinking directory records only | Keep system-area MBR/GPT, El Torito sectors and payload bytes unchanged. No directory deletion, additions, resizing, Rock Ridge or UDF Bridge. |
+| Plain ISO9660/Joliet | Constrained addition, replacement, deletion and byte-exact no-op for already existing folders | Rock Ridge and incompatible layouts remain read-only; not a general-purpose ISO remaster. |
+| Hybrid boot ISO9660/Joliet (Preview) | Delete existing regular files by unlinking directory records only | Keep system-area MBR/GPT, El Torito sectors and payload bytes unchanged. No directory deletion, additions, resizing, Rock Ridge or UDF Bridge. |
 | UDF-only Type-1 | Selected file and directory creations, file replacement and logical deletion | Experimental, validated physical Type-1 metadata and sufficient space only. |
 | ISO/UDF Bridge | Narrow synchronized file replacement/deletion when both namespaces remain valid | No general directory creation or hybrid boot editing. |
 | ESD / SWM | Read and extract only | Editing is not supported. |
