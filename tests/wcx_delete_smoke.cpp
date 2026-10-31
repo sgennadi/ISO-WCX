@@ -328,6 +328,15 @@ int wmain(int argc,wchar_t** argv) {
              "ISO F5 duplicate selection lost nested file");
         verify_data(L"DOCS\\SELECTED\\DEEP\\MORE.BIN",
                     "ISO F5 nested directory data");
+        // Repeat a NONEMPTY directory F5 with byte-identical content:
+        // the ISO and its last-write timestamp must remain unchanged.
+        const auto identical_folder_bytes=load(image);
+        const auto identical_folder_time=fs::last_write_time(image);
+        need(pack(arc.data(),f5_sub.data(),folder_dir.data(),
+                  selected_folder,2)==0 &&
+             load(image)==identical_folder_bytes &&
+             fs::last_write_time(image)==identical_folder_time,
+             "Repeated identical ISO folder F5 unnecessarily remastered image");
         // Optional Windows symlink privilege: when creation is permitted,
         // a reparse point inside F5 source must be refused atomically.
         std::error_code link_error;
