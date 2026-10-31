@@ -593,6 +593,43 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         if(folder_rc!=0)return 27;
         if(wim_percent_calls.load()==0 || wim_stage_calls.load()==0)
             return 32; // Progress must be visible even for empty folders.
+        // Repeat F7 with the legacy Apply/Capture route forced ON. An
+        // existing empty directory must use the read-only metadata preflight
+        // and return without cloning/rebuilding any WIM indexes.
+        const auto before_repeated_f7=load(original);
+        const auto before_repeated_f7_time=fs::last_write_time(original);
+        const auto legacy_before_repeat=wim_legacy_staging_calls.load();
+        const auto percent_before_repeat=wim_percent_calls.load();
+        SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",L"0");
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int repeat_f7=pack(packed.data(),sub.data(),src.data(),
+                                 mkdir_list,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        SetEnvironmentVariableW(L"ISO_WCX_WIM_FAST_MOUNT",nullptr);
+        if(repeat_f7!=0 ||
+           load(original)!=before_repeated_f7 ||
+           fs::last_write_time(original)!=before_repeated_f7_time ||
+           wim_legacy_staging_calls.load()!=legacy_before_repeat ||
+           wim_percent_calls.load()==percent_before_repeat)
+            return 116;
+        for(const auto& item:fs::directory_iterator(root))
+            if(item.path().filename().wstring().starts_with(
+                   L".iso-wcx-edit-"))
+                return 117;
+        // A differently-cased copy of an existing NTFS directory must NOT
+        // silently succeed or attempt a multi-gigabyte recapture.
+        fs::create_directories(incoming/L"new_empty_folder");
+        wchar_t wrong_case_f7[]=L"new_empty_folder\0\0";
+        const auto case_before_repeated_f7=load(original);
+        const auto legacy_before_case=wim_legacy_staging_calls.load();
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int wrong_case_f7_result=pack(
+            packed.data(),sub.data(),src.data(),wrong_case_f7,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(wrong_case_f7_result==0 ||
+           load(original)!=case_before_repeated_f7 ||
+           wim_legacy_staging_calls.load()!=legacy_before_case)
+            return 118;
         // Cancel during a long apply before replacing the original WIM.
         fs::create_directories(incoming/L"CANCEL_FOLDER");
         wchar_t cancel_list[]=L"CANCEL_FOLDER\0\0";
