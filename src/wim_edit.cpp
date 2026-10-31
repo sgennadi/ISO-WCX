@@ -686,6 +686,22 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             std::unordered_set<std::string> missing;
             for(const auto& [folded,original]:desired)
                 missing.insert(original);
+            // Even a NEW folder can have an impossible ancestor:
+            // "image1/HELLO.TXT/CHILD" when HELLO.TXT is a regular file.
+            // Detect it before a multi-GB WIMApplyImage, not after staging.
+            std::unordered_map<std::string,std::string> ancestors;
+            for(const auto& [folded,full]:desired) {
+                for(std::size_t slash=full.find('/');
+                    slash!=std::string::npos;
+                    slash=full.find('/',slash+1)) {
+                    const auto parent=full.substr(0,slash);
+                    const auto [at,added]=ancestors.emplace(
+                        fold_ascii(parent),parent);
+                    if(!added && at->second!=parent)
+                        throw EditUnsupported(
+                            "WIM F7 contains case-conflicting parent folders");
+                }
+            }
             const std::wstring stage=L"Check WIM existing folders: image "+
                 std::to_wstring(index);
             report(stage.c_str(),2);
@@ -704,7 +720,17 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 });
             for(const auto& item:listing.items()) {
                 edit_tick(progress);
-                const auto match=desired.find(fold_ascii(item.path));
+                const auto folded=fold_ascii(item.path);
+                const auto parent=ancestors.find(folded);
+                if(parent!=ancestors.end()) {
+                    if(parent->second!=item.path)
+                        throw EditUnsupported(
+                            "WIM F7 conflicts with a differently-cased parent");
+                    if(!item.directory)
+                        throw EditUnsupported(
+                            "WIM F7 cannot create a folder under a regular file");
+                }
+                const auto match=desired.find(folded);
                 if(match==desired.end())continue;
                 if(match->second!=item.path)
                     throw EditUnsupported(
