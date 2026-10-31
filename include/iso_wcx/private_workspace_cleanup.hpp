@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <cwchar>
+#include <cstring>
 #include <initializer_list>
 #include <iterator>
 #include <filesystem>
@@ -239,6 +240,82 @@ inline bool delete_entry(const fs::path& path,Result& result) {
 // A directory created by WIMApplyImage is only scratch storage. Unlike a
 // mount, it is safe to discard its ACL-protected Windows folders AFTER
 // WIMCaptureImage has finished. Use the same link-safe delete engine.
+// Deleting a Windows system file may require granting DELETE_CHILD on its
+// surviving parent directory. The generic scratch cleaner can change that
+// private parent's DACL; BEFORE WIMCaptureImage we MUST restore it so the
+// newly captured Windows image keeps the original security descriptor.
+struct SurvivingDaclSnapshot {
+    fs::path directory;
+    PSECURITY_DESCRIPTOR original=nullptr;
+    PACL original_acl=nullptr;
+    SECURITY_DESCRIPTOR_CONTROL original_control{};
+    bool ready=false;
+    explicit SurvivingDaclSnapshot(fs::path p) : directory(std::move(p)) {}
+    ~SurvivingDaclSnapshot() {
+        if(original)LocalFree(original);
+    }
+    SurvivingDaclSnapshot(const SurvivingDaclSnapshot&)=delete;
+    SurvivingDaclSnapshot& operator=(const SurvivingDaclSnapshot&)=delete;
+
+    DWORD capture() {
+        auto native=extended_path(directory);
+        const DWORD err=GetNamedSecurityInfoW(native.data(),SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,nullptr,nullptr,&original_acl,
+            nullptr,&original);
+        if(err!=ERROR_SUCCESS)return err;
+        DWORD revision=0;
+        if(!GetSecurityDescriptorControl(
+               original,&original_control,&revision))
+            return GetLastError();
+        BOOL present=FALSE,defaulted=FALSE;
+        PACL verified=nullptr;
+        if(!GetSecurityDescriptorDacl(
+               original,&present,&verified,&defaulted))
+            return GetLastError();
+        // A missing DACL cannot be faithfully reconstructed by the normal
+        // SetNamedSecurityInfo API. Refuse editing instead of weakening it.
+        if(!present)return ERROR_INVALID_SECURITY_DESCR;
+        ready=true;
+        return ERROR_SUCCESS;
+    }
+    DWORD restore_if_changed() {
+        if(!ready)return ERROR_INVALID_SECURITY_DESCR;
+        auto native=extended_path(directory);
+        PSECURITY_DESCRIPTOR current=nullptr;
+        PACL current_acl=nullptr;
+        auto err=GetNamedSecurityInfoW(native.data(),SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,nullptr,nullptr,&current_acl,
+            nullptr,&current);
+        bool identical=false;
+        if(err==ERROR_SUCCESS) {
+            SECURITY_DESCRIPTOR_CONTROL control{};
+            DWORD revision=0;
+            if(!GetSecurityDescriptorControl(current,&control,&revision))
+                err=GetLastError();
+            else {
+                const bool same_protection=
+                    ((control^original_control)&SE_DACL_PROTECTED)==0;
+                const bool same_acl=
+                    (original_acl==nullptr && current_acl==nullptr) ||
+                    (original_acl!=nullptr && current_acl!=nullptr &&
+                     original_acl->AclSize==current_acl->AclSize &&
+                     std::memcmp(original_acl,current_acl,
+                                 original_acl->AclSize)==0);
+                identical=same_protection && same_acl;
+            }
+        }
+        if(current)LocalFree(current);
+        if(identical)return ERROR_SUCCESS;
+        // Restore even when the post-delete DACL could not be read. An
+        // unsuccessful restore aborts the edit BEFORE any WIM recapture.
+        const DWORD info=DACL_SECURITY_INFORMATION |
+            ((original_control&SE_DACL_PROTECTED)?
+              PROTECTED_DACL_SECURITY_INFORMATION:
+              UNPROTECTED_DACL_SECURITY_INFORMATION);
+        return SetNamedSecurityInfoW(native.data(),SE_FILE_OBJECT,info,
+            nullptr,nullptr,original_acl,nullptr);
+    }
+};
 // Remove one selected entry INSIDE a disposable WIMApplyImage tree. Unlike
 // whole-workspace cleanup this is used for an F8/Delete or file replacement
 // before recapture. It must never unlink the expanded root, traverse a
@@ -315,7 +392,21 @@ inline Result remove_expanded_entry(const fs::path& root,
             return report;
         }
         CleanupPrivileges privileges;
+        SurvivingDaclSnapshot surviving_parent(selected.parent_path());
+        const DWORD snapshot_error=surviving_parent.capture();
+        if(snapshot_error!=ERROR_SUCCESS) {
+            failure(report,surviving_parent.directory,snapshot_error);
+            return report; // No DACL changes and no partial deletion
+        }
         report.clean=delete_entry(selected,report);
+        const DWORD restore_error=surviving_parent.restore_if_changed();
+        if(restore_error!=ERROR_SUCCESS) {
+            // Do not recapture an image with altered Windows folder ACLs.
+            report.clean=false;
+            report.unsafe=true;
+            report.blocked=surviving_parent.directory;
+            report.error=restore_error;
+        }
     }catch(...) {
         failure(report,entry,ERROR_GEN_FAILURE);
     }
