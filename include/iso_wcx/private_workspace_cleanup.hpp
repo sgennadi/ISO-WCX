@@ -9,6 +9,7 @@
 #include <cwctype>
 #include <cwchar>
 #include <initializer_list>
+#include <iterator>
 #include <filesystem>
 #include <string>
 #include <vector>
