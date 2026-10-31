@@ -540,6 +540,9 @@ int main() {
             need(blocked.unsafe && !fs::exists(system/L"blocked.txt"),
                  "WIM F5 copied while an active mount marker existed");
             need(fs::remove(mounted),"remove WIM F5 synthetic mount marker");
+            // The test input lives outside the private WIM transaction and
+            // must be removed explicitly before the final leak assertion.
+            need(fs::remove(input),"remove WIM F5 source fixture");
         }
         // Scoped WIM F8 delete regression: use exactly the disposable
         // WIMApplyImage tree, never the original WIM or an outside path.
