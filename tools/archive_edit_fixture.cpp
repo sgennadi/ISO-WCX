@@ -27,14 +27,15 @@ static std::string wide_to_utf8(const wchar_t* text) {
 
 static void route_edit(const std::filesystem::path& image,
                        const std::vector<iso_wcx::ArchiveChange>& changes,
-                       const iso_wcx::EditProgress& progress) {
+                       const iso_wcx::EditProgress& progress,
+                       const iso_wcx::OpticalEditStatus& status = {}) {
     auto ext = image.extension().string();
     for (auto& c : ext) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
     if (ext == ".ima" || ext == ".img" || ext == ".bif" ||
         ext == ".vfd" || ext == ".flp" || ext == ".raw" ||
         ext == ".vhd" || ext == ".vhdx")
         iso_wcx::edit_fat(image, changes, progress);
-    else iso_wcx::edit_optical(image, changes, progress);
+    else iso_wcx::edit_optical(image, changes, progress, status);
 }
 
 static int invoke(const std::filesystem::path& image,
@@ -51,8 +52,17 @@ static int invoke(const std::filesystem::path& image,
             if (!has_source) return 2;
             change.source = source;
         }
-        route_edit(image, {change}, [&] { return operation != "cancel"; });
+        if(operation=="latecancel") {
+            // Reject only at verification, after stage data was actually
+            // overwritten. This proves rollback of a completed fast write.
+            route_edit(image,{change},[]{return true;},
+                [](const wchar_t*,unsigned percent) {return percent<96;});
+        } else {
+            route_edit(image,{change},[&] {return operation!="cancel";});
+        }
         return 0;
+    } catch (const iso_wcx::EditCancelled&) {
+        return operation=="latecancel"?3:1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
