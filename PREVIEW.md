@@ -17,7 +17,7 @@ or pre-install cleanup hook**. Installing a new WCX DLL can leave older
 `[PackerPlugins]` entries (including bare paths or flags `192`/`222`)
 that prevent TC from invoking F5 for WIM even when `PackFilesW` works.
 
-On the first WIM open after an upgrade, the Preview DLL automatically
+On the first WIM, ISO or UDF open after an upgrade, the Preview DLL automatically
 checks for obsolete ISO-WCX masks and offers repair only when it finds
 changes. It requires confirmation and never silently overwrites user INIs.
 The Preview DLL also ships a **native Repair WCX associations** control
@@ -216,6 +216,28 @@ Unpack the GitHub artifact wrapper, then open the enclosed
 `ISO-WCX-preview.zip` directly in Total Commander with **Enter**.
 Confirm the `pluginst.inf` installation. Both native plugin binaries
 are included; TC chooses Win32 WCX or x64 WCX64 itself.
+
+### Fast native ISO F5 staging and progress (Preview)
+
+Supported ISO9660/Joliet writes now use cancellable Windows `CopyFileExW`
+for the private same-volume working copy, including long paths and UNC shares.
+This reduces the cost of repeated 1-MiB user-mode reads and enables Windows
+copy acceleration where the filesystem supports it. A delayed, responsive
+ISO/UDF TaskDialog reports copy bytes (0-75%), payload writing, filesystem
+metadata regeneration, independent readback and atomic commit. TC's own WCX
+progress callback also receives exact stage percentages.
+
+Automated real-WCX tests exercise TC F5 (`PK_PACK_SAVE_PATHS`) into a nested
+ISO folder while the old panel is still open; multi-file replacement, byte
+readback through WCX extraction, single-file F8, and cancellation with a
+byte-identical original ISO and no abandoned private workspace. The same
+native copy optimization is used for the *narrow supported* ISO/UDF Bridge
+same-length replacement/deletion and boot-preserving deletion.
+
+**Not a universal ISO remaster:** adding files to an ISO/UDF Bridge, hybrid
+MBR/GPT ISO, or Rock Ridge layout remains unsupported unless a synchronized
+writer can guarantee both namespaces and boot structures survive. Plain
+ISO9660/Joliet and validated UDF-only Type-1 have different write limits.
 
 ### WIM and ISO editing in Preview
 
