@@ -177,6 +177,15 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     return 1;
 }
 
+static std::atomic<unsigned> wim_f5_source_scan_calls{0};
+static int __stdcall cancel_wim_f5_source_scan(wchar_t* stage,int size) {
+    if(size==0 && stage && std::wstring_view(stage).starts_with(
+            L"ISO-WCX: Scanning F5 source entries ")) {
+        ++wim_f5_source_scan_calls;
+        return 0;
+    }
+    return 1;
+}
 template<typename F>
 F bind(HMODULE library,const char* export_name) {
     return reinterpret_cast<F>(GetProcAddress(library,export_name));
@@ -816,6 +825,26 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         std::wstring nested_sub=L"image1\\Nested";
         std::wstring nested_source=incoming_files.wstring();
         wchar_t nested_list[]=L"F5 copied.txt\0folder.bin\0\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt\0Recursive Folder\0\0";
+        // F5 source-list expansion is cancellable before WIMApplyImage,
+        // source replacement, or allocation of private NTFS staging.
+        const auto before_f5_scan=load(original);
+        const auto before_f5_scan_time=fs::last_write_time(original);
+        const auto legacy_before_f5_scan=wim_legacy_staging_calls.load();
+        wim_f5_source_scan_calls.store(0);
+        set_progress(INVALID_HANDLE_VALUE,&cancel_wim_f5_source_scan);
+        const int cancelled_f5_scan=pack(packed.data(),nested_sub.data(),
+                                         nested_source.data(),nested_list,2);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(cancelled_f5_scan!=21 ||
+           wim_f5_source_scan_calls.load()==0 ||
+           load(original)!=before_f5_scan ||
+           fs::last_write_time(original)!=before_f5_scan_time ||
+           wim_legacy_staging_calls.load()!=legacy_before_f5_scan)
+            return 126;
+        for(const auto& item:fs::directory_iterator(root))
+            if(item.path().filename().wstring().starts_with(
+                   L".iso-wcx-edit-"))
+                return 127;
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         const int f5_result=pack(packed.data(),nested_sub.data(),
                                  nested_source.data(),nested_list,2);
