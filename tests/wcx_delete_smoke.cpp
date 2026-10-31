@@ -171,6 +171,70 @@ int wmain(int argc,wchar_t** argv) {
              names.contains(L"DOCS\\ONE.TXT"),
              "WCX failed to list packed test files");
 
+        // Real Total Commander F5: source from the opposite panel,
+        // target is a nested directory within the ISO, and the common
+        // PK_PACK_SAVE_PATHS (bit 2) flag is set. F7/F8 do not test this.
+        const auto f5_source=root/L"Incoming ISO files";
+        write_source(f5_source/L"COPIED.BIN","native ISO F5 copy bytes");
+        write_source(f5_source/L"HELLO.TXT","native ISO F5 overwrite bytes");
+        auto f5_dir=f5_source.wstring();
+        std::wstring f5_sub=L"DOCS";
+        wchar_t f5_list[]=L"COPIED.BIN\0HELLO.TXT\0\0";
+        need((caps()&2)!=0,
+             "GetPackerCaps omits MODIFY and TC prevents F5 into ISO");
+        need(pack(arc.data(),f5_sub.data(),f5_dir.data(),
+                  f5_list,2)==0,
+             "TC F5 PK_PACK_SAVE_PATHS cannot copy into existing ISO directory");
+        names=list_names(image,open,header,process,close);
+        need(names.contains(L"DOCS\\COPIED.BIN") &&
+             names.contains(L"DOCS\\HELLO.TXT"),
+             "WCX ISO F5 entries missing after nested copy");
+        // Verify both payloads via WCX extraction, not only the listing.
+        const auto verify_data=[&](const wchar_t* archive_file,
+                                   const std::string& expected) {
+            auto current=image.wstring();
+            OpenW options{};options.ArcName=current.data();
+            const HANDLE handle=open(&options);
+            need(handle && options.OpenResult==0,
+                 "WCX failed to reopen ISO after F5");
+            bool found=false;
+            try {
+                for(unsigned i=0;i<500;++i) {
+                    HeaderExW entry{};
+                    const int code=header(handle,&entry);
+                    if(code==10)break;
+                    need(code==0,"F5 ISO verification listing failed");
+                    if(std::wstring_view(entry.FileName)==archive_file) {
+                        const auto target=root/L"extracted";
+                        fs::create_directories(target);
+                        std::wstring dest=target.wstring();
+                        wchar_t output_name[]=L"verified.bin";
+                        need(process(handle,2,dest.data(),output_name)==0,
+                             "WCX cannot extract F5 copied ISO file");
+                        const auto bytes=load(target/L"verified.bin");
+                        need(std::string(bytes.begin(),bytes.end())==expected,
+                             "extracted ISO F5 content differs from source");
+                        found=true;
+                        break;
+                    }
+                    need(process(handle,0,nullptr,nullptr)==0,
+                         "WCX skip after F5 failed");
+                }
+                need(found,"ISO F5 file missing from WCX readback");
+            }catch(...) {close(handle);throw;}
+            need(close(handle)==0,"WCX CloseArchive after F5 failed");
+        };
+        verify_data(L"DOCS\\COPIED.BIN","native ISO F5 copy bytes");
+        verify_data(L"DOCS\\HELLO.TXT","native ISO F5 overwrite bytes");
+        // F8 delete of just one file must preserve the second new file.
+        wchar_t f8_copied[]=L"DOCS\\COPIED.BIN\0\0";
+        need(delW(arc.data(),f8_copied)==0,
+             "ISO F8 cannot remove F5 copied file");
+        names=list_names(image,open,header,process,close);
+        need(!names.contains(L"DOCS\\COPIED.BIN") &&
+             names.contains(L"DOCS\\HELLO.TXT"),
+             "ISO F8 removed wrong file or left deleted file visible");
+
         // Idempotent native PackFilesW mkdir must not rebuild a complete
         // ISO or append redundant directory/path table sectors.
         const auto before_repeat=load(image);
