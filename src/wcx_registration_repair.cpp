@@ -12,6 +12,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <climits>
+#include <cstdio>
+#include <cwchar>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -151,7 +154,7 @@ Document load(const fs::path& path) {
     check(n>=0 && n<=16*1024*1024,"INI exceeds 16 MiB safe-edit limit");
     input.seekg(0);
     std::string bytes(static_cast<std::size_t>(n),'\0');
-    if(!bytes.empty())input.read(bytes.data(),n);
+    if(!bytes.empty())input.read(bytes.data(),static_cast<std::streamsize>(n));
     check(bool(input) || (n==0),"Cannot read complete Total Commander INI");
     Document document{path,bytes,{},Coding::Utf8};
     if(bytes.starts_with("\xff\xfe")) {
@@ -311,17 +314,22 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian) {
             try {cache_backup=save_backup(cached.path);}
             catch(...) {throw;}
         }
+        bool assoc_committed=false,cache_committed=false;
         try {
             store(assoc,saved_assoc.text);
-            if(cache_path!=assoc_path && saved_cache.changed)
+            assoc_committed=true;
+            if(cache_path!=assoc_path && saved_cache.changed) {
                 store(cached,saved_cache.text);
+                cache_committed=true;
+            }
         }catch(...) {
-            // Roll back the first file if writing the separate x64 cache
-            // failed. Keep the dated backups even when restore succeeds.
+            // Never overwrite third-party edits when a before-write identity
+            // check failed. Restore only files this operation DID replace.
             std::error_code ignored;
-            fs::copy_file(backup,assoc.path,
-                fs::copy_options::overwrite_existing,ignored);
-            if(!cache_backup.empty())
+            if(assoc_committed)
+                fs::copy_file(backup,assoc.path,
+                    fs::copy_options::overwrite_existing,ignored);
+            if(cache_committed && !cache_backup.empty())
                 fs::copy_file(cache_backup,cached.path,
                     fs::copy_options::overwrite_existing,ignored);
             throw;
