@@ -564,6 +564,55 @@ int main() {
             fs::remove_all(outside_folder);
             fs::remove(foreign);
         }
+        // WIM F8 cooperative cancellation regression: walking a large
+        // Windows-image directory must allow the user to cancel without
+        // recapturing or replacing the source archive. Retain the ability
+        // to finish deletion after the user initiates a new operation.
+        {
+            const auto original_data=read_bytes(archive);
+            fs::path workspace;
+            {
+                iso_wcx::EditTransaction tx(archive);
+                workspace=tx.workspace;
+                const auto expanded=tx.workspace/L"expanded";
+                const auto large=expanded/L"Windows"/L"LargeDirectory";
+                fs::create_directories(large);
+                for(unsigned i=0;i<256;++i)
+                    write_bytes(large/("entry-"+std::to_string(i)+".dat"),"DATA");
+                unsigned polls=0;
+                iso_wcx::workspace_cleanup::DeletePulse cancel{
+                    +[](void* context,std::uint64_t visited)->bool {
+                        ++*static_cast<unsigned*>(context);
+                        return visited<128u;
+                    },&polls};
+                const auto interrupted=
+                    iso_wcx::workspace_cleanup::remove_expanded_entry(
+                        tx.workspace,expanded,large,&cancel);
+                need(!interrupted.clean &&
+                     interrupted.error==ERROR_CANCELLED && polls==2 &&
+                     cancel.visited==128,
+                     "large WIM F8 delete did not stop at a safe checkpoint");
+                need(fs::exists(large),
+                     "cancelled staged WIM deletion removed its own root");
+                need(read_bytes(archive)==original_data,
+                     "cancelled staged WIM delete modified source archive");
+                unsigned finish_polls=0;
+                iso_wcx::workspace_cleanup::DeletePulse finish{
+                    +[](void* context,std::uint64_t)->bool {
+                        ++*static_cast<unsigned*>(context);
+                        return true;
+                    },&finish_polls};
+                const auto complete=
+                    iso_wcx::workspace_cleanup::remove_expanded_entry(
+                        tx.workspace,expanded,large,&finish);
+                need(complete.clean && !fs::exists(large) &&
+                     finish_polls>=1,
+                     "large WIM F8 delete did not complete after cancelled stage");
+            }
+            need(!fs::exists(workspace) &&
+                 read_bytes(archive)==original_data,
+                 "cancelled WIM F8 transaction leaked a stage or changed source");
+        }
         // Simulate a file handle held by TC until CloseArchive. A complete
         // cleanup must be retried AFTER the handle is released.
         {
