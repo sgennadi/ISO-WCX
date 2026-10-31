@@ -107,6 +107,43 @@ static void set_protected_dacl(const fs::path& path) {
     need(error == ERROR_SUCCESS, "set protected DACL");
 }
 
+// A user-owned test folder that permits reading and changing its own DACL,
+// but denies ordinary FILE_ADD_FILE. This reproduces an applied Windows
+// System32 parent without requiring changes to actual system directories.
+static void set_copy_restricted_dacl(const fs::path& path) {
+    HANDLE token=nullptr;
+    need(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token)!=FALSE,
+         "open user token for WIM F5 fixture");
+    DWORD bytes=0;
+    (void)GetTokenInformation(token,TokenUser,nullptr,0,&bytes);
+    need(bytes>=sizeof(TOKEN_USER),"measure WIM F5 test user SID");
+    std::vector<BYTE> buffer(bytes);
+    const BOOL got=GetTokenInformation(token,TokenUser,
+                                       buffer.data(),bytes,&bytes);
+    CloseHandle(token);
+    need(got!=FALSE,"get WIM F5 test user SID");
+    const auto* user=reinterpret_cast<const TOKEN_USER*>(buffer.data());
+    EXPLICIT_ACCESSW access{};
+    access.grfAccessPermissions=READ_CONTROL|WRITE_DAC|
+        FILE_LIST_DIRECTORY|FILE_TRAVERSE|FILE_READ_ATTRIBUTES|
+        FILE_READ_EA|SYNCHRONIZE;
+    access.grfAccessMode=SET_ACCESS;
+    access.grfInheritance=NO_INHERITANCE;
+    access.Trustee.TrusteeForm=TRUSTEE_IS_SID;
+    access.Trustee.TrusteeType=TRUSTEE_IS_USER;
+    access.Trustee.ptstrName=static_cast<LPWSTR>(user->User.Sid);
+    PACL acl=nullptr;
+    const DWORD made=SetEntriesInAclW(1,&access,nullptr,&acl);
+    need(made==ERROR_SUCCESS,"prepare WIM F5 restricted parent DACL");
+    auto native=path.wstring();
+    const DWORD error=SetNamedSecurityInfoW(native.data(),SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,nullptr,acl,nullptr);
+    LocalFree(acl);
+    SetLastError(error);
+    need(error==ERROR_SUCCESS,"protect WIM F5 parent directory");
+}
+
 static std::wstring dacl_sddl(const fs::path& path) {
     DWORD count = 0;
     (void)GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION,
@@ -469,6 +506,40 @@ int main() {
                      "KEEP-OUTSIDE",
                  "WIM cleanup traversed outside the private workspace");
             fs::remove_all(root/L"symlink-target");
+        }
+        // WIM F5 copies into protected NTFS parents: never modify DACLs
+        // of the original WIM or leave a temporary full-access ACE on the
+        // surviving System32 parent before WIMCaptureImage.
+        {
+            const auto input=root/L"F5 protected input.txt";
+            write_bytes(input,"F5-PROTECTED-NONEMPTY");
+            iso_wcx::EditTransaction tx(archive);
+            const auto expanded=tx.workspace/L"expanded";
+            const auto system=expanded/L"Windows"/L"System32";
+            fs::create_directories(system);
+            set_copy_restricted_dacl(system);
+            const auto original_acl=dacl_sddl(system);
+            const auto dst=system/L"F5 copied.txt";
+            const auto added=iso_wcx::workspace_cleanup::
+                copy_into_expanded(tx.workspace,expanded,input,dst);
+            need(added.clean && fs::is_regular_file(dst) &&
+                 read_bytes(dst)=="F5-PROTECTED-NONEMPTY",
+                 "WIM F5 could not create file in protected System32");
+            need(dacl_sddl(system)==original_acl,
+                 "WIM F5 leaked temporary parent DACL into captured image");
+            const auto outside=root/L"F5-WIM-OUTSIDE.txt";
+            const auto escaped=iso_wcx::workspace_cleanup::
+                copy_into_expanded(tx.workspace,expanded,input,outside);
+            need(escaped.unsafe && !escaped.clean && !fs::exists(outside),
+                 "WIM F5 wrote outside the private expanded tree");
+            const auto mounted=tx.workspace/L"mounted";
+            fs::create_directory(mounted);
+            const auto blocked=iso_wcx::workspace_cleanup::
+                copy_into_expanded(tx.workspace,expanded,input,
+                                   system/L"blocked.txt");
+            need(blocked.unsafe && !fs::exists(system/L"blocked.txt"),
+                 "WIM F5 copied while an active mount marker existed");
+            need(fs::remove(mounted),"remove WIM F5 synthetic mount marker");
         }
         // Scoped WIM F8 delete regression: use exactly the disposable
         // WIMApplyImage tree, never the original WIM or an outside path.
