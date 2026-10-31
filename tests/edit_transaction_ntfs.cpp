@@ -473,6 +473,9 @@ int main() {
         // Simulate a file handle held by TC until CloseArchive. A complete
         // cleanup must be retried AFTER the handle is released.
         {
+            // Do not carry a prior synthetic mount warning into this
+            // independent locked-backup regression.
+            (void)iso_wcx::take_edit_cleanup_warning();
             fs::path temporary;
             HANDLE hold=INVALID_HANDLE_VALUE;
             {
@@ -486,11 +489,20 @@ int main() {
             }
             need(fs::exists(temporary),
                  "locked WIM stage was unexpectedly deleted");
+            need(!iso_wcx::edit_cleanup_warning_slot().empty(),
+                 "locked WIM backup did not retain a pending cleanup warning");
+            // The first retry still has a real sharing violation. It must
+            // preserve the backup AND keep the warning actionable.
+            iso_wcx::retry_deferred_edit_workspace_cleanup();
+            need(fs::exists(temporary) &&
+                 !iso_wcx::edit_cleanup_warning_slot().empty(),
+                 "active locked backup warning disappeared prematurely");
             CloseHandle(hold);
             iso_wcx::retry_deferred_edit_workspace_cleanup();
             need(!fs::exists(temporary),
                  "CloseArchive deferred backup cleanup did not complete");
-            (void)iso_wcx::take_edit_cleanup_warning();
+            need(iso_wcx::take_edit_cleanup_warning().empty(),
+                 "successful deferred cleanup showed a stale warning to TC");
         }
         for (const auto& entry : fs::directory_iterator(root))
             need(entry.path() == archive, "transaction leaked workspace");
