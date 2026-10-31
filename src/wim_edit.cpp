@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -168,8 +169,26 @@ void preserve_metadata(HMODULE m,HANDLE old_image,HANDLE new_image){
     checked(api<BOOL(WINAPI*)(HANDLE,void*,DWORD)>(m,"WIMSetImageInformation")(new_image,xml.data(),static_cast<DWORD>((xml.size()+1)*sizeof(wchar_t))),"write WIM XML");
 }
 std::filesystem::path relative_path(const std::string& text){return std::filesystem::u8path(edit_path(text));}
-void no_reparse(const std::filesystem::path& root,const std::filesystem::path& relative){
-    auto path=root;for(const auto& part:relative){path/=part;DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){auto err=GetLastError();checked(err==ERROR_FILE_NOT_FOUND||err==ERROR_PATH_NOT_FOUND,"cannot inspect WIM edit path");continue;}if(attr&FILE_ATTRIBUTE_REPARSE_POINT)throw EditUnsupported("editing through WIM reparse points is not supported");}
+// Reject reparse ancestors even when deleting a selected symlink/junction.
+// A reparse LEAF is safe to unlink via remove_expanded_entry(), which never
+// descends into its target. Folder creation and replacement stay strict.
+void no_reparse(const std::filesystem::path& root,
+                const std::filesystem::path& relative,
+                bool allow_leaf_reparse=false) {
+    auto path=root;
+    for(auto it=relative.begin();it!=relative.end();++it) {
+        path/=*it;
+        const DWORD attr=GetFileAttributesW(path.c_str());
+        if(attr==INVALID_FILE_ATTRIBUTES) {
+            const DWORD error=GetLastError();
+            checked(error==ERROR_FILE_NOT_FOUND ||
+                    error==ERROR_PATH_NOT_FOUND,"cannot inspect WIM edit path");
+            continue;
+        }
+        if((attr&FILE_ATTRIBUTE_REPARSE_POINT) &&
+           !(allow_leaf_reparse && std::next(it)==relative.end()))
+            throw EditUnsupported("editing through WIM reparse points is not supported");
+    }
 }
 // WIMApplyImage may restore Windows system-folder DACLs that deny ordinary
 // recursive deletion. Delete selected entries only through the same scoped,
@@ -677,7 +696,9 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             callback.begin_stage(L"Edit WIM image "+number,apply_end,0);
             for(const auto& c:edits[index]){
                 callback.tick();
-                auto relative=relative_path(c.path);no_reparse(expanded,relative);auto target=expanded/relative;
+                auto relative=relative_path(c.path);
+                no_reparse(expanded,relative,c.remove);
+                auto target=expanded/relative;
                 if(c.remove) {
                     // This private NTFS removal is intentionally recursive for selected
                     // cleanup, but a user F8/Delete request must NOT succeed
