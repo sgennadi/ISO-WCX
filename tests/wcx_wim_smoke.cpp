@@ -56,6 +56,7 @@ static std::atomic<unsigned> wim_stage_calls{0};
 static std::atomic<unsigned> wim_legacy_staging_calls{0};
 static std::atomic<unsigned> wim_delete_metadata_preflight_calls{0};
 static std::atomic<bool> cancel_wim_delete_preflight{false};
+static std::atomic<bool> cancel_wim_folder_preflight{false};
 static std::atomic<unsigned> wim_fast_mount_stages{0};
 static std::atomic<unsigned> wim_recovery_notes_seen{0};
 static fs::path wim_recovery_test_root;
@@ -121,6 +122,10 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
             ++wim_delete_metadata_preflight_calls;
             if(cancel_wim_delete_preflight.load())return 0;
         }
+        if(stage && cancel_wim_folder_preflight.load() &&
+           std::wstring_view(stage).find(L"Check WIM existing folders")!=
+                std::wstring_view::npos)
+            return 0;
         if(stage && std::wstring_view(stage).find(
                 L"Create WIM folders without applying image") !=
                 std::wstring_view::npos) {
@@ -616,6 +621,24 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
             if(item.path().filename().wstring().starts_with(
                    L".iso-wcx-edit-"))
                 return 117;
+        // Cancellation during a metadata-only F7 check must never leave
+        // a scratch tree, invalidate a TC panel or modify the original.
+        const auto before_cancelled_f7=load(original);
+        const auto legacy_before_cancel_f7=wim_legacy_staging_calls.load();
+        cancel_wim_folder_preflight.store(true);
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int cancelled_f7=pack(packed.data(),sub.data(),src.data(),
+                                    mkdir_list,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        cancel_wim_folder_preflight.store(false);
+        if(cancelled_f7!=21 ||
+           load(original)!=before_cancelled_f7 ||
+           wim_legacy_staging_calls.load()!=legacy_before_cancel_f7)
+            return 119;
+        for(const auto& item:fs::directory_iterator(root))
+            if(item.path().filename().wstring().starts_with(
+                   L".iso-wcx-edit-"))
+                return 120;
         // A differently-cased copy of an existing NTFS directory must NOT
         // silently succeed or attempt a multi-gigabyte recapture.
         fs::create_directories(incoming/L"new_empty_folder");
