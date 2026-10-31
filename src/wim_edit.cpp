@@ -171,11 +171,21 @@ std::filesystem::path relative_path(const std::string& text){return std::filesys
 void no_reparse(const std::filesystem::path& root,const std::filesystem::path& relative){
     auto path=root;for(const auto& part:relative){path/=part;DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){auto err=GetLastError();checked(err==ERROR_FILE_NOT_FOUND||err==ERROR_PATH_NOT_FOUND,"cannot inspect WIM edit path");continue;}if(attr&FILE_ATTRIBUTE_REPARSE_POINT)throw EditUnsupported("editing through WIM reparse points is not supported");}
 }
-void remove_tree(const std::filesystem::path& path){
-    DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES)return;
-    if((attr&FILE_ATTRIBUTE_DIRECTORY)&&!(attr&FILE_ATTRIBUTE_REPARSE_POINT))for(const auto& item:std::filesystem::directory_iterator(path))remove_tree(item.path());
-    checked(SetFileAttributesW(path.c_str(),attr&~FILE_ATTRIBUTE_READONLY),"clear temporary read-only flag");
-    checked((attr&FILE_ATTRIBUTE_DIRECTORY)?RemoveDirectoryW(path.c_str()):DeleteFileW(path.c_str()),"remove WIM entry");
+// WIMApplyImage may restore Windows system-folder DACLs that deny ordinary
+// recursive deletion. Delete selected entries only through the same scoped,
+// reparse-safe NTFS cleanup engine used by private WIM workspaces.
+void remove_staged_wim_entry(const std::filesystem::path& workspace,
+                             const std::filesystem::path& expanded,
+                             const std::filesystem::path& target) {
+    const auto result=workspace_cleanup::remove_expanded_entry(
+        workspace,expanded,target);
+    if(result.clean)return;
+    const auto detail="WIM staged delete failed (Win32 "+
+        std::to_string(result.error)+")";
+    if(result.unsafe)
+        throw EditUnsupported(detail+
+            ": unsafe path, active mount or reparse ancestor");
+    throw std::runtime_error(detail);
 }
 
 // The fast folder-only path is deliberately opt-in during initial field
@@ -669,14 +679,19 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 callback.tick();
                 auto relative=relative_path(c.path);no_reparse(expanded,relative);auto target=expanded/relative;
                 if(c.remove) {
-                    // remove_tree() is intentionally idempotent for recursive
+                    // This private NTFS removal is intentionally recursive for selected
                     // cleanup, but a user F8/Delete request must NOT succeed
                     // if the selected WIM entry was already absent. Otherwise
                     // we recapture a large install.wim and report a fake
                     // successful deletion of nothing.
-                    if(GetFileAttributesW(target.c_str())==INVALID_FILE_ATTRIBUTES)
-                        throw EditUnsupported("WIM entry to delete was not found");
-                    remove_tree(target);
+                    const DWORD attr=GetFileAttributesW(target.c_str());
+                    if(attr==INVALID_FILE_ATTRIBUTES) {
+                        const DWORD error=GetLastError();
+                        if(error==ERROR_FILE_NOT_FOUND ||
+                           error==ERROR_PATH_NOT_FOUND)
+                            throw EditUnsupported("WIM entry to delete was not found");
+                    }
+                    remove_staged_wim_entry(tx.workspace,expanded,target);
                     continue;
                 }
                 if(c.directory){std::filesystem::create_directories(target);continue;}
@@ -684,7 +699,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 std::filesystem::create_directories(target.parent_path());
                 if(std::filesystem::exists(target)){
                     if(std::filesystem::is_directory(target))throw EditUnsupported("cannot replace a directory with a file");
-                    remove_tree(target);
+                    remove_staged_wim_entry(tx.workspace,expanded,target);
                 }
                 checked(CopyFileW(c.source.c_str(),target.c_str(),TRUE),"copy replacement into WIM workspace");
             }
