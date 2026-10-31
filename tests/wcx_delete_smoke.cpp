@@ -37,6 +37,12 @@ static int __stdcall record_iso_progress(wchar_t*,int size) {
     }
     return 1;
 }
+static int __stdcall cancel_iso_staging(wchar_t* name,int size) {
+    (void)name;
+    // Fail at a real CopyFileEx clone checkpoint, not only at preflight.
+    if(size<=-30 && size>=-75)return 0;
+    return 1;
+}
 struct OpenW {
     wchar_t* ArcName; int OpenMode,OpenResult;
     wchar_t* CmtBuf; int CmtBufSize,CmtSize,CmtState;
@@ -267,6 +273,21 @@ int wmain(int argc,wchar_t** argv) {
              names.contains(L"DOCS\\HELLO.TXT"),
              "ISO F8 removed wrong file or left deleted file visible");
 
+        // Cancelling an ISO F5 during the native staged clone must roll
+        // back the entire private transaction, preserve the original bytes,
+        // and leave no scratch folders. The original user data remains live.
+        const auto before_cancel=load(image);
+        wchar_t cancel_list[]=L"COPIED.BIN\0\0";
+        setpack(INVALID_HANDLE_VALUE,&cancel_iso_staging);
+        const int cancelled_iso=pack(arc.data(),f5_sub.data(),f5_dir.data(),
+                                     cancel_list,2);
+        setpack(INVALID_HANDLE_VALUE,nullptr);
+        need(cancelled_iso==21 && load(image)==before_cancel,
+             "cancelled ISO F5 changed source image or ignored cancellation");
+        for(const auto& entry:fs::directory_iterator(root)) {
+            if(entry.path().filename().wstring().starts_with(L".iso-wcx-edit-"))
+                need(false,"cancelled ISO F5 left a private edit workspace");
+        }
         // Idempotent native PackFilesW mkdir must not rebuild a complete
         // ISO or append redundant directory/path table sectors.
         const auto before_repeat=load(image);
