@@ -470,6 +470,95 @@ int main() {
                  "WIM cleanup traversed outside the private workspace");
             fs::remove_all(root/L"symlink-target");
         }
+        // Scoped WIM F8 delete regression: use exactly the disposable
+        // WIMApplyImage tree, never the original WIM or an outside path.
+        {
+            iso_wcx::EditTransaction tx(archive);
+            const auto expanded=tx.workspace/L"expanded";
+            const auto system=expanded/L"Windows"/L"System32";
+            fs::create_directories(system);
+            const auto protected_file=system/L"readonly.dll";
+            write_bytes(protected_file,"RECAPTURE-DELETE");
+            need(SetFileAttributesW(protected_file.c_str(),
+                  FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_HIDDEN)!=FALSE,
+                  "mark WIM delete target readonly and hidden");
+            set_protected_dacl(system);
+            auto removed=iso_wcx::workspace_cleanup::remove_expanded_entry(
+                tx.workspace,expanded,protected_file);
+            need(removed.clean && !fs::exists(protected_file),
+                 "scoped WIM F8 failed to remove protected readonly file");
+
+            // Deleting protected directories also requires NTFS DACL repair
+            // confined to the private WIM workspace.
+            const auto protected_dir=expanded/L"Windows";
+            removed=iso_wcx::workspace_cleanup::remove_expanded_entry(
+                tx.workspace,expanded,protected_dir);
+            need(removed.clean && !fs::exists(protected_dir),
+                 "scoped WIM F8 failed to remove protected system folder");
+            need(fs::exists(expanded),
+                 "scoped deletion accidentally removed the expanded root");
+
+            const auto foreign=root/"WIM-OUTSIDE-DELETE.txt";
+            write_bytes(foreign,"MUST-SURVIVE");
+            const auto outside=iso_wcx::workspace_cleanup::
+                remove_expanded_entry(tx.workspace,expanded,foreign);
+            need(outside.unsafe && !outside.clean &&
+                 read_bytes(foreign)=="MUST-SURVIVE",
+                 "scoped WIM delete touched an external file");
+
+            const auto whole_root=iso_wcx::workspace_cleanup::
+                remove_expanded_entry(tx.workspace,expanded,expanded);
+            need(whole_root.unsafe && !whole_root.clean && fs::exists(expanded),
+                 "scoped WIM delete allowed deleting the expanded root");
+
+            const auto dotdot=iso_wcx::workspace_cleanup::
+                remove_expanded_entry(tx.workspace,expanded,
+                    expanded/L"sub"/L".."/L"target");
+            need(dotdot.unsafe && !dotdot.clean,
+                 "scoped WIM delete accepted a dotdot path");
+
+            const auto link=expanded/L"external-link";
+            const auto outside_folder=root/"WIM-EXTERNAL-DELETE";
+            fs::create_directories(outside_folder);
+            write_bytes(outside_folder/L"keep.txt","DO-NOT-DELETE");
+            const BOOL made_link=CreateSymbolicLinkW(
+                link.c_str(),outside_folder.c_str(),
+                SYMBOLIC_LINK_FLAG_DIRECTORY|0x2u);
+            if(made_link) {
+                const auto via_link=iso_wcx::workspace_cleanup::
+                    remove_expanded_entry(tx.workspace,expanded,
+                        link/L"keep.txt");
+                need(via_link.unsafe && !via_link.clean &&
+                     read_bytes(outside_folder/L"keep.txt")=="DO-NOT-DELETE",
+                     "scoped WIM delete followed an external reparse ancestor");
+                const auto unlink=iso_wcx::workspace_cleanup::
+                    remove_expanded_entry(tx.workspace,expanded,link);
+                need(unlink.clean && !fs::exists(link) &&
+                     read_bytes(outside_folder/L"keep.txt")=="DO-NOT-DELETE",
+                     "scoped WIM delete failed to safely unlink reparse entry");
+            }
+
+            // Never touch selected entries while any native mount marker
+            // exists; even a DISM-empty WIMGAPI mount may remain active.
+            const auto mounted=tx.workspace/L"mounted";
+            fs::create_directories(mounted);
+            write_bytes(expanded/L"target.txt","KEEP-WHILE-MOUNTED");
+            const auto during_mount=iso_wcx::workspace_cleanup::
+                remove_expanded_entry(tx.workspace,expanded,
+                    expanded/L"target.txt");
+            need(during_mount.unsafe && !during_mount.clean &&
+                 read_bytes(expanded/L"target.txt")=="KEEP-WHILE-MOUNTED",
+                 "scoped WIM delete ignored a possible active mount");
+            need(fs::remove(mounted),
+                 "remove synthetic empty mount marker after scoped test");
+            const auto after_mount=iso_wcx::workspace_cleanup::
+                remove_expanded_entry(tx.workspace,expanded,
+                    expanded/L"target.txt");
+            need(after_mount.clean && !fs::exists(expanded/L"target.txt"),
+                 "scoped WIM delete failed after removing mount marker");
+            fs::remove_all(outside_folder);
+            fs::remove(foreign);
+        }
         // Simulate a file handle held by TC until CloseArchive. A complete
         // cleanup must be retried AFTER the handle is released.
         {
