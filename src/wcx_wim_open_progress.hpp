@@ -43,6 +43,7 @@ public:
 private:
     void run() noexcept;
     [[nodiscard]] std::wstring describe() const;
+    [[nodiscard]] std::wstring headline() const;
     static HRESULT CALLBACK dialog_callback(
         HWND window,UINT message,WPARAM wparam,LPARAM lparam,
         LONG_PTR context) noexcept;
@@ -51,7 +52,6 @@ private:
     mutable std::mutex edit_mutex_;
     std::wstring edit_stage_;
     std::atomic<unsigned> edit_percent_{0};
-    std::atomic<ULONGLONG> edit_last_update_{0};
     std::atomic<bool> finished_{false};
     std::atomic<bool> cancelled_{false};
     std::atomic<std::uint32_t> image_{0};
@@ -65,6 +65,7 @@ private:
     std::condition_variable wake_;
     std::thread worker_;
     std::wstring last_message_;
+    std::wstring last_headline_;
     bool progress_is_determinate_=false;
 };
 } // namespace iso_wcx

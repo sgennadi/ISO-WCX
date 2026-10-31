@@ -45,7 +45,6 @@ bool WimOpenProgress::on_edit(const wchar_t* stage,unsigned percent) noexcept {
             edit_stage_=stage?stage:L"Processing Windows image";
         }
         edit_percent_.store(std::min(percent,99u));
-        edit_last_update_.store(GetTickCount64());
         return !cancelled_.load();
     } catch (...) {
         // A failed optional UI update must not corrupt an otherwise valid WIM.
@@ -60,63 +59,53 @@ void WimOpenProgress::on_scan(std::uint32_t index,std::size_t entries) {
     if (cancelled_.load()) throw WimOpenCancelled{};
 }
 
+namespace {
+std::wstring elapsed_label(ULONGLONG milliseconds) {
+    const auto seconds=milliseconds/1000u;
+    const auto pad=[](ULONGLONG value) {
+        return (value<10?std::wstring(L"0"):std::wstring())+
+               std::to_wstring(value);
+    };
+    if(seconds>=3600u)
+        return std::to_wstring(seconds/3600u)+L":"+
+               pad((seconds/60u)%60u)+L":"+pad(seconds%60u);
+    return pad(seconds/60u)+L":"+pad(seconds%60u);
+}
+}
+
+std::wstring WimOpenProgress::headline() const {
+    if(cancelled_.load())return L"Stopping safely...";
+    if(mode_==Mode::Editing) {
+        std::lock_guard lock(edit_mutex_);
+        return edit_stage_.empty()?L"Preparing WIM update":edit_stage_;
+    }
+    if(publishing_.load())return L"Preparing the file list";
+    const auto index=image_.load(),count=image_count_.load();
+    if(!index)return L"Opening Windows image";
+    return L"Reading image "+std::to_wstring(index)+
+        (count?L" of "+std::to_wstring(count):std::wstring());
+}
+
 std::wstring WimOpenProgress::describe() const {
     std::wstring result;
     if(mode_==Mode::Editing) {
-        {
-            std::lock_guard lock(edit_mutex_);
-            result=edit_stage_.empty()?L"Preparing WIM edit":edit_stage_;
-        }
-        const auto percent=edit_percent_.load();
-        result+=L"\nOperation checkpoint: "+std::to_wstring(percent)+L"%";
-        const auto elapsed=(GetTickCount64()-started_)/1000u;
-        result+=L"\nElapsed: "+std::to_wstring(elapsed)+L" seconds";
-        const auto since=GetTickCount64()-edit_last_update_.load();
-        if(since>3000u && edit_last_update_.load()!=0)
-            result+=L"\nWindows Imaging API is still working on this stage.";
-        if(cancelled_.load())
-            result+=L"\nCancellation requested; waiting for a safe "
-                    L"Windows Imaging API checkpoint...";
-        else
-            result+=L"\nThe original WIM remains unchanged until verified commit.";
-        return result;
-    }
-    const auto image=image_.load();
-    const auto total=image_count_.load();
-    if (publishing_.load()) {
-        result=L"Publishing file list to Total Commander...\n";
+        result=L"Checkpoint  "+std::to_wstring(edit_percent_.load())+L"%";
+    } else if(publishing_.load()) {
         const auto total=total_entries_.load();
         const auto done=std::min(published_.load(),total);
-        result+=L"Entries: "+std::to_wstring(done)+
-                L" / "+std::to_wstring(total);
-        if(total) {
-            // WIMGAPI has finished the scan, so the listing denominator
-            // is now exact. Do not fake a percentage during enumeration.
-            const auto percent=std::min<std::uint64_t>(
-                100,(done*100)/total);
-            result+=L" ("+std::to_wstring(percent)+L"%)";
-        }
-    } else if (!image) {
-        result=L"Opening Windows Imaging API and reading WIM metadata...";
+        result=L"Entries  "+std::to_wstring(done)+L" / "+std::to_wstring(total);
     } else {
-        result=L"Opening WIM image "+std::to_wstring(image);
-        if (total) result+=L" of "+std::to_wstring(total);
-        result+=L"\nWindows Imaging API: loading image metadata / "
-                L"enumerating folders";
-        result+=L"\nMetadata entries discovered: "+
-                std::to_wstring(entries_.load());
+        result=L"Entries found  "+std::to_wstring(entries_.load());
     }
-    const auto seconds=(GetTickCount64()-started_)/1000u;
-    result+=L"\nElapsed: "+std::to_wstring(seconds)+L" seconds";
-    if (cancelled_.load()) {
-        result+=L"\nCancellation requested. Waiting for the current "
-                L"Windows Imaging API operation to return...";
-    } else if (publishing_.load()) {
-        result+=L"\nListing metadata only. WIM file contents are not being read.";
-    } else {
-        result+=L"\nScanning directory metadata. File contents are not "
-                L"being extracted or hashed.";
-    }
+    result+=L"    |    Elapsed  "+elapsed_label(GetTickCount64()-started_);
+    // Keep the same number of lines during long API calls so the layout
+    // and Cancel button do not jump while the user is trying to click.
+    if(cancelled_.load())
+        result+=L"\n\nWaiting for Windows to reach a safe stopping point.";
+    else if(mode_==Mode::Editing)
+        result+=L"\n\nWorking on this step. Large images can take several minutes.";
+    else
+        result+=L"\n\nReading directory information from the image.";
     return result;
 }
 
@@ -139,7 +128,7 @@ HRESULT CALLBACK WimOpenProgress::dialog_callback(
                 break;
             }
             {
-                if(self->mode_==Mode::Opening && self->publishing_.load()) {
+                if(self->mode_==Mode::Editing || self->publishing_.load()) {
                     if(!self->progress_is_determinate_) {
                         SendMessageW(window,TDM_SET_MARQUEE_PROGRESS_BAR,FALSE,0);
                         SendMessageW(window,TDM_SET_PROGRESS_BAR_RANGE,0,
@@ -147,12 +136,21 @@ HRESULT CALLBACK WimOpenProgress::dialog_callback(
                         self->progress_is_determinate_=true;
                     }
                     const auto total=self->total_entries_.load();
-                    if(total) {
+                    if(self->mode_==Mode::Editing) {
+                        SendMessageW(window,TDM_SET_PROGRESS_BAR_POS,
+                                     self->edit_percent_.load(),0);
+                    } else if(total) {
                         const auto done=self->published_.load();
                         const auto percent=static_cast<WPARAM>(
                             std::min<std::uint64_t>(100,done*100/total));
                         SendMessageW(window,TDM_SET_PROGRESS_BAR_POS,percent,0);
                     }
+                }
+                const auto heading=self->headline();
+                if(heading!=self->last_headline_) {
+                    self->last_headline_=heading;
+                    SendMessageW(window,TDM_SET_ELEMENT_TEXT,TDE_MAIN_INSTRUCTION,
+                                 reinterpret_cast<LPARAM>(heading.c_str()));
                 }
                 auto message_text=self->describe();
                 if (message_text!=self->last_message_) {
@@ -168,6 +166,10 @@ HRESULT CALLBACK WimOpenProgress::dialog_callback(
                 // The synchronous WIMGAPI call may not be interruptible;
                 // keep the progress window open until the next safe callback.
                 self->cancelled_.store(true);
+                SendMessageW(window,TDM_SET_PROGRESS_BAR_STATE,PBST_PAUSED,0);
+                const auto heading=self->headline();
+                SendMessageW(window,TDM_SET_ELEMENT_TEXT,TDE_MAIN_INSTRUCTION,
+                             reinterpret_cast<LPARAM>(heading.c_str()));
                 const auto text=self->describe();
                 SendMessageW(window,TDM_SET_ELEMENT_TEXT,TDE_CONTENT,
                              reinterpret_cast<LPARAM>(text.c_str()));
@@ -200,19 +202,27 @@ void WimOpenProgress::run() noexcept {
                        TDF_SHOW_MARQUEE_PROGRESS_BAR|
                        TDF_ALLOW_DIALOG_CANCELLATION;
         config.dwCommonButtons=TDCBF_CANCEL_BUTTON;
+        config.cxWidth=360;
+        config.pszMainIcon=TD_INFORMATION_ICON;
         config.pszWindowTitle=mode_==Mode::Editing?
-            L"ISO-WCX - Editing WIM":L"ISO-WCX - Opening WIM";
-        config.pszMainInstruction=mode_==Mode::Editing?
-            L"Creating files and folders in WIM":
-            L"Opening WIM in Total Commander";
-        config.pszContent=mode_==Mode::Editing?
-            L"Preparing WIM editing. A moving indicator remains active "
-            L"during long synchronous Windows Imaging API calls.":
-            L"Loading Windows image indexes. Large install.wim files "
-            L"may contain hundreds of thousands of paths.";
+            L"ISO-WCX | Updating WIM":L"ISO-WCX | Opening WIM";
+        const auto initial_heading=headline();
+        const auto initial_content=describe();
+        config.pszMainInstruction=initial_heading.c_str();
+        config.pszContent=initial_content.c_str();
         config.pszFooter=mode_==Mode::Editing?
-            L"Private copy. The source is replaced only after verification.":
-            L"Metadata-only operation. The WIM remains unchanged.";
+            L"Original image protected until verification completes.":
+            L"Read-only operation. Your image stays unchanged.";
+        config.pszExpandedControlText=L"Details";
+        config.pszCollapsedControlText=L"Hide details";
+        config.pszExpandedInformation=mode_==Mode::Editing?
+            L"Changes are prepared in a private working copy and verified "
+            L"before replacing the original image.\n\n"
+            L"The bar shows reported operation checkpoints, not a time estimate. "
+            L"It can pause while Windows processes a large image. Cancel takes "
+            L"effect at the next safe Windows Imaging API checkpoint.":
+            L"Only directory metadata is listed. File contents are not extracted "
+            L"or hashed. The bar becomes determinate when the entry count is known.";
         config.pfCallback=&WimOpenProgress::dialog_callback;
         config.lpCallbackData=reinterpret_cast<LONG_PTR>(this);
         // Defer loading ComCtl32 until an actual Total Commander UI is
