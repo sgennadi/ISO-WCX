@@ -436,6 +436,142 @@ inline Result remove_expanded_entry(const fs::path& root,
     }
     return report;
 }
+// Copy an F5 source into one private WIMApplyImage tree. Windows images often
+// protect directories (e.g. System32) against file creation, even when the
+// plugin has SeRestorePrivilege. Grant temporary access ONLY to the parent
+// of the new destination, and restore its exact original DACL BEFORE capture.
+// Never follow reparse ancestors or write outside the private apply tree.
+inline Result copy_into_expanded(const fs::path& root,
+                                 const fs::path& expanded,
+                                 const fs::path& source,
+                                 const fs::path& destination) noexcept {
+    Result report{};
+    try {
+        const auto workspace=fs::absolute(root).lexically_normal();
+        const auto image_tree=fs::absolute(expanded).lexically_normal();
+        const auto target=fs::absolute(destination).lexically_normal();
+        const auto name=image_tree.filename().wstring();
+        bool dot_component=false;
+        for(const auto& part:destination)
+            if(part==fs::path(L".") || part==fs::path(L"..")) {
+                dot_component=true;
+                break;
+            }
+        const auto prefix=std::mismatch(
+            image_tree.begin(),image_tree.end(),
+            target.begin(),target.end());
+        if(!private_workspace_name(workspace) ||
+           image_tree.parent_path()!=workspace ||
+           !(name==L"expanded" || name.starts_with(L"expanded-image-")) ||
+           prefix.first!=image_tree.end() ||
+           prefix.second==target.end() ||
+           dot_component) {
+            report.unsafe=true;
+            failure(report,destination,ERROR_INVALID_NAME);
+            return report;
+        }
+        const DWORD src_attr=attributes(source);
+        if(src_attr==INVALID_FILE_ATTRIBUTES ||
+           (src_attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))) {
+            failure(report,source,src_attr==INVALID_FILE_ATTRIBUTES?
+                    GetLastError():ERROR_ACCESS_DENIED);
+            return report;
+        }
+        const DWORD root_attr=attributes(workspace);
+        const DWORD tree_attr=attributes(image_tree);
+        if(root_attr==INVALID_FILE_ATTRIBUTES ||
+           tree_attr==INVALID_FILE_ATTRIBUTES ||
+           !(root_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           !(tree_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           (root_attr&FILE_ATTRIBUTE_REPARSE_POINT) ||
+           (tree_attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+            report.unsafe=true;
+            failure(report,expanded,ERROR_ACCESS_DENIED);
+            return report;
+        }
+        const DWORD mount_attr=attributes(workspace/L"mounted");
+        const DWORD mount_err=mount_attr==INVALID_FILE_ATTRIBUTES?
+            GetLastError():ERROR_SUCCESS;
+        if(mount_attr!=INVALID_FILE_ATTRIBUTES ||
+           (mount_err!=ERROR_FILE_NOT_FOUND &&
+            mount_err!=ERROR_PATH_NOT_FOUND)) {
+            report.unsafe=true;
+            failure(report,workspace/L"mounted",ERROR_BUSY);
+            return report;
+        }
+        auto node=prefix.second;
+        fs::path parent=image_tree;
+        for(;node!=target.end();++node) {
+            if(std::next(node)==target.end())break;
+            parent/=*node;
+            const DWORD attr=attributes(parent);
+            if(attr==INVALID_FILE_ATTRIBUTES ||
+               !(attr&FILE_ATTRIBUTE_DIRECTORY) ||
+               (attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+                report.unsafe=true;
+                failure(report,parent,ERROR_ACCESS_DENIED);
+                return report;
+            }
+        }
+        const DWORD parent_attr=attributes(target.parent_path());
+        if(parent_attr==INVALID_FILE_ATTRIBUTES ||
+           !(parent_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           (parent_attr&FILE_ATTRIBUTE_REPARSE_POINT)) {
+            report.unsafe=true;
+            failure(report,target.parent_path(),ERROR_ACCESS_DENIED);
+            return report;
+        }
+        const auto src=extended_path(source);
+        const auto dst=extended_path(target);
+        const DWORD dst_attr=attributes(target);
+        if(dst_attr!=INVALID_FILE_ATTRIBUTES) {
+            failure(report,target,ERROR_ALREADY_EXISTS);
+            return report;
+        }
+        const DWORD dst_err=GetLastError();
+        if(dst_err!=ERROR_FILE_NOT_FOUND &&
+           dst_err!=ERROR_PATH_NOT_FOUND) {
+            failure(report,target,dst_err);
+            return report;
+        }
+        if(CopyFileW(src.c_str(),dst.c_str(),TRUE)) {
+            report.clean=true;
+            return report;
+        }
+        DWORD copy_error=GetLastError();
+        if(copy_error!=ERROR_ACCESS_DENIED) {
+            failure(report,target,copy_error);
+            return report;
+        }
+        CleanupPrivileges privileges;
+        SurvivingDaclSnapshot original_parent(target.parent_path());
+        const DWORD saved=original_parent.capture();
+        if(saved!=ERROR_SUCCESS) {
+            failure(report,target.parent_path(),saved);
+            return report;
+        }
+        const DWORD granted=enable_temporary_directory_access(
+            target.parent_path());
+        if(granted==ERROR_SUCCESS) {
+            report.clean=CopyFileW(src.c_str(),dst.c_str(),TRUE)!=FALSE;
+            if(!report.clean)copy_error=GetLastError();
+        } else {
+            copy_error=granted;
+        }
+        const DWORD restored=original_parent.restore_if_changed();
+        if(restored!=ERROR_SUCCESS) {
+            report.clean=false;
+            report.unsafe=true; // Never capture with an altered parent DACL.
+            report.blocked=target.parent_path();
+            report.error=restored;
+            return report;
+        }
+        if(!report.clean)failure(report,target,copy_error);
+    }catch(...) {
+        failure(report,destination,ERROR_GEN_FAILURE);
+    }
+    return report;
+}
 inline Result cleanup_expanded(
         const fs::path& root,const fs::path& expanded) noexcept {
     Result report{};
