@@ -566,9 +566,24 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         }
         auto wide=archive;auto ansi=to_ansi(archive);const auto pw=pack_progress_w.load();const auto pa=pack_progress_a.load();
         const auto progress=[&]{if(pw)return pw(wide.data(),0)!=0;if(pa)return pa(ansi.data(),0)!=0;return true;};
-        if(ext==L".iso"||ext==L".udf")
-             iso_wcx::edit_optical(image,changes,progress);
-        else if(ext==L".wim") {
+        if(ext==L".iso"||ext==L".udf") {
+            // F5 can spend minutes cloning a multi-GiB ISO. Reuse the
+            // delayed native progress dialog used for WIM but label it
+            // ISO/UDF, with real CopyFileEx byte progress and safe cancel.
+            // The WCX callback still receives exact negative percentages.
+            iso_wcx::WimOpenProgress indicator(
+                wim_edit_dialog_enabled(),
+                iso_wcx::WimOpenProgress::Mode::OpticalEditing);
+            const auto status=[&](const wchar_t* stage,unsigned percent){
+                if(!indicator.on_edit(stage,percent))return false;
+                const int pct=-static_cast<int>(std::clamp(percent,1u,99u));
+                auto label=std::wstring(L"ISO/UDF: ")+(stage?stage:L"Working");
+                if(pw)return pw(label.data(),pct)!=0;
+                if(pa){auto narrow=to_ansi(label);return pa(narrow.data(),pct)!=0;}
+                return true;
+            };
+            iso_wcx::edit_optical(image,changes,progress,status);
+        } else if(ext==L".wim") {
             // TC's plugin progress window can remain at 0% when creating
             // folders (F7). The delayed native UI remains responsive during
             // WIMGAPI calls and preserves real stage/cancel checkpoints.
