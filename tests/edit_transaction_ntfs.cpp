@@ -483,10 +483,15 @@ int main() {
                   FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_HIDDEN)!=FALSE,
                   "mark WIM delete target readonly and hidden");
             set_protected_dacl(system);
+            const auto original_system_acl=dacl_sddl(system);
             auto removed=iso_wcx::workspace_cleanup::remove_expanded_entry(
                 tx.workspace,expanded,protected_file);
             need(removed.clean && !fs::exists(protected_file),
                  "scoped WIM F8 failed to remove protected readonly file");
+            // This folder will still exist during WIMCaptureImage. A temporary
+            // DELETE_CHILD grant must never leak into the saved image.
+            need(dacl_sddl(system)==original_system_acl,
+                 "scoped WIM F8 changed surviving System32 protected DACL");
 
             // Deleting protected directories also requires NTFS DACL repair
             // confined to the private WIM workspace.
