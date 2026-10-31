@@ -156,6 +156,15 @@ def main(binary, reader=None):
                updated[21*B+5:]==prior[21*B+5:],(
             'same-size ISO F5 changed directory, padding or other metadata')
         assert read_image(image)['HELLO.TXT']==b'RENEW'
+        # Repeating a byte-identical F5 must be a true no-op: preserve the
+        # ISO bytes and its original modification time without a new stage.
+        unchanged=bytes(updated)
+        unchanged_mtime=image.stat().st_mtime_ns
+        run('add','HELLO.TXT')
+        assert image.read_bytes()==unchanged,(
+            'duplicate same-size F5 unexpectedly rewrote ISO bytes')
+        assert image.stat().st_mtime_ns==unchanged_mtime,(
+            'duplicate F5 rewrote the ISO despite identical file content')
         assert not any(root.glob('.iso-wcx-edit-*')),(
             'same-size ISO fast replacement leaked staging files')
         # Abort after the data has been written in the private stage but
@@ -203,6 +212,19 @@ def main(binary, reader=None):
                     'batched ISO replacement changed unrelated sector')
         assert read_image(image)['HELLO.TXT']==b'RENEW'
         assert read_image(image)['SECOND.TXT']==b'RENEW'
+        # The same two-file copy on the already-updated image must skip
+        # staging altogether, including the expensive CoW/CopyFileEx clone.
+        unchanged=bytes(updated)
+        unchanged_mtime=image.stat().st_mtime_ns
+        repeat=subprocess.run([
+            binary,str(image),'batch',
+            'add','HELLO.TXT',str(source),
+            'add','SECOND.TXT',str(source)],
+            capture_output=True,text=True)
+        assert repeat.returncode==0,(repeat.stdout,repeat.stderr)
+        assert image.read_bytes()==unchanged and \
+               image.stat().st_mtime_ns==unchanged_mtime,(
+            'repeat multi-file F5 did not preserve ISO bytes and timestamp')
         # Aliased sectors must use the old full writer: replacing HELLO
         # may not silently overwrite another file sharing the same data.
         aliased=bytearray(fixture())
