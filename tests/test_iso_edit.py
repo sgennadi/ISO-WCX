@@ -225,6 +225,24 @@ def main(binary, reader=None):
         struct.pack_into('<I',metadata,16*B+144,21)
         image.write_bytes(metadata)
         run('add','HELLO.TXT',False)
+        # Some discs keep their Joliet directories at different LBAs from
+        # the primary tree. A replacement file that aliases such a sector
+        # MUST NOT overwrite supplementary filesystem metadata.
+        dangerous=bytearray(fixture(joliet=True))
+        dot=iso_record(20,B,2,b'\\0')
+        dotdot=iso_record(20,B,2,b'\\1')
+        file_record=20*B+len(dot)+len(dotdot)
+        both(dangerous,file_record+10,B)
+        both(dangerous,17*B+156+2,21)
+        name='café.txt;1'.encode('utf-16-be')
+        secondary=(iso_record(21,B,2,b'\\0')+
+                   iso_record(21,B,2,b'\\1')+
+                   iso_record(21,B,0,name))
+        dangerous[21*B:22*B]=bytes(B)
+        dangerous[21*B:21*B+len(secondary)]=secondary
+        image.write_bytes(dangerous)
+        source.write_bytes(b'X'*B)
+        run('add','café.txt',False)
         source.write_bytes(b'new content'*1000)
         image.write_bytes(fixture());run('add','HELLO.TXT');run('add','DOCS/NEW.TXT');run('mkdir','EMPTY');run('mkdir','AAA');run('mkdir','DOCS/Z_CHILD');run('mkdir','DOCS/A_CHILD')
         expected={'HELLO.TXT':source.read_bytes(),'DOCS/':None,'DOCS/NEW.TXT':source.read_bytes(),'EMPTY/':None,'AAA/':None,'DOCS/Z_CHILD/':None,'DOCS/A_CHILD/':None}
