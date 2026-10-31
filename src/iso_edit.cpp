@@ -382,7 +382,11 @@ void clone_iso_stage(const std::filesystem::path& original,
     (void)input;
     (void)size;
     IsoCloneProgress state{&progress,&status};
-    if(!CopyFileExW(original.c_str(),output.c_str(),
+    // ISO files can live inside deep TC profile folders or UNC shares.
+    // Preserve long-path support when using the Windows native copy engine.
+    const auto source_native=workspace_cleanup::extended_path(original);
+    const auto output_native=workspace_cleanup::extended_path(output);
+    if(!CopyFileExW(source_native.c_str(),output_native.c_str(),
                     &iso_clone_callback,&state,nullptr,
                     COPY_FILE_FAIL_IF_EXISTS)) {
         if(state.aborted)throw EditCancelled();
@@ -392,10 +396,10 @@ void clone_iso_stage(const std::filesystem::path& original,
     edit_tick(progress);
     // The private working copy is modified before replacement. An original
     // ISO marked read-only may be read, but its staged clone must be writable.
-    const auto attributes=GetFileAttributesW(output.c_str());
+    const auto attributes=GetFileAttributesW(output_native.c_str());
     if(attributes==INVALID_FILE_ATTRIBUTES ||
        ((attributes&FILE_ATTRIBUTE_READONLY) &&
-        !SetFileAttributesW(output.c_str(),
+        !SetFileAttributesW(output_native.c_str(),
                             attributes&~FILE_ATTRIBUTE_READONLY)))
         throw std::runtime_error("cannot make private ISO stage writable");
 #else
