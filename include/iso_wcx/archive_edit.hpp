@@ -15,7 +15,11 @@ struct ArchiveChange {
     bool directory = false;
 };
 using EditProgress = std::function<bool()>;
-void edit_iso(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
+// Optional exact stage/0..99 progress for optical edits. The legacy boolean
+// callback remains the cancellation contract for all library callers.
+using OpticalEditStatus = std::function<bool(const wchar_t*, unsigned)>;
+void edit_iso(const std::filesystem::path&, const std::vector<ArchiveChange>&,
+              const EditProgress& = {}, const OpticalEditStatus& = {});
 // Extremely narrow shared-extent ISO/UDF Bridge deletion: only existing
 // regular files with identical ISO and UDF physical runs. First preflight
 // without writing, then patch the already-private EditTransaction stage.
@@ -47,7 +51,8 @@ void edit_fixed_vhdx(const std::filesystem::path&,
 // Transactional native FAT12/16/32 editor, including VHD/VHDX dispatch.
 void edit_fat(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
 // Content-based ISO/Joliet, ISO/UDF Bridge and UDF-only dispatch.
-void edit_optical(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
+void edit_optical(const std::filesystem::path&, const std::vector<ArchiveChange>&,
+                  const EditProgress& = {}, const OpticalEditStatus& = {});
 #ifdef _WIN32
 // Stage label and overall 0..100 percentage for WCX pack-progress callbacks.
 // This is an independent, optional observer; the cancellation contract is
