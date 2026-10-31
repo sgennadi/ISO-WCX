@@ -37,6 +37,7 @@ struct HeaderExW {
     char Reserved[1024];
 };
 using PackFn=int(__stdcall*)(wchar_t*,wchar_t*,wchar_t*,wchar_t*,int);
+using PackerCapsFn=int(__stdcall*)();
 using DeleteFn=int(__stdcall*)(wchar_t*,wchar_t*);
 using OpenFn=HANDLE(__stdcall*)(OpenW*);
 using ReadFn=int(__stdcall*)(HANDLE,HeaderExW*);
@@ -486,8 +487,14 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         if(!verify(renamed)||!verify(swm.parent_path()/L"RENAMED.swm"))return 19;
         // Transactional WIM changes through the real WCX ABI.
         auto pack=bind<PackFn>(dll,"PackFilesW");auto erase=bind<DeleteFn>(dll,"DeleteFilesW");
+        const auto caps=bind<PackerCapsFn>(dll,"GetPackerCaps");
         auto set_progress=bind<SetProgressFn>(dll,"SetProcessDataProcW");
         if(!pack||!erase||!set_progress)return 20;
+        // F5 into an existing WIM is blocked by Total Commander before
+        // PackFilesW if the registered WCX flags lack PK_CAPS_MODIFY (2).
+        // The mask must be 158: MODIFY|MULTIPLE|DELETE|OPTIONS|SEARCHTEXT;
+        // do NOT advertise NEW (1), encrypted packing or ZIP-by-content.
+        if(!caps || caps()!=158 || !(caps()&2))return 115;
         const auto incoming=root/L"incoming";
         write(incoming/L"HELLO.TXT","replacement");write(incoming/L"ADDED.TXT","new-file");
         std::wstring packed=original.wstring(),src=incoming.wstring(),sub=L"image1";
@@ -674,7 +681,9 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         wchar_t nested_list[]=L"F5 copied.txt\0folder.bin\0\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt\0\0";
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         const int f5_result=pack(packed.data(),nested_sub.data(),
-                                 nested_source.data(),nested_list,0);
+                                 nested_source.data(),nested_list,2);
+        // WCX PK_PACK_SAVE_PATHS=2 is a normal TC F5 option. Do not
+        // confuse this bit with PK_PACK_MOVE_FILES=1 (F6/move).
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         if(f5_result!=0) {
             std::cerr<<"WIM nested F5 PackFilesW returned "<<f5_result<<"\n";
