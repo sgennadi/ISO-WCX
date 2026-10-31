@@ -86,7 +86,9 @@ batch is directory creation and all selected directories already exist with
 identical spelling in their WIM indexes, the writer now checks WIMGAPI
 metadata and returns without applying/capturing an image or creating a
 private `.iso-wcx-edit-*` workspace. Differently-cased names and file/folder
-conflicts are refused before staging. The preflight is cancellable and does
+conflicts are refused before staging. This includes Windows-invariant Unicode
+case aliases such as Cyrillic/Greek names, not just ASCII `A-Z`. The
+preflight is cancellable and does
 not modify the WIM. Large-image metadata enumeration can still be slow.
 Creating genuinely new directories still uses the legacy Apply/Capture mode
 unless the separately gated fast WIM mount option is explicitly enabled.
@@ -231,7 +233,9 @@ are included; TC chooses Win32 WCX or x64 WCX64 itself.
 
 **Selected-directory F5:** Total Commander may pass just the selected folder
 in the WCX AddList. This Preview expands its nested files and directories,
-including empty folders, before writing. Repeated identical source entries
+including empty folders, before writing. TC receives scanned-entry counts
+(every 128 descendants) and can cancel safely during this scan, before
+any optical or WIM staging workspace is allocated. Repeated identical source entries
 are coalesced, but NTFS junctions, symlinks, and unsafe reparse points fail
 closed before staging. If an existing folder tree is byte-identical and its
 file payloads total at most 32 MiB, the ISO skips the private clone/remaster

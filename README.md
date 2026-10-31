@@ -45,7 +45,9 @@ both WCX machine types and the one native INF package.
 **Recursive TC F5 folder copy (Preview):** selecting one directory expands all
 nested regular files and subdirectories inside the native WCX editor for
 supported ISO/WIM operations. Duplicate TC file-list entries are coalesced;
-unsafe reparse points and conflicting sources fail before staging. For plain
+unsafe reparse points and conflicting sources fail before staging. During
+folder enumeration Total Commander receives real scanned-entry counts and can
+cancel before an ISO/WIM staging workspace exists. For plain
 ISO9660/Joliet, a repeated byte-identical folder copy may skip rebuilding
 when its total compared file content is at most 32 MiB. Hybrid boot and
 ISO/UDF Bridge write restrictions remain unchanged.
@@ -175,7 +177,8 @@ reassociate the WCX plugin so Total Commander refreshes its capability flags.
 already-existing directories now performs a read-only per-image metadata
 preflight and exits before allocating a staging workspace or running WIMGAPI
 Apply/Capture. This works with the native fast-mount checkbox OFF. The check
-rejects conflicting files or case-only aliases and honors cancellation.
+rejects conflicting files or case-only aliases (including Cyrillic/Greek
+Unicode case pairs) and honors cancellation.
 It can still take time to enumerate metadata in a large `install.wim`;
 **new** folders still require the normal Apply/Capture edit or the explicit
 experimental fast mount path below.
