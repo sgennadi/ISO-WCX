@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
@@ -354,6 +355,9 @@ bool try_clone_iso_blocks(const std::filesystem::path& original,
                           const OpticalEditStatus& status) {
     constexpr std::uint64_t alignment=64ull*1024u;
     constexpr std::uint64_t chunk=64ull*1024u*1024u;
+    // Deterministic fallback regression and emergency disable switch.
+    // This bypasses the optional acceleration, never the verified writer.
+    if(std::getenv("ISO_WCX_ISO_DISABLE_BLOCK_CLONE"))return false;
     if(size<64ull*1024u*1024u ||
        size>static_cast<std::uint64_t>(
            std::numeric_limits<LONGLONG>::max()))
