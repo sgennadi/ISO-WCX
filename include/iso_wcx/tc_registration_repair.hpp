@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cwctype>
+#include <cstddef>
 #include <map>
 #include <string>
 #include <string_view>
