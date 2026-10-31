@@ -13,6 +13,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -182,8 +183,16 @@ int wmain(int argc,wchar_t** argv) {
         wchar_t f5_list[]=L"COPIED.BIN\0HELLO.TXT\0\0";
         need((caps()&2)!=0,
              "GetPackerCaps omits MODIFY and TC prevents F5 into ISO");
-        need(pack(arc.data(),f5_sub.data(),f5_dir.data(),
-                  f5_list,2)==0,
+        OpenW retained{};
+        retained.ArcName=arc.data();
+        const HANDLE original_panel=open(&retained);
+        need(original_panel && retained.OpenResult==0,
+             "WCX cannot retain an ISO panel while copying via F5");
+        const int f5_status=pack(arc.data(),f5_sub.data(),f5_dir.data(),
+                                 f5_list,2);
+        need(close(original_panel)==0,
+             "WCX CloseArchive failed after editing an open ISO panel");
+        need(f5_status==0,
              "TC F5 PK_PACK_SAVE_PATHS cannot copy into existing ISO directory");
         names=list_names(image,open,header,process,close);
         need(names.contains(L"DOCS\\COPIED.BIN") &&
