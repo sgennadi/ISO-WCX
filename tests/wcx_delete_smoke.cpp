@@ -37,6 +37,16 @@ static int __stdcall record_iso_progress(wchar_t*,int size) {
     }
     return 1;
 }
+static std::atomic<unsigned> iso_source_scan_callbacks{0};
+static int __stdcall cancel_iso_source_scan(wchar_t* name,int size) {
+    if(size==0 && name && std::wstring_view(name).starts_with(
+            L"ISO-WCX: Scanning F5 source entries ")) {
+        // The scan must produce a SECOND update after 128 entries, then
+        // honor cancellation BEFORE the first image staging operation.
+        return ++iso_source_scan_callbacks<2 ? 1 : 0;
+    }
+    return 1;
+}
 static int __stdcall cancel_iso_staging(wchar_t* name,int size) {
     (void)name;
     // Fail at a real CopyFileEx clone checkpoint, not only at preflight.
@@ -301,6 +311,30 @@ int wmain(int argc,wchar_t** argv) {
         fs::create_directories(folder_source/L"SELECTED"/L"EMPTY");
         auto folder_dir=folder_source.wstring();
         wchar_t selected_folder[]=L"SELECTED\0\0";
+        // Enumerating a large directory is a cancellable F5 phase on its
+        // own, with exact visited-entry counts and no invented percent.
+        // Test after the first 128 children without ever editing the ISO.
+        const auto scan_only=folder_source/L"SCAN_ONLY";
+        for(unsigned i=0;i<130;++i) {
+            write_source(scan_only/
+                (L"item"+std::to_wstring(i)+L".dat"),"x");
+        }
+        wchar_t scan_list[]=L"SCAN_ONLY\0\0";
+        const auto before_scan_cancel=load(image);
+        const auto before_scan_time=fs::last_write_time(image);
+        iso_source_scan_callbacks.store(0);
+        setpack(INVALID_HANDLE_VALUE,&cancel_iso_source_scan);
+        const int scan_cancel_rc=pack(arc.data(),f5_sub.data(),
+                                      folder_dir.data(),scan_list,2);
+        setpack(INVALID_HANDLE_VALUE,nullptr);
+        need(scan_cancel_rc==21 && iso_source_scan_callbacks.load()>=2 &&
+             load(image)==before_scan_cancel &&
+             fs::last_write_time(image)==before_scan_time,
+             "ISO F5 source-tree scan cancel modified image or ignored callback");
+        for(const auto& entry:fs::directory_iterator(root))
+            need(!entry.path().filename().wstring().starts_with(
+                     L".iso-wcx-edit-"),
+                 "Cancelled ISO F5 enumeration created a staging workspace");
         need(pack(arc.data(),f5_sub.data(),folder_dir.data(),
                   selected_folder,2)==0,
              "ISO F5 selected directory did not pack recursively");
