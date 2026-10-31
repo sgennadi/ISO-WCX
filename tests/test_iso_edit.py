@@ -217,6 +217,14 @@ def main(binary, reader=None):
         assert read_image(image)['ALIAS.TXT']==b'world',(
             'same-size ISO fast path damaged another file sharing its extent')
         assert read_image(image)['HELLO.TXT']==b'RENEW'
+        # Malformed images can place an optional ISO9660 path table over
+        # file content. Reject rather than overwrite hidden metadata or
+        # retry through an unsafe full remaster.
+        metadata=bytearray(fixture())
+        both(metadata,16*B+132,B)
+        struct.pack_into('<I',metadata,16*B+144,21)
+        image.write_bytes(metadata)
+        run('add','HELLO.TXT',False)
         source.write_bytes(b'new content'*1000)
         image.write_bytes(fixture());run('add','HELLO.TXT');run('add','DOCS/NEW.TXT');run('mkdir','EMPTY');run('mkdir','AAA');run('mkdir','DOCS/Z_CHILD');run('mkdir','DOCS/A_CHILD')
         expected={'HELLO.TXT':source.read_bytes(),'DOCS/':None,'DOCS/NEW.TXT':source.read_bytes(),'EMPTY/':None,'AAA/':None,'DOCS/Z_CHILD/':None,'DOCS/A_CHILD/':None}
