@@ -17,7 +17,10 @@ or pre-install cleanup hook**. Installing a new WCX DLL can leave older
 `[PackerPlugins]` entries (including bare paths or flags `192`/`222`)
 that prevent TC from invoking F5 for WIM even when `PackFilesW` works.
 
-The Preview DLL therefore ships a **native Repair WCX associations** control
+On the first WIM open after an upgrade, the Preview DLL automatically
+checks for obsolete ISO-WCX masks and offers repair only when it finds
+changes. It requires confirmation and never silently overwrites user INIs.
+The Preview DLL also ships a **native Repair WCX associations** control
 inside **Files > Pack > Configure... > ISO-WCX Settings** (no additional
 installer EXE, PowerShell, CMD or DLL). It detects only ISO-WCX-owned records,
 normalizes masks to `158`, removes duplicate extension keys for that plugin,
