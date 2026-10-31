@@ -299,6 +299,12 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
             label(russian,L"\nDuplicate entries removed: ",
                           L"\nУдаляемые дубликаты: ")+
             std::to_wstring(fixed.duplicates_removed);
+        if(!fixed.extensions.empty()) {
+            summary+=label(russian,L"\nExtensions to repair: ",
+                                    L"\nИсправляемые расширения: ");
+            for(const auto& ext:fixed.extensions)
+                summary+=ext+L" ";
+        }
         if(!fixed.conflicts.empty()) {
             summary+=label(russian,L"\nUnchanged (other WCX installed): ",
                             L"\nСохранены привязки других WCX: ");
