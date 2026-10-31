@@ -42,6 +42,14 @@ Toolbar buttons, existing custom commands and unrelated WCX associations
 must remain untouched. CI rejects extra installation ZIPs and checks
 both WCX machine types and the one native INF package.
 
+**Recursive TC F5 folder copy (Preview):** selecting one directory expands all
+nested regular files and subdirectories inside the native WCX editor for
+supported ISO/WIM operations. Duplicate TC file-list entries are coalesced;
+unsafe reparse points and conflicting sources fail before staging. For plain
+ISO9660/Joliet, a repeated byte-identical folder copy may skip rebuilding
+when its total compared file content is at most 32 MiB. Hybrid boot and
+ISO/UDF Bridge write restrictions remain unchanged.
+
 **Editing status (Preview, not universal):** standard unsplit WIM supports
 bounded add/replace/delete of files and folders; it uses expensive WIMGAPI
 Apply/Capture, and the optional fast mount/commit route currently supports

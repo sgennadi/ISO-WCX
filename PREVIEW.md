@@ -219,6 +219,15 @@ are included; TC chooses Win32 WCX or x64 WCX64 itself.
 
 ### Fast native ISO F5 staging and progress (Preview)
 
+**Selected-directory F5:** Total Commander may pass just the selected folder
+in the WCX AddList. This Preview expands its nested files and directories,
+including empty folders, before writing. Repeated identical source entries
+are coalesced, but NTFS junctions, symlinks, and unsafe reparse points fail
+closed before staging. If an existing folder tree is byte-identical and its
+file payloads total at most 32 MiB, the ISO skips the private clone/remaster
+and preserves the original modification time. Missing or changed entries use
+the regular verified writer. Hybrid boot/ISO-UDF Bridge restrictions remain.
+
 Supported ISO9660/Joliet writes now try NTFS/ReFS copy-on-write block
 cloning (64-KiB aligned, with an exact tail copy) before the cancellable
 Windows `CopyFileExW` fallback for the private same-volume working copy.
