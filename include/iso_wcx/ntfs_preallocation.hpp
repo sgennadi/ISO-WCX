@@ -49,6 +49,11 @@ inline bool is_ntfs(const fs::path& parent) noexcept {
         wchar_t volume[MAX_PATH]{};
         if(!GetVolumePathNameW(parent.c_str(),volume,MAX_PATH))
             return false;
+        // The AMI firmware issue concerns booting from a local NTFS disk.
+        // A UNC/SMB share may also report NTFS, but reserving a large
+        // remote file has no firmware-read benefit and can hurt performance.
+        const UINT drive=GetDriveTypeW(volume);
+        if(drive!=DRIVE_FIXED && drive!=DRIVE_REMOVABLE)return false;
         wchar_t filesystem[32]{};
         if(!GetVolumeInformationW(volume,nullptr,0,nullptr,nullptr,nullptr,
                                   filesystem,32))
@@ -106,7 +111,7 @@ inline Stage create_stage(const fs::path& candidate,
 // contiguous clusters. Query after closing the writer, before final rename.
 inline void log_extents_if_requested(const fs::path& path,
                                     bool was_preallocated) noexcept {
-    if(!diagnostic_enabled())return;
+    if(!diagnostic_enabled() || !is_ntfs(path.parent_path()))return;
     try {
         HANDLE h=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,
                              FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
