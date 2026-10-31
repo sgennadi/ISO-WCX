@@ -102,6 +102,30 @@ inline bool owned_plugin(std::wstring_view entry) {
     const auto file=path.substr(at==std::wstring::npos?0:at+1);
     return file==L"iso-wcx.wcx" || file==L"iso-wcx.wcx64";
 }
+// A correct portable TC registration should stay portable; merely opening
+// a WIM must not turn %COMMANDER_PATH% into a machine-specific absolute path.
+// The pure implementation uses Windows separators on Linux CI as well.
+inline std::wstring windows_path(std::wstring path) {
+    std::replace(path.begin(),path.end(),L'/',L'\\');
+    return fold(std::move(path));
+}
+inline bool is_current_wcx_registration(
+        std::wstring_view entry,std::wstring_view installed_wcx) {
+    const auto field=trim(entry);
+    if(field.size()<5 || field.substr(0,4)!=L"158,")
+        return false;
+    auto candidate=windows_path(unpack_plugin_path(field));
+    const auto installed=windows_path(std::wstring(installed_wcx));
+    if(candidate==installed)return true;
+    constexpr std::wstring_view token=L"%commander_path%";
+    constexpr std::wstring_view plugins=L"\\plugins\\wcx\\";
+    if(candidate.rfind(token,0)!=0)return false;
+    const auto offset=installed.rfind(plugins);
+    if(offset==std::wstring::npos)return false;
+    candidate=installed.substr(0,offset)+
+              candidate.substr(token.size());
+    return candidate==installed;
+}
 inline bool supported(std::wstring_view ext) {
     constexpr std::array<std::wstring_view,23> extensions{
         L"iso",L"udf",L"cue",L"ccd",L"nrg",L"mds",L"mdx",
@@ -135,21 +159,32 @@ inline Patch repair_packer_plugins(std::wstring_view input,
             patch.conflicts.push_back(ext);
             continue; // Preserve unrelated working plugins and user intent.
         }
-        const auto normalized=ext+L"=158,"+std::wstring(installed_wcx);
-        if(lines[entries[0].line].body!=normalized) {
-            lines[entries[0].line].body=normalized;
+        // Prefer a correct existing line, including a portable
+        // %COMMANDER_PATH% binding, instead of destroying its layout and
+        // moving it to the first duplicate's line.
+        std::size_t keep=0;
+        for(std::size_t n=0;n<entries.size();++n)
+            if(is_current_wcx_registration(entries[n].val,installed_wcx)) {
+                keep=n;
+                break;
+            }
+        bool changed=false;
+        if(!is_current_wcx_registration(entries[keep].val,installed_wcx)) {
+            lines[entries[keep].line].body=
+                ext+L"=158,"+std::wstring(installed_wcx);
             patch.changed=true;
+            changed=true;
         }
-        for(std::size_t n=1;n<entries.size();++n) {
+        for(std::size_t n=0;n<entries.size();++n) {
+            if(n==keep)continue;
             auto& line=lines[entries[n].line];
             line.body.clear();
             line.ending.clear();
             patch.changed=true;
+            changed=true;
             ++patch.duplicates_removed;
         }
-        if(lines[entries[0].line].body==normalized &&
-           (entries.size()>1 || entries[0].val!=L"158,"+std::wstring(installed_wcx)))
-            patch.extensions.push_back(ext);
+        if(changed)patch.extensions.push_back(ext);
     }
     if(patch.changed)patch.text=join(lines);
     return patch;
