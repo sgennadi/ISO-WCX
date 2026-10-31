@@ -1096,7 +1096,8 @@ bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
         for(const auto& child:all[i]->children)all.push_back(child.get());
     for(const auto& patch:patches) {
         if(patch.offset<16ull*block ||
-           patch.offset+patch.length>image.size)return false;
+           patch.offset+patch.length>image.size)
+            throw EditUnsupported("ISO file overlaps volume system data");
         const auto sectors=(patch.length+block-1)/block;
         const auto physical_size=sectors*block;
         for(const auto* other:all) {
@@ -1104,8 +1105,12 @@ bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
             const auto other_size=
                 ((std::uint64_t(other->size)+block-1)/block)*block;
             if(overlaps(patch.offset,physical_size,
-                        std::uint64_t(other->lba)*block,other_size))
-                return false;
+                        std::uint64_t(other->lba)*block,other_size)) {
+                if(other->directory)
+                    throw EditUnsupported(
+                        "ISO file overlaps filesystem directory metadata");
+                return false; // Shared file extent: use full writer.
+            }
         }
         for(const auto& other:patches) {
             if(other.node==patch.node)continue;
@@ -1118,21 +1123,29 @@ bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
             image.descriptors.back().first;
         if(overlaps(patch.offset,physical_size,16ull*block,
                     (std::uint64_t(last_descriptor)+2u-16u)*block))
-            return false;
-        // Path tables are not represented as Node children.
+            throw EditUnsupported(
+                "ISO file overlaps volume descriptor sequence");
+        // All four ISO9660 path tables are protected. Optional little/
+        // big-endian tables must not be overwritten just because they are
+        // absent from our logical directory tree.
         for(const auto& [lba,vd]:image.descriptors) {
             (void)lba;
             const auto length=std::uint64_t(le(vd,132));
+            const auto big_lba=[&](std::size_t at) {
+                return (std::uint64_t(vd[at])<<24) |
+                       (std::uint64_t(vd[at+1])<<16) |
+                       (std::uint64_t(vd[at+2])<<8) |
+                       std::uint64_t(vd[at+3]);
+            };
             for(const auto table_lba:{
                     std::uint64_t(le(vd,140)),
-                    (std::uint64_t(vd[148])<<24) |
-                    (std::uint64_t(vd[149])<<16) |
-                    (std::uint64_t(vd[150])<<8) |
-                    std::uint64_t(vd[151])}) {
+                    std::uint64_t(le(vd,144)),
+                    big_lba(148),big_lba(152)}) {
                 if(table_lba &&
                    overlaps(patch.offset,physical_size,table_lba*block,
                             ((length+block-1)/block)*block))
-                    return false;
+                    throw EditUnsupported(
+                        "ISO file shares a sector with an ISO path table");
             }
         }
     }
