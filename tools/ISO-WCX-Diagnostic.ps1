@@ -151,6 +151,68 @@ function Check-Wcx64Cache {
     }
     Say 'Наличие расширения не доказывает, что текущий процесс TC использует новые флаги F5.'
 }
+function Check-AssociationSummary {
+    Say '--- Summary of 23 supported image associations (read-only) ---'
+    $ini = Find-TcIni
+    if (-not $ini) { Say 'Active TC INI unavailable'; return }
+    $all = @('iso','udf','cue','ccd','nrg','mds','mdx',
+             'cso','zso','isz','daa','img','raw','vhd','vhdx',
+             'wim','esd','swm','ima','vfd','flp','bif','imz')
+    $known = @{}
+    $section = ''
+    $reader = [IO.File]::OpenText($ini)
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            if ($line -match '^\s*\[([^\]]+)\]\s*$') {
+                $section = $Matches[1].Trim()
+                continue
+            }
+            if ($section -ne 'PackerPlugins') { continue }
+            if ($line -match '^\s*([^=;\s]+)\s*=\s*(.*)$') {
+                $extension = $Matches[1].ToLowerInvariant()
+                $setting = $Matches[2].Trim()
+                if ($all -contains $extension) {
+                    if (-not $known.ContainsKey($extension)) {
+                        $known[$extension] = @()
+                    }
+                    $known[$extension] = @($known[$extension]) + @($setting)
+                }
+            }
+        }
+    } finally { $reader.Dispose() }
+    $owned158=0
+    $ownedOther=0
+    $missing=0
+    $foreign=0
+    $duplicates=0
+    foreach ($extension in $all) {
+        if (-not $known.ContainsKey($extension)) {
+            $missing++
+            continue
+        }
+        $entries = @($known[$extension])
+        if ($entries.Count -gt 1) { $duplicates += $entries.Count - 1 }
+        foreach ($entry in $entries) {
+            $plugin = ($entry -replace '^\s*\d+\s*,\s*','').Trim('"')
+            if ($plugin -match '(?i)(?:^|[\\/])ISO-WCX\.wcx(64)?$') {
+                if ($entry -match '^\s*158\s*,') {
+                    $owned158++
+                } else {
+                    $ownedOther++
+                    Say ('WCX_ASSOC_BAD_MASK=' + $extension + ' value=' + $entry)
+                }
+            } else {
+                $foreign++
+            }
+        }
+    }
+    Say ('WCX_ASSOC_SUMMARY owned_158=' + $owned158 +
+         ' owned_other=' + $ownedOther + ' missing=' + $missing +
+         ' foreign=' + $foreign + ' duplicates=' + $duplicates)
+    if ($missing -eq 0 -and $ownedOther -eq 0 -and $duplicates -eq 0) {
+        Say 'The second association prompt may correctly be skipped; all image formats have an assigned handler.'
+    }
+}
 function Check-WimFile {
     Say '--- Заголовок WIM и временные папки ---'
     if (-not $WimPath) {
@@ -228,6 +290,7 @@ Say ('ISO-WCX диагностика: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:
 Say 'Только чтение: никаких изменений TC, WIM, монтировок и временных папок.'
 try { Check-TcProcesses } catch { Say ('TC: ' + $_.Exception.Message) }
 try { Check-Ini } catch { Say ('INI: ' + $_.Exception.Message) }
+try { Check-AssociationSummary } catch { Say ('Association summary: ' + $_.Exception.Message) }
 try { Check-Wcx64Cache } catch { Say ('Кэш x64: ' + $_.Exception.Message) }
 try { Check-WimFile } catch { Say ('WIM: ' + $_.Exception.Message) }
 

@@ -8,6 +8,7 @@
 #endif
 #include "iso_wcx/tc_registration_repair.hpp"
 #include "iso_wcx/wcx_updater.hpp"
+#include "iso_wcx/edit_diagnostics.hpp"
 #include <windows.h>
 #include <algorithm>
 #include <atomic>
@@ -300,6 +301,12 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
         const auto added=register_missing_packer_plugins(
             fixed.text,dll.wstring());
         const bool registrations_changed=fixed.changed || added.changed;
+        edit_diagnostics::log(
+            L"WCX association inspection",{},
+            L"fix="+std::to_wstring(fixed.extensions.size())+
+            L" new="+std::to_wstring(added.extensions.size())+
+            L" duplicates="+std::to_wstring(fixed.duplicates_removed)+
+            L" conflicts="+std::to_wstring(fixed.conflicts.size()));
         std::wstring summary=
             label(russian,L"ISO-WCX registrations: ",L"Регистрации ISO-WCX: ")+
             std::to_wstring(fixed.extensions.size())+
@@ -330,7 +337,11 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
         // invalidate that cache, without changing any other WCX association.
         // On passive open keep the existing silent fast path: don't offer
         // a cache reset every time TC recreates its valid checksum.
-        if(!registrations_changed && quiet_when_clean)return;
+        if(!registrations_changed && quiet_when_clean) {
+            edit_diagnostics::log(L"WCX association check complete",{},
+                                  L"all supported registrations already assigned");
+            return;
+        }
         Document cached=cache_path==assoc_path?assoc:load(cache_path);
         const auto cache_in_assoc=cache_path==assoc_path?
             invalidate_cache(added.text):Patch{};
@@ -373,8 +384,14 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
                 L"Создаётся резервная копия INI. Привязки других "
                 L"плагинов не меняются. После этого перезапустите все окна TC.");
         }
+        edit_diagnostics::log(L"WCX association confirmation requested",{},
+                              registrations_changed?L"registration update":
+                                                    L"cache-only repair");
         if(MessageBoxW(parent,summary.c_str(),L"ISO-WCX Associations",
-                 MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES)return;
+                 MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES) {
+            edit_diagnostics::log(L"WCX association confirmation declined",{});
+            return;
+        }
         fs::path backup,cache_backup;
         if(assoc_changed)backup=save_backup(assoc.path);
         if(cache_changed)cache_backup=save_backup(cached.path);
@@ -416,13 +433,17 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
             registrations_changed?L"Привязки ISO-WCX зарегистрированы/исправлены.\nПерезапустите все окна Total Commander.\n\nКопия: ":
                                   L"Кэш WCX (TC x64) сброшен.\nПерезапустите все окна Total Commander.\n\nКопия: "))+
             saved_path.wstring();
+        edit_diagnostics::log(L"WCX association update committed",{},
+                              registrations_changed?L"restart TC to reload masks":
+                                                    L"TC64 checksum reset");
         MessageBoxW(parent,message.c_str(),L"ISO-WCX Associations",
                     MB_OK|MB_ICONINFORMATION);
     }catch(const std::exception& e) {
-        if(quiet_when_clean)return; // Do not interrupt normal WIM opening.
         std::wstring error=L"Association repair was not completed.\n";
         const auto message=std::string(e.what());
         for(unsigned char c:message)error.push_back(static_cast<wchar_t>(c));
+        edit_diagnostics::log(L"WCX association inspection failed",{},error);
+        if(quiet_when_clean)return; // Do not interrupt normal WIM opening.
         MessageBoxW(parent,error.c_str(),L"ISO-WCX Associations",
                     MB_OK|MB_ICONWARNING);
     }
@@ -434,22 +455,32 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
 void offer_tc_association_repair_once() {
     static std::atomic<bool> inspected{false};
     if(inspected.exchange(true,std::memory_order_relaxed))return;
+    edit_diagnostics::log(L"WCX association auto-check started",{});
     wchar_t process[MAX_PATH]{};
     const auto n=GetModuleFileNameW(nullptr,process,MAX_PATH);
-    if(!n || n>=MAX_PATH)return;
+    if(!n || n>=MAX_PATH) {
+        edit_diagnostics::log(L"WCX association check skipped",{},L"host path unavailable");
+        return;
+    }
     const auto* base=std::wcsrchr(process,L'\\');
     base=base?base+1:process;
     if(_wcsicmp(base,L"TOTALCMD.EXE")!=0 &&
        _wcsicmp(base,L"TOTALCMD64.EXE")!=0)return;
     wchar_t disabled[4]{};
     if(GetEnvironmentVariableW(L"ISO_WCX_DISABLE_ASSOC_REPAIR",
-                               disabled,4)==1 && disabled[0]==L'1')return;
+                               disabled,4)==1 && disabled[0]==L'1') {
+        edit_diagnostics::log(L"WCX association check skipped",{},L"explicit opt-out");
+        return;
+    }
     HMODULE dll=nullptr;
     if(!GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|
             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
             reinterpret_cast<LPCWSTR>(&offer_tc_association_repair_once),
-            &dll))return;
+            &dll)) {
+        edit_diagnostics::log(L"WCX association check skipped",{},L"module handle unavailable");
+        return;
+    }
     const bool ru=PRIMARYLANGID(GetUserDefaultUILanguage())==LANG_RUSSIAN;
     repair_tc_registrations(GetActiveWindow(),dll,ru,true);
 }

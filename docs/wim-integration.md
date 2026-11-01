@@ -163,3 +163,26 @@ windows is essential. An F5 return code 24 means E_NOT_SUPPORTED and
 the preceding `F5/F7 edit error` explains any intentional WCX refusal.
 Test first with an ordinary small text file on a disposable WIM copy,
 not with symlinks, protected paths or an entire AppData tree.
+
+### Field diagnosis: no second Associate dialog / no PackFilesW
+
+The one native `defaultextension=wim` Associate prompt is expected.
+If all 23 supported image extensions were already associated in earlier
+previews and WIM flags are already `158`, the follow-up repair dialog is
+**correctly suppressed**. A missing repair dialog can also mean that the
+read-only profile discovery or registration inspection failed. Such failures
+were previously swallowed when opening WIM; the next Preview records
+`WCX association auto-check started`, `WCX association inspection`
+(with counts for corrected, missing, duplicate, and foreign handlers),
+`WCX association check complete`, any confirmation decision, and
+`WCX association inspection failed` to the existing local TC log.
+
+The read-only `tools/ISO-WCX-Diagnostic.ps1` now also reports
+`WCX_ASSOC_SUMMARY owned_158=... owned_other=... missing=... foreign=...
+duplicates=...` based on `[PackerPlugins]`. An older setup may
+have zero `missing` entries, so no second dialog is required. Any
+`WCX_ASSOC_BAD_MASK=wim` entry or a `WCX64_CACHE_MISSING=wim` warning
+helps explain why TC might not dispatch an F5 edit callback.
+A log consisting only of `OpenArchiveW entered/succeeded` does not
+prove F5 was attempted; reproduce from a filesystem source panel into
+a disposable WIM copy, with a small normal file selected as the source.
