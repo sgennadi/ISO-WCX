@@ -472,9 +472,19 @@ try { Check-Installed-Wcx } catch { Say ('WCX файл: ' + $_.Exception.Message
 try { Check-Edit-Log } catch { Say ('Журнал: ' + $_.Exception.Message) }
 
 if ($ReportPath) {
-    $target = [IO.Path]::GetFullPath(
-        [Environment]::ExpandEnvironmentVariables($ReportPath))
-    $directory = Split-Path -Parent $target
+    # .NET GetFullPath resolves relative names against the PROCESS working
+    # directory, which can differ from PowerShell's Get-Location. A report
+    # passed as ".\ISO-WCX-F5.txt" must land in the invoking PS directory.
+    $requested=[Environment]::ExpandEnvironmentVariables($ReportPath)
+    if (-not [IO.Path]::IsPathRooted($requested)) {
+        $location=Get-Location
+        if ($location.Provider.Name -ne 'FileSystem') {
+            throw 'Относительный путь отчёта допустим только в файловой системе.'
+        }
+        $requested=Join-Path -Path $location.ProviderPath -ChildPath $requested
+    }
+    $target=[IO.Path]::GetFullPath($requested)
+    $directory=Split-Path -Parent $target
     if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
         throw ('Папка для отчёта не существует: ' + $directory)
     }

@@ -76,6 +76,24 @@ jobs:
             throw 'TC F5 panel regression: source can be left OR right'
           }
           Write-Host 'PASS: bidirectional TC F5 read-only panel routing regression'
+          $working=Join-Path $env:RUNNER_TEMP 'wcx-ps-report-location'
+          New-Item -ItemType Directory -Path $working -Force | Out-Null
+          Push-Location -LiteralPath $working
+          try {
+            $reportResult=& $file -IniPath $fixture -ReportPath '.\ISO-WCX-F5.txt' | Out-String
+            $expectedReport=Join-Path $working 'ISO-WCX-F5.txt'
+            if (-not (Test-Path -LiteralPath $expectedReport -PathType Leaf)) {
+              Write-Host $reportResult
+              throw 'Diagnostic report was written outside the PowerShell current directory'
+            }
+            $reportText=Get-Content -LiteralPath $expectedReport -Raw
+            if ($reportText -notmatch 'WCX_ASSOC_SUMMARY' -or $reportText -notmatch 'TC_PANEL_QUERY: no running Total Commander process') {
+              throw 'Diagnostic report missing required read-only observations'
+            }
+            Write-Host 'PASS: relative diagnostic report path follows PowerShell Get-Location'
+          } finally {
+            Pop-Location
+          }
           if ($report -notmatch 'TC_PANEL_QUERY: no running Total Commander process') {
             Write-Host 'No TC process on CI runner or future interactive smoke context:'
             Write-Host $report

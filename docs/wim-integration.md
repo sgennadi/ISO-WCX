@@ -249,3 +249,14 @@ available, it reports whether the WIM destination lies inside image1
 or at the synthetic root. Custom-drawn path labels can be inaccessible;
 the script then reports UNKNOWN rather than inferring the path from
 WCX archive presence. No commands are posted to TC.
+
+### PowerShell relative ReportPath resolution fix
+
+The user submitted -ReportPath ".\ISO-WCX-F5.txt" from
+Downloads\Mount; an older diagnostic used .NET GetFullPath against the
+underlying process working directory and silently wrote to $HOME instead.
+The script now explicitly resolves non-rooted report paths against
+PowerShell Get-Location.ProviderPath before normalizing the absolute
+path. Existing absolute and UNC paths are unchanged. A Windows CI
+regression runs the script after Push-Location and checks that the report
+was actually created in that PowerShell folder.
