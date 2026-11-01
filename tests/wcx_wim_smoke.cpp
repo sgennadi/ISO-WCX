@@ -266,6 +266,21 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
             close_wim(image);
         }
         close_wim(archive);
+        // The source fixture is exactly two indexes, like a standard
+        // dual-index boot.wim; WIMGAPI and the raw header must agree.
+        {
+            std::ifstream header_stream(original,std::ios::binary);
+            std::array<unsigned char,48> header{};
+            if(!header_stream.read(
+                   reinterpret_cast<char*>(header.data()),
+                   static_cast<std::streamsize>(header.size())))
+                return 128;
+            const auto declared=std::uint32_t(header[44]) |
+                (std::uint32_t(header[45])<<8) |
+                (std::uint32_t(header[46])<<16) |
+                (std::uint32_t(header[47])<<24);
+            if(declared!=2)return 129;
+        }
 
         if(audit_fixture_test) {
             // Independent, READ-ONLY tests on a real system-captured

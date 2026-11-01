@@ -238,6 +238,19 @@ WimArchive::WimArchive(const std::filesystem::path& image,
     const DWORD count = api_->count(api_->archive);
     require(count > 0 && count <= 256,
             "WIM has no image indexes or too many images");
+    // Before showing image1, image2 etc, cross-check the independent
+    // on-disk WIM index count. A native WIMGAPI mismatch must not turn
+    // an actual two-index boot.wim into a misleading single folder.
+    wim_detail::Header raw_header{};
+    require(wim_detail::read_header(parts.front(), raw_header),
+            "cannot reread WIM image-index header");
+    wim_detail::validate(raw_header);
+    const auto declared_count=wim_detail::u32(raw_header,44);
+    if(declared_count != count)
+        throw std::runtime_error(
+            "WIM image-index mismatch: on-disk header declares "+
+            std::to_string(declared_count)+" but Windows WIMGAPI reports "+
+            std::to_string(count)+". Verify with DISM /Get-WimInfo");
     require(only_image_index == 0 || only_image_index <= count,
             "requested WIM image index does not exist");
     // Reserve slots even for indices not loaded: locations_ retains the

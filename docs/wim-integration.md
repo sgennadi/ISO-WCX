@@ -80,3 +80,31 @@ SWM, exercise renamed/missing/duplicate parts, and test WIM editing and
 index deletion through WCX exports. Automated fixtures are not equivalent
 to manual Total Commander GUI validation or a broad corpus of real
 installation images: **this feature remains Preview.**
+
+## Diagnose a missing boot.wim image index, disabled TC F5 or retained workspace
+
+A read-only PowerShell 5.1/7 diagnostic is provided as
+[`tools/ISO-WCX-Diagnostic.ps1`](../tools/ISO-WCX-Diagnostic.ps1).
+Run on the affected Windows computer after closing and reopening every
+Total Commander instance when replacing the WCX plugin:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\ISO-WCX-Diagnostic.ps1 -WimPath "D:\sources\boot.wim" -CheckDism -ReportPath "$env:TEMP\ISO-WCX-Diagnostic.txt"
+```
+
+The script compares the raw WIM header image count against read-only DISM
+output; prints the active TC packer associations and WCX capability flags
+(158 is expected for F5); reports the ISO-WCX module loaded by each
+running Total Commander process; and inventories only strictly named
+`.iso-wcx-edit-*` directories beside that exact WIM. It does **not**
+change the INI, edit the WIM, unload a mount, or delete any workspace.
+An empty `dism /Get-MountedWimInfo` cannot prove that a native WIMGAPI
+mount is absent. A retained `mounted` directory or
+`original-archive.backup` must be preserved until native mount registration,
+source-WIM identity and handle ownership have been checked. Retried cleanup
+from a prior TC process is not persisted across restarts.
+
+If the on-disk WIM declares two images, the WCX should show both
+`image1` and `image2`; a disagreement between WIMGAPI's image count
+and the on-disk header now fails explicitly instead of silently listing
+fewer image roots. This does not assume every boot.wim contains two images.
