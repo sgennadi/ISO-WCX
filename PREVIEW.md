@@ -149,9 +149,15 @@ stock INF installer, **only the correctly matching one is loaded**.
 
 After unpacking the outer Actions artifact, open the inner installer ZIP
 using **Enter** in Total Commander and accept the native `pluginst.inf`
-installation. It advertises 23 supported image extensions. TC can prompt
-per extension; the INF cannot force silent bulk registration, remove older
-binaries, or conditionally extract only one architecture. Existing
+installation. The INF now offers **only WIM** as a bootstrap extension,
+so there is just one standard Associate dialog. TC does not expose a
+`pluginst.inf` option to preselect the `158,` capability entry: accept
+the prefilled ISO-WCX path even when it appears without `158`. Opening
+WIM afterward offers a single confirmed, backed-up registration of the
+remaining unassigned formats and fixes the WIM flag to `158`.
+Restart all TC windows after the repair. The INF cannot silently install
+all extensions, remove older binaries or conditionally extract only one
+architecture. Existing
 ZIP/RAR/7z associations, toolbars, custom commands and unrelated plugins
 must stay unchanged. CI enforces the single-ZIP requirement and both
 native PE machine types.

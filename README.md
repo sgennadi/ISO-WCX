@@ -27,17 +27,21 @@ Download the **single** `ISO-WCX-Installable-Preview` artifact from
 [GitHub Actions](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml),
 unpack its Actions wrapper, and open `ISO-WCX-preview.zip` with **Enter**
 inside Total Commander. The standard `pluginst.inf` installs the WCX plugin
-and offers 23 image extension associations. It specifies
+and offers only one native association, `wim`. The built-in confirmed repair on first WIM open registers the remaining unassigned supported image types as `158,ISO-WCX.wcx`. It specifies
 `file=ISO-WCX.wcx`; Total Commander loads the adjacent
 `ISO-WCX.wcx64` **only when running its 64-bit edition**. Both compiled
 modules have to be present *inside this one universal ZIP* so native TC
 installation works for either edition; TC only **loads** the matching one.
 
-The stock `pluginst.inf` installer unpacks both binaries and may show
-separate confirmation prompts for the extensions. With **no external
-installer**, it cannot conditionally skip the unused binary, silently
-assign all extensions in one operation, or remove stale binaries left by a
-previous installation. ZIP/RAR/7z are not assigned to ISO-WCX.
+The stock `pluginst.inf` installer unpacks both binaries and displays
+**one WIM Associate dialog**, not 23. The INF cannot preselect Total
+Commander's numeric capability entry `158`; accept its prefilled
+`ISO-WCX.wcx` path instead. When WIM is opened afterward, the plugin
+offers **one confirmation** to normalize its own entry to `158` and add
+other unassigned image formats, keeping unrelated handlers and toolbar
+settings. Restart TC after accepting this confirmation. The native
+installer cannot conditionally skip the unused binary or remove stale
+binaries left by a previous installation. ZIP/RAR/7z are not assigned to ISO-WCX.
 Toolbar buttons, existing custom commands and unrelated WCX associations
 must remain untouched. CI rejects extra installation ZIPs and checks
 both WCX machine types and the one native INF package.

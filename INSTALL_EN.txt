@@ -25,9 +25,13 @@ ISO-WCX.wcx64 (x64) and documentation. TC LOADS only the matching module.
 The native installer extracts both versions from the common ZIP; with no
 standalone installer, pluginst.inf cannot choose which file to extract.
 
-All 23 supported image extensions are offered by pluginst.inf, but TC may
-display an association prompt for each. The INF format cannot bypass those
-confirmations. ZIP/RAR/7z, existing user buttons and external plugins are
+The native pluginst.inf now offers only WIM: just one Associate dialog.
+No manual selection of the 158 entry is necessary. Accept the prefilled
+ISO-WCX.wcx path; on first WIM open the plugin offers one confirmed,
+backup-protected operation to normalize that entry to 158 and register
+all other still-unassigned supported image formats with 158. Restart all
+Total Commander windows after accepting. The INF cannot preselect an
+entry in Total Commander's native Associate dialog. ZIP/RAR/7z, existing user buttons and external plugins are
 not assigned to ISO-WCX. Previously installed extra files are not removed
 by the stock INF installer. No CMD, PowerShell or extra DLL is needed.
 
