@@ -250,12 +250,12 @@ function Check-TcLivePanels {
     # 1000=active panel, 1019/20=selected files, 1023/24=archive
     # filename length, 1025/26=panel type, >=10000 = WCX plugin.
     # SendMessageTimeout prevents hanging when a modal dialog is open.
-    if (-not ('IsoWcxTcPanelQuery' -as [type])) {
+    if (-not ('IsoWcxTcPanelQueryV2' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
 using System.Text;
 using System.Runtime.InteropServices;
-public static class IsoWcxTcPanelQuery {
+public static class IsoWcxTcPanelQueryV2 {
     [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
     public static extern IntPtr SendMessageTimeout(
         IntPtr window, uint message, IntPtr wParam, IntPtr lParam,
@@ -276,7 +276,7 @@ public static class IsoWcxTcPanelQuery {
             $values=@{}
             foreach ($code in @(1000,1017,1018,1019,1020,1023,1024,1025,1026)) {
                 $result=[IntPtr]::Zero
-                $ok=[IsoWcxTcPanelQuery]::SendMessageTimeout(
+                $ok=[IsoWcxTcPanelQueryV2]::SendMessageTimeout(
                     $window,[uint32]1074,[IntPtr]$code,[IntPtr]::Zero,
                     [uint32]2,[uint32]1200,[ref]$result)
                 if ($ok -eq [IntPtr]::Zero) {
@@ -315,14 +315,14 @@ public static class IsoWcxTcPanelQuery {
             foreach ($side in @('left','right')) {
                 $code=if ($side -eq 'left') { 9 } else { 10 }
                 $handle=[IntPtr]::Zero
-                $valid=[IsoWcxTcPanelQuery]::SendMessageTimeout(
+                $valid=[IsoWcxTcPanelQueryV2]::SendMessageTimeout(
                     $window,[uint32]1074,[IntPtr]$code,[IntPtr]::Zero,
                     [uint32]2,[uint32]1200,[ref]$handle)
                 $pathText=''
                 if ($valid -ne [IntPtr]::Zero -and
                     $handle -ne [IntPtr]::Zero) {
                     $buffer=New-Object System.Text.StringBuilder(8192)
-                    $characters=[IsoWcxTcPanelQuery]::GetWindowText(
+                    $characters=[IsoWcxTcPanelQueryV2]::GetWindowText(
                         $handle,$buffer,$buffer.Capacity)
                     if ($characters -gt 0) {
                         $pathText=$buffer.ToString().Replace([char]13,' ').Replace([char]10,' ')
