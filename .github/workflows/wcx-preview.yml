@@ -56,7 +56,7 @@ jobs:
             '$checksum$=123'
           )
           $report= & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -IniPath $fixture | Out-String
-          if ($report -notmatch 'wim отсутствует в PackerPlugins64 exts') {
+          if ($report -notmatch 'WCX64_CACHE_MISSING=wim') {
             Write-Host $report
             throw 'Read-only diagnostic missed stale WIM cache'
           }
