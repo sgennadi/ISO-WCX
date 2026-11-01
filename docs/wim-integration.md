@@ -129,3 +129,18 @@ workspace contains only `expanded` and no `mounted` or
 `original-archive.backup`, do not blindly recurse-delete it: Windows
 Apply/Capture may restore protected ACLs and hardlinks. A TC restart cannot
 recover a process-local deferred cleanup queue from the previous process.
+
+### Explicit TC x64 cache repair when F5 is unavailable despite flags 158
+
+Use **Packers > ISO-WCX > Configure > Repair WCX associations**.
+For a correctly registered `iso/wim=158,...ISO-WCX.wcx`, an explicit
+repair now offers to clear the checksum in TC's `PackerPlugins64` cache.
+This is opt-in, backs up the affected INI, and leaves third-party packer
+associations and toolbar buttons unchanged. The previous implementation
+returned `Nothing changed` when `PackerPlugins` flags were already
+correct, even if the separate x64 cache was stale. Auto-detection while
+opening a WIM still does NOT prompt for a cache reset on every TC launch.
+After confirming, **close every Total Commander process** and start TC
+again before testing F5. This addresses one plausible cache issue but
+does not prove it caused the user's F5 failure; inspect the new local
+`edit-errors.log` from the subsequent F5 attempt.

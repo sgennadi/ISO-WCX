@@ -78,6 +78,36 @@ int main() {
              blocked.conflicts[0]==L"wim" && blocked.text==foreign,
              "foreign WIM association should be reported, not overwritten");
 
+        // TC x64 can cache stale capabilities after reinstalling an
+        // already-correct "158" ISO-WCX. Manual Repair must be able to
+        // clear ONLY the x64 checksum, preserving flags, third-party
+        // plug-ins, custom toolbar and all unrelated cached data.
+        const std::wstring cache_only=
+            L"[PackerPlugins]\r\n"
+            L"iso=158,"+current+L"\r\n"
+            L"wim=158,"+current+L"\r\n"
+            L"zip=777,C:\\Other\\zip.wcx\r\n"
+            L"[PackerPlugins64]\r\n"
+            L"$checksum$=stale\r\n"
+            L"exts=iso*wim*zip*\r\n"
+            L"[Buttonbar]\r\nButtonbar=custom.bar\r\n";
+        const auto already_good=repair_packer_plugins(cache_only,current);
+        need(!already_good.changed,
+             "cache-only WCX repair must not touch already-correct flags");
+        const auto reset_x64=invalidate_cache(already_good.text);
+        need(reset_x64.changed &&
+             reset_x64.text.find(L"$checksum$") == std::wstring::npos &&
+             reset_x64.text.find(L"zip=777,C:\\Other\\zip.wcx") !=
+                 std::wstring::npos &&
+             reset_x64.text.find(L"exts=iso*wim*zip*") !=
+                 std::wstring::npos &&
+             reset_x64.text.find(L"Buttonbar=custom.bar") !=
+                 std::wstring::npos,
+             "cache-only WCX repair damaged third-party TC settings");
+        need(!invalidate_cache(reset_x64.text).changed &&
+             !repair_packer_plugins(reset_x64.text,current).changed,
+             "cache-only x64 invalidation must be idempotent");
+
         // Paths with commas are valid, unless a leading decimal flag
         // before the first comma is actually present.
         need(owned_plugin(L"C:\\Program,Files\\ISO-WCX.wcx"),

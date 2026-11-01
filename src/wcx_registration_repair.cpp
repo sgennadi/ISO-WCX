@@ -310,68 +310,95 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
                             L"\nСохранены привязки других WCX: ");
             for(const auto& ext:fixed.conflicts)summary+=ext+L" ";
         }
-        if(!fixed.changed) {
-            if(quiet_when_clean)return;
-            summary+=label(russian,
-                L"\nNo obsolete ISO-WCX binding was found. Nothing changed.",
-                L"\nУстаревших привязок ISO-WCX нет. Изменений нет.");
-            MessageBoxW(parent,summary.c_str(),L"ISO-WCX Associations",
-                        MB_OK|MB_ICONINFORMATION);
-            return;
-        }
-        summary+=label(russian,
-            L"\n\nFix only ISO-WCX associations to flags 158, remove "
-            L"their duplicates and invalidate the TC x64 cache?\n"
-            L"Original INI files will be backed up. Restart TC afterward.",
-            L"\n\nИсправить только привязки ISO-WCX (маска 158), "
-            L"удалить их дубликаты и обновить кэш TC x64?\n"
-            L"Оригинальные INI будут сохранены. После этого перезапустите TC.");
-        if(MessageBoxW(parent,summary.c_str(),L"ISO-WCX Associations",
-                 MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES)return;
+        // A 64-bit Total Commander can retain an obsolete PackerPlugins64
+        // checksum even though PackerPlugins already reads "158,ISO-WCX.wcx".
+        // The old manual Repair button returned early here, so F5 stayed
+        // unavailable after installation. Let EXPLICIT manual repair also
+        // invalidate that cache, without changing any other WCX association.
+        // On passive open keep the existing silent fast path: don't offer
+        // a cache reset every time TC recreates its valid checksum.
+        if(!fixed.changed && quiet_when_clean)return;
         Document cached=cache_path==assoc_path?assoc:load(cache_path);
         const auto saved_assoc=cache_path==assoc_path?
             invalidate_cache(fixed.text):fixed;
         const auto saved_cache=cache_path==assoc_path?
             Patch{}:invalidate_cache(cached.text);
-        const auto backup=save_backup(assoc.path);
-        fs::path cache_backup;
-        if(cache_path!=assoc_path && saved_cache.changed) {
-            try {cache_backup=save_backup(cached.path);}
-            catch(...) {throw;}
+        const bool assoc_changed=fixed.changed ||
+            (cache_path==assoc_path && saved_assoc.changed);
+        const bool cache_changed=cache_path!=assoc_path && saved_cache.changed;
+        if(!assoc_changed && !cache_changed) {
+            if(quiet_when_clean)return;
+            summary+=label(russian,
+                L"\nNo obsolete ISO-WCX binding or TC x64 cache was found. Nothing changed.",
+                L"\nУстаревших привязок ISO-WCX или кэша TC x64 нет. Изменений нет.");
+            MessageBoxW(parent,summary.c_str(),L"ISO-WCX Associations",
+                        MB_OK|MB_ICONINFORMATION);
+            return;
         }
+        if(fixed.changed) {
+            summary+=label(russian,
+                L"\n\nFix only ISO-WCX associations to flags 158, remove "
+                L"their duplicates and invalidate the TC x64 cache?\n"
+                L"Original INI files will be backed up. Restart TC afterward.",
+                L"\n\nИсправить только привязки ISO-WCX (маска 158), "
+                L"удалить их дубликаты и обновить кэш TC x64?\n"
+                L"Оригинальные INI будут сохранены. После этого перезапустите TC.");
+        }else{
+            summary+=label(russian,
+                L"\n\nThe ISO-WCX flags already equal 158. Reset ONLY the "
+                L"TC x64 PackerPlugins64 cache checksum to force Total "
+                L"Commander to rebuild its cached capabilities?\n"
+                L"An INI backup will be saved; all other plugin bindings "
+                L"will remain unchanged. Restart all TC windows afterward.",
+                L"\n\nФлаги ISO-WCX уже равны 158. Сбросить ТОЛЬКО "
+                L"контрольную сумму кэша PackerPlugins64, чтобы TC "
+                L"перечитал возможности плагина?\n"
+                L"Создаётся резервная копия INI. Привязки других "
+                L"плагинов не меняются. После этого перезапустите все окна TC.");
+        }
+        if(MessageBoxW(parent,summary.c_str(),L"ISO-WCX Associations",
+                 MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES)return;
+        fs::path backup,cache_backup;
+        if(assoc_changed)backup=save_backup(assoc.path);
+        if(cache_changed)cache_backup=save_backup(cached.path);
         bool assoc_committed=false,cache_committed=false;
-        // The confirmation dialog can stay open while TC or another process
-        // changes settings. Verify BOTH sources before replacing EITHER one.
+        // A user may edit TC settings while the confirmation dialog stays
+        // open. Neither INI may be written unless BOTH source copies match.
         check(load(assoc.path).bytes==assoc.bytes,
               "PackerPlugins changed before repair; no INI replaced");
-        if(cache_path!=assoc_path && saved_cache.changed)
+        if(cache_changed)
             check(load(cached.path).bytes==cached.bytes,
                   "PackerPlugins64 changed before repair; no INI replaced");
         try {
-            store(assoc,saved_assoc.text);
-            assoc_committed=true;
-            if(cache_path!=assoc_path && saved_cache.changed) {
+            if(assoc_changed) {
+                store(assoc,saved_assoc.text);
+                assoc_committed=true;
+            }
+            if(cache_changed) {
                 store(cached,saved_cache.text);
                 cache_committed=true;
             }
         }catch(...) {
-            // Never overwrite third-party edits when a before-write identity
-            // check failed. Restore only files this operation DID replace.
+            // Restore only files this action actually wrote, and only if
+            // their bytes still match OUR changes (never overwrite user edits).
             std::error_code ignored;
-            if(assoc_committed &&
+            if(assoc_committed && !backup.empty() &&
                load(assoc.path).bytes==encoded(saved_assoc.text,assoc.coding))
                 fs::copy_file(backup,assoc.path,
                     fs::copy_options::overwrite_existing,ignored);
-            if(cache_committed && !cache_backup.empty())
+            if(cache_committed && !cache_backup.empty() &&
+               load(cached.path).bytes==encoded(saved_cache.text,cached.coding))
                 fs::copy_file(cache_backup,cached.path,
                     fs::copy_options::overwrite_existing,ignored);
             throw;
         }
+        const auto saved_path=!backup.empty()?backup:cache_backup;
         const auto message=std::wstring(label(russian,
-            L"ISO-WCX bindings repaired.\nRestart all Total Commander windows."
-            L"\n\nBackup: ",
-            L"Привязки ISO-WCX исправлены.\nПерезапустите все окна Total Commander."
-            L"\n\nКопия: "))+backup.wstring();
+            fixed.changed?L"ISO-WCX bindings repaired.\nRestart all Total Commander windows.\n\nBackup: ":
+                          L"TC x64 WCX capability cache reset.\nRestart all Total Commander windows.\n\nBackup: ",
+            fixed.changed?L"Привязки ISO-WCX исправлены.\nПерезапустите все окна Total Commander.\n\nКопия: ":
+                          L"Кэш возможностей WCX (TC x64) сброшен.\nПерезапустите все окна Total Commander.\n\nКопия: "))+
+            saved_path.wstring();
         MessageBoxW(parent,message.c_str(),L"ISO-WCX Associations",
                     MB_OK|MB_ICONINFORMATION);
     }catch(const std::exception& e) {
