@@ -215,9 +215,13 @@ a format-specific new-archive implementation.
 
 The user has verified `wim=158`, `PackerPlugins64 exts` contains WIM,
 and `OpenArchiveW succeeded` runs with no `PackFilesW` callback.
-A screenshot of the last failed F5 shows only `[image1]` in the right
-panel: this is the synthetic WIM root, not the contents of that index.
+An earlier screenshot showed only `[image1]` in the right panel,
+but a later **read-only TC 11.58.1 live-panel query conclusively verified**
+`TC_WIM_DESTINATION_DEPTH=inside-image-index` and the path
+`boot.wim\\image1\\*.*` during the same reported F5 failure.
 The standard file-to-WIM F5 operation must target `boot.wim\\image1\\`.
+**Do not blame the user's panel selection or keep asking for the same
+panel check after this verification.**
 The source must be a selected file in an ordinary filesystem panel
 (not from another archive), and **that source panel** must be active.
 
@@ -229,10 +233,12 @@ right-side archive presence. The query never posts a command, edits
 Total Commander, or changes the image. If the querying process is
 not permitted to message an elevated Total Commander (UIPI), it
 reports the failure rather than escalating or attempting bypass.
-Path text inside a WIM index is not accessible via these messages;
-verify it visually in the TC right pane. Run the diagnostic from
-the same elevation level as the TC process, preferably while the
-source file is still selected immediately after the F5 error.
+The later diagnostic reads the path-bar control captions using
+non-mutating GetWindowTextW and identifies the WIM destination index
+when a caption is available. Run the diagnostic at the same elevation
+as TC immediately after F5. If the destination is confirmed inside
+`image1` and no PackFiles callback appears, investigate the WCX host
+dispatch or cached capabilities rather than repeating panel tests.
 
 ### Bidirectional F5 routing and live destination path
 
@@ -260,3 +266,26 @@ PowerShell Get-Location.ProviderPath before normalizing the absolute
 path. Existing absolute and UNC paths are unchanged. A Windows CI
 regression runs the script after Push-Location and checks that the report
 was actually created in that PowerShell folder.
+
+### Do not use cm_CopyToArchive as a WIM F5 test
+
+**Confirmed in a 2026-11-01 TC 11.58.1 field screenshot:** typing
+`cm_CopyToArchive` opened the normal **Pack files (Alt+F5)** dialog with
+**ZIP** selected and an output of `diags.zip`. The next overwrite prompt
+was for `diags.txt` inside an existing ZIP, **not** for a file inside
+`boot.wim`. The test was invalid for WIM and should be cancelled
+instead of allowing the ZIP overwrite.
+
+The standard F5 action is `cm_Copy`, **not** `cm_CopyToArchive`.
+`cm_CopyToArchive` and `cm_PackFiles` always start the separate pack
+dialog for a new archive; neither adds files to an already open WIM
+in the opposite panel. Do not suggest either as a way to bypass
+`Function not supported!`.
+
+The user's ordinary F5 was already reproduced with source
+`filesystem`, one source file selected, WIM destination `image1`,
+`wim=158`, TC64 cache containing `wim`, and ISO-WCX.wcx64 loaded.
+The root cause remains open until a real TC-hosted PackFiles callback
+(or a specific host refusal mechanism) is identified. Do not change
+masks to `159`, alter third-party associations, or create an output ZIP
+to disguise the missing WIM edit.
