@@ -7,6 +7,7 @@
 #include <cwctype>
 #include <cstddef>
 #include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -126,13 +127,16 @@ inline bool is_current_wcx_registration(
               candidate.substr(token.size());
     return candidate==installed;
 }
+inline constexpr std::array<std::wstring_view,23> supported_image_extensions{
+    L"iso",L"udf",L"cue",L"ccd",L"nrg",L"mds",L"mdx",
+    L"cso",L"zso",L"isz",L"daa",L"img",L"raw",L"vhd",
+    L"vhdx",L"wim",L"esd",L"swm",L"ima",L"vfd",L"flp",
+    L"bif",L"imz"
+};
 inline bool supported(std::wstring_view ext) {
-    constexpr std::array<std::wstring_view,23> extensions{
-        L"iso",L"udf",L"cue",L"ccd",L"nrg",L"mds",L"mdx",
-        L"cso",L"zso",L"isz",L"daa",L"img",L"raw",L"vhd",
-        L"vhdx",L"wim",L"esd",L"swm",L"ima",L"vfd",L"flp",
-        L"bif",L"imz"};
-    return std::find(extensions.begin(),extensions.end(),ext)!=extensions.end();
+    return std::find(supported_image_extensions.begin(),
+                     supported_image_extensions.end(),ext)!=
+           supported_image_extensions.end();
 }
 // Replaces stale 0/192/222/bare-path flags, moves previous ISO-WCX installs
 // to the currently loaded DLL, and removes same-extension duplicates.
@@ -187,6 +191,63 @@ inline Patch repair_packer_plugins(std::wstring_view input,
         if(changed)patch.extensions.push_back(ext);
     }
     if(patch.changed)patch.text=join(lines);
+    return patch;
+}
+// First TC installation exposes only ISO/WIM through pluginst.inf (two
+// native dialogs, not 23). After loading an image, an explicitly confirmed
+// operation can add the still-UNASSIGNED image formats in one INI update.
+// Existing foreign handlers, intentionally empty entries, duplicate keys
+// and every unrelated INI section are preserved verbatim.
+inline Patch register_missing_packer_plugins(
+        std::wstring_view input,std::wstring_view installed_wcx) {
+    Patch patch{};
+    patch.text=std::wstring(input);
+    auto lines=split(input);
+    std::set<std::wstring> registered;
+    std::wstring current;
+    std::size_t end=lines.size();
+    unsigned sections=0;
+    bool inside=false;
+    for(std::size_t i=0;i<lines.size();++i) {
+        const auto sec=section(lines[i].body);
+        if(!sec.empty()) {
+            if(inside) {end=i;inside=false;}
+            if(sec==L"packerplugins") {
+                if(++sections>1)return patch; // Ambiguous INI: fail closed.
+                inside=true;
+                end=lines.size();
+            }
+            current=sec;
+            continue;
+        }
+        if(current==L"packerplugins") {
+            const auto [key,val]=property(lines[i].body);
+            if(supported(key))registered.insert(key);
+        }
+    }
+    if(sections!=1)return patch;
+    for(const auto ext:supported_image_extensions) {
+        if(!registered.contains(std::wstring(ext)))
+            patch.extensions.emplace_back(ext);
+    }
+    if(patch.extensions.empty())return patch;
+    std::wstring ending=L"\r\n";
+    for(const auto& line:lines) {
+        if(!line.ending.empty()) {ending=line.ending;break;}
+    }
+    // When PackerPlugins is the last section and its final property
+    // lacks a trailing newline, add exactly one separator first.
+    if(end>0 && lines[end-1].ending.empty())
+        lines[end-1].ending=ending;
+    std::vector<Line> additions;
+    additions.reserve(patch.extensions.size());
+    for(const auto& ext:patch.extensions)
+        additions.push_back({ext+L"=158,"+std::wstring(installed_wcx),
+                             ending});
+    lines.insert(lines.begin()+static_cast<std::ptrdiff_t>(end),
+                 additions.begin(),additions.end());
+    patch.text=join(lines);
+    patch.changed=true;
     return patch;
 }
 inline Patch invalidate_cache(std::wstring_view input) {

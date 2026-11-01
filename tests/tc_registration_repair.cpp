@@ -7,6 +7,7 @@
 #include <string_view>
 using iso_wcx::tc_registration::repair_packer_plugins;
 using iso_wcx::tc_registration::invalidate_cache;
+using iso_wcx::tc_registration::register_missing_packer_plugins;
 using iso_wcx::tc_registration::owned_plugin;
 using iso_wcx::tc_registration::value;
 
@@ -69,6 +70,51 @@ int main() {
         need(value(repaired.text,L"Configuration",L"UseIniInProgramDir")==L"7",
              "INI section parser lost unrelated settings");
 
+        // The native INF registers just ISO+WIM. The WCX offers one
+        // explicitly confirmed batch for the remaining free formats.
+        // Every unrelated plugin, toolbar, and explicit empty association
+        // must remain byte-for-byte preserved.
+        const std::wstring native_two=
+            L"[Configuration]\r\nUseIniInProgramDir=7\r\n"
+            L"[PackerPlugins]\r\n"
+            L"iso=158,"+current+L"\r\n"
+            L"wim=158,"+current+L"\r\n"
+            L"udf=333,C:\\Other\\UDF.wcx\r\n"
+            L"nrg=\r\n" // Explicit empty entry must not be replaced.
+            L"zip=777,C:\\Other\\zip.wcx\r\n"
+            L"[Buttonbar]\r\nButtonbar=custom.bar\r\n"
+            L"[PackerPlugins64]\r\n$checksum$=987\r\nexts=iso*wim*\r\n";
+        const auto batch=register_missing_packer_plugins(native_two,current);
+        need(batch.changed && batch.extensions.size()==19,
+             "one-click batch should add 19 missing extensions (2 owned, 2 reserved)");
+        need(batch.text.find(L"esd=158,"+current)!=std::wstring::npos &&
+             batch.text.find(L"swm=158,"+current)!=std::wstring::npos &&
+             batch.text.find(L"vhdx=158,"+current)!=std::wstring::npos,
+             "missing WIM and disk image associations were not registered");
+        need(batch.text.find(L"udf=333,C:\\Other\\UDF.wcx")!=std::wstring::npos &&
+             batch.text.find(L"nrg=\r\n")!=std::wstring::npos &&
+             batch.text.find(L"zip=777,C:\\Other\\zip.wcx")!=std::wstring::npos &&
+             batch.text.find(L"[Buttonbar]\r\nButtonbar=custom.bar")!=std::wstring::npos,
+             "bulk install overwrote another plug-in, custom button, or user's unassigned format");
+        need(!register_missing_packer_plugins(batch.text,current).changed &&
+             !repair_packer_plugins(batch.text,current).changed,
+             "bulk installation not idempotent");
+        const auto folded_batch=register_missing_packer_plugins(
+            L"[PackerPlugins]\nISO=158,"+current+L"\nWiM=158,"+current+
+            L"\n[Buttonbar]\nButtonbar=custom.bar\n",current);
+        need(folded_batch.changed && folded_batch.extensions.size()==21 &&
+             folded_batch.text.find(L"iso=158,"+current+L"\n")==std::wstring::npos,
+             "mixed-case format keys must not be registered twice");
+        const auto no_section=register_missing_packer_plugins(
+            L"[Buttonbar]\nButtonbar=custom.bar\n",current);
+        need(!no_section.changed && no_section.text==
+             L"[Buttonbar]\nButtonbar=custom.bar\n",
+             "missing PackerPlugins section must not create a new unrelated section");
+        const auto duplicate_sections=register_missing_packer_plugins(
+            L"[PackerPlugins]\niso=158,"+current+
+            L"\n[PackerPlugins]\nwim=158,"+current+L"\n",current);
+        need(!duplicate_sections.changed,
+             "ambiguous duplicate PackerPlugins sections must not be edited");
         // Do not take over another working WIM handler if both are present.
         const std::wstring foreign=
             std::wstring(L"[PackerPlugins]\nwim=2,C:\\ThirdParty\\wim.wcx\n")+

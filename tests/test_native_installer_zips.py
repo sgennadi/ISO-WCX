@@ -20,6 +20,7 @@ EXTENSIONS = (
     "wim", "esd", "swm", "ima", "vfd", "flp", "bif", "imz",
 )
 MODULES = {"ISO-WCX.wcx": 0x014C, "ISO-WCX.wcx64": 0x8664}
+DEFAULT_EXTENSIONS = ("iso", "wim")
 DOCS = {"PREVIEW.md", "INSTALL_RU.txt", "INSTALL_EN.txt",
         "THIRD_PARTY_NOTICES.txt"}
 EXPECTED = {"pluginst.inf", *MODULES, *DOCS}
@@ -54,7 +55,11 @@ def validate(path: pathlib.Path) -> None:
         assert cfg.get("defaultdir") == "ISO-WCX"
         extensions = [x.strip().lower()
                       for x in cfg["defaultextension"].split(",")]
-        assert tuple(extensions) == EXTENSIONS, "image extension set changed"
+        assert tuple(extensions) == DEFAULT_EXTENSIONS, (
+            "native INF must offer ISO/WIM only; one built-in confirmed "
+            "batch handles other image associations"
+        )
+        assert set(extensions).issubset(set(EXTENSIONS))
         assert len(set(extensions)) == len(extensions)
         assert not set(extensions).intersection(
             {"zip", "rar", "7z", "tar", "gz", "docx", "xlsx"}
@@ -71,7 +76,9 @@ def validate(path: pathlib.Path) -> None:
                 f"wrong PE architecture in {filename}: {machine:#x}"
             )
     print(f"PASS: one universal {path.name}; Win32+x64 WCX verified; "
-          f"{len(EXTENSIONS)} safe image extensions; no extra installers")
+          f"{len(DEFAULT_EXTENSIONS)} native prompts, "
+          f"{len(EXTENSIONS)} supported image types via confirmed bulk registration; "
+          "no extra installers")
 
 
 def main() -> None:
