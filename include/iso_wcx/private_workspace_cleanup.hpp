@@ -183,16 +183,28 @@ inline bool delete_entry(const fs::path& path,Result& result,
         const auto wildcard=native+L"\\*";
         WIN32_FIND_DATAW item{};
         HANDLE search=FindFirstFileW(wildcard.c_str(),&item);
-        if(search==INVALID_HANDLE_VALUE && GetLastError()==ERROR_ACCESS_DENIED) {
+        // Save the native enumeration error immediately. Security helpers
+        // may overwrite GetLastError, masking the actual ACCESS_DENIED and
+        // causing failed ACL cleanup of a WIMApplyImage tree to leave an
+        // unexplained private "expanded" folder after TC exits.
+        DWORD find_error=search==INVALID_HANDLE_VALUE?
+            GetLastError():ERROR_SUCCESS;
+        if(search==INVALID_HANDLE_VALUE &&
+           find_error==ERROR_ACCESS_DENIED) {
             // Directory-level DACL adjustment only, *not* per-file changes:
             // source WIM security descriptors were already captured.
-            if(enable_temporary_directory_access(path)==ERROR_SUCCESS)
-                search=FindFirstFileW(wildcard.c_str(),&item);
+            const DWORD grant=enable_temporary_directory_access(path);
+            if(grant!=ERROR_SUCCESS) {
+                failure(result,path,grant);
+                return false;
+            }
+            search=FindFirstFileW(wildcard.c_str(),&item);
+            find_error=search==INVALID_HANDLE_VALUE?
+                GetLastError():ERROR_SUCCESS;
         }
         if(search==INVALID_HANDLE_VALUE) {
-            const DWORD code=GetLastError();
-            if(code!=ERROR_FILE_NOT_FOUND) {
-                failure(result,path,code);return false;
+            if(find_error!=ERROR_FILE_NOT_FOUND) {
+                failure(result,path,find_error);return false;
             }
         }else {
             bool done=true;
