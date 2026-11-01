@@ -104,6 +104,52 @@ function Check-Ini {
         Say 'Прямых привязок не найдено. Проверьте RedirectSection и настройки плагинов TC.'
     }
 }
+function Check-Wcx64Cache {
+    Say '--- Кэш WCX Total Commander x64 (только чтение) ---'
+    $ini = Find-TcIni
+    if (-not $ini) { Say 'wincmd.ini не найден'; return }
+    $section = ''
+    $exts = $null
+    $checksum = $false
+    $redirect = $false
+    $reader = [IO.File]::OpenText($ini)
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            if ($line -match '^\s*\[([^\]]+)\]\s*$') {
+                $section = $Matches[1].Trim()
+                continue
+            }
+            if ($section -eq 'RedirectSection' -and
+                $line -match '^\s*PackerPlugins(64)?\s*=') { $redirect = $true }
+            if ($section -ne 'PackerPlugins64') { continue }
+            if ($line -match '^\s*exts\s*=\s*(.*)$') { $exts = $Matches[1].Trim() }
+            if ($line -match '^\s*\$checksum\$\s*=') { $checksum = $true }
+        }
+    } finally { $reader.Dispose() }
+    if ($redirect) {
+        Say 'RedirectSection перенаправляет WCX-привязки: проверьте другой INI.'
+        return
+    }
+    if ($checksum) {
+        Say 'Кэш PackerPlugins64: контрольная сумма присутствует.'
+    } else {
+        Say 'Кэш PackerPlugins64: контрольной суммы нет (TC может перестроить кэш).'
+    }
+    if ($null -eq $exts) {
+        Say 'PackerPlugins64 exts отсутствует; TC может перестроить его при запуске.'
+        return
+    }
+    $extensions = @($exts -split '\*')
+    foreach ($extension in @('wim','iso','udf')) {
+        if ($extensions -contains $extension) {
+            Say ('x64 кэш: ' + $extension + ' присутствует')
+        } else {
+            Say ('ВНИМАНИЕ: ' + $extension +
+                ' отсутствует в PackerPlugins64 exts — возможна устаревшая привязка.')
+        }
+    }
+    Say 'Наличие расширения не доказывает, что текущий процесс TC использует новые флаги F5.'
+}
 function Check-WimFile {
     Say '--- Заголовок WIM и временные папки ---'
     if (-not $WimPath) {
@@ -181,6 +227,7 @@ Say ('ISO-WCX диагностика: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:
 Say 'Только чтение: никаких изменений TC, WIM, монтировок и временных папок.'
 try { Check-TcProcesses } catch { Say ('TC: ' + $_.Exception.Message) }
 try { Check-Ini } catch { Say ('INI: ' + $_.Exception.Message) }
+try { Check-Wcx64Cache } catch { Say ('Кэш x64: ' + $_.Exception.Message) }
 try { Check-WimFile } catch { Say ('WIM: ' + $_.Exception.Message) }
 
 function Check-Installed-Wcx {

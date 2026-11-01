@@ -47,6 +47,20 @@ jobs:
             throw 'ISO-WCX diagnostic script contains PowerShell syntax errors'
           }
           Write-Host 'PASS: ISO-WCX diagnostic syntax (Windows PowerShell 5.1)'
+          $fixture=Join-Path $env:RUNNER_TEMP 'isowcx-stale-cache.ini'
+          Set-Content -LiteralPath $fixture -Encoding Unicode -Value @(
+            '[PackerPlugins]'
+            'wim=158,C:\NoSuchFolder\ISO-WCX.wcx'
+            '[PackerPlugins64]'
+            'exts=iso*'
+            '$checksum$=123'
+          )
+          $report= & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -IniPath $fixture | Out-String
+          if ($report -notmatch 'wim отсутствует в PackerPlugins64 exts') {
+            Write-Host $report
+            throw 'Read-only diagnostic missed stale WIM cache'
+          }
+          Write-Host 'PASS: ISO-WCX x64 cache read-only diagnostic'
       - name: Configure Visual Studio 2026 with experimental C++26
         run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST=ON
       - name: Require VS2026 and C++26 configuration

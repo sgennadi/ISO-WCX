@@ -144,3 +144,22 @@ After confirming, **close every Total Commander process** and start TC
 again before testing F5. This addresses one plausible cache issue but
 does not prove it caused the user's F5 failure; inspect the new local
 `edit-errors.log` from the subsequent F5 attempt.
+
+### TC 11.x F5 "Function not supported" diagnosis (Preview)
+
+A failed F5 in an already-open WIM panel does not by itself prove the
+WIM writer was called. The optional interactive log at
+`%LOCALAPPDATA%\\ISO-WCX\\Logs\\edit-errors.log` now records
+`OpenArchiveW entered` and `OpenArchiveW succeeded` when TC opens WIM,
+ISO or UDF, as well as existing `PackFilesW entered` and
+`PackFilesW finished` entries. If the WIM open is present and no new
+PackFiles event appears after F5, inspect TC's x64 associations and
+cache rather than changing the WIM bytes. The read-only script
+`tools/ISO-WCX-Diagnostic.ps1` checks whether `wim` occurs in
+`[PackerPlugins64] exts` and whether a checksum is present.
+`ConfigurePacker -> Repair WCX associations` performs a confirmed,
+backup-protected cache invalidation when needed; restarting all TC
+windows is essential. An F5 return code 24 means E_NOT_SUPPORTED and
+the preceding `F5/F7 edit error` explains any intentional WCX refusal.
+Test first with an ordinary small text file on a disposable WIM copy,
+not with symlinks, protected paths or an entire AppData tree.

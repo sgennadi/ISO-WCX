@@ -267,9 +267,17 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
         auto open_ext=path.extension().wstring();
         std::transform(open_ext.begin(),open_ext.end(),open_ext.begin(),
             [](wchar_t c){return std::towlower(c);});
-        if(wim_extension(path) || open_ext==L".iso" || open_ext==L".udf")
+        const bool editing_image=
+            wim_extension(path) || open_ext==L".iso" || open_ext==L".udf";
+        if(editing_image) {
+            iso_wcx::edit_diagnostics::log(
+                L"OpenArchiveW entered",path);
             iso_wcx::offer_tc_association_repair_once();
+        }
         auto state=open_state(path);
+        if(editing_image)
+            iso_wcx::edit_diagnostics::log(
+                L"OpenArchiveW succeeded",path);
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
     }catch(const iso_wcx::WimOpenCancelled&){
@@ -291,9 +299,17 @@ WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
         auto open_ext=path.extension().wstring();
         std::transform(open_ext.begin(),open_ext.end(),open_ext.begin(),
             [](wchar_t c){return std::towlower(c);});
-        if(wim_extension(path) || open_ext==L".iso" || open_ext==L".udf")
+        const bool editing_image=
+            wim_extension(path) || open_ext==L".iso" || open_ext==L".udf";
+        if(editing_image) {
+            iso_wcx::edit_diagnostics::log(
+                L"OpenArchive ANSI entered",path);
             iso_wcx::offer_tc_association_repair_once();
+        }
         auto state=open_state(path);
+        if(editing_image)
+            iso_wcx::edit_diagnostics::log(
+                L"OpenArchive ANSI succeeded",path);
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
     }catch(const iso_wcx::WimOpenCancelled&){
