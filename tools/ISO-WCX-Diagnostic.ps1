@@ -146,6 +146,7 @@ function Check-Wcx64Cache {
         } else {
             Say ('ВНИМАНИЕ: ' + $extension +
                 ' отсутствует в PackerPlugins64 exts — возможна устаревшая привязка.')
+            Say ('WCX64_CACHE_MISSING=' + $extension)
         }
     }
     Say 'Наличие расширения не доказывает, что текущий процесс TC использует новые флаги F5.'
