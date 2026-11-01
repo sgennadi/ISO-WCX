@@ -13,6 +13,7 @@
 #endif
 #include <windows.h>
 #include "iso_wcx/private_workspace_cleanup.hpp"
+#include "iso_wcx/edit_diagnostics.hpp"
 #endif
 namespace iso_wcx {
 #ifdef _WIN32
@@ -60,6 +61,7 @@ inline void note_edit_cleanup_failure(
         edit_cleanup_warning_slot()=issue;
         edit_cleanup_warning_workspace_slot()=workspace;
         OutputDebugStringW((L"ISO-WCX cleanup: "+issue+L"\n").c_str());
+        edit_diagnostics::log(L"WIM workspace cleanup failed",workspace,issue);
     }catch(...) {}
 }
 inline std::wstring take_edit_cleanup_warning() noexcept {
@@ -80,7 +82,10 @@ inline void retry_deferred_edit_workspace_cleanup() noexcept {
         }
         for(const auto& workspace:retry) {
             const auto state=workspace_cleanup::cleanup(workspace);
-            if(state.clean)continue;
+            if(state.clean) {
+                edit_diagnostics::log(L"WIM deferred cleanup succeeded",workspace);
+                continue;
+            }
             // Unknown/registered WIM mounts are never deleted or added to
             // generic retry loops: manual mount recovery is required.
             if(!state.unsafe)

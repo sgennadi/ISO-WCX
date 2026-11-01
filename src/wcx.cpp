@@ -3,6 +3,7 @@
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/edit_transaction.hpp"
+#include "iso_wcx/edit_diagnostics.hpp"
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/wim_parts.hpp"
 #include "wcx_wim_open_progress.hpp"
@@ -435,6 +436,7 @@ void report_edit_error(const char* description,bool remove) noexcept {
         std::wstring reason;
         try { reason=from_bytes(description,CP_UTF8); }
         catch(...) { reason=L"Unsupported or invalid filesystem layout"; }
+        iso_wcx::edit_diagnostics::log(remove?L"F8 edit error":L"F5/F7 edit error",{},reason);
         if(reason.size()>800) reason.resize(800);
         const std::wstring details=
             L"Unsupported ISO/UDF Bridge, Rock Ridge and protected boot "
@@ -453,6 +455,7 @@ void report_edit_error(const char* description,bool remove) noexcept {
 // have been committed successfully when Windows still holds a scratch handle.
 void report_workspace_cleanup_warning(const std::wstring& reason) noexcept {
     if(reason.empty())return;
+    iso_wcx::edit_diagnostics::log(L"WIM cleanup warning",{},reason);
     try {
         wchar_t host[MAX_PATH]{};
         const DWORD length=GetModuleFileNameW(nullptr,host,MAX_PATH);
@@ -753,9 +756,13 @@ void retry_wim_cleanup_after_edit(const std::wstring& archive) noexcept {
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
     try {
         if(!archive||!source)return E_NOT_SUPPORTED;
+        iso_wcx::edit_diagnostics::log(L"PackFilesW entered",archive,
+            L"flags="+std::to_wstring(flags)+L" sub="+(sub?std::wstring(sub):L""));
         const int result=do_edit(archive,sub?sub:L"",source,
                                  edit_list(list),false,flags);
         retry_wim_cleanup_after_edit(archive);
+        iso_wcx::edit_diagnostics::log(L"PackFilesW finished",archive,
+            L"return="+std::to_wstring(result));
         return result;
     }catch(const std::exception& e) {
         report_edit_error(e.what(),false);return E_BAD_ARCHIVE;
@@ -768,10 +775,14 @@ WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* li
     try {
         if(!archive||!source)return E_NOT_SUPPORTED;
         const auto name=from_bytes(archive,CP_ACP);
+        iso_wcx::edit_diagnostics::log(L"PackFiles ANSI entered",name,
+            L"flags="+std::to_wstring(flags));
         const int result=do_edit(name,from_bytes(sub,CP_ACP),
                                  from_bytes(source,CP_ACP),
                                  edit_list(list),false,flags);
         retry_wim_cleanup_after_edit(name);
+        iso_wcx::edit_diagnostics::log(L"PackFiles ANSI finished",name,
+            L"return="+std::to_wstring(result));
         return result;
     }catch(const std::exception& e) {
         report_edit_error(e.what(),false);return E_BAD_ARCHIVE;

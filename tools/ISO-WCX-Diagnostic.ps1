@@ -55,7 +55,7 @@ function Check-TcProcesses {
                     $found = $true
                 }
             }
-            if (-not $found) { Say 'ISO-WCX не обнаружен среди доступных модулей процесса.' }
+            if (-not $found) { Say 'ISO-WCX не загружен сейчас (это нормально после закрытия панели архива).' }
         } catch {
             Say ('Нет доступа к списку DLL: ' + $_.Exception.Message)
         }
@@ -182,6 +182,55 @@ Say 'Только чтение: никаких изменений TC, WIM, мо�
 try { Check-TcProcesses } catch { Say ('TC: ' + $_.Exception.Message) }
 try { Check-Ini } catch { Say ('INI: ' + $_.Exception.Message) }
 try { Check-WimFile } catch { Say ('WIM: ' + $_.Exception.Message) }
+
+function Check-Installed-Wcx {
+    Say '--- Установленные модули ISO-WCX ---'
+    $ini = Find-TcIni
+    if (-not $ini) { Say 'Не удалось определить wincmd.ini.'; return }
+    $match = Select-String -LiteralPath $ini -Pattern '(?i)^\\s*(wim|iso)\\s*=\\s*(?:\\d+\\s*,\\s*)?(.+ISO-WCX\\.wcx)\\s*    $target = [IO.Path]::GetFullPath(
+        [Environment]::ExpandEnvironmentVariables($ReportPath))
+    $directory = Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        throw ('Папка для отчёта не существует: ' + $directory)
+    }
+    [IO.File]::WriteAllLines(
+        $target,$script:Lines.ToArray(),
+        (New-Object System.Text.UTF8Encoding($true)))
+    Write-Host ('Отчёт: ' + $target)
+}
+ -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $match) { Say 'Не найдена строка с ISO-WCX.wcx в INI.'; return }
+    $full = [Environment]::ExpandEnvironmentVariables(
+        $match.Matches[0].Groups[2].Value.Trim().Trim('"'))
+    foreach ($candidate in @($full,[IO.Path]::ChangeExtension($full,'wcx64'))) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -LiteralPath $candidate
+            Say ('Установлен: ' + $item.FullName +
+                 ' | размер=' + $item.Length + ' | UTC=' +
+                 $item.LastWriteTimeUtc.ToString('o'))
+        } else {
+            Say ('ОШИБКА: отсутствует ' + $candidate)
+        }
+    }
+    Say 'Нет загруженного WCX в списке процессов — само по себе НОРМАЛЬНО, если архив закрыт.'
+}
+function Check-Edit-Log {
+    Say '--- Последние события F5 и очистки WIM ---'
+    if (-not $env:LOCALAPPDATA) { Say 'LOCALAPPDATA отсутствует.'; return }
+    $file = Join-Path $env:LOCALAPPDATA 'ISO-WCX\Logs\edit-errors.log'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        Say 'Журнал пока отсутствует. Он создаётся новой версией WCX при работе F5 в TC.'
+        return
+    }
+    Say ('Журнал: ' + $file)
+    try {
+        Get-Content -LiteralPath $file -Encoding UTF8 -Tail 40 |
+            ForEach-Object { Say ([string]$_) }
+    } catch { Say ('Не удалось прочитать журнал: ' + $_.Exception.Message) }
+}
+try { Check-Installed-Wcx } catch { Say ('WCX файл: ' + $_.Exception.Message) }
+try { Check-Edit-Log } catch { Say ('Журнал: ' + $_.Exception.Message) }
 
 if ($ReportPath) {
     $target = [IO.Path]::GetFullPath(

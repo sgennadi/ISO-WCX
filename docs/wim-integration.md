@@ -108,3 +108,24 @@ If the on-disk WIM declares two images, the WCX should show both
 `image1` and `image2`; a disagreement between WIMGAPI's image count
 and the on-disk header now fails explicitly instead of silently listing
 fewer image roots. This does not assume every boot.wim contains two images.
+
+### Interactive F5/F7 failures and retained WIM cleanup diagnostics
+
+The current Preview records local, bounded, best-effort error and operation
+events only when invoked inside Total Commander. The log is stored at
+`%LOCALAPPDATA%\\ISO-WCX\\Logs\\edit-errors.log`; it is never uploaded
+or sent through the network. An entry named `PackFilesW entered` means the
+TC host actually called the Unicode WCX edit callback. If pressing F5 does
+not produce this event after reopening TC, inspect TC's WCX association and
+capability cache rather than assuming the WIM writer failed. Nonzero
+`PackFilesW finished` results and corresponding edit error messages help
+locate a rejected path or NTFS/Windows API error. Cleanup failures include
+the exact blocked entry and Win32 error; successful deferred retries are
+also recorded. No CTest/CLI host writes this interactive log.
+
+Run the read-only `tools/ISO-WCX-Diagnostic.ps1` and send its report after
+reproducing the failed F5 to capture the recent local entries. Even when a
+workspace contains only `expanded` and no `mounted` or
+`original-archive.backup`, do not blindly recurse-delete it: Windows
+Apply/Capture may restore protected ACLs and hardlinks. A TC restart cannot
+recover a process-local deferred cleanup queue from the previous process.
