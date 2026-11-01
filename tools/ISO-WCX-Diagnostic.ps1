@@ -5,6 +5,7 @@
 param(
     [string]$WimPath,
     [string]$IniPath,
+    [string]$WcxPath,
     [switch]$CheckDism,
     [string]$ReportPath
 )
@@ -454,6 +455,74 @@ function Check-Installed-Wcx {
     }
     Say 'Отсутствие DLL в списке процессов само по себе нормально при закрытой панели архива.'
 }
+function Check-WcxExports {
+    param([string]$Path)
+    Say '--- Native WCX DLL export table (read-only) ---'
+    if (-not $Path) {
+        $ini=Find-TcIni
+        if (-not $ini) { Say 'WCX_EXPORT_CHECK: no TC INI; use -WcxPath'; return }
+        $row=Select-String -LiteralPath $ini -Pattern '(?i)^\s*wim\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $row) { Say 'WCX_EXPORT_CHECK: WIM association not found'; return }
+        $Path=[Environment]::ExpandEnvironmentVariables(
+            $row.Matches[0].Groups[1].Value.Trim().Trim('"'))
+        if ([IntPtr]::Size -eq 8) {
+            $Path=[IO.Path]::ChangeExtension($Path,'wcx64')
+        }
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Say ('WCX_EXPORT_CHECK: no DLL at ' + $Path)
+        return
+    }
+    if (-not ('IsoWcxReadOnlyExportsV1' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class IsoWcxReadOnlyExportsV1 {
+    // DONT_RESOLVE_DLL_REFERENCES = 1: read export table without running DllMain
+    // or any plug-in code. Do not call any returned function pointer.
+    [DllImport("kernel32.dll", EntryPoint="LoadLibraryExW", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr LoadLibraryEx(string file, IntPtr ignored, uint flags);
+    [DllImport("kernel32.dll", EntryPoint="GetProcAddress", CharSet=CharSet.Ansi, SetLastError=true)]
+    public static extern IntPtr GetProcAddress(IntPtr module, string name);
+    [DllImport("kernel32.dll", EntryPoint="FreeLibrary", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FreeLibrary(IntPtr module);
+}
+'@ -ErrorAction Stop
+    }
+    $full=(Resolve-Path -LiteralPath $Path).ProviderPath
+    $loaded=[IsoWcxReadOnlyExportsV1]::LoadLibraryEx($full,[IntPtr]::Zero,[uint32]1)
+    if ($loaded -eq [IntPtr]::Zero) {
+        Say ('WCX_EXPORT_CHECK: PE load failed, Win32=' +
+            [Runtime.InteropServices.Marshal]::GetLastWin32Error() +
+            ' (check PowerShell and WCX architecture)')
+        return
+    }
+    try {
+        $missing=@()
+        $required=@('OpenArchiveW','ReadHeaderExW','ProcessFileW',
+                    'GetPackerCaps','PackFilesW','PackFiles',
+                    'DeleteFilesW','CloseArchive','SetProcessDataProcW')
+        foreach ($name in $required) {
+            $pointer=[IsoWcxReadOnlyExportsV1]::GetProcAddress($loaded,$name)
+            if ($pointer -eq [IntPtr]::Zero) {
+                $missing+=@($name)
+                Say ('WCX_EXPORT_MISSING=' + $name)
+            } else {
+                Say ('WCX_EXPORT_PRESENT=' + $name)
+            }
+        }
+        if ($missing.Count -eq 0) {
+            Say 'WCX_EXPORT_SUMMARY=PASS: all required WCX ABI entry points are exported'
+        } else {
+            Say ('WCX_EXPORT_SUMMARY=FAIL: ' + $missing.Count +
+                 ' missing; TC cannot call missing entry points')
+        }
+        Say 'Only export names were inspected; no DLL entry point was executed.'
+    } finally {
+        [void][IsoWcxReadOnlyExportsV1]::FreeLibrary($loaded)
+    }
+}
 function Check-Edit-Log {
     Say '--- Последние события F5 и очистки WIM ---'
     if (-not $env:LOCALAPPDATA) { Say 'LOCALAPPDATA отсутствует.'; return }
@@ -469,6 +538,7 @@ function Check-Edit-Log {
     } catch { Say ('Не удалось прочитать журнал: ' + $_.Exception.Message) }
 }
 try { Check-Installed-Wcx } catch { Say ('WCX файл: ' + $_.Exception.Message) }
+try { Check-WcxExports -Path $WcxPath } catch { Say ('WCX exports: ' + $_.Exception.Message) }
 try { Check-Edit-Log } catch { Say ('Журнал: ' + $_.Exception.Message) }
 
 if ($ReportPath) {

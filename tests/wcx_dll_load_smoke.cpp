@@ -17,13 +17,28 @@ int wmain(int argc,wchar_t** argv) {
         return 2;
     }
     std::wcerr << L"WCX_LOAD_OK" << std::endl;
-    if(!GetProcAddress(module,"OpenArchiveW") ||
-       !GetProcAddress(module,"DeleteFilesW") ||
-       !GetProcAddress(module,"GetPackerCaps")) {
-        FreeLibrary(module);
-        std::wcerr << L"WCX_MISSING_EXPORT" << std::endl;
-        return 3;
+    // Verify the actual binary's packing exports before involving TC.
+    // Previously this quick smoke skipped PackFilesW, allowing a host-only
+    // F5 regression to be overlooked until the longer WIM integration test.
+    for(const char* name : {"OpenArchiveW","ReadHeaderExW","ProcessFileW",
+                            "PackFilesW","PackFiles","DeleteFilesW",
+                            "GetPackerCaps","CloseArchive",
+                            "SetProcessDataProcW"}) {
+        if(!GetProcAddress(module,name)) {
+            std::wcerr << L"WCX_MISSING_EXPORT: " << name << std::endl;
+            FreeLibrary(module);
+            return 3;
+        }
     }
+    using GetCapsFn=int (__stdcall*)();
+    const auto caps=reinterpret_cast<GetCapsFn>(
+        GetProcAddress(module,"GetPackerCaps"));
+    if(!caps || caps()!=158 || (caps()&2)==0) {
+        std::wcerr << L"WCX_CAPS_INVALID expected 158 with PK_CAPS_MODIFY" << std::endl;
+        FreeLibrary(module);
+        return 5;
+    }
+    std::wcerr << L"WCX_ABI_PACKING_EXPORTS_OK caps=158" << std::endl;
     if(!FreeLibrary(module))return 4;
     std::wcerr << L"WCX_UNLOAD_OK" << std::endl;
     return 0;

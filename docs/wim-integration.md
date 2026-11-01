@@ -289,3 +289,25 @@ The root cause remains open until a real TC-hosted PackFiles callback
 (or a specific host refusal mechanism) is identified. Do not change
 masks to `159`, alter third-party associations, or create an output ZIP
 to disguise the missing WIM edit.
+
+### Diagnose deployed WCX64 exports before host routing
+
+The user's real Total Commander test verifies:
+- the source is an active filesystem panel with a selected ordinary file;
+- the destination is a WCX panel whose path is inside boot.wim\image1\;
+- all 23 image associations use 158, and the TC64 cache includes wim;
+- the live WIM opened successfully, but F5 reports "Function not supported!"
+
+The diagnostic now checks the **deployed binary's PE export table** using
+LoadLibraryExW with DONT_RESOLVE_DLL_REFERENCES and GetProcAddress.
+This does not execute plugin code, start any WIM action, or alter TC:
+it reports WCX_EXPORT_PRESENT/MISSING for PackFilesW, PackFiles,
+GetPackerCaps, DeleteFilesW and the core Unicode entrypoints.
+A missing PackFilesW is a concrete ABI failure; a complete export set
+means the refusal occurs somewhere else, not that F5 has been fixed.
+A separate native CTest DLL-loading smoke now asserts actual PackFilesW
+exports and invokes GetPackerCaps to verify its return value is 158.
+Run the read-only field script after installing the latest Preview; it
+automatically checks the .wcx64 path if PowerShell is 64-bit, or set
+-WcxPath explicitly. Do not execute the WCX pack exports in diagnostic
+code or promote Stable before a real hosted F5 succeeds.
