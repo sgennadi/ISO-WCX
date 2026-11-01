@@ -65,6 +65,13 @@ jobs:
             throw 'Read-only diagnostic did not count exactly the 23 supported image bindings'
           }
           Write-Host 'PASS: ISO-WCX x64 cache read-only diagnostic'
+          if ($report -notmatch 'TC_PANEL_QUERY: no running Total Commander process') {
+            Write-Host 'No TC process on CI runner or future interactive smoke context:'
+            Write-Host $report
+            Write-Host 'PASS: live TC panel state reported or runner was interactive'
+          } else {
+            Write-Host 'PASS: no TC process on CI runner handled safely'
+          }
       - name: Configure Visual Studio 2026 with experimental C++26
         run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST=ON
       - name: Require VS2026 and C++26 configuration

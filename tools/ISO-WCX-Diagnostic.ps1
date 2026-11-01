@@ -213,6 +213,76 @@ function Check-AssociationSummary {
         Say 'The second association prompt may correctly be skipped; all image formats have an assigned handler.'
     }
 }
+function Check-TcLivePanels {
+    Say '--- Total Commander live F5 panel state (read-only) ---'
+    $running = @(Get-Process -Name TOTALCMD,TOTALCMD64 -ErrorAction SilentlyContinue)
+    if ($running.Count -eq 0) {
+        Say 'TC_PANEL_QUERY: no running Total Commander process'
+        return
+    }
+    # The 11.57+ public WM_USER+50 query is entirely read-only.
+    # 1000=active panel, 1019/20=selected files, 1023/24=archive
+    # filename length, 1025/26=panel type, >=10000 = WCX plugin.
+    # SendMessageTimeout prevents hanging when a modal dialog is open.
+    if (-not ('IsoWcxTcPanelQuery' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class IsoWcxTcPanelQuery {
+    [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
+    public static extern IntPtr SendMessageTimeout(
+        IntPtr window, uint message, IntPtr wParam, IntPtr lParam,
+        uint flags, uint timeout, out IntPtr result);
+}
+'@ -ErrorAction Stop
+    }
+    foreach ($proc in $running) {
+        try {
+            $window=$proc.MainWindowHandle
+            if ($window -eq [IntPtr]::Zero) {
+                Say ('TC_PANEL_QUERY pid=' + $proc.Id + ' no visible main window')
+                continue
+            }
+            $values=@{}
+            foreach ($code in @(1000,1017,1018,1019,1020,1023,1024,1025,1026)) {
+                $result=[IntPtr]::Zero
+                $ok=[IsoWcxTcPanelQuery]::SendMessageTimeout(
+                    $window,[uint32]1074,[IntPtr]$code,[IntPtr]::Zero,
+                    [uint32]2,[uint32]1200,[ref]$result)
+                if ($ok -eq [IntPtr]::Zero) {
+                    $values[$code]=$null
+                } else {
+                    $values[$code]=$result.ToInt64()
+                }
+            }
+            if ($null -eq $values[1000] -or $null -eq $values[1026]) {
+                Say ('TC_PANEL_QUERY pid=' + $proc.Id +
+                     ' unavailable (modal dialog, old TC, or Windows UIPI permissions)')
+                continue
+            }
+            $active=$(if ($values[1000] -eq 1) {'left'} elseif ($values[1000] -eq 2) {'right'} else {'unknown'})
+            $leftType=$(if ($values[1025] -eq 0) {'filesystem'} elseif ($values[1025] -ge 10000) {'WCX-plugin'} else {'other'})
+            $rightType=$(if ($values[1026] -eq 0) {'filesystem'} elseif ($values[1026] -ge 10000) {'WCX-plugin'} else {'other'})
+            Say ('TC_PANEL_SNAPSHOT pid=' + $proc.Id +
+                 ' active=' + $active + ' left_type=' + $leftType +
+                 ' right_type=' + $rightType +
+                 ' left_selected_files=' + $values[1019] +
+                 ' right_selected_files=' + $values[1020] +
+                 ' left_selected_dirs=' + $values[1017] +
+                 ' right_selected_dirs=' + $values[1018] +
+                 ' right_archive_name_length=' + $values[1024])
+            if ($active -ne 'left' -or $values[1019] -lt 1 -or
+                $leftType -ne 'filesystem' -or $rightType -ne 'WCX-plugin') {
+                Say 'TC_F5_CONTEXT_WARNING: expected active LEFT filesystem panel with selected files and RIGHT WCX destination.'
+            } else {
+                Say 'TC_F5_CONTEXT: source/destination panel types and selected files are correct.'
+            }
+            Say 'Panel query does not include the WCX inner subdirectory. Confirm RIGHT path ends with boot.wim\image1\ and lists Windows/Program Files.'
+        } catch {
+            Say ('TC_PANEL_QUERY pid=' + $proc.Id + ': ' + $_.Exception.Message)
+        }
+    }
+}
 function Check-WimFile {
     Say '--- Заголовок WIM и временные папки ---'
     if (-not $WimPath) {
@@ -289,6 +359,7 @@ function Check-WimFile {
 Say ('ISO-WCX диагностика: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))
 Say 'Только чтение: никаких изменений TC, WIM, монтировок и временных папок.'
 try { Check-TcProcesses } catch { Say ('TC: ' + $_.Exception.Message) }
+try { Check-TcLivePanels } catch { Say ('TC panels: ' + $_.Exception.Message) }
 try { Check-Ini } catch { Say ('INI: ' + $_.Exception.Message) }
 try { Check-AssociationSummary } catch { Say ('Association summary: ' + $_.Exception.Message) }
 try { Check-Wcx64Cache } catch { Say ('Кэш x64: ' + $_.Exception.Message) }

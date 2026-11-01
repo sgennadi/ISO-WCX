@@ -210,3 +210,26 @@ not the synthetic WIM root listing only `image1`). The user's screenshot
 showing the synthetic WIM root is insufficient evidence of an attempted
 copy inside index 1. Do not add `PK_CAPS_NEW` to work around this without
 a format-specific new-archive implementation.
+
+### Read-only F5 panel routing check (Total Commander 11.57+)
+
+The user has verified `wim=158`, `PackerPlugins64 exts` contains WIM,
+and `OpenArchiveW succeeded` runs with no `PackFilesW` callback.
+A screenshot of the last failed F5 shows only `[image1]` in the right
+panel: this is the synthetic WIM root, not the contents of that index.
+The standard file-to-WIM F5 operation must target `boot.wim\\image1\\`.
+The source must be a selected file in an ordinary filesystem panel
+(not from another archive), and **that source panel** must be active.
+
+The existing `tools/ISO-WCX-Diagnostic.ps1` now queries Total Commander
+11.57+ read-only window messages `WM_USER+50` via
+`SendMessageTimeoutW`. It reports `TC_PANEL_SNAPSHOT` with active
+panel, file/dir selection counts, filesystem/WCX plugin type and
+right-side archive presence. The query never posts a command, edits
+Total Commander, or changes the image. If the querying process is
+not permitted to message an elevated Total Commander (UIPI), it
+reports the failure rather than escalating or attempting bypass.
+Path text inside a WIM index is not accessible via these messages;
+verify it visually in the TC right pane. Run the diagnostic from
+the same elevation level as the TC process, preferably while the
+source file is still selected immediately after the F5 error.
