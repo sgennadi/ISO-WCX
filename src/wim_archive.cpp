@@ -215,8 +215,17 @@ WimArchive::WimArchive(const std::filesystem::path& image,
     require(!input.empty(), "invalid WIM archive path");
 
     DWORD opened = 0;
+    // WIMGAPI defaults to a read handle which does NOT share writes.
+    // Total Commander may probe the physical WIM for GENERIC_WRITE before
+    // dispatching F5/PackFilesW. That probe then fails while its own WIM
+    // panel is still open, even though PK_CAPS_MODIFY is correctly set.
+    // WIM_FLAG_SHARE_WRITE (0x40, public wimgapi.h) grants *sharing* of
+    // a read-only reader; it does not grant write access or mutate the WIM.
+    // Our edit transaction already releases readers before committing a
+    // replacement, and invalidates old panel streams after the commit.
+    constexpr DWORD wim_flag_share_write=0x00000040u;
     api_->archive = api_->create(input.c_str(), GENERIC_READ, OPEN_EXISTING,
-                                   0, 0u, &opened);
+                                   wim_flag_share_write, 0u, &opened);
     if (!is_valid(api_->archive)) fail_windows("cannot open WIM archive");
 
     // WIMGAPI expands internal image metadata in Windows' temporary directory

@@ -311,3 +311,27 @@ Run the read-only field script after installing the latest Preview; it
 automatically checks the .wcx64 path if PowerShell is 64-bit, or set
 -WcxPath explicitly. Do not execute the WCX pack exports in diagnostic
 code or promote Stable before a real hosted F5 succeeds.
+
+### WIMGAPI read-side sharing fix for TC F5 preflight (Preview)
+
+A concrete Windows API compatibility issue was found in the WCX WIM
+reader: WIMCreateFile(..., GENERIC_READ, OPEN_EXISTING, 0, ...) omits
+WIM_FLAG_SHARE_WRITE (0x40). Windows can then refuse a SECOND
+GENERIC_WRITE open of the physical WIM while Total Commander still has
+its archive panel open. TC may perform a writable-destination preflight
+before dispatching PackFilesW, so this is a **plausible**, not yet
+field-proven, explanation for its "Function not supported!" error.
+
+The read-only WIMGAPI opener now specifies WIM_FLAG_SHARE_WRITE while
+still using GENERIC_READ. This allows the host's concurrent write probe
+without granting the WCX reader write permissions. The existing
+commit/replace transaction still releases active reader handles, holds
+per-archive locks, and invalidates stale open-panel WIM streams before
+replacing the archive.
+
+The real Windows WIM CTest opens a genuine disposable WIM through the
+WCX OpenArchiveW entry point, then tests CreateFileW(GENERIC_WRITE) on
+the same WIM while keeping that archive panel open. No bytes are written
+by the probe. This assertion must pass on both Win32 and x64 before
+the change can be tested in a real TC instance. Do NOT promote Stable
+until the user's F5 trial confirms PackFilesW is reached.

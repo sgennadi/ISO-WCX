@@ -544,6 +544,23 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         active_panel.ArcName=packed.data();
         HANDLE panel_handle=open(&active_panel);
         if(!panel_handle || active_panel.OpenResult!=0)return 93;
+        // Host-level F5 preflight: a genuine Total Commander window keeps
+        // its WCX/WIMGAPI reader open. Verify the physical WIM also allows
+        // a second generic WRITE handle with sharing (without writing any
+        // bytes). Previously WIMCreateFile lacked WIM_FLAG_SHARE_WRITE, so
+        // a host write-permission probe could fail BEFORE calling PackFilesW.
+        // The test uses a disposable WIM fixture, never a user WIM.
+        const HANDLE write_probe=CreateFileW(
+            packed.c_str(),GENERIC_WRITE,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+            nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(write_probe==INVALID_HANDLE_VALUE) {
+            std::cerr<<"WCX WIM read panel blocked host GENERIC_WRITE probe, Win32="
+                     <<GetLastError()<<"\n";
+            close(panel_handle);
+            return 131;
+        }
+        CloseHandle(write_probe);
         // A cancelled F8 preflight must never invalidate an already open
         // WIM panel. It has not committed any changes and should still test
         // and extract the original files without forcing the user to reopen.
