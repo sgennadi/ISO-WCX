@@ -4,4 +4,4 @@ version=0.21.0-preview
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX
-defaultextension=iso,wim
+defaultextension=wim

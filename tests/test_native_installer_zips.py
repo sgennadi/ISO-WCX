@@ -20,7 +20,7 @@ EXTENSIONS = (
     "wim", "esd", "swm", "ima", "vfd", "flp", "bif", "imz",
 )
 MODULES = {"ISO-WCX.wcx": 0x014C, "ISO-WCX.wcx64": 0x8664}
-DEFAULT_EXTENSIONS = ("iso", "wim")
+DEFAULT_EXTENSIONS = ("wim",)
 DOCS = {"PREVIEW.md", "INSTALL_RU.txt", "INSTALL_EN.txt",
         "THIRD_PARTY_NOTICES.txt"}
 EXPECTED = {"pluginst.inf", *MODULES, *DOCS}
@@ -56,7 +56,7 @@ def validate(path: pathlib.Path) -> None:
         extensions = [x.strip().lower()
                       for x in cfg["defaultextension"].split(",")]
         assert tuple(extensions) == DEFAULT_EXTENSIONS, (
-            "native INF must offer ISO/WIM only; one built-in confirmed "
+            "native INF must offer only WIM; one built-in confirmed "
             "batch handles other image associations"
         )
         assert set(extensions).issubset(set(EXTENSIONS))

@@ -163,7 +163,7 @@ jobs:
           grep -qx 'type=wcx' pluginst.inf
           grep -qx 'file=ISO-WCX.wcx' pluginst.inf
           grep -qx 'defaultdir=ISO-WCX' pluginst.inf
-          grep -qx 'defaultextension=iso,wim' pluginst.inf
+          grep -qx 'defaultextension=wim' pluginst.inf
           python3 - <<'PY'
           from pathlib import Path
           import struct

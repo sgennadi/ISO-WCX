@@ -70,8 +70,32 @@ int main() {
         need(value(repaired.text,L"Configuration",L"UseIniInProgramDir")==L"7",
              "INI section parser lost unrelated settings");
 
-        // The native INF registers just ISO+WIM. The WCX offers one
-        // explicitly confirmed batch for the remaining free formats.
+        // The one native WIM dialog can prefill a bare WCX path.
+        // Total Commander gives us no supported way to preselect 158.
+        // On the first WIM open, normalize that path and register all
+        // other unassigned image types in one confirmed operation.
+        const std::wstring bootstrap =
+            L"[PackerPlugins]\r\nwim="+current+L"\r\n"
+            L"zip=777,C:\\Other\\zip.wcx\r\n"
+            L"[Buttonbar]\r\nButtonbar=custom.bar\r\n";
+        const auto normalized=repair_packer_plugins(bootstrap,current);
+        need(normalized.changed &&
+             normalized.text.find(L"wim=158,"+current)!=std::wstring::npos,
+             "WIM bare-path install must be converted to 158");
+        const auto installed=register_missing_packer_plugins(
+            normalized.text,current);
+        need(installed.changed && installed.extensions.size()==22 &&
+             installed.text.find(L"iso=158,"+current)!=std::wstring::npos &&
+             installed.text.find(L"vhdx=158,"+current)!=std::wstring::npos &&
+             installed.text.find(L"zip=777,C:\\Other\\zip.wcx")!=std::wstring::npos &&
+             installed.text.find(L"Buttonbar=custom.bar")!=std::wstring::npos,
+             "one-click WIM bootstrap must preserve user handlers and buttons");
+        need(!repair_packer_plugins(installed.text,current).changed &&
+             !register_missing_packer_plugins(installed.text,current).changed,
+             "one-click WIM bootstrap must be idempotent");
+
+        // Older builds may already have both ISO and WIM registered.
+        // The WCX offers one confirmed batch for other free formats.
         // Every unrelated plugin, toolbar, and explicit empty association
         // must remain byte-for-byte preserved.
         const std::wstring native_two=
