@@ -112,6 +112,25 @@ jobs:
           Write-Host "Visual Studio 2026 C++26 Preview: ${{ matrix.arch }}"
       - name: Build
         run: cmake --build build --config Release --parallel 2
+      - name: Verify actual built WCX exports in PowerShell (read-only)
+        shell: pwsh
+        run: |
+          $suffix = if ('${{ matrix.arch }}' -eq 'Win32') { '.wcx' } else { '.wcx64' }
+          $module = Join-Path (Get-Location) ('build\Release\ISO-WCX' + $suffix)
+          if (-not (Test-Path -LiteralPath $module -PathType Leaf)) {
+            throw "Missing freshly built WCX: $module"
+          }
+          $powershellExe = if ('${{ matrix.arch }}' -eq 'Win32') {
+            Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+          } else {
+            Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          }
+          $output = & $powershellExe -NoProfile -ExecutionPolicy Bypass -File tools/ISO-WCX-Diagnostic.ps1 -WcxPath $module | Out-String
+          if ($LASTEXITCODE -ne 0 -or $output -notmatch 'WCX_EXPORT_SUMMARY=PASS') {
+            Write-Host $output
+            throw 'The built WCX is missing a required Total Commander export'
+          }
+          Write-Host 'PASS: actual on-disk WCX exports include PackFilesW/GetPackerCaps'
       - name: Fail fast if the WCX DLL loader stalls
         run: ctest --test-dir build -C Release --output-on-failure -R "^wcx_dll_load_unload$"
       - name: Run tests including WCX DLL loading
