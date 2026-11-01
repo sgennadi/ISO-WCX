@@ -528,6 +528,10 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         // The mask must be 158: MODIFY|MULTIPLE|DELETE|OPTIONS|SEARCHTEXT;
         // do NOT advertise NEW (1), encrypted packing or ZIP-by-content.
         if(!caps || caps()!=158 || !(caps()&2))return 115;
+        // A WCX host can call PackFilesW with missing pointers. It must
+        // return E_NOT_SUPPORTED(24) without modifying any WIM, and
+        // interactive TC diagnostics must record the early return.
+        if(pack(nullptr,nullptr,nullptr,nullptr,0)!=24)return 130;
         const auto incoming=root/L"incoming";
         write(incoming/L"HELLO.TXT","replacement");write(incoming/L"ADDED.TXT","new-file");
         std::wstring packed=original.wstring(),src=incoming.wstring(),sub=L"image1";

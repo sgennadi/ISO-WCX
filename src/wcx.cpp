@@ -771,9 +771,23 @@ void retry_wim_cleanup_after_edit(const std::wstring& archive) noexcept {
 }
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
     try {
-        if(!archive||!source)return E_NOT_SUPPORTED;
-        iso_wcx::edit_diagnostics::log(L"PackFilesW entered",archive,
-            L"flags="+std::to_wstring(flags)+L" sub="+(sub?std::wstring(sub):L""));
+        // Total Commander may supply a null source or packed-file pointer
+        // for a transfer it cannot route normally (e.g. archive-to-archive).
+        // Record the entry BEFORE the early E_NOT_SUPPORTED return so
+        // absence of a PackFilesW log really means no WCX callback occurred.
+        const auto image=archive?std::filesystem::path(archive):
+                                 std::filesystem::path{};
+        iso_wcx::edit_diagnostics::log(L"PackFilesW entered",image,
+            L"archive="+std::wstring(archive?L"present":L"NULL")+
+            L" source="+(source?L"present":L"NULL")+
+            L" list="+(list?L"present":L"NULL")+
+            L" flags="+std::to_wstring(flags)+
+            L" sub="+(sub?std::wstring(sub):L"(null)"));
+        if(!archive||!source) {
+            iso_wcx::edit_diagnostics::log(L"PackFilesW rejected",image,
+                L"E_NOT_SUPPORTED(24): null archive or source argument");
+            return E_NOT_SUPPORTED;
+        }
         const int result=do_edit(archive,sub?sub:L"",source,
                                  edit_list(list),false,flags);
         retry_wim_cleanup_after_edit(archive);
@@ -789,10 +803,20 @@ WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* sourc
 }
 WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* list,int flags) {
     try {
-        if(!archive||!source)return E_NOT_SUPPORTED;
+        // ANSI compatibility callback: log a missing argument before
+        // returning 24, just as the Unicode entry point does.
+        iso_wcx::edit_diagnostics::log(
+            L"PackFiles ANSI entered",{},
+            L"archive="+std::wstring(archive?L"present":L"NULL")+
+            L" source="+(source?L"present":L"NULL")+
+            L" list="+(list?L"present":L"NULL")+
+            L" flags="+std::to_wstring(flags));
+        if(!archive||!source) {
+            iso_wcx::edit_diagnostics::log(L"PackFiles ANSI rejected",{},
+                L"E_NOT_SUPPORTED(24): null archive or source argument");
+            return E_NOT_SUPPORTED;
+        }
         const auto name=from_bytes(archive,CP_ACP);
-        iso_wcx::edit_diagnostics::log(L"PackFiles ANSI entered",name,
-            L"flags="+std::to_wstring(flags));
         const int result=do_edit(name,from_bytes(sub,CP_ACP),
                                  from_bytes(source,CP_ACP),
                                  edit_list(list),false,flags);
@@ -840,8 +864,12 @@ WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
     try { iso_wcx::configure_updates(parent,module); } catch(...) {}
 }
 WCX_EXPORT int __stdcall GetPackerCaps() {
-    // TC asks for flags at startup, including when the user only opens ZIPs.
-    // Do not start the update checker until an actual image is opened/probed.
+    // Capture the exact capabilities the live TC process saw once. This
+    // stays outside the expensive update checker and never changes the mask.
+    static std::atomic<bool> logged{false};
+    if(!logged.exchange(true,std::memory_order_relaxed))
+        iso_wcx::edit_diagnostics::log(
+            L"GetPackerCaps",{},L"return=158 (MODIFY|MULTIPLE|DELETE|OPTIONS|SEARCHTEXT)");
     return PK_CAPS_SEARCHTEXT|2|4|8|16; // 158, no global BY_CONTENT ZIP interception
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {

@@ -187,6 +187,8 @@ int wmain(int argc,wchar_t** argv) {
         const auto process=reinterpret_cast<ProcessFn>(sym("ProcessFileW"));
         const auto close=reinterpret_cast<CloseFn>(sym("CloseArchive"));
         need((caps()&8)!=0,"GetPackerCaps omitted delete capability");
+        need(pack(nullptr,nullptr,nullptr,nullptr,0)==24,
+             "Null-argument WCX PackFilesW must return E_NOT_SUPPORTED safely");
 
         fs::create_directories(root);
         const auto image=root/L"edited.iso";

@@ -186,3 +186,27 @@ helps explain why TC might not dispatch an F5 edit callback.
 A log consisting only of `OpenArchiveW entered/succeeded` does not
 prove F5 was attempted; reproduce from a filesystem source panel into
 a disposable WIM copy, with a small normal file selected as the source.
+
+### TC F5 dispatched vs WCX rejected
+
+The actual WIM F5 integration field report found that the WCX64 module
+opened the image successfully and `[PackerPlugins]` contained `wim=158`;
+the TC x64 `PackerPlugins64 exts` cache included `wim` too. Thus neither
+a duplicate registration nor a missing MODIFY bit was demonstrated.
+
+The interactive `edit-errors.log` now records the first live
+`GetPackerCaps` call (`return=158`) and always logs the entrance of
+`PackFilesW` or ANSI `PackFiles` before checking for null arguments.
+A null archive/source returns `E_NOT_SUPPORTED(24)` **with an explicit
+rejection event**, rather than returning 24 silently. No changes are
+written to images or TC configuration by these diagnostics.
+
+If `OpenArchiveW succeeded` is present but **no** `PackFilesW entered`
+or `PackFiles ANSI entered` appears after a real F5, TC did not call
+either WCX packing callback. Confirm that the source panel displays an
+ordinary filesystem file, not a ZIP or other archive, and that the WIM
+destination panel is `boot.wim\\image1\\` (inside the image index,
+not the synthetic WIM root listing only `image1`). The user's screenshot
+showing the synthetic WIM root is insufficient evidence of an attempted
+copy inside index 1. Do not add `PK_CAPS_NEW` to work around this without
+a format-specific new-archive implementation.
