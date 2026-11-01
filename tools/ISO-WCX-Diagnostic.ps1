@@ -187,18 +187,7 @@ function Check-Installed-Wcx {
     Say '--- Установленные модули ISO-WCX ---'
     $ini = Find-TcIni
     if (-not $ini) { Say 'Не удалось определить wincmd.ini.'; return }
-    $match = Select-String -LiteralPath $ini -Pattern '(?i)^\\s*(wim|iso)\\s*=\\s*(?:\\d+\\s*,\\s*)?(.+ISO-WCX\\.wcx)\\s*    $target = [IO.Path]::GetFullPath(
-        [Environment]::ExpandEnvironmentVariables($ReportPath))
-    $directory = Split-Path -Parent $target
-    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
-        throw ('Папка для отчёта не существует: ' + $directory)
-    }
-    [IO.File]::WriteAllLines(
-        $target,$script:Lines.ToArray(),
-        (New-Object System.Text.UTF8Encoding($true)))
-    Write-Host ('Отчёт: ' + $target)
-}
- -ErrorAction SilentlyContinue |
+    $match = Select-String -LiteralPath $ini -Pattern '(?i)^\s*(wim|iso)\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if (-not $match) { Say 'Не найдена строка с ISO-WCX.wcx в INI.'; return }
     $full = [Environment]::ExpandEnvironmentVariables(
@@ -213,14 +202,14 @@ function Check-Installed-Wcx {
             Say ('ОШИБКА: отсутствует ' + $candidate)
         }
     }
-    Say 'Нет загруженного WCX в списке процессов — само по себе НОРМАЛЬНО, если архив закрыт.'
+    Say 'Отсутствие DLL в списке процессов само по себе нормально при закрытой панели архива.'
 }
 function Check-Edit-Log {
     Say '--- Последние события F5 и очистки WIM ---'
     if (-not $env:LOCALAPPDATA) { Say 'LOCALAPPDATA отсутствует.'; return }
     $file = Join-Path $env:LOCALAPPDATA 'ISO-WCX\Logs\edit-errors.log'
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
-        Say 'Журнал пока отсутствует. Он создаётся новой версией WCX при работе F5 в TC.'
+        Say 'Журнал отсутствует. Новая версия WCX создаёт его при вызове F5 в TC.'
         return
     }
     Say ('Журнал: ' + $file)
