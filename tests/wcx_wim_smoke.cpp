@@ -762,6 +762,12 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         cancel_next_wim.store(false);
         if(cancel_rc!=21 || load(original)!=before_cancel)
             return 33; // A cancelled edit must leave WIM byte-identical.
+        // A cancelled Apply can leave a populated WIM expanded NTFS tree.
+        // The WCX transaction must safely clean it before returning abort.
+        for(const auto& entry:fs::directory_iterator(root))
+            if(entry.path().filename().wstring().starts_with(
+                   L".iso-wcx-edit-"))
+                return 130;
         // Late F7 cancellation happens AFTER the expensive WIM Apply/Capture
         // and output verification, but BEFORE the atomic ReplaceFileW. The
         // existing TC panel must remain readable; releasing WIMGAPI handles
@@ -800,6 +806,12 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
             if(close(live)!=0)return 109;
             if(!tested)return 110;
         }
+        // Post-capture cancellation cannot strand protected staging trees
+        // after all WIMGAPI handles have closed.
+        for(const auto& entry:fs::directory_iterator(root))
+            if(entry.path().filename().wstring().starts_with(
+                   L".iso-wcx-edit-"))
+                return 131;
         {
             OpenW args{};args.ArcName=packed.data();
             HANDLE h=open(&args);
@@ -836,6 +848,25 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
               "WIM F5 recursively copied");
         fs::create_directories(incoming_files/L"Recursive Folder"/L"Empty");
         write(incoming_files/L"\u0420\u0443\u0441\u0441\u043A\u0438\u0439 \u0444\u0430\u0439\u043B.txt","Unicode file bytes");
+        // F5 file-versus-existing-folder conflicts are discovered AFTER
+        // WIMApplyImage. Even this rejected edit must remove the populated
+        // expanded scratch tree and preserve the original WIM byte-for-byte.
+        const auto wrong_f5_source=root/L"F5 conflicts";
+        write(wrong_f5_source/L"Empty","must not replace existing WIM folder");
+        std::wstring wrong_f5_directory=wrong_f5_source.wstring();
+        wchar_t wrong_f5_list[]=L"Empty\0\0";
+        const auto before_conflict=load(original);
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int conflicting_f5=pack(packed.data(),sub.data(),
+                                      wrong_f5_directory.data(),
+                                      wrong_f5_list,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(conflicting_f5==0 || load(original)!=before_conflict)
+            return 132;
+        for(const auto& entry:fs::directory_iterator(root))
+            if(entry.path().filename().wstring().starts_with(
+                   L".iso-wcx-edit-"))
+                return 133;
         const auto existing_source=incoming_files/L"F5 copied.txt";
         std::wstring nested_sub=L"image1\\Nested";
         std::wstring nested_source=incoming_files.wstring();
