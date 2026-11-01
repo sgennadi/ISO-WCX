@@ -34,6 +34,19 @@ jobs:
         arch: [Win32, x64]
     steps:
       - uses: actions/checkout@v7
+      - name: Validate read-only WCX diagnostics (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $tokens=$null
+          $parseErrors=$null
+          $file=Join-Path (Get-Location) 'tools\ISO-WCX-Diagnostic.ps1'
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $file,[ref]$tokens,[ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | ForEach-Object { Write-Host $_.ToString() }
+            throw 'ISO-WCX diagnostic script contains PowerShell syntax errors'
+          }
+          Write-Host 'PASS: ISO-WCX diagnostic syntax (Windows PowerShell 5.1)'
       - name: Configure Visual Studio 2026 with experimental C++26
         run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST=ON
       - name: Require VS2026 and C++26 configuration
