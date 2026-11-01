@@ -213,6 +213,32 @@ function Check-AssociationSummary {
         Say 'The second association prompt may correctly be skipped; all image formats have an assigned handler.'
     }
 }
+function Get-TcF5Context {
+    param(
+        [string]$Active,
+        [string]$LeftType,
+        [string]$RightType,
+        [long]$LeftFiles,
+        [long]$RightFiles,
+        [long]$LeftDirs,
+        [long]$RightDirs
+    )
+    if ($Active -notin @('left','right')) {
+        return [pscustomobject]@{ IsValid=$false; Source='unknown'; Destination='unknown'; Reason='No active file panel' }
+    }
+    $selected = if ($Active -eq 'left') { $LeftFiles+$LeftDirs } else { $RightFiles+$RightDirs }
+    $sourceType = if ($Active -eq 'left') { $LeftType } else { $RightType }
+    $targetType = if ($Active -eq 'left') { $RightType } else { $LeftType }
+    $destination = if ($Active -eq 'left') { 'right' } else { 'left' }
+    $ok = ($sourceType -eq 'filesystem' -and $targetType -eq 'WCX-plugin' -and $selected -gt 0)
+    $reason = if ($selected -le 0) { 'No selected source file or directory' }
+              elseif ($sourceType -ne 'filesystem') { 'Source is not a filesystem panel' }
+              elseif ($targetType -ne 'WCX-plugin') { 'Destination is not a WCX plugin panel' }
+              else { 'Filesystem to WCX with selected source' }
+    return [pscustomobject]@{
+        IsValid=$ok; Source=$Active; Destination=$destination; Reason=$reason
+    }
+}
 function Check-TcLivePanels {
     Say '--- Total Commander live F5 panel state (read-only) ---'
     $running = @(Get-Process -Name TOTALCMD,TOTALCMD64 -ErrorAction SilentlyContinue)
@@ -227,12 +253,16 @@ function Check-TcLivePanels {
     if (-not ('IsoWcxTcPanelQuery' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public static class IsoWcxTcPanelQuery {
     [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
     public static extern IntPtr SendMessageTimeout(
         IntPtr window, uint message, IntPtr wParam, IntPtr lParam,
         uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll", EntryPoint="GetWindowTextW", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern int GetWindowText(
+        IntPtr window, StringBuilder buffer, int maxCount);
 }
 '@ -ErrorAction Stop
     }
@@ -271,13 +301,51 @@ public static class IsoWcxTcPanelQuery {
                  ' left_selected_dirs=' + $values[1017] +
                  ' right_selected_dirs=' + $values[1018] +
                  ' right_archive_name_length=' + $values[1024])
-            if ($active -ne 'left' -or $values[1019] -lt 1 -or
-                $leftType -ne 'filesystem' -or $rightType -ne 'WCX-plugin') {
-                Say 'TC_F5_CONTEXT_WARNING: expected active LEFT filesystem panel with selected files and RIGHT WCX destination.'
+            $context=Get-TcF5Context -Active $active -LeftType $leftType -RightType $rightType -LeftFiles $values[1019] -RightFiles $values[1020] -LeftDirs $values[1017] -RightDirs $values[1018]
+            if (-not $context.IsValid) {
+                Say ('TC_F5_CONTEXT_WARNING: ' + $context.Reason +
+                     '; source=' + $context.Source + ' destination=' + $context.Destination)
             } else {
-                Say 'TC_F5_CONTEXT: source/destination panel types and selected files are correct.'
+                Say ('TC_F5_CONTEXT: valid filesystem-to-WCX routing; source=' +
+                     $context.Source + ' destination=' + $context.Destination)
             }
-            Say 'Panel query does not include the WCX inner subdirectory. Confirm RIGHT path ends with boot.wim\image1\ and lists Windows/Program Files.'
+            # Try the public path-label handles 9=left, 10=right.
+            # GetWindowTextW reads a caption without altering TC. If it
+            # cannot retrieve a custom-drawn label, report unknown.
+            foreach ($side in @('left','right')) {
+                $code=if ($side -eq 'left') { 9 } else { 10 }
+                $handle=[IntPtr]::Zero
+                $valid=[IsoWcxTcPanelQuery]::SendMessageTimeout(
+                    $window,[uint32]1074,[IntPtr]$code,[IntPtr]::Zero,
+                    [uint32]2,[uint32]1200,[ref]$handle)
+                $pathText=''
+                if ($valid -ne [IntPtr]::Zero -and
+                    $handle -ne [IntPtr]::Zero) {
+                    $buffer=New-Object System.Text.StringBuilder(8192)
+                    $characters=[IsoWcxTcPanelQuery]::GetWindowText(
+                        $handle,$buffer,$buffer.Capacity)
+                    if ($characters -gt 0) {
+                        $pathText=$buffer.ToString().Replace([char]13,' ').Replace([char]10,' ')
+                    }
+                }
+                if ($pathText) {
+                    Say ('TC_PANEL_PATH side=' + $side + ' text=' + $pathText)
+                } else {
+                    Say ('TC_PANEL_PATH side=' + $side + ' unavailable; use visible TC path bar')
+                }
+                if ($context.IsValid -and $context.Destination -eq $side) {
+                    if (-not $pathText) {
+                        Say 'TC_WIM_DESTINATION_DEPTH=unknown; inspect the archive path visually.'
+                    } elseif ($pathText -match '(?i)\.wim[\\/]image[1-9][0-9]*([\\/]|$)') {
+                        Say 'TC_WIM_DESTINATION_DEPTH=inside-image-index'
+                    } elseif ($pathText -match '(?i)\.wim([\\/]|$)') {
+                        Say 'TC_WIM_DESTINATION_DEPTH=synthetic-root; enter image1 before F5.'
+                    } else {
+                        Say 'TC_WIM_DESTINATION_DEPTH=unrecognized'
+                    }
+                }
+            }
+            Say 'WIM F5 must target boot.wim\image1\ or deeper, regardless of panel side.'
         } catch {
             Say ('TC_PANEL_QUERY pid=' + $proc.Id + ': ' + $_.Exception.Message)
         }

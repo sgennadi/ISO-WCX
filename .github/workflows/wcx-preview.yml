@@ -65,6 +65,17 @@ jobs:
             throw 'Read-only diagnostic did not count exactly the 23 supported image bindings'
           }
           Write-Host 'PASS: ISO-WCX x64 cache read-only diagnostic'
+          . $file -IniPath $fixture | Out-Null
+          $left=Get-TcF5Context -Active left -LeftType filesystem -RightType WCX-plugin -LeftFiles 1 -RightFiles 0 -LeftDirs 0 -RightDirs 0
+          $right=Get-TcF5Context -Active right -LeftType WCX-plugin -RightType filesystem -LeftFiles 0 -RightFiles 1 -LeftDirs 0 -RightDirs 0
+          $wrong=Get-TcF5Context -Active right -LeftType filesystem -RightType WCX-plugin -LeftFiles 0 -RightFiles 1 -LeftDirs 0 -RightDirs 0
+          $empty=Get-TcF5Context -Active left -LeftType filesystem -RightType WCX-plugin -LeftFiles 0 -RightFiles 0 -LeftDirs 0 -RightDirs 0
+          if (-not $left.IsValid -or $left.Destination -ne 'right' -or
+              -not $right.IsValid -or $right.Destination -ne 'left' -or
+              $wrong.IsValid -or $empty.IsValid) {
+            throw 'TC F5 panel regression: source can be left OR right'
+          }
+          Write-Host 'PASS: bidirectional TC F5 read-only panel routing regression'
           if ($report -notmatch 'TC_PANEL_QUERY: no running Total Commander process') {
             Write-Host 'No TC process on CI runner or future interactive smoke context:'
             Write-Host $report

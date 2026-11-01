@@ -233,3 +233,19 @@ Path text inside a WIM index is not accessible via these messages;
 verify it visually in the TC right pane. Run the diagnostic from
 the same elevation level as the TC process, preferably while the
 source file is still selected immediately after the F5 error.
+
+### Bidirectional F5 routing and live destination path
+
+Total Commander 11.58.1 field reports verified both valid panel layouts:
+filesystem LEFT to WCX RIGHT, and filesystem RIGHT to WCX LEFT.
+The first version of the diagnostic incorrectly rejected the second,
+which is now fixed in the read-only Get-TcF5Context helper.
+Windows PowerShell CI covers both directions, archive-to-filesystem,
+and zero-source-selection conditions.
+
+The diagnostic also attempts to read the documented panel path control
+handles 9/10 using GetWindowTextW. Where a visible path caption is
+available, it reports whether the WIM destination lies inside image1
+or at the synthetic root. Custom-drawn path labels can be inaccessible;
+the script then reports UNKNOWN rather than inferring the path from
+WCX archive presence. No commands are posted to TC.
