@@ -250,6 +250,39 @@ std::unique_ptr<State> open_state(const std::filesystem::path& path) {
         indicator->set_image_count(iso_wcx::wim_detail::u32(header,44));
     return std::make_unique<State>(path,std::move(indicator));
 }
+// This is an observed share/access check, not a write to the image.
+// Keep the real WCX panel reader alive while probing: the host may refuse
+// F5 before calling PackFilesW if it cannot acquire a writable file handle.
+// Never turn a failed probe into an OpenArchive failure.
+void log_tc_f5_write_share_probe(const std::filesystem::path& image) noexcept {
+    if(!iso_wcx::edit_diagnostics::interactive_tc())return;
+    try {
+        const DWORD attrs=GetFileAttributesW(image.c_str());
+        if(attrs==INVALID_FILE_ATTRIBUTES ||
+           (attrs&FILE_ATTRIBUTE_REPARSE_POINT)) {
+            iso_wcx::edit_diagnostics::log(
+                L"TC_F5_WRITE_SHARE_PROBE=SKIPPED",image,
+                L"missing path or reparse point; no write attempted");
+            return;
+        }
+        const HANDLE handle=CreateFileW(
+            image.c_str(),GENERIC_WRITE,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+            nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(handle==INVALID_HANDLE_VALUE) {
+            const DWORD code=GetLastError();
+            iso_wcx::edit_diagnostics::log(
+                L"TC_F5_WRITE_SHARE_PROBE=BLOCKED",image,
+                L"win32="+std::to_wstring(code)+L" readonly="+
+                std::wstring((attrs&FILE_ATTRIBUTE_READONLY)?L"yes":L"no"));
+            return;
+        }
+        CloseHandle(handle);
+        iso_wcx::edit_diagnostics::log(
+            L"TC_F5_WRITE_SHARE_PROBE=ALLOWED",image,
+            L"GENERIC_WRITE open/close succeeded; no image bytes written");
+    }catch(...) {}
+}
 } // namespace
 
 #define WCX_EXPORT extern "C" __declspec(dllexport)
@@ -275,9 +308,13 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
             iso_wcx::offer_tc_association_repair_once();
         }
         auto state=open_state(path);
-        if(editing_image)
+        if(editing_image) {
+            if(open_ext==L".wim" || open_ext==L".iso" ||
+               open_ext==L".udf")
+                log_tc_f5_write_share_probe(path);
             iso_wcx::edit_diagnostics::log(
                 L"OpenArchiveW succeeded",path);
+        }
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
     }catch(const iso_wcx::WimOpenCancelled&){
@@ -307,9 +344,13 @@ WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
             iso_wcx::offer_tc_association_repair_once();
         }
         auto state=open_state(path);
-        if(editing_image)
+        if(editing_image) {
+            if(open_ext==L".wim" || open_ext==L".iso" ||
+               open_ext==L".udf")
+                log_tc_f5_write_share_probe(path);
             iso_wcx::edit_diagnostics::log(
                 L"OpenArchive ANSI succeeded",path);
+        }
         d->OpenResult=0;
         return reinterpret_cast<HANDLE>(state.release());
     }catch(const iso_wcx::WimOpenCancelled&){

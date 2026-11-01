@@ -159,6 +159,19 @@ int main(int argc,char** argv){
     std::wstring source=file.wstring();OpenW options{};options.ArcName=source.data();
     std::cerr << "wcx smoke: invoking OpenArchiveW\n" << std::flush;
     HANDLE state=open(&options);if(!state||options.OpenResult!=0){std::cerr<<"OpenArchiveW failed\n";return 4;}
+    // The filesystem-to-ISO F5 route must remain writable while TC holds
+    // its WCX reader open. Probe access without modifying the ISO.
+    const HANDLE write_probe=CreateFileW(
+        file.c_str(),GENERIC_WRITE,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(write_probe==INVALID_HANDLE_VALUE) {
+        std::cerr<<"ISO browse panel blocks F5 write-share probe, Win32="
+                 <<GetLastError()<<"\n";
+        close(state);
+        return 50;
+    }
+    CloseHandle(write_probe);
     std::cerr << "wcx smoke: invoking ReadHeaderExW\n" << std::flush;
     HeaderExW item{};if(header(state,&item)!=0||std::wstring(item.FileName)!=L"HELLO.TXT"||
        item.UnpSize!=5||item.FileTime!=((46<<25)|(10<<21)|(23<<16)|(12<<11)|(34<<5)|29)||
