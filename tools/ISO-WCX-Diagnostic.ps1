@@ -352,6 +352,1148 @@ public static class IsoWcxTcPanelQueryV2 {
         }
     }
 }
+function Check-TcF5CommandConfig {
+    Say '--- F5 command dispatch preflight (read-only) ---'
+    $ini=Find-TcIni
+    if (-not $ini) {
+        Say 'TC_F5_BINDING=unknown (no readable Total Commander INI)'
+        return
+    }
+    $section=''
+    $binding=$null
+    $redirect=$null
+    $copyMode=$null
+    $packMode=$null
+    # Plain F5 is stored in [Shortcuts]. [ShortcutsWin] is for the Windows
+    # modifier and cannot redefine a plain F5 keypress.
+    $reader=[IO.File]::OpenText($ini)
+    try {
+        while ($null -ne ($line=$reader.ReadLine())) {
+            if ($line -match '^\s*\[([^\]]+)\]\s*
+    Say '--- Заголовок WIM и временные папки ---'
+    if (-not $WimPath) {
+        Say 'Для проверки image1/image2 укажите -WimPath.'
+        return
+    }
+    $resolved = (Resolve-Path -LiteralPath $WimPath).ProviderPath
+    $file = Get-Item -LiteralPath $resolved -Force
+    if ($file.PSIsContainer -or
+        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Ожидался обычный файл WIM, не ссылка и не папка.'
+    }
+    Say ('WIM: ' + $resolved)
+    Say ('Размер: ' + $file.Length + ' байт, изменение UTC: ' + $file.LastWriteTimeUtc.ToString('o'))
+    $stream = [IO.File]::Open(
+        $resolved,[IO.FileMode]::Open,[IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        $header = New-Object byte[] 208
+        if ($stream.Read($header,0,$header.Length) -lt $header.Length -or
+            [Text.Encoding]::ASCII.GetString($header,0,5) -ne 'MSWIM') {
+            throw 'WIM заголовок повреждён или слишком короткий.'
+        }
+        $count = [BitConverter]::ToUInt32($header,44)
+        $part = [BitConverter]::ToUInt16($header,40)
+        $totalParts = [BitConverter]::ToUInt16($header,42)
+        $bootIndex = [BitConverter]::ToUInt32($header,120)
+        Say ('Индексов в заголовке: ' + $count + '; часть: ' + $part + '/' +
+             $totalParts + '; загрузочный индекс: ' + $bootIndex)
+        if ($count -eq 2) {
+            Say 'В корне образа TC ожидаются image1 И image2.'
+        } elseif ($count -eq 1) {
+            Say 'В самом файле WIM указан только один индекс.'
+        } else {
+            Say 'Сверьте количество индексов с выводом DISM /Get-WimInfo.'
+        }
+    } finally { $stream.Dispose() }
+
+    $parent = Split-Path -Parent $resolved
+    $workspaces = @(Get-ChildItem -LiteralPath $parent -Force -Directory |
+        Where-Object { $_.Name -match '^\.iso-wcx-edit-[0-9]+-[0-9]+$' })
+    Say ('Временных папок ISO-WCX рядом с WIM: ' + $workspaces.Count)
+    foreach ($workspace in $workspaces) {
+        Say ('Временная папка: ' + $workspace.FullName)
+        if (($workspace.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            Say 'ОПАСНО: сама временная папка является reparse point. Не удалять.'
+            continue
+        }
+        foreach ($name in @('mounted','original-archive.backup',
+                            'original-archive.backup-recovery',
+                            'WIM-MOUNT-RECOVERY.txt','expanded')) {
+            $item = Join-Path $workspace.FullName $name
+            if (Test-Path -LiteralPath $item) {
+                Say ('Обнаружен: ' + $name)
+                if ($name -eq 'mounted') {
+                    Say 'ОПАСНО: активный WIMGAPI mount нельзя исключить одной командой DISM.'
+                }
+            }
+        }
+        Say 'Ничего не удаляйте до проверки нативного WIMGAPI mount и открытых backup handles.'
+    }
+    if ($CheckDism) {
+        Say '--- DISM /Get-WimInfo (без изменений образа) ---'
+        $dism = Join-Path $env:WINDIR 'System32\dism.exe'
+        if (Test-Path -LiteralPath $dism) {
+            & $dism '/English' '/Get-WimInfo' ('/WimFile:' + $resolved) 2>&1 |
+                ForEach-Object { Say ([string]$_) }
+            Say ('DISM код завершения: ' + $LASTEXITCODE)
+        } else {
+            Say 'DISM не найден.'
+        }
+    }
+}
+Say ('ISO-WCX диагностика: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))
+Say 'Только чтение: никаких изменений TC, WIM, монтировок и временных папок.'
+try { Check-TcProcesses } catch { Say ('TC: ' + $_.Exception.Message) }
+try { Check-TcLivePanels } catch { Say ('TC panels: ' + $_.Exception.Message) }
+try { Check-Ini } catch { Say ('INI: ' + $_.Exception.Message) }
+try { Check-AssociationSummary } catch { Say ('Association summary: ' + $_.Exception.Message) }
+try { Check-TcF5CommandConfig } catch { Say ('F5 settings: ' + $_.Exception.Message) }
+try { Check-Wcx64Cache } catch { Say ('Кэш x64: ' + $_.Exception.Message) }
+try { Check-WimFile } catch { Say ('WIM: ' + $_.Exception.Message) }
+
+function Check-Installed-Wcx {
+    Say '--- Установленные модули ISO-WCX ---'
+    $ini = Find-TcIni
+    if (-not $ini) { Say 'Не удалось определить wincmd.ini.'; return }
+    $match = Select-String -LiteralPath $ini -Pattern '(?i)^\s*(wim|iso)\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $match) { Say 'Не найдена строка с ISO-WCX.wcx в INI.'; return }
+    $full = [Environment]::ExpandEnvironmentVariables(
+        $match.Matches[0].Groups[2].Value.Trim().Trim('"'))
+    foreach ($candidate in @($full,[IO.Path]::ChangeExtension($full,'wcx64'))) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -LiteralPath $candidate
+            Say ('Установлен: ' + $item.FullName +
+                 ' | размер=' + $item.Length + ' | UTC=' +
+                 $item.LastWriteTimeUtc.ToString('o'))
+        } else {
+            Say ('ОШИБКА: отсутствует ' + $candidate)
+        }
+    }
+    Say 'Отсутствие DLL в списке процессов само по себе нормально при закрытой панели архива.'
+}
+function Check-WcxExports {
+    param([string]$Path)
+    Say '--- Native WCX DLL export table (read-only) ---'
+    if (-not $Path) {
+        $ini=Find-TcIni
+        if (-not $ini) { Say 'WCX_EXPORT_CHECK: no TC INI; use -WcxPath'; return }
+        $row=Select-String -LiteralPath $ini -Pattern '(?i)^\s*wim\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $row) { Say 'WCX_EXPORT_CHECK: WIM association not found'; return }
+        $Path=[Environment]::ExpandEnvironmentVariables(
+            $row.Matches[0].Groups[1].Value.Trim().Trim('"'))
+        if ([IntPtr]::Size -eq 8) {
+            $Path=[IO.Path]::ChangeExtension($Path,'wcx64')
+        }
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Say ('WCX_EXPORT_CHECK: no DLL at ' + $Path)
+        return
+    }
+    if (-not ('IsoWcxReadOnlyExportsV1' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class IsoWcxReadOnlyExportsV1 {
+    // DONT_RESOLVE_DLL_REFERENCES = 1: read export table without running DllMain
+    // or any plug-in code. Do not call any returned function pointer.
+    [DllImport("kernel32.dll", EntryPoint="LoadLibraryExW", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr LoadLibraryEx(string file, IntPtr ignored, uint flags);
+    [DllImport("kernel32.dll", EntryPoint="GetProcAddress", CharSet=CharSet.Ansi, SetLastError=true)]
+    public static extern IntPtr GetProcAddress(IntPtr module, string name);
+    [DllImport("kernel32.dll", EntryPoint="FreeLibrary", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FreeLibrary(IntPtr module);
+}
+'@ -ErrorAction Stop
+    }
+    $full=(Resolve-Path -LiteralPath $Path).ProviderPath
+    $loaded=[IsoWcxReadOnlyExportsV1]::LoadLibraryEx($full,[IntPtr]::Zero,[uint32]1)
+    if ($loaded -eq [IntPtr]::Zero) {
+        Say ('WCX_EXPORT_CHECK: PE load failed, Win32=' +
+            [Runtime.InteropServices.Marshal]::GetLastWin32Error() +
+            ' (check PowerShell and WCX architecture)')
+        return
+    }
+    try {
+        $missing=@()
+        $required=@('OpenArchiveW','ReadHeaderExW','ProcessFileW',
+                    'GetPackerCaps','PackFilesW','PackFiles',
+                    'DeleteFilesW','CloseArchive','SetProcessDataProcW')
+        foreach ($name in $required) {
+            $pointer=[IsoWcxReadOnlyExportsV1]::GetProcAddress($loaded,$name)
+            if ($pointer -eq [IntPtr]::Zero) {
+                $missing+=@($name)
+                Say ('WCX_EXPORT_MISSING=' + $name)
+            } else {
+                Say ('WCX_EXPORT_PRESENT=' + $name)
+            }
+        }
+        if ($missing.Count -eq 0) {
+            Say 'WCX_EXPORT_SUMMARY=PASS: all required WCX ABI entry points are exported'
+        } else {
+            Say ('WCX_EXPORT_SUMMARY=FAIL: ' + $missing.Count +
+                 ' missing; TC cannot call missing entry points')
+        }
+        Say 'Only export names were inspected; no DLL entry point was executed.'
+    } finally {
+        [void][IsoWcxReadOnlyExportsV1]::FreeLibrary($loaded)
+    }
+}
+function Check-Edit-Log {
+    Say '--- Последние события F5 и очистки WIM ---'
+    if (-not $env:LOCALAPPDATA) { Say 'LOCALAPPDATA отсутствует.'; return }
+    $file = Join-Path $env:LOCALAPPDATA 'ISO-WCX\Logs\edit-errors.log'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        Say 'Журнал отсутствует. Новая версия WCX создаёт его при вызове F5 в TC.'
+        return
+    }
+    Say ('Журнал: ' + $file)
+    try {
+        $tail=@(Get-Content -LiteralPath $file -Encoding UTF8 -Tail 160)
+        foreach ($line in @($tail | Select-Object -Last 40)) {
+            Say ([string]$line)
+        }
+        $lastOpen=-1
+        for ($i=0; $i -lt $tail.Count; $i++) {
+            if ($tail[$i] -match 'OpenArchive(W| ANSI) succeeded') {
+                $lastOpen=$i
+            }
+        }
+        if ($lastOpen -lt 0) {
+            Say 'TC_F5_CALLBACK_SINCE_OPEN=unknown (archive open not in recent log)'
+            return
+        }
+        $recent=@($tail[$lastOpen..($tail.Count-1)])
+        $probe=@($recent | Where-Object { $_ -match 'TC_F5_WRITE_SHARE_PROBE=' } | Select-Object -Last 1)
+        if ($probe.Count -gt 0) {
+            Say ('TC_F5_PROBE_LAST=' + $probe[0])
+        } else {
+            Say 'TC_F5_PROBE_LAST=absent (check that the new WCX build is loaded)'
+        }
+        $callbacks=@($recent | Where-Object { $_ -match 'PackFiles(W| ANSI) entered' })
+        if ($callbacks.Count -eq 0) {
+            Say 'TC_F5_CALLBACK_SINCE_OPEN=not-observed'
+            Say 'TC_F5_HOST_NOTE: if F5 was pressed after this open, inspect host routing/configuration before changing the WIM writer.'
+        } else {
+            Say 'TC_F5_CALLBACK_SINCE_OPEN=observed'
+            Say 'TC_F5_HOST_NOTE: PackFiles reached ISO-WCX; inspect its finished/rejected event and return code.'
+        }
+    } catch { Say ('Не удалось прочитать журнал: ' + $_.Exception.Message) }
+}
+try { Check-Installed-Wcx } catch { Say ('WCX файл: ' + $_.Exception.Message) }
+try { Check-WcxExports -Path $WcxPath } catch { Say ('WCX exports: ' + $_.Exception.Message) }
+try { Check-Edit-Log } catch { Say ('Журнал: ' + $_.Exception.Message) }
+
+if ($ReportPath) {
+    # .NET GetFullPath resolves relative names against the PROCESS working
+    # directory, which can differ from PowerShell's Get-Location. A report
+    # passed as ".\ISO-WCX-F5.txt" must land in the invoking PS directory.
+    $requested=[Environment]::ExpandEnvironmentVariables($ReportPath)
+    if (-not [IO.Path]::IsPathRooted($requested)) {
+        $location=Get-Location
+        if ($location.Provider.Name -ne 'FileSystem') {
+            throw 'Относительный путь отчёта допустим только в файловой системе.'
+        }
+        $requested=Join-Path -Path $location.ProviderPath -ChildPath $requested
+    }
+    $target=[IO.Path]::GetFullPath($requested)
+    $directory=Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        throw ('Папка для отчёта не существует: ' + $directory)
+    }
+    [IO.File]::WriteAllLines(
+        $target,$script:Lines.ToArray(),
+        (New-Object System.Text.UTF8Encoding($true)))
+    Write-Host ('Отчёт: ' + $target)
+}
+) {
+                $section=$Matches[1].Trim()
+                continue
+            }
+            if ($line -match '^\s*[;#]') { continue }
+            if ($section -eq 'Shortcuts') {
+                if ($line -match '^\s*RedirectSection\s*=\s*(.+)
+    Say '--- Заголовок WIM и временные папки ---'
+    if (-not $WimPath) {
+        Say 'Для проверки image1/image2 укажите -WimPath.'
+        return
+    }
+    $resolved = (Resolve-Path -LiteralPath $WimPath).ProviderPath
+    $file = Get-Item -LiteralPath $resolved -Force
+    if ($file.PSIsContainer -or
+        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Ожидался обычный файл WIM, не ссылка и не папка.'
+    }
+    Say ('WIM: ' + $resolved)
+    Say ('Размер: ' + $file.Length + ' байт, изменение UTC: ' + $file.LastWriteTimeUtc.ToString('o'))
+    $stream = [IO.File]::Open(
+        $resolved,[IO.FileMode]::Open,[IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        $header = New-Object byte[] 208
+        if ($stream.Read($header,0,$header.Length) -lt $header.Length -or
+            [Text.Encoding]::ASCII.GetString($header,0,5) -ne 'MSWIM') {
+            throw 'WIM заголовок повреждён или слишком короткий.'
+        }
+        $count = [BitConverter]::ToUInt32($header,44)
+        $part = [BitConverter]::ToUInt16($header,40)
+        $totalParts = [BitConverter]::ToUInt16($header,42)
+        $bootIndex = [BitConverter]::ToUInt32($header,120)
+        Say ('Индексов в заголовке: ' + $count + '; часть: ' + $part + '/' +
+             $totalParts + '; загрузочный индекс: ' + $bootIndex)
+        if ($count -eq 2) {
+            Say 'В корне образа TC ожидаются image1 И image2.'
+        } elseif ($count -eq 1) {
+            Say 'В самом файле WIM указан только один индекс.'
+        } else {
+            Say 'Сверьте количество индексов с выводом DISM /Get-WimInfo.'
+        }
+    } finally { $stream.Dispose() }
+
+    $parent = Split-Path -Parent $resolved
+    $workspaces = @(Get-ChildItem -LiteralPath $parent -Force -Directory |
+        Where-Object { $_.Name -match '^\.iso-wcx-edit-[0-9]+-[0-9]+$' })
+    Say ('Временных папок ISO-WCX рядом с WIM: ' + $workspaces.Count)
+    foreach ($workspace in $workspaces) {
+        Say ('Временная папка: ' + $workspace.FullName)
+        if (($workspace.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            Say 'ОПАСНО: сама временная папка является reparse point. Не удалять.'
+            continue
+        }
+        foreach ($name in @('mounted','original-archive.backup',
+                            'original-archive.backup-recovery',
+                            'WIM-MOUNT-RECOVERY.txt','expanded')) {
+            $item = Join-Path $workspace.FullName $name
+            if (Test-Path -LiteralPath $item) {
+                Say ('Обнаружен: ' + $name)
+                if ($name -eq 'mounted') {
+                    Say 'ОПАСНО: активный WIMGAPI mount нельзя исключить одной командой DISM.'
+                }
+            }
+        }
+        Say 'Ничего не удаляйте до проверки нативного WIMGAPI mount и открытых backup handles.'
+    }
+    if ($CheckDism) {
+        Say '--- DISM /Get-WimInfo (без изменений образа) ---'
+        $dism = Join-Path $env:WINDIR 'System32\dism.exe'
+        if (Test-Path -LiteralPath $dism) {
+            & $dism '/English' '/Get-WimInfo' ('/WimFile:' + $resolved) 2>&1 |
+                ForEach-Object { Say ([string]$_) }
+            Say ('DISM код завершения: ' + $LASTEXITCODE)
+        } else {
+            Say 'DISM не найден.'
+        }
+    }
+}
+Say ('ISO-WCX диагностика: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))
+Say 'Только чтение: никаких изменений TC, WIM, монтировок и временных папок.'
+try { Check-TcProcesses } catch { Say ('TC: ' + $_.Exception.Message) }
+try { Check-TcLivePanels } catch { Say ('TC panels: ' + $_.Exception.Message) }
+try { Check-Ini } catch { Say ('INI: ' + $_.Exception.Message) }
+try { Check-AssociationSummary } catch { Say ('Association summary: ' + $_.Exception.Message) }
+try { Check-Wcx64Cache } catch { Say ('Кэш x64: ' + $_.Exception.Message) }
+try { Check-WimFile } catch { Say ('WIM: ' + $_.Exception.Message) }
+
+function Check-Installed-Wcx {
+    Say '--- Установленные модули ISO-WCX ---'
+    $ini = Find-TcIni
+    if (-not $ini) { Say 'Не удалось определить wincmd.ini.'; return }
+    $match = Select-String -LiteralPath $ini -Pattern '(?i)^\s*(wim|iso)\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $match) { Say 'Не найдена строка с ISO-WCX.wcx в INI.'; return }
+    $full = [Environment]::ExpandEnvironmentVariables(
+        $match.Matches[0].Groups[2].Value.Trim().Trim('"'))
+    foreach ($candidate in @($full,[IO.Path]::ChangeExtension($full,'wcx64'))) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -LiteralPath $candidate
+            Say ('Установлен: ' + $item.FullName +
+                 ' | размер=' + $item.Length + ' | UTC=' +
+                 $item.LastWriteTimeUtc.ToString('o'))
+        } else {
+            Say ('ОШИБКА: отсутствует ' + $candidate)
+        }
+    }
+    Say 'Отсутствие DLL в списке процессов само по себе нормально при закрытой панели архива.'
+}
+function Check-WcxExports {
+    param([string]$Path)
+    Say '--- Native WCX DLL export table (read-only) ---'
+    if (-not $Path) {
+        $ini=Find-TcIni
+        if (-not $ini) { Say 'WCX_EXPORT_CHECK: no TC INI; use -WcxPath'; return }
+        $row=Select-String -LiteralPath $ini -Pattern '(?i)^\s*wim\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $row) { Say 'WCX_EXPORT_CHECK: WIM association not found'; return }
+        $Path=[Environment]::ExpandEnvironmentVariables(
+            $row.Matches[0].Groups[1].Value.Trim().Trim('"'))
+        if ([IntPtr]::Size -eq 8) {
+            $Path=[IO.Path]::ChangeExtension($Path,'wcx64')
+        }
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Say ('WCX_EXPORT_CHECK: no DLL at ' + $Path)
+        return
+    }
+    if (-not ('IsoWcxReadOnlyExportsV1' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class IsoWcxReadOnlyExportsV1 {
+    // DONT_RESOLVE_DLL_REFERENCES = 1: read export table without running DllMain
+    // or any plug-in code. Do not call any returned function pointer.
+    [DllImport("kernel32.dll", EntryPoint="LoadLibraryExW", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr LoadLibraryEx(string file, IntPtr ignored, uint flags);
+    [DllImport("kernel32.dll", EntryPoint="GetProcAddress", CharSet=CharSet.Ansi, SetLastError=true)]
+    public static extern IntPtr GetProcAddress(IntPtr module, string name);
+    [DllImport("kernel32.dll", EntryPoint="FreeLibrary", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FreeLibrary(IntPtr module);
+}
+'@ -ErrorAction Stop
+    }
+    $full=(Resolve-Path -LiteralPath $Path).ProviderPath
+    $loaded=[IsoWcxReadOnlyExportsV1]::LoadLibraryEx($full,[IntPtr]::Zero,[uint32]1)
+    if ($loaded -eq [IntPtr]::Zero) {
+        Say ('WCX_EXPORT_CHECK: PE load failed, Win32=' +
+            [Runtime.InteropServices.Marshal]::GetLastWin32Error() +
+            ' (check PowerShell and WCX architecture)')
+        return
+    }
+    try {
+        $missing=@()
+        $required=@('OpenArchiveW','ReadHeaderExW','ProcessFileW',
+                    'GetPackerCaps','PackFilesW','PackFiles',
+                    'DeleteFilesW','CloseArchive','SetProcessDataProcW')
+        foreach ($name in $required) {
+            $pointer=[IsoWcxReadOnlyExportsV1]::GetProcAddress($loaded,$name)
+            if ($pointer -eq [IntPtr]::Zero) {
+                $missing+=@($name)
+                Say ('WCX_EXPORT_MISSING=' + $name)
+            } else {
+                Say ('WCX_EXPORT_PRESENT=' + $name)
+            }
+        }
+        if ($missing.Count -eq 0) {
+            Say 'WCX_EXPORT_SUMMARY=PASS: all required WCX ABI entry points are exported'
+        } else {
+            Say ('WCX_EXPORT_SUMMARY=FAIL: ' + $missing.Count +
+                 ' missing; TC cannot call missing entry points')
+        }
+        Say 'Only export names were inspected; no DLL entry point was executed.'
+    } finally {
+        [void][IsoWcxReadOnlyExportsV1]::FreeLibrary($loaded)
+    }
+}
+function Check-Edit-Log {
+    Say '--- Последние события F5 и очистки WIM ---'
+    if (-not $env:LOCALAPPDATA) { Say 'LOCALAPPDATA отсутствует.'; return }
+    $file = Join-Path $env:LOCALAPPDATA 'ISO-WCX\Logs\edit-errors.log'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        Say 'Журнал отсутствует. Новая версия WCX создаёт его при вызове F5 в TC.'
+        return
+    }
+    Say ('Журнал: ' + $file)
+    try {
+        Get-Content -LiteralPath $file -Encoding UTF8 -Tail 40 |
+            ForEach-Object { Say ([string]$_) }
+    } catch { Say ('Не удалось прочитать журнал: ' + $_.Exception.Message) }
+}
+try { Check-Installed-Wcx } catch { Say ('WCX файл: ' + $_.Exception.Message) }
+try { Check-WcxExports -Path $WcxPath } catch { Say ('WCX exports: ' + $_.Exception.Message) }
+try { Check-Edit-Log } catch { Say ('Журнал: ' + $_.Exception.Message) }
+
+if ($ReportPath) {
+    # .NET GetFullPath resolves relative names against the PROCESS working
+    # directory, which can differ from PowerShell's Get-Location. A report
+    # passed as ".\ISO-WCX-F5.txt" must land in the invoking PS directory.
+    $requested=[Environment]::ExpandEnvironmentVariables($ReportPath)
+    if (-not [IO.Path]::IsPathRooted($requested)) {
+        $location=Get-Location
+        if ($location.Provider.Name -ne 'FileSystem') {
+            throw 'Относительный путь отчёта допустим только в файловой системе.'
+        }
+        $requested=Join-Path -Path $location.ProviderPath -ChildPath $requested
+    }
+    $target=[IO.Path]::GetFullPath($requested)
+    $directory=Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        throw ('Папка для отчёта не существует: ' + $directory)
+    }
+    [IO.File]::WriteAllLines(
+        $target,$script:Lines.ToArray(),
+        (New-Object System.Text.UTF8Encoding($true)))
+    Write-Host ('Отчёт: ' + $target)
+}
+) {
+                    $redirect=$Matches[1].Trim()
+                } elseif ($line -match '^\s*F5\s*=\s*(.*)
+    Say '--- Заголовок WIM и временные папки ---'
+    if (-not $WimPath) {
+        Say 'Для проверки image1/image2 укажите -WimPath.'
+        return
+    }
+    $resolved = (Resolve-Path -LiteralPath $WimPath).ProviderPath
+    $file = Get-Item -LiteralPath $resolved -Force
+    if ($file.PSIsContainer -or
+        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Ожидался обычный файл WIM, не ссылка и не папка.'
+    }
+    Say ('WIM: ' + $resolved)
+    Say ('Размер: ' + $file.Length + ' байт, изменение UTC: ' + $file.LastWriteTimeUtc.ToString('o'))
+    $stream = [IO.File]::Open(
+        $resolved,[IO.FileMode]::Open,[IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        $header = New-Object byte[] 208
+        if ($stream.Read($header,0,$header.Length) -lt $header.Length -or
+            [Text.Encoding]::ASCII.GetString($header,0,5) -ne 'MSWIM') {
+            throw 'WIM заголовок повреждён или слишком короткий.'
+        }
+        $count = [BitConverter]::ToUInt32($header,44)
+        $part = [BitConverter]::ToUInt16($header,40)
+        $totalParts = [BitConverter]::ToUInt16($header,42)
+        $bootIndex = [BitConverter]::ToUInt32($header,120)
+        Say ('Индексов в заголовке: ' + $count + '; часть: ' + $part + '/' +
+             $totalParts + '; загрузочный индекс: ' + $bootIndex)
+        if ($count -eq 2) {
+            Say 'В корне образа TC ожидаются image1 И image2.'
+        } elseif ($count -eq 1) {
+            Say 'В самом файле WIM указан только один индекс.'
+        } else {
+            Say 'Сверьте количество индексов с выводом DISM /Get-WimInfo.'
+        }
+    } finally { $stream.Dispose() }
+
+    $parent = Split-Path -Parent $resolved
+    $workspaces = @(Get-ChildItem -LiteralPath $parent -Force -Directory |
+        Where-Object { $_.Name -match '^\.iso-wcx-edit-[0-9]+-[0-9]+$' })
+    Say ('Временных папок ISO-WCX рядом с WIM: ' + $workspaces.Count)
+    foreach ($workspace in $workspaces) {
+        Say ('Временная папка: ' + $workspace.FullName)
+        if (($workspace.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            Say 'ОПАСНО: сама временная папка является reparse point. Не удалять.'
+            continue
+        }
+        foreach ($name in @('mounted','original-archive.backup',
+                            'original-archive.backup-recovery',
+                            'WIM-MOUNT-RECOVERY.txt','expanded')) {
+            $item = Join-Path $workspace.FullName $name
+            if (Test-Path -LiteralPath $item) {
+                Say ('Обнаружен: ' + $name)
+                if ($name -eq 'mounted') {
+                    Say 'ОПАСНО: активный WIMGAPI mount нельзя исключить одной командой DISM.'
+                }
+            }
+        }
+        Say 'Ничего не удаляйте до проверки нативного WIMGAPI mount и открытых backup handles.'
+    }
+    if ($CheckDism) {
+        Say '--- DISM /Get-WimInfo (без изменений образа) ---'
+        $dism = Join-Path $env:WINDIR 'System32\dism.exe'
+        if (Test-Path -LiteralPath $dism) {
+            & $dism '/English' '/Get-WimInfo' ('/WimFile:' + $resolved) 2>&1 |
+                ForEach-Object { Say ([string]$_) }
+            Say ('DISM код завершения: ' + $LASTEXITCODE)
+        } else {
+            Say 'DISM не найден.'
+        }
+    }
+}
+Say ('ISO-WCX диагностика: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))
+Say 'Только чтение: никаких изменений TC, WIM, монтировок и временных папок.'
+try { Check-TcProcesses } catch { Say ('TC: ' + $_.Exception.Message) }
+try { Check-TcLivePanels } catch { Say ('TC panels: ' + $_.Exception.Message) }
+try { Check-Ini } catch { Say ('INI: ' + $_.Exception.Message) }
+try { Check-AssociationSummary } catch { Say ('Association summary: ' + $_.Exception.Message) }
+try { Check-Wcx64Cache } catch { Say ('Кэш x64: ' + $_.Exception.Message) }
+try { Check-WimFile } catch { Say ('WIM: ' + $_.Exception.Message) }
+
+function Check-Installed-Wcx {
+    Say '--- Установленные модули ISO-WCX ---'
+    $ini = Find-TcIni
+    if (-not $ini) { Say 'Не удалось определить wincmd.ini.'; return }
+    $match = Select-String -LiteralPath $ini -Pattern '(?i)^\s*(wim|iso)\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $match) { Say 'Не найдена строка с ISO-WCX.wcx в INI.'; return }
+    $full = [Environment]::ExpandEnvironmentVariables(
+        $match.Matches[0].Groups[2].Value.Trim().Trim('"'))
+    foreach ($candidate in @($full,[IO.Path]::ChangeExtension($full,'wcx64'))) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -LiteralPath $candidate
+            Say ('Установлен: ' + $item.FullName +
+                 ' | размер=' + $item.Length + ' | UTC=' +
+                 $item.LastWriteTimeUtc.ToString('o'))
+        } else {
+            Say ('ОШИБКА: отсутствует ' + $candidate)
+        }
+    }
+    Say 'Отсутствие DLL в списке процессов само по себе нормально при закрытой панели архива.'
+}
+function Check-WcxExports {
+    param([string]$Path)
+    Say '--- Native WCX DLL export table (read-only) ---'
+    if (-not $Path) {
+        $ini=Find-TcIni
+        if (-not $ini) { Say 'WCX_EXPORT_CHECK: no TC INI; use -WcxPath'; return }
+        $row=Select-String -LiteralPath $ini -Pattern '(?i)^\s*wim\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $row) { Say 'WCX_EXPORT_CHECK: WIM association not found'; return }
+        $Path=[Environment]::ExpandEnvironmentVariables(
+            $row.Matches[0].Groups[1].Value.Trim().Trim('"'))
+        if ([IntPtr]::Size -eq 8) {
+            $Path=[IO.Path]::ChangeExtension($Path,'wcx64')
+        }
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Say ('WCX_EXPORT_CHECK: no DLL at ' + $Path)
+        return
+    }
+    if (-not ('IsoWcxReadOnlyExportsV1' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class IsoWcxReadOnlyExportsV1 {
+    // DONT_RESOLVE_DLL_REFERENCES = 1: read export table without running DllMain
+    // or any plug-in code. Do not call any returned function pointer.
+    [DllImport("kernel32.dll", EntryPoint="LoadLibraryExW", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr LoadLibraryEx(string file, IntPtr ignored, uint flags);
+    [DllImport("kernel32.dll", EntryPoint="GetProcAddress", CharSet=CharSet.Ansi, SetLastError=true)]
+    public static extern IntPtr GetProcAddress(IntPtr module, string name);
+    [DllImport("kernel32.dll", EntryPoint="FreeLibrary", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FreeLibrary(IntPtr module);
+}
+'@ -ErrorAction Stop
+    }
+    $full=(Resolve-Path -LiteralPath $Path).ProviderPath
+    $loaded=[IsoWcxReadOnlyExportsV1]::LoadLibraryEx($full,[IntPtr]::Zero,[uint32]1)
+    if ($loaded -eq [IntPtr]::Zero) {
+        Say ('WCX_EXPORT_CHECK: PE load failed, Win32=' +
+            [Runtime.InteropServices.Marshal]::GetLastWin32Error() +
+            ' (check PowerShell and WCX architecture)')
+        return
+    }
+    try {
+        $missing=@()
+        $required=@('OpenArchiveW','ReadHeaderExW','ProcessFileW',
+                    'GetPackerCaps','PackFilesW','PackFiles',
+                    'DeleteFilesW','CloseArchive','SetProcessDataProcW')
+        foreach ($name in $required) {
+            $pointer=[IsoWcxReadOnlyExportsV1]::GetProcAddress($loaded,$name)
+            if ($pointer -eq [IntPtr]::Zero) {
+                $missing+=@($name)
+                Say ('WCX_EXPORT_MISSING=' + $name)
+            } else {
+                Say ('WCX_EXPORT_PRESENT=' + $name)
+            }
+        }
+        if ($missing.Count -eq 0) {
+            Say 'WCX_EXPORT_SUMMARY=PASS: all required WCX ABI entry points are exported'
+        } else {
+            Say ('WCX_EXPORT_SUMMARY=FAIL: ' + $missing.Count +
+                 ' missing; TC cannot call missing entry points')
+        }
+        Say 'Only export names were inspected; no DLL entry point was executed.'
+    } finally {
+        [void][IsoWcxReadOnlyExportsV1]::FreeLibrary($loaded)
+    }
+}
+function Check-Edit-Log {
+    Say '--- Последние события F5 и очистки WIM ---'
+    if (-not $env:LOCALAPPDATA) { Say 'LOCALAPPDATA отсутствует.'; return }
+    $file = Join-Path $env:LOCALAPPDATA 'ISO-WCX\Logs\edit-errors.log'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        Say 'Журнал отсутствует. Новая версия WCX создаёт его при вызове F5 в TC.'
+        return
+    }
+    Say ('Журнал: ' + $file)
+    try {
+        Get-Content -LiteralPath $file -Encoding UTF8 -Tail 40 |
+            ForEach-Object { Say ([string]$_) }
+    } catch { Say ('Не удалось прочитать журнал: ' + $_.Exception.Message) }
+}
+try { Check-Installed-Wcx } catch { Say ('WCX файл: ' + $_.Exception.Message) }
+try { Check-WcxExports -Path $WcxPath } catch { Say ('WCX exports: ' + $_.Exception.Message) }
+try { Check-Edit-Log } catch { Say ('Журнал: ' + $_.Exception.Message) }
+
+if ($ReportPath) {
+    # .NET GetFullPath resolves relative names against the PROCESS working
+    # directory, which can differ from PowerShell's Get-Location. A report
+    # passed as ".\ISO-WCX-F5.txt" must land in the invoking PS directory.
+    $requested=[Environment]::ExpandEnvironmentVariables($ReportPath)
+    if (-not [IO.Path]::IsPathRooted($requested)) {
+        $location=Get-Location
+        if ($location.Provider.Name -ne 'FileSystem') {
+            throw 'Относительный путь отчёта допустим только в файловой системе.'
+        }
+        $requested=Join-Path -Path $location.ProviderPath -ChildPath $requested
+    }
+    $target=[IO.Path]::GetFullPath($requested)
+    $directory=Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        throw ('Папка для отчёта не существует: ' + $directory)
+    }
+    [IO.File]::WriteAllLines(
+        $target,$script:Lines.ToArray(),
+        (New-Object System.Text.UTF8Encoding($true)))
+    Write-Host ('Отчёт: ' + $target)
+}
+) {
+                    $binding=$Matches[1].Trim()
+                }
+            } elseif ($section -eq 'Configuration') {
+                if ($line -match '^\s*AlwaysCopyInBackground\s*=\s*(.*)
+    Say '--- Заголовок WIM и временные папки ---'
+    if (-not $WimPath) {
+        Say 'Для проверки image1/image2 укажите -WimPath.'
+        return
+    }
+    $resolved = (Resolve-Path -LiteralPath $WimPath).ProviderPath
+    $file = Get-Item -LiteralPath $resolved -Force
+    if ($file.PSIsContainer -or
+        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Ожидался обычный файл WIM, не ссылка и не папка.'
+    }
+    Say ('WIM: ' + $resolved)
+    Say ('Размер: ' + $file.Length + ' байт, изменение UTC: ' + $file.LastWriteTimeUtc.ToString('o'))
+    $stream = [IO.File]::Open(
+        $resolved,[IO.FileMode]::Open,[IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        $header = New-Object byte[] 208
+        if ($stream.Read($header,0,$header.Length) -lt $header.Length -or
+            [Text.Encoding]::ASCII.GetString($header,0,5) -ne 'MSWIM') {
+            throw 'WIM заголовок повреждён или слишком короткий.'
+        }
+        $count = [BitConverter]::ToUInt32($header,44)
+        $part = [BitConverter]::ToUInt16($header,40)
+        $totalParts = [BitConverter]::ToUInt16($header,42)
+        $bootIndex = [BitConverter]::ToUInt32($header,120)
+        Say ('Индексов в заголовке: ' + $count + '; часть: ' + $part + '/' +
+             $totalParts + '; загрузочный индекс: ' + $bootIndex)
+        if ($count -eq 2) {
+            Say 'В корне образа TC ожидаются image1 И image2.'
+        } elseif ($count -eq 1) {
+            Say 'В самом файле WIM указан только один индекс.'
+        } else {
+            Say 'Сверьте количество индексов с выводом DISM /Get-WimInfo.'
+        }
+    } finally { $stream.Dispose() }
+
+    $parent = Split-Path -Parent $resolved
+    $workspaces = @(Get-ChildItem -LiteralPath $parent -Force -Directory |
+        Where-Object { $_.Name -match '^\.iso-wcx-edit-[0-9]+-[0-9]+$' })
+    Say ('Временных папок ISO-WCX рядом с WIM: ' + $workspaces.Count)
+    foreach ($workspace in $workspaces) {
+        Say ('Временная папка: ' + $workspace.FullName)
+        if (($workspace.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            Say 'ОПАСНО: сама временная папка является reparse point. Не удалять.'
+            continue
+        }
+        foreach ($name in @('mounted','original-archive.backup',
+                            'original-archive.backup-recovery',
+                            'WIM-MOUNT-RECOVERY.txt','expanded')) {
+            $item = Join-Path $workspace.FullName $name
+            if (Test-Path -LiteralPath $item) {
+                Say ('Обнаружен: ' + $name)
+                if ($name -eq 'mounted') {
+                    Say 'ОПАСНО: активный WIMGAPI mount нельзя исключить одной командой DISM.'
+                }
+            }
+        }
+        Say 'Ничего не удаляйте до проверки нативного WIMGAPI mount и открытых backup handles.'
+    }
+    if ($CheckDism) {
+        Say '--- DISM /Get-WimInfo (без изменений образа) ---'
+        $dism = Join-Path $env:WINDIR 'System32\dism.exe'
+        if (Test-Path -LiteralPath $dism) {
+            & $dism '/English' '/Get-WimInfo' ('/WimFile:' + $resolved) 2>&1 |
+                ForEach-Object { Say ([string]$_) }
+            Say ('DISM код завершения: ' + $LASTEXITCODE)
+        } else {
+            Say 'DISM не найден.'
+        }
+    }
+}
+Say ('ISO-WCX диагностика: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))
+Say 'Только чтение: никаких изменений TC, WIM, монтировок и временных папок.'
+try { Check-TcProcesses } catch { Say ('TC: ' + $_.Exception.Message) }
+try { Check-TcLivePanels } catch { Say ('TC panels: ' + $_.Exception.Message) }
+try { Check-Ini } catch { Say ('INI: ' + $_.Exception.Message) }
+try { Check-AssociationSummary } catch { Say ('Association summary: ' + $_.Exception.Message) }
+try { Check-Wcx64Cache } catch { Say ('Кэш x64: ' + $_.Exception.Message) }
+try { Check-WimFile } catch { Say ('WIM: ' + $_.Exception.Message) }
+
+function Check-Installed-Wcx {
+    Say '--- Установленные модули ISO-WCX ---'
+    $ini = Find-TcIni
+    if (-not $ini) { Say 'Не удалось определить wincmd.ini.'; return }
+    $match = Select-String -LiteralPath $ini -Pattern '(?i)^\s*(wim|iso)\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $match) { Say 'Не найдена строка с ISO-WCX.wcx в INI.'; return }
+    $full = [Environment]::ExpandEnvironmentVariables(
+        $match.Matches[0].Groups[2].Value.Trim().Trim('"'))
+    foreach ($candidate in @($full,[IO.Path]::ChangeExtension($full,'wcx64'))) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -LiteralPath $candidate
+            Say ('Установлен: ' + $item.FullName +
+                 ' | размер=' + $item.Length + ' | UTC=' +
+                 $item.LastWriteTimeUtc.ToString('o'))
+        } else {
+            Say ('ОШИБКА: отсутствует ' + $candidate)
+        }
+    }
+    Say 'Отсутствие DLL в списке процессов само по себе нормально при закрытой панели архива.'
+}
+function Check-WcxExports {
+    param([string]$Path)
+    Say '--- Native WCX DLL export table (read-only) ---'
+    if (-not $Path) {
+        $ini=Find-TcIni
+        if (-not $ini) { Say 'WCX_EXPORT_CHECK: no TC INI; use -WcxPath'; return }
+        $row=Select-String -LiteralPath $ini -Pattern '(?i)^\s*wim\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $row) { Say 'WCX_EXPORT_CHECK: WIM association not found'; return }
+        $Path=[Environment]::ExpandEnvironmentVariables(
+            $row.Matches[0].Groups[1].Value.Trim().Trim('"'))
+        if ([IntPtr]::Size -eq 8) {
+            $Path=[IO.Path]::ChangeExtension($Path,'wcx64')
+        }
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Say ('WCX_EXPORT_CHECK: no DLL at ' + $Path)
+        return
+    }
+    if (-not ('IsoWcxReadOnlyExportsV1' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class IsoWcxReadOnlyExportsV1 {
+    // DONT_RESOLVE_DLL_REFERENCES = 1: read export table without running DllMain
+    // or any plug-in code. Do not call any returned function pointer.
+    [DllImport("kernel32.dll", EntryPoint="LoadLibraryExW", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr LoadLibraryEx(string file, IntPtr ignored, uint flags);
+    [DllImport("kernel32.dll", EntryPoint="GetProcAddress", CharSet=CharSet.Ansi, SetLastError=true)]
+    public static extern IntPtr GetProcAddress(IntPtr module, string name);
+    [DllImport("kernel32.dll", EntryPoint="FreeLibrary", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FreeLibrary(IntPtr module);
+}
+'@ -ErrorAction Stop
+    }
+    $full=(Resolve-Path -LiteralPath $Path).ProviderPath
+    $loaded=[IsoWcxReadOnlyExportsV1]::LoadLibraryEx($full,[IntPtr]::Zero,[uint32]1)
+    if ($loaded -eq [IntPtr]::Zero) {
+        Say ('WCX_EXPORT_CHECK: PE load failed, Win32=' +
+            [Runtime.InteropServices.Marshal]::GetLastWin32Error() +
+            ' (check PowerShell and WCX architecture)')
+        return
+    }
+    try {
+        $missing=@()
+        $required=@('OpenArchiveW','ReadHeaderExW','ProcessFileW',
+                    'GetPackerCaps','PackFilesW','PackFiles',
+                    'DeleteFilesW','CloseArchive','SetProcessDataProcW')
+        foreach ($name in $required) {
+            $pointer=[IsoWcxReadOnlyExportsV1]::GetProcAddress($loaded,$name)
+            if ($pointer -eq [IntPtr]::Zero) {
+                $missing+=@($name)
+                Say ('WCX_EXPORT_MISSING=' + $name)
+            } else {
+                Say ('WCX_EXPORT_PRESENT=' + $name)
+            }
+        }
+        if ($missing.Count -eq 0) {
+            Say 'WCX_EXPORT_SUMMARY=PASS: all required WCX ABI entry points are exported'
+        } else {
+            Say ('WCX_EXPORT_SUMMARY=FAIL: ' + $missing.Count +
+                 ' missing; TC cannot call missing entry points')
+        }
+        Say 'Only export names were inspected; no DLL entry point was executed.'
+    } finally {
+        [void][IsoWcxReadOnlyExportsV1]::FreeLibrary($loaded)
+    }
+}
+function Check-Edit-Log {
+    Say '--- Последние события F5 и очистки WIM ---'
+    if (-not $env:LOCALAPPDATA) { Say 'LOCALAPPDATA отсутствует.'; return }
+    $file = Join-Path $env:LOCALAPPDATA 'ISO-WCX\Logs\edit-errors.log'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        Say 'Журнал отсутствует. Новая версия WCX создаёт его при вызове F5 в TC.'
+        return
+    }
+    Say ('Журнал: ' + $file)
+    try {
+        Get-Content -LiteralPath $file -Encoding UTF8 -Tail 40 |
+            ForEach-Object { Say ([string]$_) }
+    } catch { Say ('Не удалось прочитать журнал: ' + $_.Exception.Message) }
+}
+try { Check-Installed-Wcx } catch { Say ('WCX файл: ' + $_.Exception.Message) }
+try { Check-WcxExports -Path $WcxPath } catch { Say ('WCX exports: ' + $_.Exception.Message) }
+try { Check-Edit-Log } catch { Say ('Журнал: ' + $_.Exception.Message) }
+
+if ($ReportPath) {
+    # .NET GetFullPath resolves relative names against the PROCESS working
+    # directory, which can differ from PowerShell's Get-Location. A report
+    # passed as ".\ISO-WCX-F5.txt" must land in the invoking PS directory.
+    $requested=[Environment]::ExpandEnvironmentVariables($ReportPath)
+    if (-not [IO.Path]::IsPathRooted($requested)) {
+        $location=Get-Location
+        if ($location.Provider.Name -ne 'FileSystem') {
+            throw 'Относительный путь отчёта допустим только в файловой системе.'
+        }
+        $requested=Join-Path -Path $location.ProviderPath -ChildPath $requested
+    }
+    $target=[IO.Path]::GetFullPath($requested)
+    $directory=Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        throw ('Папка для отчёта не существует: ' + $directory)
+    }
+    [IO.File]::WriteAllLines(
+        $target,$script:Lines.ToArray(),
+        (New-Object System.Text.UTF8Encoding($true)))
+    Write-Host ('Отчёт: ' + $target)
+}
+) {
+                    $copyMode=$Matches[1].Trim()
+                } elseif ($line -match '^\s*AlwaysPackInBackground\s*=\s*(.*)
+    Say '--- Заголовок WIM и временные папки ---'
+    if (-not $WimPath) {
+        Say 'Для проверки image1/image2 укажите -WimPath.'
+        return
+    }
+    $resolved = (Resolve-Path -LiteralPath $WimPath).ProviderPath
+    $file = Get-Item -LiteralPath $resolved -Force
+    if ($file.PSIsContainer -or
+        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Ожидался обычный файл WIM, не ссылка и не папка.'
+    }
+    Say ('WIM: ' + $resolved)
+    Say ('Размер: ' + $file.Length + ' байт, изменение UTC: ' + $file.LastWriteTimeUtc.ToString('o'))
+    $stream = [IO.File]::Open(
+        $resolved,[IO.FileMode]::Open,[IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        $header = New-Object byte[] 208
+        if ($stream.Read($header,0,$header.Length) -lt $header.Length -or
+            [Text.Encoding]::ASCII.GetString($header,0,5) -ne 'MSWIM') {
+            throw 'WIM заголовок повреждён или слишком короткий.'
+        }
+        $count = [BitConverter]::ToUInt32($header,44)
+        $part = [BitConverter]::ToUInt16($header,40)
+        $totalParts = [BitConverter]::ToUInt16($header,42)
+        $bootIndex = [BitConverter]::ToUInt32($header,120)
+        Say ('Индексов в заголовке: ' + $count + '; часть: ' + $part + '/' +
+             $totalParts + '; загрузочный индекс: ' + $bootIndex)
+        if ($count -eq 2) {
+            Say 'В корне образа TC ожидаются image1 И image2.'
+        } elseif ($count -eq 1) {
+            Say 'В самом файле WIM указан только один индекс.'
+        } else {
+            Say 'Сверьте количество индексов с выводом DISM /Get-WimInfo.'
+        }
+    } finally { $stream.Dispose() }
+
+    $parent = Split-Path -Parent $resolved
+    $workspaces = @(Get-ChildItem -LiteralPath $parent -Force -Directory |
+        Where-Object { $_.Name -match '^\.iso-wcx-edit-[0-9]+-[0-9]+$' })
+    Say ('Временных папок ISO-WCX рядом с WIM: ' + $workspaces.Count)
+    foreach ($workspace in $workspaces) {
+        Say ('Временная папка: ' + $workspace.FullName)
+        if (($workspace.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            Say 'ОПАСНО: сама временная папка является reparse point. Не удалять.'
+            continue
+        }
+        foreach ($name in @('mounted','original-archive.backup',
+                            'original-archive.backup-recovery',
+                            'WIM-MOUNT-RECOVERY.txt','expanded')) {
+            $item = Join-Path $workspace.FullName $name
+            if (Test-Path -LiteralPath $item) {
+                Say ('Обнаружен: ' + $name)
+                if ($name -eq 'mounted') {
+                    Say 'ОПАСНО: активный WIMGAPI mount нельзя исключить одной командой DISM.'
+                }
+            }
+        }
+        Say 'Ничего не удаляйте до проверки нативного WIMGAPI mount и открытых backup handles.'
+    }
+    if ($CheckDism) {
+        Say '--- DISM /Get-WimInfo (без изменений образа) ---'
+        $dism = Join-Path $env:WINDIR 'System32\dism.exe'
+        if (Test-Path -LiteralPath $dism) {
+            & $dism '/English' '/Get-WimInfo' ('/WimFile:' + $resolved) 2>&1 |
+                ForEach-Object { Say ([string]$_) }
+            Say ('DISM код завершения: ' + $LASTEXITCODE)
+        } else {
+            Say 'DISM не найден.'
+        }
+    }
+}
+Say ('ISO-WCX диагностика: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))
+Say 'Только чтение: никаких изменений TC, WIM, монтировок и временных папок.'
+try { Check-TcProcesses } catch { Say ('TC: ' + $_.Exception.Message) }
+try { Check-TcLivePanels } catch { Say ('TC panels: ' + $_.Exception.Message) }
+try { Check-Ini } catch { Say ('INI: ' + $_.Exception.Message) }
+try { Check-AssociationSummary } catch { Say ('Association summary: ' + $_.Exception.Message) }
+try { Check-Wcx64Cache } catch { Say ('Кэш x64: ' + $_.Exception.Message) }
+try { Check-WimFile } catch { Say ('WIM: ' + $_.Exception.Message) }
+
+function Check-Installed-Wcx {
+    Say '--- Установленные модули ISO-WCX ---'
+    $ini = Find-TcIni
+    if (-not $ini) { Say 'Не удалось определить wincmd.ini.'; return }
+    $match = Select-String -LiteralPath $ini -Pattern '(?i)^\s*(wim|iso)\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $match) { Say 'Не найдена строка с ISO-WCX.wcx в INI.'; return }
+    $full = [Environment]::ExpandEnvironmentVariables(
+        $match.Matches[0].Groups[2].Value.Trim().Trim('"'))
+    foreach ($candidate in @($full,[IO.Path]::ChangeExtension($full,'wcx64'))) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -LiteralPath $candidate
+            Say ('Установлен: ' + $item.FullName +
+                 ' | размер=' + $item.Length + ' | UTC=' +
+                 $item.LastWriteTimeUtc.ToString('o'))
+        } else {
+            Say ('ОШИБКА: отсутствует ' + $candidate)
+        }
+    }
+    Say 'Отсутствие DLL в списке процессов само по себе нормально при закрытой панели архива.'
+}
+function Check-WcxExports {
+    param([string]$Path)
+    Say '--- Native WCX DLL export table (read-only) ---'
+    if (-not $Path) {
+        $ini=Find-TcIni
+        if (-not $ini) { Say 'WCX_EXPORT_CHECK: no TC INI; use -WcxPath'; return }
+        $row=Select-String -LiteralPath $ini -Pattern '(?i)^\s*wim\s*=\s*(?:\d+\s*,\s*)?(.+ISO-WCX\.wcx)\s*$' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $row) { Say 'WCX_EXPORT_CHECK: WIM association not found'; return }
+        $Path=[Environment]::ExpandEnvironmentVariables(
+            $row.Matches[0].Groups[1].Value.Trim().Trim('"'))
+        if ([IntPtr]::Size -eq 8) {
+            $Path=[IO.Path]::ChangeExtension($Path,'wcx64')
+        }
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Say ('WCX_EXPORT_CHECK: no DLL at ' + $Path)
+        return
+    }
+    if (-not ('IsoWcxReadOnlyExportsV1' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class IsoWcxReadOnlyExportsV1 {
+    // DONT_RESOLVE_DLL_REFERENCES = 1: read export table without running DllMain
+    // or any plug-in code. Do not call any returned function pointer.
+    [DllImport("kernel32.dll", EntryPoint="LoadLibraryExW", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr LoadLibraryEx(string file, IntPtr ignored, uint flags);
+    [DllImport("kernel32.dll", EntryPoint="GetProcAddress", CharSet=CharSet.Ansi, SetLastError=true)]
+    public static extern IntPtr GetProcAddress(IntPtr module, string name);
+    [DllImport("kernel32.dll", EntryPoint="FreeLibrary", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool FreeLibrary(IntPtr module);
+}
+'@ -ErrorAction Stop
+    }
+    $full=(Resolve-Path -LiteralPath $Path).ProviderPath
+    $loaded=[IsoWcxReadOnlyExportsV1]::LoadLibraryEx($full,[IntPtr]::Zero,[uint32]1)
+    if ($loaded -eq [IntPtr]::Zero) {
+        Say ('WCX_EXPORT_CHECK: PE load failed, Win32=' +
+            [Runtime.InteropServices.Marshal]::GetLastWin32Error() +
+            ' (check PowerShell and WCX architecture)')
+        return
+    }
+    try {
+        $missing=@()
+        $required=@('OpenArchiveW','ReadHeaderExW','ProcessFileW',
+                    'GetPackerCaps','PackFilesW','PackFiles',
+                    'DeleteFilesW','CloseArchive','SetProcessDataProcW')
+        foreach ($name in $required) {
+            $pointer=[IsoWcxReadOnlyExportsV1]::GetProcAddress($loaded,$name)
+            if ($pointer -eq [IntPtr]::Zero) {
+                $missing+=@($name)
+                Say ('WCX_EXPORT_MISSING=' + $name)
+            } else {
+                Say ('WCX_EXPORT_PRESENT=' + $name)
+            }
+        }
+        if ($missing.Count -eq 0) {
+            Say 'WCX_EXPORT_SUMMARY=PASS: all required WCX ABI entry points are exported'
+        } else {
+            Say ('WCX_EXPORT_SUMMARY=FAIL: ' + $missing.Count +
+                 ' missing; TC cannot call missing entry points')
+        }
+        Say 'Only export names were inspected; no DLL entry point was executed.'
+    } finally {
+        [void][IsoWcxReadOnlyExportsV1]::FreeLibrary($loaded)
+    }
+}
+function Check-Edit-Log {
+    Say '--- Последние события F5 и очистки WIM ---'
+    if (-not $env:LOCALAPPDATA) { Say 'LOCALAPPDATA отсутствует.'; return }
+    $file = Join-Path $env:LOCALAPPDATA 'ISO-WCX\Logs\edit-errors.log'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        Say 'Журнал отсутствует. Новая версия WCX создаёт его при вызове F5 в TC.'
+        return
+    }
+    Say ('Журнал: ' + $file)
+    try {
+        Get-Content -LiteralPath $file -Encoding UTF8 -Tail 40 |
+            ForEach-Object { Say ([string]$_) }
+    } catch { Say ('Не удалось прочитать журнал: ' + $_.Exception.Message) }
+}
+try { Check-Installed-Wcx } catch { Say ('WCX файл: ' + $_.Exception.Message) }
+try { Check-WcxExports -Path $WcxPath } catch { Say ('WCX exports: ' + $_.Exception.Message) }
+try { Check-Edit-Log } catch { Say ('Журнал: ' + $_.Exception.Message) }
+
+if ($ReportPath) {
+    # .NET GetFullPath resolves relative names against the PROCESS working
+    # directory, which can differ from PowerShell's Get-Location. A report
+    # passed as ".\ISO-WCX-F5.txt" must land in the invoking PS directory.
+    $requested=[Environment]::ExpandEnvironmentVariables($ReportPath)
+    if (-not [IO.Path]::IsPathRooted($requested)) {
+        $location=Get-Location
+        if ($location.Provider.Name -ne 'FileSystem') {
+            throw 'Относительный путь отчёта допустим только в файловой системе.'
+        }
+        $requested=Join-Path -Path $location.ProviderPath -ChildPath $requested
+    }
+    $target=[IO.Path]::GetFullPath($requested)
+    $directory=Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        throw ('Папка для отчёта не существует: ' + $directory)
+    }
+    [IO.File]::WriteAllLines(
+        $target,$script:Lines.ToArray(),
+        (New-Object System.Text.UTF8Encoding($true)))
+    Write-Host ('Отчёт: ' + $target)
+}
+) {
+                    $packMode=$Matches[1].Trim()
+                }
+            }
+        }
+    } finally { $reader.Dispose() }
+    if ($redirect) {
+        Say ('TC_F5_BINDING=unknown (Shortcuts RedirectSection=' + $redirect + ')')
+        Say 'TC_F5_SHORTCUT_WARNING: read the redirected Shortcuts section before assuming that F5 invokes cm_Copy.'
+    } elseif ($null -eq $binding) {
+        Say 'TC_F5_BINDING=default cm_Copy'
+    } else {
+        Say ('TC_F5_BINDING=custom ' + $binding)
+        if ($binding -notmatch '^(?i:cm_Copy)(\s|$)' -and $binding -ne '905') {
+            Say 'TC_F5_SHORTCUT_WARNING: plain F5 is NOT assigned to cm_Copy; it may never invoke WCX PackFilesW.'
+        } elseif ($binding -match '(?i)/B[12]') {
+            Say 'TC_F5_SHORTCUT_WARNING: custom F5 command explicitly requests background copying.'
+        }
+    }
+    if ($null -eq $copyMode -or $copyMode -eq '') { $copyMode='0 (default)' }
+    if ($null -eq $packMode -or $packMode -eq '') { $packMode='0 (default)' }
+    Say ('TC_F5_COPY_BACKGROUND=' + $copyMode)
+    Say ('TC_F5_PACK_BACKGROUND=' + $packMode)
+    if ($copyMode -match '^\s*[12](?:\s|$)') {
+        Say 'TC_F5_BACKGROUND_WARNING: copy is configured for background mode. A foreground F5 transfer can help isolate host routing.'
+    }
+    Say 'TC_F5_HOST_NOTE: this is static INI evidence, not proof that Total Commander invoked PackFilesW.'
+}
 function Check-WimFile {
     Say '--- Заголовок WIM и временные папки ---'
     if (-not $WimPath) {

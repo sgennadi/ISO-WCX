@@ -64,6 +64,21 @@ jobs:
             Write-Host $report
             throw 'Read-only diagnostic did not count exactly the 23 supported image bindings'
           }
+          if ($report -notmatch 'TC_F5_BINDING=default cm_Copy') {
+            Write-Host $report
+            throw 'Read-only diagnostic missed default plain F5 binding'
+          }
+          Add-Content -LiteralPath $fixture -Encoding Unicode -Value @(
+            '[Shortcuts]'
+            'F5=cm_PackFiles'
+          )
+          $remapped=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -IniPath $fixture | Out-String
+          if ($remapped -notmatch 'TC_F5_BINDING=custom cm_PackFiles' -or
+              $remapped -notmatch 'TC_F5_SHORTCUT_WARNING') {
+            Write-Host $remapped
+            throw 'Read-only diagnostic missed remapped plain F5'
+          }
+          Write-Host 'PASS: F5 default/remap read-only diagnosis'
           Write-Host 'PASS: ISO-WCX x64 cache read-only diagnostic'
           . $file -IniPath $fixture | Out-Null
           $left=Get-TcF5Context -Active left -LeftType filesystem -RightType WCX-plugin -LeftFiles 1 -RightFiles 0 -LeftDirs 0 -RightDirs 0
