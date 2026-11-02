@@ -363,6 +363,8 @@ function Check-TcF5CommandConfig {
     $binding=$null
     $redirect=$null
     $copyMode=$null
+    $packMode=$null
+    $explorerCopy=$null
     # Only the plain F5 key is relevant. Do not modify any shortcuts.
     $reader=[IO.File]::OpenText($ini)
     try {
@@ -378,9 +380,14 @@ function Check-TcF5CommandConfig {
                 } elseif ($line -match '^\s*F5\s*=\s*(.*)$') {
                     $binding=$Matches[1].Trim()
                 }
-            } elseif ($section -eq 'Configuration' -and
-                      $line -match '^\s*AlwaysCopyInBackground\s*=\s*(.*)$') {
-                $copyMode=$Matches[1].Trim()
+            } elseif ($section -eq 'Configuration') {
+                if ($line -match '^\s*AlwaysCopyInBackground\s*=\s*(.*)$') {
+                    $copyMode=$Matches[1].Trim()
+                } elseif ($line -match '^\s*AlwaysPackInBackground\s*=\s*(.*)$') {
+                    $packMode=$Matches[1].Trim()
+                } elseif ($line -match '^\s*ExplorerForCopy\s*=\s*(.*)$') {
+                    $explorerCopy=$Matches[1].Trim()
+                }
             }
         }
     } finally { $reader.Dispose() }
@@ -399,6 +406,15 @@ function Check-TcF5CommandConfig {
         $copyMode='0 (default)'
     }
     Say ('TC_F5_COPY_BACKGROUND=' + $copyMode)
+    if ($null -eq $packMode -or $packMode -eq '') { $packMode='0 (default)' }
+    Say ('TC_F5_PACK_BACKGROUND=' + $packMode)
+    if ($null -eq $explorerCopy -or $explorerCopy -eq '') {
+        $explorerCopy='0 (default)'
+    }
+    Say ('TC_F5_EXPLORER_FOR_COPY=' + $explorerCopy)
+    if ($explorerCopy -match '^\s*1(?:\s|$)') {
+        Say 'TC_F5_COPY_ENGINE_WARNING: ExplorerForCopy=1 requests Windows Explorer copy/paste and may bypass native WCX packing. This diagnostic does not change TC settings.'
+    }
     Say 'TC_F5_HOST_NOTE: static settings cannot prove that Total Commander called PackFilesW.'
 }
 function Check-WimFile {

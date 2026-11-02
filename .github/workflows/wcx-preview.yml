@@ -78,6 +78,19 @@ jobs:
             Write-Host $remapped
             throw 'Read-only diagnostic missed remapped plain F5'
           }
+          Add-Content -LiteralPath $fixture -Encoding Unicode -Value @(
+            '[Configuration]'
+            'ExplorerForCopy=1'
+            'AlwaysPackInBackground=2'
+          )
+          $shellCopy=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -IniPath $fixture | Out-String
+          if ($shellCopy -notmatch 'TC_F5_EXPLORER_FOR_COPY=1' -or
+              $shellCopy -notmatch 'TC_F5_COPY_ENGINE_WARNING' -or
+              $shellCopy -notmatch 'TC_F5_PACK_BACKGROUND=2') {
+            Write-Host $shellCopy
+            throw 'Read-only diagnostic missed ExplorerForCopy/packing mode'
+          }
+          Write-Host 'PASS: F5 ExplorerForCopy and pack-background diagnosis'
           Write-Host 'PASS: F5 default/remap read-only diagnosis'
           Write-Host 'PASS: ISO-WCX x64 cache read-only diagnostic'
           . $file -IniPath $fixture | Out-Null
