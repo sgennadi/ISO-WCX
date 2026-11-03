@@ -245,7 +245,7 @@ try {
         if($LASTEXITCODE -ne 0)throw 'Cannot extract official TC CAB'
     }
     $exe=@(Get-ChildItem -LiteralPath $work -Recurse -File -Filter 'TOTALCMD64.EXE' |
-           Where-Object {$_.FullName -like (Join-Path $work 'cab-*')})
+           Where-Object {$_.FullName -match '[\\/]cab-[0-9]+[\\/]'})
     if($exe.Count -ne 1)throw ('Expected exactly one TC x64 executable, found '+$exe.Count)
     $sourceDir=$exe[0].Directory.FullName
     Get-ChildItem -LiteralPath $sourceDir -Force |
