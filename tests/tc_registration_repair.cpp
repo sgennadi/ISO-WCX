@@ -98,6 +98,20 @@ int main() {
         need(value(repaired.text,L"Configuration",L"UseIniInProgramDir")==L"7",
              "INI section parser lost unrelated settings");
 
+        // A previously correct-path 158 registration must be migrated
+        // to 159 for editable images: real TC F5 is blocked at 158.
+        const auto old_158=repair_packer_plugins(
+            L"[PackerPlugins]\r\nwim=158,"+current+
+            L"\r\niso=158,"+current+
+            L"\r\nesd=158,"+current+L"\r\n",current);
+        need(old_158.changed &&
+             old_158.text.find(L"wim=159,"+current)!=std::wstring::npos &&
+             old_158.text.find(L"iso=159,"+current)!=std::wstring::npos &&
+             old_158.text.find(L"esd=158,"+current)!=std::wstring::npos,
+             "158 must migrate to 159 for F5 while ESD stays read-only");
+        need(!repair_packer_plugins(old_158.text,current).changed,
+             "new 159 migration is not idempotent");
+
         // The one native WIM dialog can prefill a bare WCX path.
         // Total Commander gives us no supported way to preselect 159.
         // On the first WIM open, normalize that path and register all
