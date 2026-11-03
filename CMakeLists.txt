@@ -350,6 +350,13 @@ if(WIN32)
     ISO_WCX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     ISO_WCX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
     ISO_WCX_VERSION_PATCH=${PROJECT_VERSION_PATCH})
+  # Only the isolated Windows Actions comparison build enables this option.
+  # Normal artifacts, auto-install ZIP and releases keep GetPackerCaps=158.
+  option(ISO_WCX_CI_CAPS_NEW_EXPERIMENT
+    "Test-only 159 capability mask for Total Commander F5 host A/B" OFF)
+  if(ISO_WCX_CI_CAPS_NEW_EXPERIMENT)
+    target_compile_definitions(ISO-WCX PRIVATE ISO_WCX_CI_CAPS_NEW_EXPERIMENT=1)
+  endif()
   if(MSVC)
     target_compile_options(ISO-WCX PRIVATE /W4 /EHsc /utf-8)
   else()
