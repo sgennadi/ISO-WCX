@@ -65,7 +65,7 @@ int main() {
             L"[PackerPlugins]\r\n"
             L"wim="+old+L"\r\n"
             L"WIM=222,"+old+L"\r\n"
-            L"iso=158,"+current+L"\r\n"
+            L"iso=159,"+current+L"\r\n"
             L"esd=192,"+old+L"\r\n"
             L"zip=777,C:\\Other\\zip.wcx\r\n"
             L"rar=1,C:\\Other\\rar.wcx\r\n"
@@ -76,7 +76,7 @@ int main() {
              "stale duplicate WIM binding must be removed");
         need(repaired.extensions.size()==2,
              "only stale WIM/ESD should be changed");
-        need(repaired.text.find(L"wim=158,"+current+L"\r\n")!=std::wstring::npos,
+        need(repaired.text.find(L"wim=159,"+current+L"\r\n")!=std::wstring::npos,
              "WIM flags and loaded WCX path must be normalized");
         need(repaired.text.find(L"WIM=222,")==std::wstring::npos,
              "duplicate WIM extension was not removed");
@@ -99,7 +99,7 @@ int main() {
              "INI section parser lost unrelated settings");
 
         // The one native WIM dialog can prefill a bare WCX path.
-        // Total Commander gives us no supported way to preselect 158.
+        // Total Commander gives us no supported way to preselect 159.
         // On the first WIM open, normalize that path and register all
         // other unassigned image types in one confirmed operation.
         const std::wstring bootstrap =
@@ -108,13 +108,13 @@ int main() {
             L"[Buttonbar]\r\nButtonbar=custom.bar\r\n";
         const auto normalized=repair_packer_plugins(bootstrap,current);
         need(normalized.changed &&
-             normalized.text.find(L"wim=158,"+current)!=std::wstring::npos,
-             "WIM bare-path install must be converted to 158");
+             normalized.text.find(L"wim=159,"+current)!=std::wstring::npos,
+             "WIM bare-path install must be converted to 159");
         const auto installed=register_missing_packer_plugins(
             normalized.text,current);
         need(installed.changed && installed.extensions.size()==22 &&
-             installed.text.find(L"iso=158,"+current)!=std::wstring::npos &&
-             installed.text.find(L"vhdx=158,"+current)!=std::wstring::npos &&
+             installed.text.find(L"iso=159,"+current)!=std::wstring::npos &&
+             installed.text.find(L"vhdx=159,"+current)!=std::wstring::npos &&
              installed.text.find(L"zip=777,C:\\Other\\zip.wcx")!=std::wstring::npos &&
              installed.text.find(L"Buttonbar=custom.bar")!=std::wstring::npos,
              "one-click WIM bootstrap must preserve user handlers and buttons");
@@ -129,8 +129,8 @@ int main() {
         const std::wstring native_two=
             L"[Configuration]\r\nUseIniInProgramDir=7\r\n"
             L"[PackerPlugins]\r\n"
-            L"iso=158,"+current+L"\r\n"
-            L"wim=158,"+current+L"\r\n"
+            L"iso=159,"+current+L"\r\n"
+            L"wim=159,"+current+L"\r\n"
             L"udf=333,C:\\Other\\UDF.wcx\r\n"
             L"nrg=\r\n" // Explicit empty entry must not be replaced.
             L"zip=777,C:\\Other\\zip.wcx\r\n"
@@ -141,7 +141,7 @@ int main() {
              "one-click batch should add 19 missing extensions (2 owned, 2 reserved)");
         need(batch.text.find(L"esd=158,"+current)!=std::wstring::npos &&
              batch.text.find(L"swm=158,"+current)!=std::wstring::npos &&
-             batch.text.find(L"vhdx=158,"+current)!=std::wstring::npos,
+             batch.text.find(L"vhdx=159,"+current)!=std::wstring::npos,
              "missing WIM and disk image associations were not registered");
         need(batch.text.find(L"udf=333,C:\\Other\\UDF.wcx")!=std::wstring::npos &&
              batch.text.find(L"nrg=\r\n")!=std::wstring::npos &&
@@ -152,10 +152,10 @@ int main() {
              !repair_packer_plugins(batch.text,current).changed,
              "bulk installation not idempotent");
         const auto folded_batch=register_missing_packer_plugins(
-            L"[PackerPlugins]\nISO=158,"+current+L"\nWiM=158,"+current+
+            L"[PackerPlugins]\nISO=159,"+current+L"\nWiM=158,"+current+
             L"\n[Buttonbar]\nButtonbar=custom.bar\n",current);
         need(folded_batch.changed && folded_batch.extensions.size()==21 &&
-             folded_batch.text.find(L"iso=158,"+current+L"\n")==std::wstring::npos,
+             folded_batch.text.find(L"iso=159,"+current+L"\n")==std::wstring::npos,
              "mixed-case format keys must not be registered twice");
         const auto no_section=register_missing_packer_plugins(
             L"[Buttonbar]\nButtonbar=custom.bar\n",current);
@@ -163,14 +163,14 @@ int main() {
              L"[Buttonbar]\nButtonbar=custom.bar\n",
              "missing PackerPlugins section must not create a new unrelated section");
         const auto duplicate_sections=register_missing_packer_plugins(
-            L"[PackerPlugins]\niso=158,"+current+
-            L"\n[PackerPlugins]\nwim=158,"+current+L"\n",current);
+            L"[PackerPlugins]\niso=159,"+current+
+            L"\n[PackerPlugins]\nwim=159,"+current+L"\n",current);
         need(!duplicate_sections.changed,
              "ambiguous duplicate PackerPlugins sections must not be edited");
         // Do not take over another working WIM handler if both are present.
         const std::wstring foreign=
             std::wstring(L"[PackerPlugins]\nwim=2,C:\\ThirdParty\\wim.wcx\n")+
-            L"wim=192,"+old+L"\niso=158,"+current+L"\n";
+            L"wim=192,"+old+L"\niso=159,"+current+L"\n";
         const auto blocked=repair_packer_plugins(foreign,current);
         need(!blocked.changed && blocked.conflicts.size()==1 &&
              blocked.conflicts[0]==L"wim" && blocked.text==foreign,
@@ -182,8 +182,8 @@ int main() {
         // plug-ins, custom toolbar and all unrelated cached data.
         const std::wstring cache_only=
             L"[PackerPlugins]\r\n"
-            L"iso=158,"+current+L"\r\n"
-            L"wim=158,"+current+L"\r\n"
+            L"iso=159,"+current+L"\r\n"
+            L"wim=159,"+current+L"\r\n"
             L"zip=777,C:\\Other\\zip.wcx\r\n"
             L"[PackerPlugins64]\r\n"
             L"$checksum$=stale\r\n"
@@ -214,15 +214,15 @@ int main() {
         need(!repair_packer_plugins(empty,current).changed,
              "unknown INI without WCX section must not be rewritten");
         const std::wstring unicode=
-            L"[PackerPlugins]\nwim=158,C:\\\u05e9\u05dc\u05d5\u05dd\\ISO-WCX.wcx\n";
+            L"[PackerPlugins]\nwim=159,C:\\\u05e9\u05dc\u05d5\u05dd\\ISO-WCX.wcx\n";
         const auto migrated=repair_packer_plugins(unicode,current);
-        need(migrated.changed && migrated.text.find(L"wim=158,"+current)!=
+        need(migrated.changed && migrated.text.find(L"wim=159,"+current)!=
              std::wstring::npos,"Unicode legacy path not migrated");
         // Reinstalling on a portable Total Commander must not rewrite
         // already-correct %COMMANDER_PATH% bindings as absolute machine paths.
         const std::wstring portable=
             L"[PackerPlugins]\r\n"
-            L"wim=158,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
+            L"wim=159,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
             L"esd=158,C:/Program Files/TotalCmd/plugins/wcx/ISO-WCX/ISO-WCX.wcx\r\n"
             L"[Buttonbar]\r\nButtonbar=portable.bar\r\n";
         const auto preserved=repair_packer_plugins(portable,current);
@@ -231,14 +231,14 @@ int main() {
         const std::wstring mixed_duplicates=
             L"[PackerPlugins]\r\n"
             L"wim=222,C:\\Old\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
-            L"WIM=158,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
+            L"WIM=159,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
             L"[Buttonbar]\r\nButtonbar=portable.bar\r\n";
         const auto picked=repair_packer_plugins(mixed_duplicates,current);
         need(picked.changed && picked.duplicates_removed==1 &&
              picked.extensions.size()==1 &&
              picked.text.find(L"wim=222,")==std::wstring::npos &&
              picked.text.find(
-                 L"WIM=158,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx")
+                 L"WIM=159,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx")
                  !=std::wstring::npos,
              "duplicate migration did not prefer the valid portable WCX");
         need(picked.text.find(L"[Buttonbar]\r\nButtonbar=portable.bar")!=
