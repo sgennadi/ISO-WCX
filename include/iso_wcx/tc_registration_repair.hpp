@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -85,6 +86,35 @@ inline std::wstring value(std::wstring_view text,
         if(key==wanted_name)return val;
     }
     return {};
+}
+// The running Total Commander instance may use /i=<custom.ini> which takes
+// precedence over portable settings, COMMANDER_INI and the registry. The
+// existing helper previously inspected the wrong file in that case, so an
+// apparently correct wim=158 association could be unrelated to the active
+// process. Parse an already tokenized Windows command line without opening
+// or modifying any INI; reject ambiguous switches instead of guessing.
+inline std::wstring command_line_ini_override(
+        const std::vector<std::wstring>& args) {
+    std::wstring chosen;
+    for(std::size_t i=1;i<args.size();++i) {
+        const auto& arg=args[i];
+        const bool slash=arg.size()>=3 &&
+            (arg[0]==L'/' || arg[0]==L'-') &&
+            std::towlower(arg[1])==L'i' && arg[2]==L'=';
+        const bool bare=arg.size()>=2 &&
+            std::towlower(arg[0])==L'i' && arg[1]==L'=';
+        if(!slash && !bare)continue;
+        const auto offset=slash?3u:2u;
+        auto value=arg.substr(offset);
+        if(value.empty() && i+1<args.size())value=args[++i];
+        if(value.empty())throw std::runtime_error(
+            "Total Commander /i= must include an INI path");
+        if(!chosen.empty() && fold(chosen)!=fold(value))
+            throw std::runtime_error(
+                "Conflicting Total Commander /i= arguments");
+        chosen=std::move(value);
+    }
+    return chosen;
 }
 inline std::wstring unpack_plugin_path(std::wstring_view field) {
     auto result=trim(field);

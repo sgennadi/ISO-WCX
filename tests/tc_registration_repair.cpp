@@ -10,12 +10,40 @@ using iso_wcx::tc_registration::invalidate_cache;
 using iso_wcx::tc_registration::register_missing_packer_plugins;
 using iso_wcx::tc_registration::owned_plugin;
 using iso_wcx::tc_registration::value;
+using iso_wcx::tc_registration::command_line_ini_override;
 
 static void need(bool yes,const char* text) {
     if(!yes)throw std::runtime_error(text);
 }
 int main() {
     try {
+        // A portable or /i= TC profile can be different from HKCU. Always
+        // prefer the actual launch command line when resolving the INI for
+        // WCX F5 capability checks and registration repair.
+        need(command_line_ini_override(
+            {L"TOTALCMD64.EXE",L"/i=C:\\TC Profiles\\active.ini",
+             L"/f=C:\\Other\\wcx_ftp.ini"})==
+             L"C:\\TC Profiles\\active.ini",
+             "TC /i= path containing spaces not recognized");
+        need(command_line_ini_override(
+            {L"TOTALCMD.EXE",L"/I=C:\\Work\\wincmd.ini"})==
+             L"C:\\Work\\wincmd.ini",
+             "uppercase TC /I= not recognized");
+        need(command_line_ini_override(
+            {L"TOTALCMD64.EXE",L"-i=",L"C:\\Profiles\\test.ini"})==
+             L"C:\\Profiles\\test.ini",
+             "split TC -i= path not recognized");
+        need(command_line_ini_override(
+            {L"TOTALCMD64.EXE",L"/f=C:\\FTP\\ftp.ini"}).empty(),
+             "TC /f= mistakenly interpreted as active main INI");
+        bool ambiguous_rejected=false;
+        try {
+            (void)command_line_ini_override(
+                {L"TOTALCMD64.EXE",L"/i=C:\\A.ini",L"/I=D:\\B.ini"});
+        }catch(const std::runtime_error&) {
+            ambiguous_rejected=true;
+        }
+        need(ambiguous_rejected,"Conflicting /i= switches were accepted");
         const std::wstring current=
             L"C:\\Program Files\\TotalCmd\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx";
         const std::wstring old=

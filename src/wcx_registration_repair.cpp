@@ -10,6 +10,7 @@
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/edit_diagnostics.hpp"
 #include <windows.h>
+#include <shellapi.h>
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -83,7 +84,35 @@ fs::path normalized(fs::path path,const fs::path& base) {
     if(path.is_relative())path=base/path;
     return fs::absolute(path).lexically_normal();
 }
+// Read the running host's own command line (not a new shell or the
+// registry). Windows CommandLineToArgvW handles quoted /i= arguments.
+std::wstring running_tc_ini_override() {
+    int argc=0;
+    LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&argc);
+    if(!argv || argc<=0) {
+        if(argv)LocalFree(argv);
+        return {};
+    }
+    std::vector<std::wstring> words;
+    try {
+        words.reserve(static_cast<std::size_t>(argc));
+        for(int i=0;i<argc;++i)words.emplace_back(argv[i]);
+    }catch(...) {
+        LocalFree(argv);
+        throw;
+    }
+    LocalFree(argv);
+    return command_line_ini_override(words);
+}
 fs::path discover_ini(const fs::path& tc_dir) {
+    const auto override=running_tc_ini_override();
+    if(!override.empty()) {
+        const auto path=normalized(fs::path(expand(override)),tc_dir);
+        check(regular_ini(path),
+              "TC /i= overrides the registry but names a missing/unsafe INI");
+        edit_diagnostics::log(L"TC_ACTIVE_WCX_INI_SOURCE=/i",path);
+        return path;
+    }
     const auto env=environment(L"COMMANDER_INI");
     if(!env.empty()) {
         const auto path=normalized(fs::path(expand(env)),tc_dir);
