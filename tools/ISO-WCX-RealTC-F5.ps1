@@ -581,6 +581,12 @@ function Test-Mask([int]$mask,[string]$source,[string]$templateWim) {
 [Configuration]
 OnlyOnce=0
 AutoInstallPlugins=0
+# CI-only first-run configuration: avoid Total Commander's shareware
+# 'Configuration > Layout' setup modal, observed in F5 evidence screenshots.
+# This does NOT disable the publisher's registration/start reminder.
+FirstTime=0
+FirstTimeIconLib=0
+FirstLang=0
 [PackerPlugins]
 wim=$mask,$plugin
 [PackerPlugins64]
@@ -693,6 +699,11 @@ exts=wim*
         if(-not $enteredArchive) {
             $case.right_type=Query-Tc $window 1026
             $case.right_archive_name_length=Query-Tc $window 1024
+            # Preserve the actual host window evidence when archive navigation
+            # is blocked, rather than incorrectly attributing a modal TC
+            # first-run configuration dialog to WCX OpenArchive/PackFiles.
+            $case.session=Session-Snapshot $tc.Id
+            $case.windows=$case.session.top_level_windows
             $case.events=Tail-Wcx
             $case.outcome='INCONCLUSIVE: cm_GoToDir did not open disposable WIM, trial_acknowledged='+$case.trial_acknowledged+'; F5 NOT SENT'
             return $case
