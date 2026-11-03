@@ -26,10 +26,10 @@ The native installer extracts both versions from the common ZIP; with no
 standalone installer, pluginst.inf cannot choose which file to extract.
 
 The native pluginst.inf now offers only WIM: just one Associate dialog.
-No manual selection of the 158 entry is necessary. Accept the prefilled
+No manual selection of the 159 entry is necessary. Accept the prefilled
 ISO-WCX.wcx path; on first WIM open the plugin offers one confirmed,
-backup-protected operation to normalize that entry to 158 and register
-all other still-unassigned supported image formats with 158. Restart all
+backup-protected operation to normalize that WIM entry to 159 and register other unassigned
+editable images with 159 (read-only formats retain 158). Restart all
 Total Commander windows after accepting. The INF cannot preselect an
 entry in Total Commander's native Associate dialog. ZIP/RAR/7z, existing user buttons and external plugins are
 not assigned to ISO-WCX. Previously installed extra files are not removed
@@ -43,7 +43,7 @@ and offers a confirmed repair if any are stale. It never silently modifies
 user configuration. A built-in Settings button is also available:
   Files > Pack > Configure... > Repair WCX associations (WIM F5).
 The native WCX detects stale 0/192/222/bare-path registrations, normalizes
-only this plugin's extensions to flags 158, removes duplicate bindings of
+editable extensions to 159 and read-only formats to 158, removes duplicate bindings of
 the same plugin, and invalidates the derived PackerPlugins64 cache.
 It first previews changes, requests confirmation and backs up original INIs.
 RedirectSection, UTF-8 BOM and UTF-16LE are supported; conflicting
@@ -75,7 +75,7 @@ Preview editing status:
 ZIP speed fix in Preview: ISO-WCX no longer advertises the global
 PK_CAPS_BY_CONTENT (64) capability, and its probe/OpenArchive reject
 ZIP/RAR/7z before scanning an image. Preview capabilities now have
-mask 158 rather than Stable v0.21.0 mask 222; TC's normal ZIP support
+mask 159 rather than Stable v0.21.0 mask 222; TC's normal ZIP support
 remains intact. Verify actual ZIP timing after installing this Preview.
 
 No setup EXE, repair CMD, PowerShell script, external parser DLL, virtual
@@ -163,7 +163,7 @@ If Total Commander says "File iso.wcx not found!" pointing to an old
 A DLL cannot change a missing DLL's association before Total Commander
 has loaded it. This is a one-time settings correction, not an
 additional required program. The leading "192," (legacy) or
-"222," (Stable v0.21.0) or "158," (new Preview) in wincmd.ini represents
+"222," (Stable v0.21.0) or "159," (new Preview for editable images) in wincmd.ini represents
 Total Commander capability flags, NOT part of the DLL path. Never
 type these numeric flags in the file selection dialog.
 
