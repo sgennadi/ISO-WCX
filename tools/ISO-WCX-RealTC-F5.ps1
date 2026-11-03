@@ -530,10 +530,21 @@ function Confirm-Only-DisposableCopy([int]$tcPid,[string]$temporaryImage) {
         $handles=@([RealTcHostProbe]::OwnedVisibleTopLevelHandles(
             [uint32]$tcPid))
         foreach($hwnd in $handles) {
-            $dialog=[System.Windows.Automation.AutomationElement]::FromHandle(
-                $hwnd)
-            if($null -eq $dialog) { continue }
-            $title=[string]$dialog.Current.Name
+            # A short-lived native child handle can disappear between Win32
+            # enumeration and UIA.FromHandle. That is an ordinary race, not
+            # a failure of ISO/WIM packing. Preserve the observation and
+            # continue inspecting other windows instead of aborting F5.
+            try {
+                $dialog=[System.Windows.Automation.AutomationElement]::FromHandle(
+                    $hwnd)
+                if($null -eq $dialog) { continue }
+                $title=[string]$dialog.Current.Name
+            } catch {
+                $answer.windows=@($answer.windows)+@(
+                    'UIA_WINDOW_SKIPPED handle='+$hwnd+
+                    ' reason='+$_.Exception.Message)
+                continue
+            }
             if(-not $title -or $dialog.Current.IsOffscreen) { continue }
             if($title -match '(?i)Function not supported|not supported|not implemented') {
                 $answer.prompted=$true
@@ -542,9 +553,16 @@ function Confirm-Only-DisposableCopy([int]$tcPid,[string]$temporaryImage) {
                 return $answer
             }
             if($title -notmatch '(?i)copy|pack|копир|упаков|копирование') { continue }
-            $items=$dialog.FindAll(
-                [System.Windows.Automation.TreeScope]::Descendants,
-                [System.Windows.Automation.Condition]::TrueCondition)
+            try {
+                $items=$dialog.FindAll(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    [System.Windows.Automation.Condition]::TrueCondition)
+            } catch {
+                $answer.windows=@($answer.windows)+@(
+                    'UIA_CHILDREN_SKIPPED title='+$title+
+                    ' reason='+$_.Exception.Message)
+                continue
+            }
             $labels=New-Object 'System.Collections.Generic.List[string]'
             $okButtons=New-Object 'System.Collections.Generic.List[object]'
             for($j=0;$j -lt $items.Count;$j++) {
@@ -769,6 +787,18 @@ exts=wim*
         $case.navigation+= '4001 cm_FocusLeft (return to source)'
         Command-Tc $window 4001
         Start-Sleep -Milliseconds 350
+        # The earlier F5 CI screenshot showed a distinct TC modal
+        # Configuration > Packer window even AFTER the WIM path opened.
+        # It blocks ordinary F5, so diagnose and dismiss only this
+        # exact verified modal in the disposable test process.
+        $precopyConfig=[RealTcHostProbe]::AcceptDisposableFirstRunConfiguration(
+            [uint32]$tc.Id)
+        $case.navigation+= $precopyConfig
+        Write-Host ("TC_F5_STAGE=PRECOPY_CONFIGURATION mask="+$mask+
+            " "+$precopyConfig)
+        if($precopyConfig -match 'accepted=1') {
+            Start-Sleep -Milliseconds 350
+        }
         $case.active=Query-Tc $window 1000
         $case.left_type=Query-Tc $window 1025
         $case.right_type=Query-Tc $window 1026
@@ -812,6 +842,10 @@ exts=wim*
         $case.confirmation=$confirmation
         Write-Host ("TC_F5_STAGE=CONFIRM mask="+$mask+
             " kind="+$confirmation.kind)
+        if($confirmation.windows.Count -gt 0) {
+            Write-Host ("TC_F5_WINDOW_OBSERVATIONS mask="+$mask+
+                " "+(@($confirmation.windows) -join ' | '))
+        }
         Start-Sleep -Seconds 5
         $case.events=Tail-Wcx
         $case.windows=Window-Names $tc.Id
@@ -826,6 +860,18 @@ exts=wim*
         }else {
             'FAIL: host did not invoke PackFiles after disposable copy confirmation'
         }
+        return $case
+    } catch {
+        # Preserve partial F5 state, especially when an unstable GUI
+        # accessibility provider throws after cm_Copy was already sent.
+        $case.outcome='INCONCLUSIVE: TC host probe error: '+$_.Exception.Message
+        $case.events=Tail-Wcx
+        if($tc) {
+            $case.windows=Window-Names $tc.Id
+        }
+        Write-Warning ("TC_F5_STAGE=EXCEPTION mask="+$mask+
+            " f5_sent="+$case.f5_sent+
+            " reason="+$_.Exception.Message)
         return $case
     } finally {
         if($tc) {
