@@ -39,6 +39,16 @@ jobs:
         run: |
           $tokens=$null
           $parseErrors=$null
+          $harness=Join-Path (Get-Location) 'tools\ISO-WCX-RealTC-F5.ps1'
+          $hTokens=$null
+          $hErrors=$null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $harness,[ref]$hTokens,[ref]$hErrors) | Out-Null
+          if($hErrors.Count -gt 0) {
+            $hErrors | ForEach-Object { Write-Host $_.ToString() }
+            throw 'Real TC F5 harness fails Windows PowerShell 5.1 parse'
+          }
+          Write-Host 'PASS: experimental F5 harness script syntax'
           $file=Join-Path (Get-Location) 'tools\ISO-WCX-Diagnostic.ps1'
           [System.Management.Automation.Language.Parser]::ParseFile(
             $file,[ref]$tokens,[ref]$parseErrors) | Out-Null
@@ -322,6 +332,19 @@ jobs:
         with:
           name: ISO-WCX-x64-preview
           path: native
+      - name: Validate F5 harness with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $hTokens=$null
+          $hErrors=$null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path (Get-Location) 'tools\ISO-WCX-RealTC-F5.ps1'),
+            [ref]$hTokens,[ref]$hErrors) | Out-Null
+          if($hErrors.Count -gt 0) {
+            $hErrors | ForEach-Object { Write-Host $_.ToString() }
+            throw 'Real TC F5 harness PowerShell 5.1 syntax invalid'
+          }
+          Write-Host 'PASS: real TC F5 harness syntax under WinPS 5.1'
       - name: Probe real TC 11.58 x64 and observe PackFilesW dispatch
         shell: powershell
         run: |

@@ -1,4 +1,4 @@
-# Experimental host test of F5 on a REAL Total Commander 11.58.1 x64.
+﻿# Experimental host test of F5 on a REAL Total Commander 11.58.1 x64.
 # Runs ONLY on disposable GitHub CI. Never writes a production WIM/INI.
 [CmdletBinding()]
 param(
@@ -58,7 +58,7 @@ function Find-TcWindow([int]$targetPid) {
         if($h -ne [IntPtr]::Zero) {
             [uint32]$owner=0
             [void][RealTcHostProbe]::GetWindowThreadProcessId($h,[ref]$owner)
-            if($owner -eq $targetPid)return $h
+            if($owner -eq $targetPid) { return $h }
         }
         Start-Sleep -Milliseconds 300
     }
@@ -68,7 +68,7 @@ function Query-Tc([IntPtr]$h,[int]$query) {
     $answer=[IntPtr]::Zero
     $ok=[RealTcHostProbe]::SendMessageTimeout($h,[uint32]1074,
         [IntPtr]::new($query),[IntPtr]::Zero,[uint32]2,[uint32]1300,[ref]$answer)
-    if($ok -eq [IntPtr]::Zero)return $null
+    if($ok -eq [IntPtr]::Zero) { return $null }
     return $answer.ToInt64()
 }
 function Command-Tc([IntPtr]$h,[int]$command) {
@@ -91,7 +91,7 @@ function Allow-RequestedTrialButton([int]$tcPid) {
         for($i=0;$i -lt $all.Count;$i++) {
             $entry=$all.Item($i)
             $label=[string]$entry.Current.Name
-            if([string]::IsNullOrWhiteSpace($label))continue
+            if([string]::IsNullOrWhiteSpace($label)) { continue }
             $words.Add($label)
             if($entry.Current.ControlType -eq
                [System.Windows.Automation.ControlType]::Button -and
@@ -99,7 +99,7 @@ function Allow-RequestedTrialButton([int]$tcPid) {
         }
         $requested=[regex]::Match([string]::Join(' ',$words),
             '(?i)(?:press|click).{0,65}?(?:number\s*|button\s*|[#]\s*)?([123])\b')
-        if(-not $requested.Success)return $false
+        if(-not $requested.Success) { return $false }
         foreach($button in $buttons) {
             if($button.Current.Name.Trim() -eq $requested.Groups[1].Value) {
                 $button.GetCurrentPattern(
@@ -123,7 +123,7 @@ function Window-Names([int]$tcPid) {
             if($entry.Current.ControlType -eq
                [System.Windows.Automation.ControlType]::Window) {
                 $label=[string]$entry.Current.Name
-                if($label)$names.Add($label)
+                if($label) { $names.Add($label) }
             }
         }
         return @($names)
@@ -157,14 +157,14 @@ function Confirm-Only-DisposableCopy([int]$tcPid,[string]$temporaryImage) {
         }
         foreach($dialog in $windows) {
             $title=[string]$dialog.Current.Name
-            if(-not $title -or $dialog.Current.IsOffscreen)continue
+            if(-not $title -or $dialog.Current.IsOffscreen) { continue }
             if($title -match '(?i)Function not supported|not supported|not implemented') {
                 $answer.prompted=$true
                 $answer.kind='host refused F5 before copy confirmation'
                 $answer.windows=@($answer.windows)+@($title)
                 return $answer
             }
-            if($title -notmatch '(?i)copy|pack|копир|упаков|копирование')continue
+            if($title -notmatch '(?i)copy|pack|копир|упаков|копирование') { continue }
             $items=$dialog.FindAll(
                 [System.Windows.Automation.TreeScope]::Descendants,
                 [System.Windows.Automation.Condition]::TrueCondition)
@@ -173,13 +173,13 @@ function Confirm-Only-DisposableCopy([int]$tcPid,[string]$temporaryImage) {
             for($j=0;$j -lt $items.Count;$j++) {
                 $item=$items.Item($j)
                 $name=[string]$item.Current.Name
-                if($name)$labels.Add($name)
+                if($name) { $labels.Add($name) }
                 if($item.Current.ControlType -eq
                    [System.Windows.Automation.ControlType]::Edit) {
                     try {
                         $val=$item.GetCurrentPattern(
                             [System.Windows.Automation.ValuePattern]::Pattern).Current.Value
-                        if($val)$labels.Add([string]$val)
+                        if($val) { $labels.Add([string]$val) }
                     }catch{}
                 }
                 if($item.Current.ControlType -eq
@@ -222,7 +222,7 @@ function Confirm-Only-DisposableCopy([int]$tcPid,[string]$temporaryImage) {
     return $answer
 }
 function Tail-Wcx {
-    if(Test-Path -LiteralPath $logFile)return @(Get-Content -LiteralPath $logFile -Tail 45)
+    if(Test-Path -LiteralPath $logFile) { return @(Get-Content -LiteralPath $logFile -Tail 45) }
     return @()
 }
 function Test-Mask([int]$mask,[string]$source,[string]$templateWim) {
@@ -309,7 +309,7 @@ exts=wim*
         if($tc) {
             try {
                 $tc.Refresh()
-                if(-not $tc.HasExited)Stop-Process -Id $tc.Id -Force
+                if(-not $tc.HasExited) { Stop-Process -Id $tc.Id -Force }
             }catch{}
         }
     }
@@ -330,21 +330,21 @@ try {
         throw 'Original TC publisher signature missing or invalid'
     }
     & 7z x -y "-o$unpacked" $package | Out-Null
-    if($LASTEXITCODE -ne 0)throw 'Cannot unpack original TC installer'
+    if($LASTEXITCODE -ne 0) { throw 'Cannot unpack original TC installer' }
     # Combined x86/x64 installer can have more than one CAB. Extract
     # independently and select only the x64 folder to avoid DLL mixing.
     $cabs=@(Get-ChildItem -LiteralPath $unpacked -Recurse -File |
             Where-Object {$_.Name -match '(?i)^INSTALL.*[.]CAB$'})
-    if($cabs.Count -eq 0)throw 'Combined official TC INSTALL.CAB missing'
+    if($cabs.Count -eq 0) { throw 'Combined official TC INSTALL.CAB missing' }
     for($i=0;$i -lt $cabs.Count;$i++) {
         $dest=Join-Path $work ('cab-'+$i)
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
         & 7z x -y "-o$dest" $cabs[$i].FullName | Out-Null
-        if($LASTEXITCODE -ne 0)throw 'Cannot extract official TC CAB'
+        if($LASTEXITCODE -ne 0) { throw 'Cannot extract official TC CAB' }
     }
     $exe=@(Get-ChildItem -LiteralPath $work -Recurse -File -Filter 'TOTALCMD64.EXE' |
            Where-Object {$_.FullName -match '[\\/]cab-[0-9]+[\\/]'})
-    if($exe.Count -ne 1)throw ('Expected exactly one TC x64 executable, found '+$exe.Count)
+    if($exe.Count -ne 1) { throw ('Expected exactly one TC x64 executable, found '+$exe.Count) }
     $sourceDir=$exe[0].Directory.FullName
     Get-ChildItem -LiteralPath $sourceDir -Force |
         Move-Item -Destination $tcDir -Force
@@ -369,7 +369,7 @@ try {
     }
     $report.template_wim_unchanged=
         $sha -eq (Get-FileHash -LiteralPath $templateWim -Algorithm SHA256).Hash
-    if(-not $report.template_wim_unchanged)throw 'WIM template unexpectedly changed'
+    if(-not $report.template_wim_unchanged) { throw 'WIM template unexpectedly changed' }
     if(@($report.cases | Where-Object {$_.packfiles_callback}).Count -eq 0) {
         throw 'No real TC F5 PackFiles callback observed; review JSON evidence'
     }
@@ -387,4 +387,4 @@ try {
     Write-Host ('REAL_TC_F5_REPORT=' + $path)
     Get-Content -LiteralPath $path
 }
-if($failure)exit 1
+if($failure) { exit 1 }
