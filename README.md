@@ -27,7 +27,7 @@ Download the **single** `ISO-WCX-Installable-Preview` artifact from
 [GitHub Actions](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml),
 unpack its Actions wrapper, and open `ISO-WCX-preview.zip` with **Enter**
 inside Total Commander. The standard `pluginst.inf` installs the WCX plugin
-and offers only one native association, `wim`. The built-in confirmed repair on first WIM open registers the remaining unassigned supported image types as `158,ISO-WCX.wcx`. It specifies
+and offers only one native association, `wim`. The built-in confirmed repair on first WIM open registers editable image types as `159,ISO-WCX.wcx` and read-only formats as `158,ISO-WCX.wcx`. It specifies
 `file=ISO-WCX.wcx`; Total Commander loads the adjacent
 `ISO-WCX.wcx64` **only when running its 64-bit edition**. Both compiled
 modules have to be present *inside this one universal ZIP* so native TC
@@ -35,9 +35,9 @@ installation works for either edition; TC only **loads** the matching one.
 
 The stock `pluginst.inf` installer unpacks both binaries and displays
 **one WIM Associate dialog**, not 23. The INF cannot preselect Total
-Commander's numeric capability entry `158`; accept its prefilled
+Commander's numeric capability entry `159`; accept its prefilled
 `ISO-WCX.wcx` path instead. When WIM is opened afterward, the plugin
-offers **one confirmation** to normalize its own entry to `158` and add
+offers **one confirmation** to normalize its own entry to `159` and add
 other unassigned image formats, keeping unrelated handlers and toolbar
 settings. Restart TC after accepting this confirmation. The native
 installer cannot conditionally skip the unused binary or remove stale
@@ -67,8 +67,8 @@ Preview without remastering MBR/GPT or El Torito sectors; ESD/SWM are read-only.
 
 **ZIP performance regression fix in Preview:** ISO-WCX no longer advertises
 `PK_CAPS_BY_CONTENT` (64), which could make TC consult its expensive image
-probe when handling unrelated archives. `GetPackerCaps` now returns **158**
-rather than old **222**. Both `CanYouHandleThisFile` and `OpenArchive` reject
+probe when handling unrelated archives. `GetPackerCaps` now returns **159**
+rather than old **222**. `PK_CAPS_NEW` (1) is needed for real TC F5 into existing ISO/WIM; it does not imply that ISO-WCX can create a brand-new image. Both `CanYouHandleThisFile` and `OpenArchive` reject
 non-image extensions *before* creating a Disc parser or starting the updater.
 ZIP remains handled by Total Commander's normal ZIP reader. This is a
 preventive fix; actual speed on a specific TC installation still requires a
@@ -103,7 +103,7 @@ association that prevents its DLL from loading in the first place.
 If the **Delete** button in the *WCX association dialog* does nothing,
 that is a Total Commander configuration/UI operation, not a call to
 `DeleteFilesW` inside an archive. The value `222,C:\\...\\ISO-WCX.wcx` is the older Stable WCX
-capability mask plus DLL path (**not error 222**); new Preview uses `158,`
+capability mask plus DLL path (**not error 222**); new Preview uses `159,` for editable formats
 to avoid global ZIP content probing. To remove
 a specific stale association safely, use the repository's optional
 [`ISO-WCX-RemoveAssociation.ps1`](ISO-WCX-RemoveAssociation.ps1) with
