@@ -129,6 +129,98 @@ function Window-Names([int]$tcPid) {
         return @($names)
     }catch { return @('UIAutomation unavailable') }
 }
+function Confirm-Only-DisposableCopy([int]$tcPid,[string]$temporaryImage) {
+    # F5 often opens an ordinary copy-confirmation dialog before it calls
+    # WCX PackFilesW. A test that merely posts cm_Copy and waits will
+    # incorrectly report missing callbacks. Only accept a positively
+    # identified, visible TC Copy/Pack dialog with the disposable WIM path.
+    $answer=[ordered]@{
+        prompted=$false; confirmed=$false; kind='none'
+        windows=@(); visible_labels=@()
+    }
+    try { Add-Type -AssemblyName UIAutomationClient } catch {
+        $answer.kind='UI Automation unavailable'
+        return $answer
+    }
+    $root=[System.Windows.Automation.AutomationElement]::RootElement
+    $filter=[System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty,$tcPid)
+    for($attempt=0;$attempt -lt 30;$attempt++) {
+        $all=$root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$filter)
+        $windows=New-Object 'System.Collections.Generic.List[object]'
+        for($i=0;$i -lt $all.Count;$i++) {
+            $element=$all.Item($i)
+            if($element.Current.ControlType -eq
+               [System.Windows.Automation.ControlType]::Window) {
+                $windows.Add($element)
+            }
+        }
+        foreach($dialog in $windows) {
+            $title=[string]$dialog.Current.Name
+            if(-not $title -or $dialog.Current.IsOffscreen)continue
+            if($title -match '(?i)Function not supported|not supported|not implemented') {
+                $answer.prompted=$true
+                $answer.kind='host refused F5 before copy confirmation'
+                $answer.windows=@($answer.windows)+@($title)
+                return $answer
+            }
+            if($title -notmatch '(?i)copy|pack|копир|упаков|копирование')continue
+            $items=$dialog.FindAll(
+                [System.Windows.Automation.TreeScope]::Descendants,
+                [System.Windows.Automation.Condition]::TrueCondition)
+            $labels=New-Object 'System.Collections.Generic.List[string]'
+            $okButtons=New-Object 'System.Collections.Generic.List[object]'
+            for($j=0;$j -lt $items.Count;$j++) {
+                $item=$items.Item($j)
+                $name=[string]$item.Current.Name
+                if($name)$labels.Add($name)
+                if($item.Current.ControlType -eq
+                   [System.Windows.Automation.ControlType]::Edit) {
+                    try {
+                        $val=$item.GetCurrentPattern(
+                            [System.Windows.Automation.ValuePattern]::Pattern).Current.Value
+                        if($val)$labels.Add([string]$val)
+                    }catch{}
+                }
+                if($item.Current.ControlType -eq
+                   [System.Windows.Automation.ControlType]::Button -and
+                   $name -match '^(?i:OK|Start|Copy|Pack|Копировать|Упаковать)$' -and
+                   $item.Current.IsEnabled -and -not $item.Current.IsOffscreen) {
+                    $okButtons.Add($item)
+                }
+            }
+            $visible=([string]::Join(' ',$labels))
+            $answer.windows=@($answer.windows)+@($title)
+            $answer.visible_labels=@($answer.visible_labels)+@(
+                $visible.Substring(0,[Math]::Min($visible.Length,500)))
+            # Require the literal ephemeral WIM filename (or entire path)
+            # inside the actual dialog, not just a similarly named window.
+            if($visible.IndexOf($temporaryImage,
+                   [StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+               $visible.IndexOf([IO.Path]::GetFileName($temporaryImage),
+                   [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                continue
+            }
+            $answer.prompted=$true
+            if($okButtons.Count -ne 1) {
+                $answer.kind='recognized copy dialog but no unambiguous confirm button'
+                return $answer
+            }
+            try {
+                $okButtons[0].GetCurrentPattern(
+                    [System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+                $answer.confirmed=$true
+                $answer.kind='explicit disposable WIM copy confirmed'
+            }catch {
+                $answer.kind='copy dialog could not be confirmed: '+$_.Exception.Message
+            }
+            return $answer
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    $answer.kind='no copy dialog observed within 7.5 seconds'
+    return $answer
+}
 function Tail-Wcx {
     if(Test-Path -LiteralPath $logFile)return @(Get-Content -LiteralPath $logFile -Tail 45)
     return @()
@@ -155,7 +247,7 @@ exts=wim*
         active=$null; left_type=$null; right_type=$null
         right_archive_name_length=$null
         f5_sent=$false; packfiles_callback=$false; events=@()
-        windows=@(); outcome='not tested'
+        confirmation=$null; windows=@(); outcome='not tested'
     }
     $tc=$null
     try {
@@ -196,6 +288,8 @@ exts=wim*
         }
         Command-Tc $window 905
         $case.f5_sent=$true
+        $confirmation=Confirm-Only-DisposableCopy $tc.Id $image
+        $case.confirmation=$confirmation
         Start-Sleep -Seconds 5
         $case.events=Tail-Wcx
         $case.windows=Window-Names $tc.Id
@@ -203,8 +297,12 @@ exts=wim*
             Where-Object { $_ -match 'PackFiles(W| ANSI) entered' }).Count -gt 0
         $case.outcome=if($case.packfiles_callback) {
             'PASS: real Total Commander invoked PackFiles'
+        }elseif($confirmation.prompted -and -not $confirmation.confirmed) {
+            'INCONCLUSIVE: F5 raised a modal copy/error dialog without a confirmed WCX callback'
+        }elseif(-not $confirmation.prompted) {
+            'INCONCLUSIVE: cm_Copy posted but the host copy dialog was not observed'
         }else {
-            'FAIL: host did not invoke PackFiles during F5'
+            'FAIL: host did not invoke PackFiles after disposable copy confirmation'
         }
         return $case
     } finally {
