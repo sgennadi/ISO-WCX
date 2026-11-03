@@ -648,8 +648,6 @@ FirstTimeIconLib=0
 FirstLang=0
 [PackerPlugins]
 wim=$mask,$plugin
-[PackerPlugins64]
-exts=wim*
 "@
     [IO.File]::WriteAllText($ini,$contents,[Text.Encoding]::Unicode)
     $case=[ordered]@{
@@ -745,6 +743,9 @@ exts=wim*
         # cm_GoToDir=2003, cm_GoToFirstEntry=2049,
         # cm_FocusLeft=4001. This is equivalent to Enter on test.wim
         # and Enter on its image1 directory, then Tab back to the source.
+        Write-Host ("TC_F5_STAGE=INITIAL_WINDOWS mask="+$mask+
+            " "+(@([RealTcHostProbe]::OwnedTopLevelWindows(
+                [uint32]$tc.Id)) -join ' | '))
         $case.navigation+= '4002 cm_FocusRight'
         Command-Tc $window 4002
         Start-Sleep -Milliseconds 250
@@ -834,10 +835,44 @@ exts=wim*
             $case.outcome='TC did not select the test source file'
             return $case
         }
+        # Capture the *real* file panels before pressing F5: earlier
+        # failed runs showed Configuration > Packer only AFTER copy.
+        Save-RunnerScreenshot $caseDir
+        $beforeF5=Join-Path $caseDir 'totalcmd-screen.png'
+        if(Test-Path -LiteralPath $beforeF5) {
+            Copy-Item -LiteralPath $beforeF5 -Destination (
+                Join-Path $caseDir 'before-f5.png') -Force
+        }
+        $case.navigation+= 'TC_F5_STAGE=PRE_F5_WINDOWS '+(
+            @([RealTcHostProbe]::OwnedTopLevelWindows(
+                [uint32]$tc.Id)) -join ' | ')
         Write-Host ("TC_F5_STAGE=SEND_F5 mask="+$mask+
             " rightType="+$case.right_type+" selected="+$case.source_selected)
         Command-Tc $window 905
         $case.f5_sent=$true
+        Start-Sleep -Milliseconds 500
+        $postF5Windows=@([RealTcHostProbe]::OwnedTopLevelWindows(
+            [uint32]$tc.Id))
+        $case.navigation+= 'TC_F5_STAGE=POST_F5_WINDOWS '+(
+            $postF5Windows -join ' | ')
+        Write-Host ("TC_F5_STAGE=POST_F5_WINDOWS mask="+$mask+
+            " "+($postF5Windows -join ' | '))
+        # A fresh test profile can open the Packer Configuration modal
+        # the FIRST time F5 is invoked. Close only that precisely verified
+        # modal and retry cm_Copy ONCE. Never do so on a user installation.
+        $afterCopyConfiguration=
+            [RealTcHostProbe]::AcceptDisposableFirstRunConfiguration(
+                [uint32]$tc.Id)
+        $case.navigation+= 'TC_F5_AFTER_COPY_CONFIGURATION '+
+            $afterCopyConfiguration
+        Write-Host ("TC_F5_STAGE=POST_F5_CONFIGURATION mask="+$mask+
+            " "+$afterCopyConfiguration)
+        if($afterCopyConfiguration -match 'accepted=1') {
+            Start-Sleep -Milliseconds 400
+            $case.navigation+= 'cm_Copy retried ONCE after CI-only modal'
+            Command-Tc $window 905
+            Start-Sleep -Milliseconds 400
+        }
         $confirmation=Confirm-Only-DisposableCopy $tc.Id $image
         $case.confirmation=$confirmation
         Write-Host ("TC_F5_STAGE=CONFIRM mask="+$mask+
@@ -851,6 +886,9 @@ exts=wim*
         $case.windows=Window-Names $tc.Id
         $case.packfiles_callback=@($case.events |
             Where-Object { $_ -match 'PackFiles(W| ANSI) entered' }).Count -gt 0
+        Write-Host ("TC_F5_STAGE=AFTER_F5 mask="+$mask+
+            " callback="+$case.packfiles_callback+
+            " outcome_hint="+$confirmation.kind)
         $case.outcome=if($case.packfiles_callback) {
             'PASS: real Total Commander invoked PackFiles'
         }elseif($confirmation.prompted -and -not $confirmation.confirmed) {
@@ -860,6 +898,8 @@ exts=wim*
         }else {
             'FAIL: host did not invoke PackFiles after disposable copy confirmation'
         }
+        Write-Host ("TC_F5_STAGE=CASE_COMPLETE mask="+$mask+
+            " result="+$case.outcome)
         return $case
     } catch {
         # Preserve partial F5 state, especially when an unstable GUI
