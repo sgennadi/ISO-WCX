@@ -52,6 +52,12 @@ public static class RealTcHostProbe {
     private static extern int GetClassName(IntPtr hwnd,StringBuilder buffer,int length);
     [DllImport("user32.dll",EntryPoint="GetWindowTextW",CharSet=CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr hwnd,StringBuilder buffer,int length);
+    public static string CaptionOf(IntPtr hwnd) {
+        if(hwnd==IntPtr.Zero) return "";
+        var text=new StringBuilder(8192);
+        GetWindowText(hwnd,text,text.Capacity);
+        return text.ToString();
+    }
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hwnd);
     // Find by both class AND PID: FindWindow(TTOTAL_CMD) alone returns the
@@ -338,7 +344,15 @@ function Test-Mask([int]$mask,[string]$source,[string]$templateWim) {
     New-Item -ItemType Directory -Force -Path $caseDir | Out-Null
     $image=Join-Path $caseDir 'test.wim'
     Copy-Item -LiteralPath $templateWim -Destination $image
-    $ini=Join-Path $caseDir 'wincmd.ini'
+    # Keep the INI OUTSIDE the archive-directory listing, otherwise
+    # cm_GoToFirstFile could pick wincmd.ini rather than our only test.wim.
+    $profileDir=Join-Path $work "profile-$mask"
+    New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+    $ini=Join-Path $profileDir 'wincmd.ini'
+    $caseLocalApp=Join-Path $work "local-app-data-$mask"
+    New-Item -ItemType Directory -Force -Path $caseLocalApp | Out-Null
+    $env:LOCALAPPDATA=$caseLocalApp
+    $script:logFile=Join-Path $caseLocalApp 'ISO-WCX/Logs/edit-errors.log'
     # 159 is an EXPERIMENT in a private temporary INI only. Never deploy 159.
     $contents=@"
 [Configuration]
@@ -357,14 +371,18 @@ exts=wim*
         f5_sent=$false; packfiles_callback=$false; events=@()
         confirmation=$null; windows=@(); session=$null
         observed_ini_binding=$null
+        navigation=@(); right_path=''
         outcome='not tested'
     }
     $tc=$null
     try {
         $tcExe=Join-Path $tcDir 'TOTALCMD64.EXE'
+        # /R accepts ordinary directories reliably, but archive-internal
+        # paths such as test.wim\image1 were observed to leave TC in a
+        # regular filesystem folder. Enter the WCX via internal commands.
         $arguments=@('/N',('/I="' + $ini + '"'),
                      ('/L="' + $source + '"'),
-                     ('/R="' + $image + '\image1"'),'/P=L')
+                     ('/R="' + $caseDir + '"'),'/P=L')
         $tc=Start-Process -FilePath $tcExe -ArgumentList $arguments -WorkingDirectory $tcDir -PassThru
         Start-Sleep -Seconds 4
         $tc.Refresh()
@@ -384,15 +402,71 @@ exts=wim*
             $case.outcome='INCONCLUSIVE: no TC main window; F5 NOT SENT (trial or desktop blocker)'
             return $case
         }
+        # Only the disposable test.wim exists in the right filesystem
+        # folder. All commands below are documented Total Commander IDs:
+        # cm_FocusRight=4002, cm_GoToFirstFile=2050,
+        # cm_GoToDir=2003, cm_GoToFirstEntry=2049,
+        # cm_FocusLeft=4001. This is equivalent to Enter on test.wim
+        # and Enter on its image1 directory, then Tab back to the source.
+        $case.navigation+= '4002 cm_FocusRight'
+        Command-Tc $window 4002
+        Start-Sleep -Milliseconds 250
+        $case.navigation+= '2050 cm_GoToFirstFile (test.wim)'
+        Command-Tc $window 2050
+        Start-Sleep -Milliseconds 250
+        $case.navigation+= '2003 cm_GoToDir (open WCX test.wim)'
+        Command-Tc $window 2003
+        $enteredArchive=$false
+        for($i=0;$i -lt 40;$i++) {
+            Start-Sleep -Milliseconds 250
+            $type=Query-Tc $window 1026
+            $archiveLength=Query-Tc $window 1024
+            if($null -ne $type -and $type -ge 10000 -and
+               $archiveLength -gt 0) {
+                $enteredArchive=$true
+                break
+            }
+        }
+        if(-not $enteredArchive) {
+            $case.right_type=Query-Tc $window 1026
+            $case.right_archive_name_length=Query-Tc $window 1024
+            $case.events=Tail-Wcx
+            $case.outcome='INCONCLUSIVE: cm_GoToDir could not open disposable WIM in right WCX pane'
+            return $case
+        }
+        $case.navigation+= '2049 cm_GoToFirstEntry (image1)'
+        Command-Tc $window 2049
+        Start-Sleep -Milliseconds 250
+        $case.navigation+= '2003 cm_GoToDir (enter image1)'
+        Command-Tc $window 2003
+        Start-Sleep -Milliseconds 750
+        $case.navigation+= '4001 cm_FocusLeft (return to source)'
+        Command-Tc $window 4001
+        Start-Sleep -Milliseconds 350
         $case.active=Query-Tc $window 1000
         $case.left_type=Query-Tc $window 1025
         $case.right_type=Query-Tc $window 1026
         $case.right_archive_name_length=Query-Tc $window 1024
         $case.opened_wcx=($case.right_type -ge 10000 -and
             $case.right_archive_name_length -gt 0)
+        # TC WM_USER+50 query 10 obtains right panel path-label handle.
+        # An empty caption may mean custom drawing; do not guess based
+        # on the caption alone, but do reject a proven wrong path.
+        $pathHandle=Query-Tc $window 10
+        if($null -ne $pathHandle -and $pathHandle -gt 0) {
+            $case.right_path=[RealTcHostProbe]::CaptionOf(
+                [IntPtr]::new($pathHandle))
+        }
         if($case.active -ne 1 -or $case.left_type -ne 0 -or
            -not $case.opened_wcx) {
-            $case.outcome='TC did not navigate into WIM image1 as right WCX pane'
+            $case.events=Tail-Wcx
+            $case.outcome='INCONCLUSIVE: WCX navigation or focus not confirmed; F5 was NOT SENT'
+            return $case
+        }
+        if($case.right_path -and
+           $case.right_path -notmatch '(?i)\\image1(?:\\|$)') {
+            $case.events=Tail-Wcx
+            $case.outcome='INCONCLUSIVE: right WCX panel is not inside image1; F5 was NOT SENT'
             return $case
         }
         # Official TC external command API WM_USER+51=1075:
