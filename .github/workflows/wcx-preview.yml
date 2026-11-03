@@ -303,3 +303,34 @@ jobs:
           path: ISO-WCX-preview.zip
           if-no-files-found: error
           retention-days: 14
+
+  genuine_tc_f5:
+    name: Experimental real Total Commander F5 into a disposable WIM
+    needs: windows
+    runs-on: windows-2025
+    timeout-minutes: 25
+    # Capture the current failure without blocking parser, writer, or ZIP CI.
+    # This is experimental and must not be claimed as a passing F5 test.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ISO-WCX-Win32-preview
+          path: native
+      - uses: actions/download-artifact@v8
+        with:
+          name: ISO-WCX-x64-preview
+          path: native
+      - name: Probe real TC 11.58 x64 and observe PackFilesW dispatch
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/ISO-WCX-RealTC-F5.ps1 -Wcx32 native/ISO-WCX.wcx -Wcx64 native/ISO-WCX.wcx64 -ReportPath tc-f5-evidence/real-tc-f5.json
+      - name: Preserve read-only host evidence (no user files)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ISO-WCX-RealTC-F5-Evidence
+          path: tc-f5-evidence/real-tc-f5.json
+          if-no-files-found: warn
+          retention-days: 14
