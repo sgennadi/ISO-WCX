@@ -285,6 +285,18 @@ public static class RealTcHostProbe {
         },IntPtr.Zero);
         return result;
     }
+    // Keep desktop inspection bounded to the disposable CI TC process.
+    public static IntPtr[] OwnedVisibleTopLevelHandles(uint targetPid) {
+        var found=new List<IntPtr>();
+        EnumWindows((hwnd,param)=>{
+            uint owner=0;
+            GetWindowThreadProcessId(hwnd,out owner);
+            if(owner==targetPid && IsWindowVisible(hwnd))
+                found.Add(hwnd);
+            return true;
+        },IntPtr.Zero);
+        return found.ToArray();
+    }
     public static string[] OwnedTopLevelWindows(uint targetPid) {
         var windows=new List<string>();
         EnumWindows((hwnd,param)=>{
@@ -496,23 +508,9 @@ function Allow-RequestedTrialButton([int]$tcPid) {
     return $false
 }
 function Window-Names([int]$tcPid) {
-    try {
-        Add-Type -AssemblyName UIAutomationClient
-        $root=[System.Windows.Automation.AutomationElement]::RootElement
-        $filter=[System.Windows.Automation.PropertyCondition]::new(
-            [System.Windows.Automation.AutomationElement]::ProcessIdProperty,$tcPid)
-        $all=$root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$filter)
-        $names=New-Object 'System.Collections.Generic.List[string]'
-        for($i=0;$i -lt $all.Count;$i++) {
-            $entry=$all.Item($i)
-            if($entry.Current.ControlType -eq
-               [System.Windows.Automation.ControlType]::Window) {
-                $label=[string]$entry.Current.Name
-                if($label) { $names.Add($label) }
-            }
-        }
-        return @($names)
-    }catch { return @('UIAutomation unavailable') }
+    # Avoid UIAutomation RootElement.FindAll(Descendants) over the whole
+    # runner desktop: another process can block the accessibility walker.
+    return @([RealTcHostProbe]::OwnedTopLevelWindows([uint32]$tcPid))
 }
 function Confirm-Only-DisposableCopy([int]$tcPid,[string]$temporaryImage) {
     # F5 often opens an ordinary copy-confirmation dialog before it calls
@@ -527,20 +525,14 @@ function Confirm-Only-DisposableCopy([int]$tcPid,[string]$temporaryImage) {
         $answer.kind='UI Automation unavailable'
         return $answer
     }
-    $root=[System.Windows.Automation.AutomationElement]::RootElement
-    $filter=[System.Windows.Automation.PropertyCondition]::new(
-        [System.Windows.Automation.AutomationElement]::ProcessIdProperty,$tcPid)
     for($attempt=0;$attempt -lt 30;$attempt++) {
-        $all=$root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$filter)
-        $windows=New-Object 'System.Collections.Generic.List[object]'
-        for($i=0;$i -lt $all.Count;$i++) {
-            $element=$all.Item($i)
-            if($element.Current.ControlType -eq
-               [System.Windows.Automation.ControlType]::Window) {
-                $windows.Add($element)
-            }
-        }
-        foreach($dialog in $windows) {
+        # Restrict UIA to HWNDs that belong to this specific TC process.
+        $handles=@([RealTcHostProbe]::OwnedVisibleTopLevelHandles(
+            [uint32]$tcPid))
+        foreach($hwnd in $handles) {
+            $dialog=[System.Windows.Automation.AutomationElement]::FromHandle(
+                $hwnd)
+            if($null -eq $dialog) { continue }
             $title=[string]$dialog.Current.Name
             if(-not $title -or $dialog.Current.IsOffscreen) { continue }
             if($title -match '(?i)Function not supported|not supported|not implemented') {
@@ -611,6 +603,7 @@ function Tail-Wcx {
     return @()
 }
 function Test-Mask([int]$mask,[string]$source,[string]$templateWim) {
+    Write-Host ("TC_F5_STAGE=START mask="+$mask)
     $caseDir=Join-Path $work "caps-$mask"
     New-Item -ItemType Directory -Force -Path $caseDir | Out-Null
     $image=Join-Path $caseDir 'test.wim'
@@ -694,15 +687,15 @@ exts=wim*
                 $trialCompleted=($verified -match '^NATIVE_TRIAL_CLICKED=1')
             }
             if(-not $trialCompleted) {
-                # UI Automation may supply its own explicit instruction;
-                # never guess or click any button without one.
-                $trialCompleted=[bool](Allow-RequestedTrialButton $tc.Id)
-                if($trialCompleted) {
-                    $case.trial_dialog+= 'UIA_TRIAL_CLICKED=1 (requested number)'
-                }
+                # No desktop-wide UIAutomation fallback after a failed
+                # verified native/OCR instruction: abort this CI case.
+                $case.trial_dialog+=
+                    'TRIAL_NOT_ACKNOWLEDGED=no verified native/OCR instruction'
             }
         }
         $case.trial_acknowledged=$trialCompleted
+        Write-Host ("TC_F5_STAGE=TRIAL mask="+$mask+
+            " acknowledged="+$trialCompleted)
         if($trialCompleted) {
             # A distinct, modal Configuration > Layout window was visible
             # in the previous real-TC evidence screenshots and blocked
@@ -719,6 +712,7 @@ exts=wim*
             return $case
         }
         Start-Sleep -Seconds 1
+        Write-Host ("TC_F5_STAGE=FIND_MAIN mask="+$mask)
         $window=Find-TcWindow $tc.Id
         if($window -eq [IntPtr]::Zero) {
             $case.session=Session-Snapshot $tc.Id
@@ -740,6 +734,8 @@ exts=wim*
         Command-Tc $window 2050
         Start-Sleep -Milliseconds 250
         $case.navigation+= '2003 cm_GoToDir (open WCX test.wim)'
+        Write-Host ("TC_F5_STAGE=OPEN_WIM mask="+$mask+
+            " rightType="+(Query-Tc $window 1026))
         Command-Tc $window 2003
         $enteredArchive=$false
         for($i=0;$i -lt 40;$i++) {
@@ -808,10 +804,14 @@ exts=wim*
             $case.outcome='TC did not select the test source file'
             return $case
         }
+        Write-Host ("TC_F5_STAGE=SEND_F5 mask="+$mask+
+            " rightType="+$case.right_type+" selected="+$case.source_selected)
         Command-Tc $window 905
         $case.f5_sent=$true
         $confirmation=Confirm-Only-DisposableCopy $tc.Id $image
         $case.confirmation=$confirmation
+        Write-Host ("TC_F5_STAGE=CONFIRM mask="+$mask+
+            " kind="+$confirmation.kind)
         Start-Sleep -Seconds 5
         $case.events=Tail-Wcx
         $case.windows=Window-Names $tc.Id
