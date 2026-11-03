@@ -366,6 +366,13 @@ std::wstring run(const Options& opts) {
          L"mdx", L"cso", L"zso", L"isz", L"daa", L"img",
          L"raw", L"vhd", L"vhdx", L"wim", L"esd", L"swm",
          L"ima", L"vfd", L"flp", L"bif", L"imz"}) {
+        const std::wstring extension(ext);
+        const bool writable=(extension==L"iso" || extension==L"udf" ||
+            extension==L"wim" || extension==L"img" || extension==L"raw" ||
+            extension==L"vhd" || extension==L"vhdx" ||
+            extension==L"ima" || extension==L"vfd" ||
+            extension==L"flp" || extension==L"bif");
+        const std::wstring mask=writable?L"159":L"158";
         const std::wstring existing = profile(assoc_ini, L"PackerPlugins", ext);
         const std::wstring raw = old_path(existing);
         std::wstring reason;
@@ -374,12 +381,12 @@ std::wstring run(const Options& opts) {
         else if (installed_name(raw)) {
             if (!same_path(fs::path(resolved_old_path(raw, tc_dir)), fs::path(new_path))) {
                 reason = L"ISO-WCX path migration";
-            } else if (existing != L"158," + new_path) {
+            } else if (existing != mask + L"," + new_path) {
                 // A legacy 192 mask advertises content/search only, hiding
                 // pack/delete/options in some TC versions despite the WCX
                 // GetPackerCaps() implementation returning 222. Repair only
                 // an association that already targets THIS plugin DLL.
-                reason = L"refresh ISO-WCX capability flags to 158";
+                reason = L"refresh ISO-WCX capability flags";
             }
         } else if (legacy_name(raw)) {
             const auto legacy = resolved_old_path(raw, tc_dir);
@@ -390,9 +397,10 @@ std::wstring run(const Options& opts) {
             continue;
         }
         // Match GetPackerCaps(): modify(2), multiple(4), delete(8),
-        // options(16), search-text(128) = 158. Global by-content (64)
+        // options(16), search-text(128) = 158; add NEW(1) for editable formats.
+        // Global by-content (64)
         // must stay disabled to avoid intercepting ordinary ZIP archives.
-        updates.push_back({ext, L"158," + new_path, reason});
+        updates.push_back({ext, mask + L"," + new_path, reason});
     }
 
     if (!same_path(binary_source, destination))
