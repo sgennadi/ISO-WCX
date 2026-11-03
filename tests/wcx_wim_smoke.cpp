@@ -525,9 +525,9 @@ static int run_wim_smoke(int argc,wchar_t** argv) {
         if(!pack||!erase||!set_progress)return 20;
         // F5 into an existing WIM is blocked by Total Commander before
         // PackFilesW if the registered WCX flags lack PK_CAPS_MODIFY (2).
-        // The mask must be 158: MODIFY|MULTIPLE|DELETE|OPTIONS|SEARCHTEXT;
+        // The mask must be 159: NEW|MODIFY|MULTIPLE|DELETE|OPTIONS|SEARCHTEXT;
         // do NOT advertise NEW (1), encrypted packing or ZIP-by-content.
-        if(!caps || caps()!=158 || !(caps()&2))return 115;
+        if(!caps || caps()!=159 || !(caps()&2))return 115;
         // A WCX host can call PackFilesW with missing pointers. It must
         // return E_NOT_SUPPORTED(24) without modifying any WIM, and
         // interactive TC diagnostics must record the early return.
