@@ -68,14 +68,14 @@ try {
     & $tool -IniPath $ini -PluginDirectory $plugin -Architecture 64 -Apply | Out-Null
     $after = [IO.File]::ReadAllBytes($ini)
     $txt = Text-Ini $ini
-    if (-not $txt.Contains("iso=158,$target")) {
+    if (-not $txt.Contains("iso=159,$target")) {
         $relevant = @($txt -split '[\r\n]+' | Where-Object { $_ -match '^(?i:iso|wim|cue|udf)\s*=' })
-        Write-Host "DEBUG expected: iso=158,$target"
+        Write-Host "DEBUG expected: iso=159,$target"
         Write-Host "DEBUG actual packer rows: $($relevant -join ' // ')"
     }
-    Assert ($txt.Contains("iso=158,$target")) 'old mask was not refreshed'
-    Assert ($txt.Contains("wim=158,$target")) 'wim missing'
-    Assert ($txt.Contains("vhdx=158,$target")) 'vhdx missing'
+    Assert ($txt.Contains("iso=159,$target")) 'old mask was not refreshed'
+    Assert ($txt.Contains("wim=159,$target")) 'wim missing'
+    Assert ($txt.Contains("vhdx=159,$target")) 'vhdx missing'
     Assert ($txt.Contains("swm=158,$target")) 'swm missing'
     Assert ($txt.Contains("imz=158,$target")) 'imz missing'
     Assert (-not $txt.Contains("chd=158,$target")) 'experimental CHD unexpectedly registered'
@@ -132,7 +132,7 @@ try {
     Assert (Same $cacheOriginal ([IO.File]::ReadAllBytes($cache))) 'redirect dry-run mutated cache'
     & $tool -IniPath $rootIni -PluginDirectory $plugin -Architecture 64 -Apply | Out-Null
     Assert (Same $rootOriginal ([IO.File]::ReadAllBytes($rootIni))) 'root buttons overwritten'
-    Assert ((Text-Ini $packers).Contains("vhd=158,$target")) 'redirected own plugin was not updated'
+    Assert ((Text-Ini $packers).Contains("vhd=159,$target")) 'redirected own plugin was not updated'
     Assert ((Text-Ini $packers).Contains('zip=735,C:\Other\zip.wcx')) 'redirected ZIP overwritten'
     Assert ((Text-Ini $cache).Contains('exts=zip*vhd*')) 'redirected cache data lost'
     Assert (-not (Text-Ini $cache).Contains('$checksum$=')) 'redirected cache checksum remained'
