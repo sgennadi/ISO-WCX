@@ -140,10 +140,26 @@ inline std::wstring windows_path(std::wstring path) {
     std::replace(path.begin(),path.end(),L'/',L'\\');
     return fold(std::move(path));
 }
+// Editable formats require mask 159 so TC routes F5 into existing images.
+// Read-only container types remain at 158 in per-extension INI entries.
+inline constexpr std::array<std::wstring_view,11> writable_image_extensions{
+    L"iso",L"udf",L"wim",L"img",L"raw",L"vhd",
+    L"vhdx",L"ima",L"vfd",L"flp",L"bif"
+};
+inline constexpr std::wstring_view expected_wcx_mask(
+        std::wstring_view ext) {
+    for(const auto editable:writable_image_extensions)
+        if(ext==editable)return L"159";
+    return L"158";
+}
 inline bool is_current_wcx_registration(
-        std::wstring_view entry,std::wstring_view installed_wcx) {
+        std::wstring_view entry,std::wstring_view installed_wcx,
+        std::wstring_view ext) {
     const auto field=trim(entry);
-    if(field.size()<5 || field.substr(0,4)!=L"158,")
+    const auto expected=expected_wcx_mask(ext);
+    if(field.size()<expected.size()+1 ||
+       field.substr(0,expected.size())!=expected ||
+       field[expected.size()]!=L',')
         return false;
     auto candidate=windows_path(unpack_plugin_path(field));
     const auto installed=windows_path(std::wstring(installed_wcx));
@@ -198,14 +214,15 @@ inline Patch repair_packer_plugins(std::wstring_view input,
         // moving it to the first duplicate's line.
         std::size_t keep=0;
         for(std::size_t n=0;n<entries.size();++n)
-            if(is_current_wcx_registration(entries[n].val,installed_wcx)) {
+            if(is_current_wcx_registration(entries[n].val,installed_wcx,ext)) {
                 keep=n;
                 break;
             }
         bool changed=false;
-        if(!is_current_wcx_registration(entries[keep].val,installed_wcx)) {
+        if(!is_current_wcx_registration(entries[keep].val,installed_wcx,ext)) {
             lines[entries[keep].line].body=
-                ext+L"=158,"+std::wstring(installed_wcx);
+                ext+L"="+std::wstring(expected_wcx_mask(ext))+L","+
+                std::wstring(installed_wcx);
             patch.changed=true;
             changed=true;
         }
@@ -272,8 +289,9 @@ inline Patch register_missing_packer_plugins(
     std::vector<Line> additions;
     additions.reserve(patch.extensions.size());
     for(const auto& ext:patch.extensions)
-        additions.push_back({ext+L"=158,"+std::wstring(installed_wcx),
-                             ending});
+        additions.push_back({ext+L"="+
+                             std::wstring(expected_wcx_mask(ext))+L","+
+                             std::wstring(installed_wcx),ending});
     lines.insert(lines.begin()+static_cast<std::ptrdiff_t>(end),
                  additions.begin(),additions.end());
     patch.text=join(lines);
