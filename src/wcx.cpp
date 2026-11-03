@@ -32,8 +32,17 @@ namespace {
 constexpr int E_END_ARCHIVE=10,E_BAD_ARCHIVE=13,E_UNKNOWN_FORMAT=14,E_ECREATE=16,E_EABORTED=21,E_SMALL_BUF=20,E_NO_FILES=22;
 constexpr int PK_SKIP=0,PK_TEST=1,PK_EXTRACT=2;
 constexpr int PK_CAPS_SEARCHTEXT=128;
-constexpr int PACKER_CAPABILITIES=PK_CAPS_SEARCHTEXT|2|4|8|16;
+constexpr int PACKER_CAPABILITIES_BASE=PK_CAPS_SEARCHTEXT|2|4|8|16;
+static_assert(PACKER_CAPABILITIES_BASE==158);
+// Strictly CI-only A/B comparison. Shipping DLL stays 158 and does not
+// advertise the ability to create new ISO/WIM archives.
+#if defined(ISO_WCX_CI_CAPS_NEW_EXPERIMENT)
+constexpr int PACKER_CAPABILITIES=PACKER_CAPABILITIES_BASE|1;
+static_assert(PACKER_CAPABILITIES==159);
+#else
+constexpr int PACKER_CAPABILITIES=PACKER_CAPABILITIES_BASE;
 static_assert(PACKER_CAPABILITIES==158);
+#endif
 // Total Commander WCX SDK, PackDefaultParamStruct (ANSI-only).
 struct PackDefaultParamsA {
     int size;
@@ -991,7 +1000,15 @@ WCX_EXPORT int __stdcall GetPackerCaps() {
     static std::atomic<bool> logged{false};
     if(!logged.exchange(true,std::memory_order_relaxed))
         iso_wcx::edit_diagnostics::log(
-            L"GetPackerCaps",{},L"return=158 (MODIFY|MULTIPLE|DELETE|OPTIONS|SEARCHTEXT)");
+            L"GetPackerCaps",{},
+            L"return="+std::to_wstring(PACKER_CAPABILITIES)+
+            L" (MODIFY|MULTIPLE|DELETE|OPTIONS|SEARCHTEXT"+
+#if defined(ISO_WCX_CI_CAPS_NEW_EXPERIMENT)
+            L"|NEW TEST-ONLY"
+#else
+            L""
+#endif
+            L")");
     return PACKER_CAPABILITIES; // 158, no global BY_CONTENT ZIP interception
 }
 // Explicitly do not advertise re-entrant background edits while the native
