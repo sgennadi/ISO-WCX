@@ -4,7 +4,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$Wcx32,
     [Parameter(Mandatory=$true)][string]$Wcx64,
-    [Parameter(Mandatory=$true)][string]$Wcx64Experimental,
+    [Parameter(Mandatory=$true)][string]$Wcx64Control,
     [string]$ReportPath='tc-f5-evidence/real-tc-f5.json'
 )
 Set-StrictMode -Version Latest
@@ -17,23 +17,23 @@ $work=Join-Path $env:RUNNER_TEMP 'ISO-WCX-RealTC-F5'
 $tcDir=Join-Path $work 'totalcmd'
 $unpacked=Join-Path $work 'installer'
 $pluginDir=Join-Path $work 'wcx'
-$experimentalPluginDir=Join-Path $work 'wcx-ci-new-caps'
+$controlPluginDir=Join-Path $work 'wcx-ci-old-caps'
 $logDir=Join-Path $work 'local-app-data'
-foreach($dir in @($work,$tcDir,$unpacked,$pluginDir,$experimentalPluginDir,$logDir)) {
+foreach($dir in @($work,$tcDir,$unpacked,$pluginDir,$controlPluginDir,$logDir)) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
 }
 Copy-Item -LiteralPath (Resolve-Path -LiteralPath $Wcx32).Path -Destination (Join-Path $pluginDir 'ISO-WCX.wcx')
 Copy-Item -LiteralPath (Resolve-Path -LiteralPath $Wcx64).Path -Destination (Join-Path $pluginDir 'ISO-WCX.wcx64')
-# Keep the shipping binary exclusively in the 158 directory.
-# CI's 159 case uses a separately compiled x64 DLL whose actual
-# GetPackerCaps() also returns 159. Changing INI alone is NOT an A/B test.
+# Shipping WCX returns 159; only the disposable negative control returns 158.
+# CI's 158 case uses a separately compiled x64 DLL whose actual
+# GetPackerCaps() returns 158. Changing INI alone is NOT a valid A/B test.
 Copy-Item -LiteralPath (Join-Path $pluginDir 'ISO-WCX.wcx') -Destination (
-    Join-Path $experimentalPluginDir 'ISO-WCX.wcx')
+    Join-Path $controlPluginDir 'ISO-WCX.wcx')
 Copy-Item -LiteralPath (
-    (Resolve-Path -LiteralPath $Wcx64Experimental).Path) -Destination (
-    Join-Path $experimentalPluginDir 'ISO-WCX.wcx64')
+    (Resolve-Path -LiteralPath $Wcx64Control).Path) -Destination (
+    Join-Path $controlPluginDir 'ISO-WCX.wcx64')
 $plugin=Join-Path $pluginDir 'ISO-WCX.wcx'
-$experimentalPlugin=Join-Path $experimentalPluginDir 'ISO-WCX.wcx'
+$controlPlugin=Join-Path $controlPluginDir 'ISO-WCX.wcx'
 $oldLocalApp=$env:LOCALAPPDATA
 $oldRepair=$env:ISO_WCX_DISABLE_ASSOC_REPAIR
 $env:LOCALAPPDATA=$logDir
@@ -42,8 +42,8 @@ $logFile=Join-Path $logDir 'ISO-WCX/Logs/edit-errors.log'
 $report=[ordered]@{
     purpose='Isolate whether Total Commander 11.58 invokes PackFilesW on F5'
     source='Disposable CI-only WIM, not any user image'
-    shipping_caps=158
-    alternative_159_is_test_only=$true
+    shipping_caps=159
+    control_158_is_test_only=$true
     template_wim_unchanged=$true
     cases=@()
     errors=@()
@@ -730,8 +730,8 @@ function Test-Mask([int]$mask,[string]$source,[string]$templateWim) {
     New-Item -ItemType Directory -Force -Path $caseLocalApp | Out-Null
     $env:LOCALAPPDATA=$caseLocalApp
     $script:logFile=Join-Path $caseLocalApp 'ISO-WCX/Logs/edit-errors.log'
-    # 159 is an EXPERIMENT in a private temporary INI only. Never deploy 159.
-    $casePlugin=if($mask -eq 159) { $experimentalPlugin } else { $plugin }
+    # 158 negative control uses a separate DLL and disposable INI. Ship only 159.
+    $casePlugin=if($mask -eq 158) { $controlPlugin } else { $plugin }
     $contents=@"
 [Configuration]
 OnlyOnce=0
@@ -1064,13 +1064,23 @@ wim=$mask,$casePlugin
             " reason="+$_.Exception.Message)
         return $case
     } finally {
+        Write-Host ("TC_F5_STAGE=CLEANUP_BEGIN mask="+$mask+
+            " verified="+$case.wim_contents_verified)
         if($tc) {
-            try { Save-RunnerScreenshot $caseDir } catch {}
+            # On successful WIM verification the before-F5 screenshot is
+            # already preserved. CopyFromScreen in a newly disposed VCL
+            # desktop can hang on a headless Windows runner; skip this
+            # best-effort postmortem screenshot on confirmed success.
+            if(-not $case.wim_contents_verified) {
+                try { Save-RunnerScreenshot $caseDir } catch {}
+            }
+            Write-Host ("TC_F5_STAGE=STOP_TC mask="+$mask)
             try {
                 $tc.Refresh()
                 if(-not $tc.HasExited) { Stop-Process -Id $tc.Id -Force }
             }catch{}
         }
+        Write-Host ("TC_F5_STAGE=CLEANUP_DONE mask="+$mask)
     }
 }
 $failure=$null
@@ -1126,6 +1136,7 @@ try {
     foreach($mask in @(158,159)) {
         $report.cases+=Test-Mask $mask $source $templateWim
     }
+    Write-Host 'TC_F5_STAGE=CASES_RETURNED'
     $report.template_wim_unchanged=
         $sha -eq (Get-FileHash -LiteralPath $templateWim -Algorithm SHA256).Hash
     if(-not $report.template_wim_unchanged) { throw 'WIM template unexpectedly changed' }
