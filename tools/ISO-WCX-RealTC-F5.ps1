@@ -42,6 +42,7 @@ using System;
 using System.Text;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 public static class RealTcHostProbe {
     [DllImport("user32.dll",EntryPoint="FindWindowW",CharSet=CharSet.Unicode)]
     public static extern IntPtr FindWindow(string className,string title);
@@ -60,6 +61,105 @@ public static class RealTcHostProbe {
     }
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowEnabled(IntPtr hwnd);
+    private static readonly uint WM_GETTEXT=0x000D;
+    private static readonly uint BM_CLICK=0x00F5;
+    private delegate bool EnumChildDelegate(IntPtr hwnd,IntPtr param);
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr parent,
+        EnumChildDelegate callback,IntPtr param);
+    [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",
+        CharSet=CharSet.Unicode,SetLastError=true)]
+    private static extern IntPtr SendMessageTimeoutText(IntPtr hwnd,uint message,
+        IntPtr wparam,[Out]StringBuilder lparam,
+        uint flags,uint timeout,out IntPtr result);
+    [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",SetLastError=true)]
+    private static extern IntPtr SendMessageTimeoutRaw(IntPtr hwnd,uint message,
+        IntPtr wparam,IntPtr lparam,
+        uint flags,uint timeout,out IntPtr result);
+    private sealed class Child {
+        public IntPtr hwnd;
+        public string kind;
+        public string text;
+        public bool enabled;
+    }
+    private static string ReadChildCaption(IntPtr hwnd) {
+        var text=new StringBuilder(1024);
+        IntPtr count;
+        if(SendMessageTimeoutText(hwnd,WM_GETTEXT,
+             (IntPtr)text.Capacity,text,2,750,out count)==IntPtr.Zero)
+             return "";
+        return text.ToString();
+    }
+    // The real Total Commander trial reminder on the Windows runner shows
+    // "Please press button Nr. 1 to start the program!". UIAutomation
+    // sometimes does not expose that static text, so use native HWNDs.
+    // This does not suppress the publisher's reminder: it reads the literal
+    // requested number and clicks ONLY that enabled button in the SAME
+    // top-level "Total Commander" dialog. Otherwise it refuses.
+    public static string ClickRequestedTrialButton(uint targetPid) {
+        var results=new List<string>();
+        bool clicked=false;
+        EnumWindows((top,param)=>{
+            uint owner=0;
+            GetWindowThreadProcessId(top,out owner);
+            if(owner!=targetPid || !IsWindowVisible(top))return true;
+            string title=CaptionOf(top);
+            if(!title.Equals("Total Commander",
+                StringComparison.OrdinalIgnoreCase))return true;
+            var controls=new List<Child>();
+            EnumChildWindows(top,(child,unused)=>{
+                var cls=new StringBuilder(128);
+                GetClassName(child,cls,cls.Capacity);
+                controls.Add(new Child {
+                    hwnd=child,kind=cls.ToString(),text=ReadChildCaption(child),
+                    enabled=IsWindowEnabled(child)
+                });
+                return true;
+            },IntPtr.Zero);
+            var captions=new StringBuilder();
+            foreach(var item in controls) {
+                if(item.text.Length>0) {
+                    captions.Append(' ').Append(item.text);
+                }
+            }
+            string text=captions.ToString();
+            var match=Regex.Match(text,
+                @"Pleases+presss+buttons+Nr.?s*([123])s+tos+starts+thes+program",
+                RegexOptions.IgnoreCase);
+            results.Add("trial_dialog="+title+
+                " child_count="+controls.Count+
+                " explicit_instruction="+match.Success+
+                " text="+text.Substring(0,Math.Min(text.Length,330)));
+            if(!match.Success)return true;
+            string digit=match.Groups[1].Value;
+            Child candidate=null;
+            int count=0;
+            foreach(var control in controls) {
+                if(control.text.Trim()!=digit ||
+                   control.kind.IndexOf("Button",
+                       StringComparison.OrdinalIgnoreCase)<0 ||
+                   !control.enabled)continue;
+                candidate=control;
+                count++;
+            }
+            if(count!=1) {
+                results.Add("required_button="+digit+
+                    " eligible_buttons="+count+" no_button_pressed");
+                return true;
+            }
+            IntPtr returned;
+            IntPtr ok=SendMessageTimeoutRaw(candidate.hwnd,BM_CLICK,
+                IntPtr.Zero,IntPtr.Zero,2,1500,out returned);
+            clicked=ok!=IntPtr.Zero;
+            results.Add("required_button="+digit+
+                " native_BM_CLICK="+(clicked?"success":"failure"));
+            return !clicked;
+        },IntPtr.Zero);
+        return "NATIVE_TRIAL_CLICKED="+(clicked?"1":"0")+
+            " "+String.Join(" | ",results.ToArray());
+    }
     // Find by both class AND PID: FindWindow(TTOTAL_CMD) alone returns the
     // first window globally, potentially a different TC process on a
     // shared Windows runner. This previously produced a false no-window
@@ -370,6 +470,7 @@ exts=wim*
         right_archive_name_length=$null
         f5_sent=$false; packfiles_callback=$false; events=@()
         confirmation=$null; windows=@(); session=$null
+        trial_acknowledged=$false; trial_dialog=@()
         observed_ini_binding=$null
         navigation=@(); right_path=''
         outcome='not tested'
@@ -392,14 +493,36 @@ exts=wim*
         $case.observed_ini_binding=(@(Get-Content -LiteralPath $ini |
             Where-Object {$_ -match '^\s*wim\s*='} |
             Select-Object -First 1) -join '').Trim()
-        [void](Allow-RequestedTrialButton $tc.Id)
-        Start-Sleep -Seconds 3
+        # The official shareware start dialog is NOT a WIM/pack error.
+        # Read its displayed required number and acknowledge that exact
+        # button; keep GUI/INI results inconclusive if it cannot be read.
+        $case.trial_dialog=@()
+        $trialCompleted=$false
+        for($trialAttempt=0;$trialAttempt -lt 12;$trialAttempt++) {
+            $native=[RealTcHostProbe]::ClickRequestedTrialButton(
+                [uint32]$tc.Id)
+            $case.trial_dialog+= $native
+            if($native -match '^NATIVE_TRIAL_CLICKED=1') {
+                $trialCompleted=$true
+                break
+            }
+            # UIAutomation is only a fallback when the native text is
+            # inaccessible. It must still read the requested number.
+            if(Allow-RequestedTrialButton $tc.Id) {
+                $case.trial_dialog+= 'UIA_TRIAL_CLICKED=1 (requested number)'
+                $trialCompleted=$true
+                break
+            }
+            Start-Sleep -Milliseconds 300
+        }
+        $case.trial_acknowledged=$trialCompleted
+        Start-Sleep -Seconds 1
         $window=Find-TcWindow $tc.Id
         if($window -eq [IntPtr]::Zero) {
             $case.session=Session-Snapshot $tc.Id
             $case.windows=$case.session.top_level_windows
             $case.events=Tail-Wcx
-            $case.outcome='INCONCLUSIVE: no TC main window; F5 NOT SENT (trial or desktop blocker)'
+            $case.outcome='INCONCLUSIVE: TC window unavailable, trial_acknowledged='+$case.trial_acknowledged+'; F5 NOT SENT'
             return $case
         }
         # Only the disposable test.wim exists in the right filesystem
@@ -431,7 +554,7 @@ exts=wim*
             $case.right_type=Query-Tc $window 1026
             $case.right_archive_name_length=Query-Tc $window 1024
             $case.events=Tail-Wcx
-            $case.outcome='INCONCLUSIVE: cm_GoToDir could not open disposable WIM in right WCX pane'
+            $case.outcome='INCONCLUSIVE: cm_GoToDir did not open disposable WIM, trial_acknowledged='+$case.trial_acknowledged+'; F5 NOT SENT'
             return $case
         }
         $case.navigation+= '2049 cm_GoToFirstEntry (image1)'
