@@ -360,7 +360,7 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
             for(const auto& ext:added.extensions)summary+=ext+L" ";
         }
         // A 64-bit Total Commander can retain an obsolete PackerPlugins64
-        // checksum even though PackerPlugins already reads "158,ISO-WCX.wcx".
+        // checksum even though PackerPlugins already reads "159,ISO-WCX.wcx".
         // The old manual Repair button returned early here, so F5 stayed
         // unavailable after installation. Let EXPLICIT manual repair also
         // invalidate that cache, without changing any other WCX association.
@@ -402,12 +402,12 @@ void repair_tc_registrations(HWND parent,HINSTANCE instance,bool russian,
                 L"Создаётся копия INI; затем перезапустите Total Commander.");
         }else{
             summary+=label(russian,
-                L"\n\nThe ISO-WCX flags already equal 158. Reset ONLY the "
+                L"\n\nThe ISO-WCX flags match the 159/158 format policy. Reset ONLY the "
                 L"TC x64 PackerPlugins64 cache checksum to force Total "
                 L"Commander to rebuild its cached capabilities?\n"
                 L"An INI backup will be saved; all other plugin bindings "
                 L"will remain unchanged. Restart all TC windows afterward.",
-                L"\n\nФлаги ISO-WCX уже равны 158. Сбросить ТОЛЬКО "
+                L"\n\nФлаги ISO-WCX соответствуют режиму 159/158. Сбросить ТОЛЬКО "
                 L"контрольную сумму кэша PackerPlugins64, чтобы TC "
                 L"перечитал возможности плагина?\n"
                 L"Создаётся резервная копия INI. Привязки других "
