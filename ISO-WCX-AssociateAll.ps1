@@ -22,7 +22,9 @@ $Extensions = @(
 # BIN may be arbitrary data; MDF is often a raw track without a descriptor.
 # CHD optical handling is experimental. Register only with explicit consent.
 if ($IncludeOptional) { $Extensions += @('bin','mdf','chd') }
-$CapabilityMask = '158' # GetPackerCaps: 2+4+8+16+128 (NOT by-content 64)
+# F5 into writable formats requires NEW=1 in addition to MODIFY=2.
+# Leave image types with read-only implementations at capability mask 158.
+$EditableExtensions = @('iso','udf','wim','img','raw','vhd','vhdx','ima','vfd','flp','bif')
 $EolCRLF = [string][char]13 + [char]10
 
 function Resolve-TcText([string]$Value, [string]$Base) {
@@ -286,7 +288,8 @@ $added = New-Object 'System.Collections.Generic.List[string]'
 $skipped = New-Object 'System.Collections.Generic.List[string]'
 $updated = New-Object 'System.Collections.Generic.List[string]'
 foreach ($ext in $Extensions) {
-    $newValue = "$CapabilityMask,$target"
+    $mask = if ($EditableExtensions -contains $ext) { '159' } else { '158' }
+    $newValue = "$mask,$target"
     if (-not $section.Rows.ContainsKey($ext)) {
         $added.Add("$ext=$newValue")
         continue
