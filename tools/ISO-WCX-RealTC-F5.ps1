@@ -1,4 +1,4 @@
-# Experimental host test of F5 on a REAL Total Commander 11.58 x64.
+# Experimental host test of F5 on a REAL Total Commander 11.58.1 x64.
 # Runs ONLY on disposable GitHub CI. Never writes a production WIM/INI.
 [CmdletBinding()]
 param(
@@ -218,10 +218,12 @@ exts=wim*
 }
 $failure=$null
 try {
-    $package=Join-Path $work 'tcmd1158x64.exe'
-    Invoke-WebRequest -Uri 'https://totalcommander.ch/1158/tcmd1158x64.exe' -OutFile $package -MaximumRedirection 4
+    # Official 11.58.1, released 2026-10-29; same build as the user's TC.
+    # SHA-256 independently published by Chocolatey TotalCommander 11.58.1.
+    $package=Join-Path $work 'tcmd115801x32_64.exe'
+    Invoke-WebRequest -Uri 'https://totalcommander.ch/115801/tcmd115801x32_64.exe' -OutFile $package -MaximumRedirection 4
     $hash=(Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
-    if($hash -ne '2281f3827a8746a597a75287f521690f1291bdb535d7e1269768dbe077a13ed4') {
+    if($hash -ne '4696c3ac8a4b7f889e99e7348940e3e08f4b6cf62c4c572a71ae4252d813ea1d') {
         throw "Official Total Commander installer checksum mismatch: $hash"
     }
     $sign=Get-AuthenticodeSignature -FilePath $package
@@ -231,10 +233,26 @@ try {
     }
     & 7z x -y "-o$unpacked" $package | Out-Null
     if($LASTEXITCODE -ne 0)throw 'Cannot unpack original TC installer'
-    & 7z x -y "-o$tcDir" (Join-Path $unpacked 'INSTALL.CAB') | Out-Null
-    if($LASTEXITCODE -ne 0)throw 'Cannot unpack original TC INSTALL.CAB'
-    Get-ChildItem -LiteralPath (Join-Path $tcDir 'e') -Force |
+    # Combined x86/x64 installer can have more than one CAB. Extract
+    # independently and select only the x64 folder to avoid DLL mixing.
+    $cabs=@(Get-ChildItem -LiteralPath $unpacked -Recurse -File |
+            Where-Object {$_.Name -match '(?i)^INSTALL.*[.]CAB$'})
+    if($cabs.Count -eq 0)throw 'Combined official TC INSTALL.CAB missing'
+    for($i=0;$i -lt $cabs.Count;$i++) {
+        $dest=Join-Path $work ('cab-'+$i)
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        & 7z x -y "-o$dest" $cabs[$i].FullName | Out-Null
+        if($LASTEXITCODE -ne 0)throw 'Cannot extract official TC CAB'
+    }
+    $exe=@(Get-ChildItem -LiteralPath $work -Recurse -File -Filter 'TOTALCMD64.EXE' |
+           Where-Object {$_.FullName -like (Join-Path $work 'cab-*')})
+    if($exe.Count -ne 1)throw ('Expected exactly one TC x64 executable, found '+$exe.Count)
+    $sourceDir=$exe[0].Directory.FullName
+    Get-ChildItem -LiteralPath $sourceDir -Force |
         Move-Item -Destination $tcDir -Force
+    if(-not (Test-Path -LiteralPath (Join-Path $tcDir 'TOTALCMD64.EXE'))) {
+        throw 'Portable official TC 11.58.1 x64 could not be assembled'
+    }
     $source=Join-Path $work 'source'
     $capture=Join-Path $work 'capture'
     New-Item -ItemType Directory -Path $source,$capture -Force | Out-Null
