@@ -4,6 +4,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$Wcx32,
     [Parameter(Mandatory=$true)][string]$Wcx64,
+    [Parameter(Mandatory=$true)][string]$Wcx64Experimental,
     [string]$ReportPath='tc-f5-evidence/real-tc-f5.json'
 )
 Set-StrictMode -Version Latest
@@ -16,13 +17,23 @@ $work=Join-Path $env:RUNNER_TEMP 'ISO-WCX-RealTC-F5'
 $tcDir=Join-Path $work 'totalcmd'
 $unpacked=Join-Path $work 'installer'
 $pluginDir=Join-Path $work 'wcx'
+$experimentalPluginDir=Join-Path $work 'wcx-ci-new-caps'
 $logDir=Join-Path $work 'local-app-data'
-foreach($dir in @($work,$tcDir,$unpacked,$pluginDir,$logDir)) {
+foreach($dir in @($work,$tcDir,$unpacked,$pluginDir,$experimentalPluginDir,$logDir)) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
 }
 Copy-Item -LiteralPath (Resolve-Path -LiteralPath $Wcx32).Path -Destination (Join-Path $pluginDir 'ISO-WCX.wcx')
 Copy-Item -LiteralPath (Resolve-Path -LiteralPath $Wcx64).Path -Destination (Join-Path $pluginDir 'ISO-WCX.wcx64')
+# Keep the shipping binary exclusively in the 158 directory.
+# CI's 159 case uses a separately compiled x64 DLL whose actual
+# GetPackerCaps() also returns 159. Changing INI alone is NOT an A/B test.
+Copy-Item -LiteralPath (Join-Path $pluginDir 'ISO-WCX.wcx') -Destination (
+    Join-Path $experimentalPluginDir 'ISO-WCX.wcx')
+Copy-Item -LiteralPath (
+    (Resolve-Path -LiteralPath $Wcx64Experimental).Path) -Destination (
+    Join-Path $experimentalPluginDir 'ISO-WCX.wcx64')
 $plugin=Join-Path $pluginDir 'ISO-WCX.wcx'
+$experimentalPlugin=Join-Path $experimentalPluginDir 'ISO-WCX.wcx'
 $oldLocalApp=$env:LOCALAPPDATA
 $oldRepair=$env:ISO_WCX_DISABLE_ASSOC_REPAIR
 $env:LOCALAPPDATA=$logDir
@@ -636,6 +647,7 @@ function Test-Mask([int]$mask,[string]$source,[string]$templateWim) {
     $env:LOCALAPPDATA=$caseLocalApp
     $script:logFile=Join-Path $caseLocalApp 'ISO-WCX/Logs/edit-errors.log'
     # 159 is an EXPERIMENT in a private temporary INI only. Never deploy 159.
+    $casePlugin=if($mask -eq 159) { $experimentalPlugin } else { $plugin }
     $contents=@"
 [Configuration]
 OnlyOnce=0
@@ -647,7 +659,7 @@ FirstTime=0
 FirstTimeIconLib=0
 FirstLang=0
 [PackerPlugins]
-wim=$mask,$plugin
+wim=$mask,$casePlugin
 "@
     [IO.File]::WriteAllText($ini,$contents,[Text.Encoding]::Unicode)
     $case=[ordered]@{
@@ -679,6 +691,9 @@ wim=$mask,$plugin
         $case.observed_ini_binding=(@(Get-Content -LiteralPath $ini |
             Where-Object {$_ -match '^\s*wim\s*='} |
             Select-Object -First 1) -join '').Trim()
+        $case.navigation+= 'CI_Dll='+$casePlugin
+        Write-Host ("TC_F5_STAGE=PLUGIN_DLL mask="+$mask+
+            " ini="+$case.observed_ini_binding)
         # The official shareware start dialog is NOT a WIM/pack error.
         # Read its displayed required number and acknowledge that exact
         # button; keep GUI/INI results inconclusive if it cannot be read.
