@@ -226,6 +226,90 @@ public static class RealTcHostProbe {
         return new int[]{rect.left,rect.top,
                          rect.right-rect.left,rect.bottom-rect.top};
     }
+    // The user-facing F5 path is not always a "Copy" dialog. When
+    // PK_CAPS_NEW is enabled, TC can display the native "Pack files" dialog.
+    // Our earlier UIAutomation-only test did not confirm it and therefore
+    // never reached PackFilesW. Accept only a dialog owned by THIS exact TC
+    // process and explicitly targeting THIS disposable test.wim image.
+    public static string ConfirmDisposablePackFiles(uint targetPid,string expectedWim) {
+        int found=0, eligible=0, confirmed=0, okCount=0, cancelCount=0;
+        bool pathSeen=false;
+        string reason="no Pack files dialog";
+        EnumWindows((top,param)=>{
+            uint owner=0;
+            GetWindowThreadProcessId(top,out owner);
+            if(owner!=targetPid || !IsWindowVisible(top) ||
+                !CaptionOf(top).Equals("Pack files",
+                    StringComparison.OrdinalIgnoreCase))return true;
+            found++;
+            var controls=new List<Child>();
+            EnumChildWindows(top,(child,unused)=>{
+                var cls=new StringBuilder(128);
+                GetClassName(child,cls,cls.Capacity);
+                controls.Add(new Child {
+                    hwnd=child,kind=cls.ToString(),
+                    text=ReadChildCaption(child),enabled=IsWindowEnabled(child)
+                });
+                return true;
+            },IntPtr.Zero);
+            Child ok=null;
+            int localOk=0,localCancel=0;
+            bool localPath=false;
+            foreach(var control in controls) {
+                var text=control.text.Replace("&","").Trim();
+                if(text.IndexOf(expectedWim,
+                        StringComparison.OrdinalIgnoreCase)>=0)
+                    localPath=true;
+                if(control.kind.IndexOf("Button",
+                        StringComparison.OrdinalIgnoreCase)<0 ||
+                   !control.enabled)continue;
+                if(text.Equals("OK",StringComparison.OrdinalIgnoreCase)) {
+                    localOk++;ok=control;
+                }else if(text.Equals("Cancel",
+                          StringComparison.OrdinalIgnoreCase))
+                    localCancel++;
+            }
+            pathSeen|=localPath;
+            okCount+=localOk;
+            cancelCount+=localCancel;
+            if(localPath && localOk==1 && localCancel==1 && ok!=null) {
+                eligible++;
+                IntPtr result;
+                if(SendMessageTimeoutRaw(ok.hwnd,BM_CLICK,IntPtr.Zero,
+                    IntPtr.Zero,2,1500,out result)!=IntPtr.Zero) {
+                    confirmed++;
+                    reason="verified temporary WIM pack-dialog OK";
+                } else reason="native OK click timed out";
+            } else {
+                reason="Pack files dialog not unambiguous: path="+localPath+
+                    " ok="+localOk+" cancel="+localCancel;
+            }
+            return true;
+        },IntPtr.Zero);
+        return "TC_DISPOSABLE_PACK_DIALOG found="+found+
+            " eligible="+eligible+" clicked="+(found==1 && confirmed==1?1:0)+
+            " path_seen="+(pathSeen?1:0)+" ok="+okCount+
+            " cancel="+cancelCount+" reason="+reason;
+    }
+    // Detect the actual TC-owned pre-callback error, which can have title
+    // "wim", not "Function not supported". This is read-only.
+    public static string DetectHostUnsupported(uint targetPid) {
+        int found=0;
+        EnumWindows((top,param)=>{
+            uint owner=0;
+            GetWindowThreadProcessId(top,out owner);
+            if(owner!=targetPid || !IsWindowVisible(top))return true;
+            if(!CaptionOf(top).Equals("wim",StringComparison.OrdinalIgnoreCase))
+                return true;
+            EnumChildWindows(top,(child,unused)=>{
+                if(ReadChildCaption(child).IndexOf("Function not supported",
+                    StringComparison.OrdinalIgnoreCase)>=0)found++;
+                return true;
+            },IntPtr.Zero);
+            return true;
+        },IntPtr.Zero);
+        return "TC_HOST_UNSUPPORTED_DIALOG="+(found>0?1:0);
+    }
     // The official first-run TC window "Configuration" / "Layout" can
     // remain modal AFTER the publisher's numbered start reminder. This is
     // a separate dialog; if it stays open, cm_GoToDir and cm_Copy never
@@ -666,7 +750,8 @@ wim=$mask,$casePlugin
         mask=$mask; opened_wcx=$false; source_selected=$false
         active=$null; left_type=$null; right_type=$null
         right_archive_name_length=$null
-        f5_sent=$false; packfiles_callback=$false; events=@()
+        f5_sent=$false; packfiles_callback=$false
+        packfiles_success=$false; wim_contents_verified=$false; events=@()
         confirmation=$null; windows=@(); session=$null
         trial_acknowledged=$false; trial_dialog=@()
         observed_ini_binding=$null
@@ -888,7 +973,188 @@ wim=$mask,$casePlugin
             Command-Tc $window 905
             Start-Sleep -Milliseconds 400
         }
-        $confirmation=Confirm-Only-DisposableCopy $tc.Id $image
+        # Native F5/Pack dialog is a VCL Win32 window. UIAutomation can
+        # fail to expose its OK button even when the dialog is visible.
+        # Confirm ONLY if the dialog itself contains this disposable WIM
+        # path and a unique OK/Cancel pair. This is not a user-side action.
+        $nativePack=[RealTcHostProbe]::ConfirmDisposablePackFiles(
+            [uint32]$tc.Id,$image)
+        $case.navigation+= $nativePack
+        Write-Host ("TC_F5_STAGE=NATIVE_PACK mask="+$mask+" "+$nativePack)
+        if($nativePack -match 'clicked=1') {
+            $confirmation=[ordered]@{
+                prompted=$true; confirmed=$true
+                kind='native disposable WIM Pack files dialog accepted'
+                windows=@($nativePack); visible_labels=@()
+            }
+        } else {
+            $hostError=[RealTcHostProbe]::DetectHostUnsupported(
+                [uint32]$tc.Id)
+            $case.navigation+= $hostError
+            Write-Host ("TC_F5_STAGE=HOST_ERROR mask="+$mask+
+                " "+$hostError)
+            if($hostError -match '=1
+        if($confirmation.windows.Count -gt 0) {
+            Write-Host ("TC_F5_WINDOW_OBSERVATIONS mask="+$mask+
+                " "+(@($confirmation.windows) -join ' | '))
+        }
+        Start-Sleep -Seconds 5
+        $case.events=Tail-Wcx
+        $case.windows=Window-Names $tc.Id
+        $case.packfiles_callback=@($case.events |
+            Where-Object { $_ -match 'PackFiles(W| ANSI) entered' }).Count -gt 0
+        $case.packfiles_success=@($case.events |
+            Where-Object { $_ -match 'PackFilesW finished' -and
+                           $_ -match 'return=0' }).Count -gt 0
+        $case.wim_contents_verified=$false
+        if($case.packfiles_success) {
+            # A callback log alone is not proof of a successful F5 edit.
+            # Apply ONLY the ephemeral one-index WIM to a private CI folder
+            # and compare the actual file that was selected in TC.
+            $verify=Join-Path $caseDir 'verify-applied'
+            New-Item -ItemType Directory -Path $verify -Force | Out-Null
+            & "$env:WINDIR\System32\dism.exe" /English /Apply-Image (
+                "/ImageFile:$image") /Index:1 ("/ApplyDir:$verify") |
+                Out-Null
+            $actual=Join-Path $verify 'add.txt'
+            $baseline=Join-Path $verify 'original.txt'
+            $case.wim_contents_verified=($LASTEXITCODE -eq 0 -and
+                (Test-Path -LiteralPath $actual -PathType Leaf) -and
+                (Test-Path -LiteralPath $baseline -PathType Leaf) -and
+                ((Get-Content -LiteralPath $actual -Raw).Trim() -eq
+                   'Real TC F5 input file'))
+            Write-Host ("TC_F5_STAGE=VERIFY_WIM mask="+$mask+
+                " success="+$case.wim_contents_verified)
+        }
+        Write-Host ("TC_F5_STAGE=AFTER_F5 mask="+$mask+
+            " callback="+$case.packfiles_callback+
+            " outcome_hint="+$confirmation.kind)
+        $case.outcome=if($case.packfiles_success -and
+                            $case.wim_contents_verified) {
+            'PASS: real TC F5 invoked PackFilesW, returned 0, and WIM contents verified'
+        }elseif($case.packfiles_callback) {
+            'FAIL: PackFilesW entered but did not complete a verified WIM edit'
+        }elseif($confirmation.prompted -and -not $confirmation.confirmed) {
+            'INCONCLUSIVE: F5 raised a modal copy/error dialog without a confirmed WCX callback'
+        }elseif(-not $confirmation.prompted) {
+            'INCONCLUSIVE: cm_Copy posted but the host copy dialog was not observed'
+        }else {
+            'FAIL: host did not invoke PackFiles after disposable copy confirmation'
+        }
+        Write-Host ("TC_F5_STAGE=CASE_COMPLETE mask="+$mask+
+            " result="+$case.outcome)
+        return $case
+    } catch {
+        # Preserve partial F5 state, especially when an unstable GUI
+        # accessibility provider throws after cm_Copy was already sent.
+        $case.outcome='INCONCLUSIVE: TC host probe error: '+$_.Exception.Message
+        $case.events=Tail-Wcx
+        if($tc) {
+            $case.windows=Window-Names $tc.Id
+        }
+        Write-Warning ("TC_F5_STAGE=EXCEPTION mask="+$mask+
+            " f5_sent="+$case.f5_sent+
+            " reason="+$_.Exception.Message)
+        return $case
+    } finally {
+        if($tc) {
+            try { Save-RunnerScreenshot $caseDir } catch {}
+            try {
+                $tc.Refresh()
+                if(-not $tc.HasExited) { Stop-Process -Id $tc.Id -Force }
+            }catch{}
+        }
+    }
+}
+$failure=$null
+try {
+    # Official 11.58.1, released 2026-10-29; same build as the user's TC.
+    # SHA-256 independently published by Chocolatey TotalCommander 11.58.1.
+    $package=Join-Path $work 'tcmd115801x32_64.exe'
+    Invoke-WebRequest -Uri 'https://totalcommander.ch/115801/tcmd115801x32_64.exe' -OutFile $package -MaximumRedirection 4
+    $hash=(Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+    if($hash -ne '4696c3ac8a4b7f889e99e7348940e3e08f4b6cf62c4c572a71ae4252d813ea1d') {
+        throw "Official Total Commander installer checksum mismatch: $hash"
+    }
+    $sign=Get-AuthenticodeSignature -FilePath $package
+    if($sign.Status -ne 'Valid' -or
+       $sign.SignerCertificate.Subject -notmatch 'Ghisler Software') {
+        throw 'Original TC publisher signature missing or invalid'
+    }
+    & 7z x -y "-o$unpacked" $package | Out-Null
+    if($LASTEXITCODE -ne 0) { throw 'Cannot unpack original TC installer' }
+    # Combined x86/x64 installer can have more than one CAB. Extract
+    # independently and select only the x64 folder to avoid DLL mixing.
+    $cabs=@(Get-ChildItem -LiteralPath $unpacked -Recurse -File |
+            Where-Object {$_.Name -match '(?i)^INSTALL.*[.]CAB$'})
+    if($cabs.Count -eq 0) { throw 'Combined official TC INSTALL.CAB missing' }
+    for($i=0;$i -lt $cabs.Count;$i++) {
+        $dest=Join-Path $work ('cab-'+$i)
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        & 7z x -y "-o$dest" $cabs[$i].FullName | Out-Null
+        if($LASTEXITCODE -ne 0) { throw 'Cannot extract official TC CAB' }
+    }
+    $exe=@(Get-ChildItem -LiteralPath $work -Recurse -File -Filter 'TOTALCMD64.EXE' |
+           Where-Object {$_.FullName -match '[\\/]cab-[0-9]+[\\/]'})
+    if($exe.Count -ne 1) { throw ('Expected exactly one TC x64 executable, found '+$exe.Count) }
+    $sourceDir=$exe[0].Directory.FullName
+    Get-ChildItem -LiteralPath $sourceDir -Force |
+        Move-Item -Destination $tcDir -Force
+    if(-not (Test-Path -LiteralPath (Join-Path $tcDir 'TOTALCMD64.EXE'))) {
+        throw 'Portable official TC 11.58.1 x64 could not be assembled'
+    }
+    $source=Join-Path $work 'source'
+    $capture=Join-Path $work 'capture'
+    New-Item -ItemType Directory -Path $source,$capture -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $source 'add.txt'),
+        'Real TC F5 input file')
+    [IO.File]::WriteAllText((Join-Path $capture 'original.txt'),
+        'Disposable original WIM content')
+    $templateWim=Join-Path $work 'original-test.wim'
+    & "$env:WINDIR\System32\dism.exe" /English /Capture-Image ("/ImageFile:$templateWim") ("/CaptureDir:$capture") /Name:CI /Compress:None | Out-Null
+    if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $templateWim)) {
+        throw "DISM cannot capture disposable one-index WIM: $LASTEXITCODE"
+    }
+    $sha=(Get-FileHash -LiteralPath $templateWim -Algorithm SHA256).Hash
+    foreach($mask in @(158,159)) {
+        $report.cases+=Test-Mask $mask $source $templateWim
+    }
+    $report.template_wim_unchanged=
+        $sha -eq (Get-FileHash -LiteralPath $templateWim -Algorithm SHA256).Hash
+    if(-not $report.template_wim_unchanged) { throw 'WIM template unexpectedly changed' }
+    $attempted=@($report.cases | Where-Object {$_.f5_sent})
+    if($attempted.Count -eq 0) {
+        throw 'INCONCLUSIVE HOST: F5 was NOT SENT (trial prompt, main-window discovery or navigation blocked). Inspect session and window evidence.'
+    }
+    if(@($report.cases | Where-Object {$_.packfiles_success -and
+                                      $_.wim_contents_verified}).Count -eq 0) {
+        throw 'Real Total Commander F5 did not complete a verified WIM edit; review native host dialog and PackFilesW trace.'
+    }
+}catch{
+    $failure=$_.Exception.Message
+    $report.errors+= $failure
+    Write-Warning $failure
+}finally{
+    $env:LOCALAPPDATA=$oldLocalApp
+    $env:ISO_WCX_DISABLE_ASSOC_REPAIR=$oldRepair
+    $path=[IO.Path]::GetFullPath($ReportPath)
+    $folder=Split-Path -Parent $path
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path -Encoding UTF8
+    Write-Host ('REAL_TC_F5_REPORT=' + $path)
+    Get-Content -LiteralPath $path
+}
+if($failure) { exit 1 }
+) {
+                $confirmation=[ordered]@{
+                    prompted=$true; confirmed=$false
+                    kind='host reports Function not supported before WCX callback'
+                    windows=@($hostError); visible_labels=@()
+                }
+            } else {
+                $confirmation=Confirm-Only-DisposableCopy $tc.Id $image
+            }
+        }
         $case.confirmation=$confirmation
         Write-Host ("TC_F5_STAGE=CONFIRM mask="+$mask+
             " kind="+$confirmation.kind)
