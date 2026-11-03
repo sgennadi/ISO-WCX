@@ -568,6 +568,7 @@ public static class IsoWcxReadOnlyExportsV1 {
         $missing=@()
         $required=@('OpenArchiveW','ReadHeaderExW','ProcessFileW',
                     'GetPackerCaps','PackFilesW','PackFiles',
+                    'GetBackgroundFlags','PackSetDefaultParams',
                     'DeleteFilesW','CloseArchive','SetProcessDataProcW')
         foreach ($name in $required) {
             $pointer=[IsoWcxReadOnlyExportsV1]::GetProcAddress($loaded,$name)

@@ -16,6 +16,7 @@
 #include <commctrl.h>
 #include <algorithm>
 #include <cstdint>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -31,6 +32,18 @@ namespace {
 constexpr int E_END_ARCHIVE=10,E_BAD_ARCHIVE=13,E_UNKNOWN_FORMAT=14,E_ECREATE=16,E_EABORTED=21,E_SMALL_BUF=20,E_NO_FILES=22;
 constexpr int PK_SKIP=0,PK_TEST=1,PK_EXTRACT=2;
 constexpr int PK_CAPS_SEARCHTEXT=128;
+constexpr int PACKER_CAPABILITIES=PK_CAPS_SEARCHTEXT|2|4|8|16;
+static_assert(PACKER_CAPABILITIES==158);
+// Total Commander WCX SDK, PackDefaultParamStruct (ANSI-only).
+struct PackDefaultParamsA {
+    int size;
+    DWORD interface_low;
+    DWORD interface_high;
+    char default_ini_name[MAX_PATH];
+};
+static_assert(offsetof(PackDefaultParamsA,default_ini_name)==12);
+static_assert(sizeof(PackDefaultParamsA)==12+MAX_PATH);
+std::atomic<bool> tc_default_params_called{false};
 constexpr int E_NOT_SUPPORTED=24;
 constexpr int ATTR_DIR=0x10,ATTR_ARCHIVE=0x20;
 
@@ -283,9 +296,75 @@ void log_tc_f5_write_share_probe(const std::filesystem::path& image) noexcept {
             L"GENERIC_WRITE open/close succeeded; no image bytes written");
     }catch(...) {}
 }
+// Report the actual DLL loaded into the TC process. Host-side "Function
+// not supported" can be produced before WCX PackFilesW, so no packer
+// callback log is generated. This passive ABI snapshot cannot read TC's
+// private cached capability mask and must not be mistaken for host proof.
+void log_wcx_pack_entrypoint_state() noexcept {
+    if(!iso_wcx::edit_diagnostics::interactive_tc())return;
+    static std::atomic<bool> once{false};
+    if(once.exchange(true,std::memory_order_relaxed))return;
+    HMODULE module=nullptr;
+    if(!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&log_wcx_pack_entrypoint_state),
+            &module))
+        return;
+    const bool unicode=GetProcAddress(module,"PackFilesW")!=nullptr;
+    const bool ansi=GetProcAddress(module,"PackFiles")!=nullptr;
+    const bool caps=GetProcAddress(module,"GetPackerCaps")!=nullptr;
+    const bool defaults=GetProcAddress(module,"PackSetDefaultParams")!=nullptr;
+    wchar_t dll_path[32768]{};
+    const DWORD length=GetModuleFileNameW(module,dll_path,32768);
+    const std::wstring detail=
+        L"compiled_caps="+std::to_wstring(PACKER_CAPABILITIES)+
+        L" PK_CAPS_MODIFY=1"+
+        L" PackFilesW="+std::to_wstring(unicode?1:0)+
+        L" PackFiles="+std::to_wstring(ansi?1:0)+
+        L" GetPackerCaps="+std::to_wstring(caps?1:0)+
+        L" PackSetDefaultParams="+std::to_wstring(defaults?1:0)+
+        L" init_callback_seen="+std::to_wstring(
+            tc_default_params_called.load(std::memory_order_relaxed)?1:0)+
+        L" (host runtime cache not observable)";
+    iso_wcx::edit_diagnostics::log(
+        L"TC_WCX_ABI_PREFLIGHT",
+        length>0&&length<32768?std::filesystem::path(dll_path):
+                              std::filesystem::path{},
+        detail);
+}
 } // namespace
 
 #define WCX_EXPORT extern "C" __declspec(dllexport)
+// ANSI-only WCX v2.1 callback. TC supplies a suggested per-plugin INI
+// location in the same directory as its active settings, which can differ
+// from registry/AppData because of portable installations or /i=. Never
+// interpret DefaultIniName as the exact active wincmd.ini filename, and
+// never modify either INI merely because the plugin was loaded.
+WCX_EXPORT void __stdcall PackSetDefaultParams(PackDefaultParamsA* params) {
+    try {
+        if(!params ||
+           params->size < static_cast<int>(
+               offsetof(PackDefaultParamsA,default_ini_name)+1))
+            return;
+        tc_default_params_called.store(true,std::memory_order_relaxed);
+        const auto available=std::min<std::size_t>(
+            MAX_PATH,static_cast<std::size_t>(params->size)-
+            offsetof(PackDefaultParamsA,default_ini_name));
+        const auto* end=static_cast<const char*>(
+            std::memchr(params->default_ini_name,'\0',available));
+        if(!end)return;
+        const std::string name(
+            params->default_ini_name,
+            static_cast<std::size_t>(end-params->default_ini_name));
+        if(name.empty())return;
+        iso_wcx::edit_diagnostics::log(
+            L"TC_WCX_DEFAULT_INI_HINT",{},
+            L"plugin_config_hint="+from_bytes(name.c_str(),CP_ACP)+
+            L" (not necessarily the active wincmd.ini)");
+    }catch(...) {}
+}
+
 WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
@@ -303,6 +382,7 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
         const bool editing_image=
             wim_extension(path) || open_ext==L".iso" || open_ext==L".udf";
         if(editing_image) {
+            log_wcx_pack_entrypoint_state();
             iso_wcx::edit_diagnostics::log(
                 L"OpenArchiveW entered",path);
             iso_wcx::offer_tc_association_repair_once();
@@ -339,6 +419,7 @@ WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
         const bool editing_image=
             wim_extension(path) || open_ext==L".iso" || open_ext==L".udf";
         if(editing_image) {
+            log_wcx_pack_entrypoint_state();
             iso_wcx::edit_diagnostics::log(
                 L"OpenArchive ANSI entered",path);
             iso_wcx::offer_tc_association_repair_once();
@@ -911,7 +992,13 @@ WCX_EXPORT int __stdcall GetPackerCaps() {
     if(!logged.exchange(true,std::memory_order_relaxed))
         iso_wcx::edit_diagnostics::log(
             L"GetPackerCaps",{},L"return=158 (MODIFY|MULTIPLE|DELETE|OPTIONS|SEARCHTEXT)");
-    return PK_CAPS_SEARCHTEXT|2|4|8|16; // 158, no global BY_CONTENT ZIP interception
+    return PACKER_CAPABILITIES; // 158, no global BY_CONTENT ZIP interception
+}
+// Explicitly do not advertise re-entrant background edits while the native
+// WIM/ISO transactions and WCX progress callback are serialized. TC may
+// choose its normal foreground pack path; this is never PK_CAPS_MODIFY.
+WCX_EXPORT int __stdcall GetBackgroundFlags() {
+    return 0;
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
     if(!path)return 0;

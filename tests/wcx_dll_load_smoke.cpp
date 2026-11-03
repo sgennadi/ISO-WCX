@@ -4,6 +4,7 @@
 #endif
 #include <windows.h>
 #include <filesystem>
+#include <cstring>
 #include <iostream>
 
 int wmain(int argc,wchar_t** argv) {
@@ -22,7 +23,8 @@ int wmain(int argc,wchar_t** argv) {
     // F5 regression to be overlooked until the longer WIM integration test.
     for(const char* name : {"OpenArchiveW","ReadHeaderExW","ProcessFileW",
                             "PackFilesW","PackFiles","DeleteFilesW",
-                            "GetPackerCaps","CloseArchive",
+                            "GetPackerCaps","GetBackgroundFlags",
+                            "PackSetDefaultParams","CloseArchive",
                             "SetProcessDataProcW"}) {
         if(!GetProcAddress(module,name)) {
             std::wcerr << L"WCX_MISSING_EXPORT: " << name << std::endl;
@@ -31,6 +33,35 @@ int wmain(int argc,wchar_t** argv) {
         }
     }
     using GetCapsFn=int (__stdcall*)();
+    using InitFn=void (__stdcall*)(void*);
+    struct PluginInit {
+        int size;
+        DWORD interfaceLow;
+        DWORD interfaceHigh;
+        char defaultIni[MAX_PATH];
+    };
+    static_assert(sizeof(PluginInit)==272);
+    const auto init=reinterpret_cast<InitFn>(
+        GetProcAddress(module,"PackSetDefaultParams"));
+    const auto bg=reinterpret_cast<GetCapsFn>(
+        GetProcAddress(module,"GetBackgroundFlags"));
+    if(!init||!bg||bg()!=0) {
+        std::wcerr << L"WCX_INIT_OR_BACKGROUND_ABI_INVALID" << std::endl;
+        FreeLibrary(module);
+        return 6;
+    }
+    // Total Commander invokes the ANSI-only initialization callback before
+    // other WCX entrypoints. The plugin must accept a valid host structure,
+    // a null pointer, and a short future/past structure safely.
+    PluginInit params{};
+    params.size=sizeof(params);
+    params.interfaceHigh=2;
+    params.interfaceLow=21;
+    memcpy(params.defaultIni,"C:\\Temp\\iso-wcx-test.ini",25);
+    init(nullptr);
+    init(&params);
+    params.size=0;
+    init(&params);
     const auto caps=reinterpret_cast<GetCapsFn>(
         GetProcAddress(module,"GetPackerCaps"));
     if(!caps || caps()!=158 || (caps()&2)==0) {
