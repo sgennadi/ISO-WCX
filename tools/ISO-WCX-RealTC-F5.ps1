@@ -54,6 +54,28 @@ public static class RealTcHostProbe {
     private static extern int GetWindowText(IntPtr hwnd,StringBuilder buffer,int length);
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hwnd);
+    // Find by both class AND PID: FindWindow(TTOTAL_CMD) alone returns the
+    // first window globally, potentially a different TC process on a
+    // shared Windows runner. This previously produced a false no-window
+    // result even if the new test instance had an actual main window.
+    public static IntPtr FindOwnedMainWindow(uint targetPid) {
+        IntPtr result=IntPtr.Zero;
+        EnumWindows((hwnd,param)=>{
+            uint pid=0;
+            GetWindowThreadProcessId(hwnd,out pid);
+            if(pid==targetPid) {
+                var cls=new StringBuilder(256);
+                GetClassName(hwnd,cls,cls.Capacity);
+                if(cls.ToString().Equals("TTOTAL_CMD",
+                       StringComparison.OrdinalIgnoreCase)) {
+                    result=hwnd;
+                    return false;
+                }
+            }
+            return true;
+        },IntPtr.Zero);
+        return result;
+    }
     public static string[] OwnedTopLevelWindows(uint targetPid) {
         var windows=new List<string>();
         EnumWindows((hwnd,param)=>{
@@ -129,12 +151,23 @@ function Save-RunnerScreenshot([string]$folder) {
 }
 function Find-TcWindow([int]$targetPid) {
     for($i=0;$i -lt 50;$i++) {
-        $h=[RealTcHostProbe]::FindWindow('TTOTAL_CMD',$null)
-        if($h -ne [IntPtr]::Zero) {
-            [uint32]$owner=0
-            [void][RealTcHostProbe]::GetWindowThreadProcessId($h,[ref]$owner)
-            if($owner -eq $targetPid) { return $h }
-        }
+        $h=[RealTcHostProbe]::FindOwnedMainWindow([uint32]$targetPid)
+        if($h -ne [IntPtr]::Zero) { return $h }
+        # Some TC launcher conditions expose a main handle before the
+        # first visible TTOTAL_CMD. It is still PID-checked.
+        try {
+            $tc=Get-Process -Id $targetPid -ErrorAction Stop
+            $tc.Refresh()
+            if(-not $tc.HasExited -and
+               $tc.MainWindowHandle -ne [IntPtr]::Zero) {
+                [uint32]$owner=0
+                [void][RealTcHostProbe]::GetWindowThreadProcessId(
+                    $tc.MainWindowHandle,[ref]$owner)
+                if($owner -eq $targetPid) {
+                    return $tc.MainWindowHandle
+                }
+            }
+        }catch {}
         Start-Sleep -Milliseconds 300
     }
     return [IntPtr]::Zero
@@ -323,6 +356,7 @@ exts=wim*
         right_archive_name_length=$null
         f5_sent=$false; packfiles_callback=$false; events=@()
         confirmation=$null; windows=@(); session=$null
+        observed_ini_binding=$null
         outcome='not tested'
     }
     $tc=$null
@@ -335,6 +369,11 @@ exts=wim*
         Start-Sleep -Seconds 4
         $tc.Refresh()
         if($tc.HasExited){$case.outcome='TC exited early';return $case}
+        # Capture whether TC rewrote the disposable 159 mask to 158 at
+        # registration. Without this, the A/B result is misleading.
+        $case.observed_ini_binding=(@(Get-Content -LiteralPath $ini |
+            Where-Object {$_ -match '^\s*wim\s*='} |
+            Select-Object -First 1) -join '').Trim()
         [void](Allow-RequestedTrialButton $tc.Id)
         Start-Sleep -Seconds 3
         $window=Find-TcWindow $tc.Id
