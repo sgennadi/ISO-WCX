@@ -1015,11 +1015,32 @@ wim=$mask,$casePlugin
         $case.windows=Window-Names $tc.Id
         $case.packfiles_callback=@($case.events |
             Where-Object { $_ -match 'PackFiles(W| ANSI) entered' }).Count -gt 0
+        $case.packfiles_success=@($case.events |
+            Where-Object { $_ -match 'PackFilesW finished' -and
+                           $_ -match 'return=0' }).Count -gt 0
+        $case.wim_contents_verified=$false
+        if($case.packfiles_success) {
+            $verify=Join-Path $caseDir 'verify-applied'
+            New-Item -ItemType Directory -Path $verify -Force | Out-Null
+            & "$env:WINDIR\System32\dism.exe" /English /Apply-Image "/ImageFile:$image" /Index:1 "/ApplyDir:$verify" | Out-Null
+            $actual=Join-Path $verify 'add.txt'
+            $baseline=Join-Path $verify 'original.txt'
+            $case.wim_contents_verified=($LASTEXITCODE -eq 0 -and
+                (Test-Path -LiteralPath $actual -PathType Leaf) -and
+                (Test-Path -LiteralPath $baseline -PathType Leaf) -and
+                ((Get-Content -LiteralPath $actual -Raw).Trim() -eq
+                  'Real TC F5 input file'))
+            Write-Host ("TC_F5_STAGE=VERIFY_WIM mask="+$mask+
+                " success="+$case.wim_contents_verified)
+        }
         Write-Host ("TC_F5_STAGE=AFTER_F5 mask="+$mask+
             " callback="+$case.packfiles_callback+
             " outcome_hint="+$confirmation.kind)
-        $case.outcome=if($case.packfiles_callback) {
-            'PASS: real Total Commander invoked PackFiles'
+        $case.outcome=if($case.packfiles_success -and
+                            $case.wim_contents_verified) {
+            'PASS: real TC F5 wrote WIM and content verified'
+        }elseif($case.packfiles_callback) {
+            'FAIL: WCX callback invoked but WIM write not verified'
         }elseif($confirmation.prompted -and -not $confirmation.confirmed) {
             'INCONCLUSIVE: F5 raised a modal copy/error dialog without a confirmed WCX callback'
         }elseif(-not $confirmation.prompted) {
@@ -1112,8 +1133,9 @@ try {
     if($attempted.Count -eq 0) {
         throw 'INCONCLUSIVE HOST: F5 was NOT SENT (trial prompt, main-window discovery or navigation blocked). Inspect session and window evidence.'
     }
-    if(@($report.cases | Where-Object {$_.packfiles_callback}).Count -eq 0) {
-        throw 'F5 was sent but no PackFiles callback observed; inspect confirmation state and host windows.'
+    if(@($report.cases | Where-Object {$_.packfiles_success -and
+                                      $_.wim_contents_verified}).Count -eq 0) {
+        throw 'Real TC F5 did not complete a verified WIM edit; inspect host trace.'
     }
 }catch{
     $failure=$_.Exception.Message
