@@ -34,14 +34,16 @@ constexpr int PK_SKIP=0,PK_TEST=1,PK_EXTRACT=2;
 constexpr int PK_CAPS_SEARCHTEXT=128;
 constexpr int PACKER_CAPABILITIES_BASE=PK_CAPS_SEARCHTEXT|2|4|8|16;
 static_assert(PACKER_CAPABILITIES_BASE==158);
-// Strictly CI-only A/B comparison. Shipping DLL stays 158 and does not
-// advertise the ability to create new ISO/WIM archives.
-#if defined(ISO_WCX_CI_CAPS_NEW_EXPERIMENT)
-constexpr int PACKER_CAPABILITIES=PACKER_CAPABILITIES_BASE|1;
-static_assert(PACKER_CAPABILITIES==159);
-#else
+// Actual TC 11.58.1 F5 tests verified: 158 is rejected by the host,
+// while 159 reaches PackFilesW and writes a valid WIM. NEW=1 enables F5
+// routing into an EXISTING image; creating a new ISO/WIM is still rejected
+// by do_edit before altering source files. Only CI builds the old control.
+#if defined(ISO_WCX_CI_CAPS_OLD_CONTROL)
 constexpr int PACKER_CAPABILITIES=PACKER_CAPABILITIES_BASE;
 static_assert(PACKER_CAPABILITIES==158);
+#else
+constexpr int PACKER_CAPABILITIES=PACKER_CAPABILITIES_BASE|1;
+static_assert(PACKER_CAPABILITIES==159);
 #endif
 // Total Commander WCX SDK, PackDefaultParamStruct (ANSI-only).
 struct PackDefaultParamsA {
@@ -1003,13 +1005,13 @@ WCX_EXPORT int __stdcall GetPackerCaps() {
             L"GetPackerCaps",{},
             L"return="+std::to_wstring(PACKER_CAPABILITIES)+
             L" (MODIFY|MULTIPLE|DELETE|OPTIONS|SEARCHTEXT"+
-#if defined(ISO_WCX_CI_CAPS_NEW_EXPERIMENT)
-            L"|NEW TEST-ONLY"
+#if defined(ISO_WCX_CI_CAPS_OLD_CONTROL)
+            L"|OLD CI-ONLY CONTROL"
 #else
-            L""
+            L"|NEW ENABLES F5"
 #endif
             L")");
-    return PACKER_CAPABILITIES; // 158, no global BY_CONTENT ZIP interception
+    return PACKER_CAPABILITIES; // 159, BY_CONTENT (64) remains disabled
 }
 // Explicitly do not advertise re-entrant background edits while the native
 // WIM/ISO transactions and WCX progress callback are serialized. TC may
