@@ -64,12 +64,12 @@ int wmain(int argc,wchar_t** argv) {
     init(&params);
     const auto caps=reinterpret_cast<GetCapsFn>(
         GetProcAddress(module,"GetPackerCaps"));
-    if(!caps || caps()!=158 || (caps()&2)==0) {
-        std::wcerr << L"WCX_CAPS_INVALID expected 158 with PK_CAPS_MODIFY" << std::endl;
+    if(!caps || caps()!=159 || (caps()&2)==0) {
+        std::wcerr << L"WCX_CAPS_INVALID expected 159 with PK_CAPS_MODIFY" << std::endl;
         FreeLibrary(module);
         return 5;
     }
-    std::wcerr << L"WCX_ABI_PACKING_EXPORTS_OK caps=158" << std::endl;
+    std::wcerr << L"WCX_ABI_PACKING_EXPORTS_OK caps=159" << std::endl;
     if(!FreeLibrary(module))return 4;
     std::wcerr << L"WCX_UNLOAD_OK" << std::endl;
     return 0;
