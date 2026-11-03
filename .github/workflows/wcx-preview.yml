@@ -200,6 +200,29 @@ jobs:
             build/Release/ISO-WCX.wcx64
           if-no-files-found: error
           retention-days: 14
+      # Perform this build only AFTER uploading the real 158 shipping DLL.
+      # Its capability mask 159 is deliberately NOT bundled in the user
+      # installer, published release or normal preview binary artifact.
+      - name: Build CI-only x64 GetPackerCaps 159 comparison
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DISO_WCX_CI_CAPS_NEW_EXPERIMENT=ON
+          if ($LASTEXITCODE -ne 0) { throw 'CI-only 159 configuration failed' }
+          cmake --build build --config Release --target ISO-WCX --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'CI-only 159 module build failed' }
+          if (-not (Test-Path -LiteralPath build/Release/ISO-WCX.wcx64)) {
+            throw 'CI-only 159 module missing'
+          }
+          Write-Host 'Experimental GetPackerCaps 159 module built; never ship this artifact'
+      - name: Upload CI-only 159 capability comparison
+        if: matrix.arch == 'x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ISO-WCX-x64-159-F5-CI-only
+          path: build/Release/ISO-WCX.wcx64
+          if-no-files-found: error
+          retention-days: 2
   linux:
     name: Linux core tests
     runs-on: ubuntu-24.04
@@ -332,6 +355,10 @@ jobs:
         with:
           name: ISO-WCX-x64-preview
           path: native
+      - uses: actions/download-artifact@v8
+        with:
+          name: ISO-WCX-x64-159-F5-CI-only
+          path: native-experimental
       - name: Validate F5 harness with Windows PowerShell 5.1
         shell: powershell
         run: |
@@ -367,7 +394,7 @@ jobs:
         # instead of occupying a runner until the 25-minute job timeout.
         timeout-minutes: 8
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/ISO-WCX-RealTC-F5.ps1 -Wcx32 native/ISO-WCX.wcx -Wcx64 native/ISO-WCX.wcx64 -ReportPath tc-f5-evidence/real-tc-f5.json
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/ISO-WCX-RealTC-F5.ps1 -Wcx32 native/ISO-WCX.wcx -Wcx64 native/ISO-WCX.wcx64 -Wcx64Experimental native-experimental/ISO-WCX.wcx64 -ReportPath tc-f5-evidence/real-tc-f5.json
       - name: Preserve read-only host evidence (no user files)
         if: always()
         uses: actions/upload-artifact@v7
