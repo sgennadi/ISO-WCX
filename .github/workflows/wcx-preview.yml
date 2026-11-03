@@ -375,7 +375,9 @@ jobs:
           name: ISO-WCX-RealTC-F5-Evidence
           path: |
             tc-f5-evidence/real-tc-f5.json
+            ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-158/before-f5.png
             ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-158/totalcmd-screen.png
+            ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-159/before-f5.png
             ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-159/totalcmd-screen.png
           if-no-files-found: warn
           retention-days: 14
