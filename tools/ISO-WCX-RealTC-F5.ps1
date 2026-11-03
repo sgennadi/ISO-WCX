@@ -128,7 +128,7 @@ public static class RealTcHostProbe {
             }
             string text=captions.ToString();
             var match=Regex.Match(text,
-                @"Pleases+presss+buttons+Nr.?s*([123])s+tos+starts+thes+program",
+                @"Please\s+press\s+button\s+Nr\.?\s*([123])\s+to\s+start\s+the\s+program",
                 RegexOptions.IgnoreCase);
             results.Add("trial_dialog="+title+
                 " child_count="+controls.Count+
@@ -166,6 +166,54 @@ public static class RealTcHostProbe {
         },IntPtr.Zero);
         return "NATIVE_TRIAL_CLICKED="+(clicked?"1":"0")+
             " "+String.Join(" | ",results.ToArray());
+    }
+    // Return the bounds only if exactly one visible owner-process dialog
+    // contains the three publisher-provided shareware number buttons.
+    // A separate TC main window may have the same title: do not count it
+    // as an ambiguous trial dialog or OCR the whole desktop.
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowRect {
+        public int left, top, right, bottom;
+    }
+    [DllImport("user32.dll",SetLastError=true)]
+    private static extern bool GetWindowRect(IntPtr hwnd,out WindowRect rect);
+    private static bool HasTrialNumberButtons(IntPtr top) {
+        bool one=false,two=false,three=false;
+        EnumChildWindows(top,(child,param)=>{
+            if(!IsWindowEnabled(child))return true;
+            var cls=new StringBuilder(128);
+            GetClassName(child,cls,cls.Capacity);
+            if(cls.ToString().IndexOf("Button",
+                 StringComparison.OrdinalIgnoreCase)<0)return true;
+            string name=ReadChildCaption(child).Replace("&","").Trim();
+            if(name=="1")one=true;
+            if(name=="2")two=true;
+            if(name=="3")three=true;
+            return true;
+        },IntPtr.Zero);
+        return one && two && three;
+    }
+    public static int[] UniqueTrialDialogBounds(uint targetPid) {
+        IntPtr match=IntPtr.Zero;
+        int count=0;
+        EnumWindows((top,param)=>{
+            uint owner=0;
+            GetWindowThreadProcessId(top,out owner);
+            if(owner!=targetPid || !IsWindowVisible(top) ||
+               !CaptionOf(top).Equals("Total Commander",
+                   StringComparison.OrdinalIgnoreCase) ||
+               !HasTrialNumberButtons(top))return true;
+            match=top;
+            count++;
+            return true;
+        },IntPtr.Zero);
+        if(count!=1)return new int[0];
+        WindowRect rect;
+        if(!GetWindowRect(match,out rect) ||
+           rect.right<=rect.left || rect.bottom<=rect.top)
+           return new int[0];
+        return new int[]{rect.left,rect.top,
+                         rect.right-rect.left,rect.bottom-rect.top};
     }
     // Find by both class AND PID: FindWindow(TTOTAL_CMD) alone returns the
     // first window globally, potentially a different TC process on a
@@ -263,24 +311,12 @@ function Save-RunnerScreenshot([string]$folder) {
     }catch{}
 }
 function Find-TcWindow([int]$targetPid) {
+    # Only the real TTOTAL_CMD class accepts WM_USER+50/51 commands.
+    # Process.MainWindowHandle may instead be the shareware trial dialog;
+    # posting cm_Copy/GoToDir there silently does nothing.
     for($i=0;$i -lt 50;$i++) {
         $h=[RealTcHostProbe]::FindOwnedMainWindow([uint32]$targetPid)
         if($h -ne [IntPtr]::Zero) { return $h }
-        # Some TC launcher conditions expose a main handle before the
-        # first visible TTOTAL_CMD. It is still PID-checked.
-        try {
-            $tc=Get-Process -Id $targetPid -ErrorAction Stop
-            $tc.Refresh()
-            if(-not $tc.HasExited -and
-               $tc.MainWindowHandle -ne [IntPtr]::Zero) {
-                [uint32]$owner=0
-                [void][RealTcHostProbe]::GetWindowThreadProcessId(
-                    $tc.MainWindowHandle,[ref]$owner)
-                if($owner -eq $targetPid) {
-                    return $tc.MainWindowHandle
-                }
-            }
-        }catch {}
         Start-Sleep -Milliseconds 300
     }
     return [IntPtr]::Zero
@@ -304,12 +340,17 @@ function Command-Tc([IntPtr]$h,[int]$command) {
 # Clicking a numeric button is authorized only after an explicit digit 1/2/3
 # is recognized in the complete publisher instruction on the screenshot.
 function Read-RequestedTrialDigit([int]$tcPid,[string]$caseDir) {
-    $result=[ordered]@{digit=''; reason='not scanned'; instruction=''}
-    $windows=@([RealTcHostProbe]::OwnedTopLevelWindows(
+    $result=[ordered]@{
+        digit=''; reason='not scanned'; instruction=''; bounds=@()
+    }
+    # A TC main window and the shareware dialog can share the same title.
+    # Identify the dialog by its three enabled number buttons, not title
+    # count. Refuse OCR if multiple plausible prompts are present.
+    $bounds=@([RealTcHostProbe]::UniqueTrialDialogBounds(
         [uint32]$tcPid))
-    if(@($windows | Where-Object {
-            $_ -match 'class=.*title=Total Commander\s*$'}).Count -ne 1) {
-        $result.reason='No unique visible Total Commander trial dialog'
+    $result.bounds=$bounds
+    if($bounds.Count -ne 4) {
+        $result.reason='No unique visible numbered Total Commander trial dialog'
         return $result
     }
     $exe=(Get-Command 'tesseract.exe' -ErrorAction SilentlyContinue)
@@ -330,21 +371,46 @@ function Read-RequestedTrialDigit([int]$tcPid,[string]$caseDir) {
         $result.reason='Could not capture trial screenshot'
         return $result
     }
+    $cropped=Join-Path $caseDir 'trial-dialog.png'
     try {
-        # Run the OCR process once per case, never poll or repeatedly decode.
-        $lines=@(& $engine $picture 'stdout' '--psm' '3' '-l' 'eng' 2>$null)
-        $text=[string]::Join(' ',$lines)
-        $match=[regex]::Match($text,
+        Add-Type -AssemblyName System.Drawing
+        Add-Type -AssemblyName System.Windows.Forms
+        $screen=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        $bitmap=[System.Drawing.Bitmap]::new($picture)
+        try {
+            $desired=[System.Drawing.Rectangle]::new(
+                [int]$bounds[0]-$screen.Left,
+                [int]$bounds[1]-$screen.Top,
+                [int]$bounds[2],[int]$bounds[3])
+            $limits=[System.Drawing.Rectangle]::new(
+                0,0,$bitmap.Width,$bitmap.Height)
+            $region=[System.Drawing.Rectangle]::Intersect(
+                $desired,$limits)
+            if($region.Width -lt 80 -or $region.Height -lt 45) {
+                $result.reason='Trial dialog outside captured CI screen'
+                return $result
+            }
+            $crop=$bitmap.Clone($region,$bitmap.PixelFormat)
+            try {
+                $crop.Save($cropped,
+                    [System.Drawing.Imaging.ImageFormat]::Png)
+            }finally { $crop.Dispose() }
+        }finally { $bitmap.Dispose() }
+        # Exactly one OCR read per case, limited to the publisher dialog.
+        # Never infer the required number from the buttons themselves.
+        $lines=@(& $engine $cropped 'stdout' '--psm' '6' '-l' 'eng' 2>$null)
+        $recognized=[string]::Join(' ',$lines)
+        $match=[regex]::Match($recognized,
             '(?i)\bPlease\s+press\s+button\s+Nr\.?\s*([123])\s+to\s+start\s+the\s+program\b')
         $result.instruction=$match.Value
         if($match.Success) {
             $result.digit=$match.Groups[1].Value
-            $result.reason='Publisher instruction recognized in CI screenshot'
+            $result.reason='Publisher instruction recognized in cropped CI screenshot'
         }else {
-            $result.reason='OCR did not recognize explicit trial instruction'
+            $result.reason='Cropped OCR did not recognize explicit trial instruction'
         }
     }catch {
-        $result.reason='OCR unavailable: '+$_.Exception.Message
+        $result.reason='Trial OCR unavailable: '+$_.Exception.Message
     }
     return $result
 }
@@ -565,7 +631,8 @@ exts=wim*
         }else {
             $ocr=Read-RequestedTrialDigit $tc.Id $caseDir
             $case.trial_dialog+= (
-                'TRIAL_OCR='+$ocr.reason+' requested_digit='+$ocr.digit)
+                'TRIAL_OCR='+$ocr.reason+' requested_digit='+$ocr.digit+
+                ' bounds='+(@($ocr.bounds) -join ','))
             if($ocr.digit -match '^[123]$') {
                 $verified=[RealTcHostProbe]::ClickRequestedTrialButton(
                     [uint32]$tc.Id,[string]$ocr.digit)
@@ -582,6 +649,13 @@ exts=wim*
             }
         }
         $case.trial_acknowledged=$trialCompleted
+        if(-not $trialCompleted) {
+            $case.session=Session-Snapshot $tc.Id
+            $case.windows=$case.session.top_level_windows
+            $case.events=Tail-Wcx
+            $case.outcome='INCONCLUSIVE: publisher trial startup prompt not acknowledged; F5 NOT SENT'
+            return $case
+        }
         Start-Sleep -Seconds 1
         $window=Find-TcWindow $tc.Id
         if($window -eq [IntPtr]::Zero) {
@@ -754,7 +828,7 @@ try {
     if(-not $report.template_wim_unchanged) { throw 'WIM template unexpectedly changed' }
     $attempted=@($report.cases | Where-Object {$_.f5_sent})
     if($attempted.Count -eq 0) {
-        throw 'INCONCLUSIVE HOST: no live TC main window was available; F5 was NOT SENT. Inspect session and window evidence.'
+        throw 'INCONCLUSIVE HOST: F5 was NOT SENT (trial prompt, main-window discovery or navigation blocked). Inspect session and window evidence.'
     }
     if(@($report.cases | Where-Object {$_.packfiles_callback}).Count -eq 0) {
         throw 'F5 was sent but no PackFiles callback observed; inspect confirmation state and host windows.'
