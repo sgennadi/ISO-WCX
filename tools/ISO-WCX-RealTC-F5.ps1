@@ -39,10 +39,39 @@ $report=[ordered]@{
 }
 Add-Type -TypeDefinition @'
 using System;
+using System.Text;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class RealTcHostProbe {
     [DllImport("user32.dll",EntryPoint="FindWindowW",CharSet=CharSet.Unicode)]
     public static extern IntPtr FindWindow(string className,string title);
+    private delegate bool EnumWindowsDelegate(IntPtr hwnd,IntPtr param);
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsDelegate callback,IntPtr param);
+    [DllImport("user32.dll",EntryPoint="GetClassNameW",CharSet=CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hwnd,StringBuilder buffer,int length);
+    [DllImport("user32.dll",EntryPoint="GetWindowTextW",CharSet=CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hwnd,StringBuilder buffer,int length);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hwnd);
+    public static string[] OwnedTopLevelWindows(uint targetPid) {
+        var windows=new List<string>();
+        EnumWindows((hwnd,param)=>{
+            uint owner=0;
+            GetWindowThreadProcessId(hwnd,out owner);
+            if(owner==targetPid) {
+                var cls=new StringBuilder(256);
+                var name=new StringBuilder(1024);
+                GetClassName(hwnd,cls,cls.Capacity);
+                GetWindowText(hwnd,name,name.Capacity);
+                windows.Add("hwnd="+hwnd.ToInt64().ToString()+
+                    " class="+cls+" visible="+IsWindowVisible(hwnd).ToString()+
+                    " title="+name);
+            }
+            return true;
+        },IntPtr.Zero);
+        return windows.ToArray();
+    }
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
     [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",SetLastError=true)]
@@ -52,6 +81,52 @@ public static class RealTcHostProbe {
     public static extern bool PostMessage(IntPtr hwnd,uint msg,UIntPtr wp,IntPtr lp);
 }
 '@
+function Session-Snapshot([int]$targetPid) {
+    $info=[ordered]@{
+        runner_user_interactive=[Environment]::UserInteractive
+        powershell_session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+        tc_session=$null
+        tc_has_exited=$null
+        tc_main_window_handle=0
+        tc_main_window_title=''
+        top_level_windows=@()
+        automation_windows=@()
+    }
+    try {
+        $proc=Get-Process -Id $targetPid -ErrorAction Stop
+        $proc.Refresh()
+        $info.tc_session=$proc.SessionId
+        $info.tc_has_exited=$proc.HasExited
+        if(-not $proc.HasExited) {
+            $info.tc_main_window_handle=$proc.MainWindowHandle.ToInt64()
+            $info.tc_main_window_title=$proc.MainWindowTitle
+            $info.top_level_windows=@(
+                [RealTcHostProbe]::OwnedTopLevelWindows([uint32]$targetPid))
+            $info.automation_windows=@(Window-Names $targetPid)
+        }
+    }catch {
+        $info.automation_windows=@('Process inspection failed: '+$_.Exception.Message)
+    }
+    return $info
+}
+function Save-RunnerScreenshot([string]$folder) {
+    try {
+        Add-Type -AssemblyName System.Drawing
+        Add-Type -AssemblyName System.Windows.Forms
+        $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        if($bounds.Width -le 0 -or $bounds.Height -le 0) { return }
+        $bitmap=New-Object Drawing.Bitmap($bounds.Width,$bounds.Height)
+        try {
+            $drawing=[Drawing.Graphics]::FromImage($bitmap)
+            try {
+                $drawing.CopyFromScreen($bounds.Left,$bounds.Top,0,0,
+                    $bitmap.Size)
+            }finally { $drawing.Dispose() }
+            $bitmap.Save((Join-Path $folder 'totalcmd-screen.png'),
+                [Drawing.Imaging.ImageFormat]::Png)
+        }finally { $bitmap.Dispose() }
+    }catch{}
+}
 function Find-TcWindow([int]$targetPid) {
     for($i=0;$i -lt 50;$i++) {
         $h=[RealTcHostProbe]::FindWindow('TTOTAL_CMD',$null)
@@ -247,7 +322,8 @@ exts=wim*
         active=$null; left_type=$null; right_type=$null
         right_archive_name_length=$null
         f5_sent=$false; packfiles_callback=$false; events=@()
-        confirmation=$null; windows=@(); outcome='not tested'
+        confirmation=$null; windows=@(); session=$null
+        outcome='not tested'
     }
     $tc=$null
     try {
@@ -263,7 +339,10 @@ exts=wim*
         Start-Sleep -Seconds 3
         $window=Find-TcWindow $tc.Id
         if($window -eq [IntPtr]::Zero) {
-            $case.outcome='TC main window unavailable (trial prompt/CI desktop)'
+            $case.session=Session-Snapshot $tc.Id
+            $case.windows=$case.session.top_level_windows
+            $case.events=Tail-Wcx
+            $case.outcome='INCONCLUSIVE: no TC main window; F5 NOT SENT (trial or desktop blocker)'
             return $case
         }
         $case.active=Query-Tc $window 1000
@@ -307,6 +386,7 @@ exts=wim*
         return $case
     } finally {
         if($tc) {
+            try { Save-RunnerScreenshot $caseDir } catch {}
             try {
                 $tc.Refresh()
                 if(-not $tc.HasExited) { Stop-Process -Id $tc.Id -Force }
@@ -370,8 +450,12 @@ try {
     $report.template_wim_unchanged=
         $sha -eq (Get-FileHash -LiteralPath $templateWim -Algorithm SHA256).Hash
     if(-not $report.template_wim_unchanged) { throw 'WIM template unexpectedly changed' }
+    $attempted=@($report.cases | Where-Object {$_.f5_sent})
+    if($attempted.Count -eq 0) {
+        throw 'INCONCLUSIVE HOST: no live TC main window was available; F5 was NOT SENT. Inspect session and window evidence.'
+    }
     if(@($report.cases | Where-Object {$_.packfiles_callback}).Count -eq 0) {
-        throw 'No real TC F5 PackFiles callback observed; review JSON evidence'
+        throw 'F5 was sent but no PackFiles callback observed; inspect confirmation state and host windows.'
     }
 }catch{
     $failure=$_.Exception.Message
