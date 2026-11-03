@@ -98,7 +98,9 @@ public static class RealTcHostProbe {
     // This does not suppress the publisher's reminder: it reads the literal
     // requested number and clicks ONLY that enabled button in the SAME
     // top-level "Total Commander" dialog. Otherwise it refuses.
-    public static string ClickRequestedTrialButton(uint targetPid) {
+    // explicitDigit can be supplied ONLY by the strict screenshot/OCR
+    // reader after it observed the publisher's entire imperative text.
+    public static string ClickRequestedTrialButton(uint targetPid,string explicitDigit) {
         var results=new List<string>();
         bool clicked=false;
         EnumWindows((top,param)=>{
@@ -131,13 +133,18 @@ public static class RealTcHostProbe {
             results.Add("trial_dialog="+title+
                 " child_count="+controls.Count+
                 " explicit_instruction="+match.Success+
+                " trusted_ocr_digit="+(explicitDigit ?? "")+
                 " text="+text.Substring(0,Math.Min(text.Length,330)));
-            if(!match.Success)return true;
-            string digit=match.Groups[1].Value;
+            if(!match.Success &&
+               !(explicitDigit=="1" || explicitDigit=="2" ||
+                 explicitDigit=="3"))return true;
+            string digit=match.Success?match.Groups[1].Value:explicitDigit;
             Child candidate=null;
             int count=0;
             foreach(var control in controls) {
-                if(control.text.Trim()!=digit ||
+                // Total Commander Win32 shortcut captions contain '&1',
+                // '&2', '&3', not merely '1', '2', '3'.
+                if(control.text.Replace("&","").Trim()!=digit ||
                    control.kind.IndexOf("Button",
                        StringComparison.OrdinalIgnoreCase)<0 ||
                    !control.enabled)continue;
@@ -290,6 +297,56 @@ function Command-Tc([IntPtr]$h,[int]$command) {
        [UIntPtr]::new([uint32]$command),[IntPtr]::Zero)) {
         throw "Cannot send internal TC command $command"
     }
+}
+# The trial reminder's instruction is owner-drawn; neither WM_GETTEXT nor
+# UIAutomation exposes "Please press button Nr. N". Read exactly ONE
+# screenshot with an OCR engine installed on CI (not shipped with ISO-WCX).
+# Clicking a numeric button is authorized only after an explicit digit 1/2/3
+# is recognized in the complete publisher instruction on the screenshot.
+function Read-RequestedTrialDigit([int]$tcPid,[string]$caseDir) {
+    $result=[ordered]@{digit=''; reason='not scanned'; instruction=''}
+    $windows=@([RealTcHostProbe]::OwnedTopLevelWindows(
+        [uint32]$tcPid))
+    if(@($windows | Where-Object {
+            $_ -match 'class=.*title=Total Commander\s*$'}).Count -ne 1) {
+        $result.reason='No unique visible Total Commander trial dialog'
+        return $result
+    }
+    $exe=(Get-Command 'tesseract.exe' -ErrorAction SilentlyContinue)
+    if($null -eq $exe) {
+        $candidate='C:\Program Files\Tesseract-OCR\tesseract.exe'
+        if(Test-Path -LiteralPath $candidate) {
+            $engine=$candidate
+        }else {
+            $result.reason='OCR engine unavailable on CI'
+            return $result
+        }
+    }else {
+        $engine=$exe.Source
+    }
+    Save-RunnerScreenshot $caseDir
+    $picture=Join-Path $caseDir 'totalcmd-screen.png'
+    if(-not (Test-Path -LiteralPath $picture)) {
+        $result.reason='Could not capture trial screenshot'
+        return $result
+    }
+    try {
+        # Run the OCR process once per case, never poll or repeatedly decode.
+        $lines=@(& $engine $picture 'stdout' '--psm' '3' '-l' 'eng' 2>$null)
+        $text=[string]::Join(' ',$lines)
+        $match=[regex]::Match($text,
+            '(?i)\bPlease\s+press\s+button\s+Nr\.?\s*([123])\s+to\s+start\s+the\s+program\b')
+        $result.instruction=$match.Value
+        if($match.Success) {
+            $result.digit=$match.Groups[1].Value
+            $result.reason='Publisher instruction recognized in CI screenshot'
+        }else {
+            $result.reason='OCR did not recognize explicit trial instruction'
+        }
+    }catch {
+        $result.reason='OCR unavailable: '+$_.Exception.Message
+    }
+    return $result
 }
 function Allow-RequestedTrialButton([int]$tcPid) {
     # Acknowledge only the exact shareware number displayed by TC.
@@ -498,22 +555,31 @@ exts=wim*
         # button; keep GUI/INI results inconclusive if it cannot be read.
         $case.trial_dialog=@()
         $trialCompleted=$false
-        for($trialAttempt=0;$trialAttempt -lt 12;$trialAttempt++) {
-            $native=[RealTcHostProbe]::ClickRequestedTrialButton(
-                [uint32]$tc.Id)
-            $case.trial_dialog+= $native
-            if($native -match '^NATIVE_TRIAL_CLICKED=1') {
-                $trialCompleted=$true
-                break
+        # Native text retrieval first, owner-drawn screenshot OCR once as
+        # a strict fallback. Do not assume the requested number is always 1.
+        $native=[RealTcHostProbe]::ClickRequestedTrialButton(
+            [uint32]$tc.Id,'')
+        $case.trial_dialog+= $native
+        if($native -match '^NATIVE_TRIAL_CLICKED=1') {
+            $trialCompleted=$true
+        }else {
+            $ocr=Read-RequestedTrialDigit $tc.Id $caseDir
+            $case.trial_dialog+= (
+                'TRIAL_OCR='+$ocr.reason+' requested_digit='+$ocr.digit)
+            if($ocr.digit -match '^[123]$') {
+                $verified=[RealTcHostProbe]::ClickRequestedTrialButton(
+                    [uint32]$tc.Id,[string]$ocr.digit)
+                $case.trial_dialog+= $verified
+                $trialCompleted=($verified -match '^NATIVE_TRIAL_CLICKED=1')
             }
-            # UIAutomation is only a fallback when the native text is
-            # inaccessible. It must still read the requested number.
-            if(Allow-RequestedTrialButton $tc.Id) {
-                $case.trial_dialog+= 'UIA_TRIAL_CLICKED=1 (requested number)'
-                $trialCompleted=$true
-                break
+            if(-not $trialCompleted) {
+                # UI Automation may supply its own explicit instruction;
+                # never guess or click any button without one.
+                $trialCompleted=[bool](Allow-RequestedTrialButton $tc.Id)
+                if($trialCompleted) {
+                    $case.trial_dialog+= 'UIA_TRIAL_CLICKED=1 (requested number)'
+                }
             }
-            Start-Sleep -Milliseconds 300
         }
         $case.trial_acknowledged=$trialCompleted
         Start-Sleep -Seconds 1

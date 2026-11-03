@@ -345,6 +345,22 @@ jobs:
             throw 'Real TC F5 harness PowerShell 5.1 syntax invalid'
           }
           Write-Host 'PASS: real TC F5 harness syntax under WinPS 5.1'
+      - name: Install CI-only OCR for owner-drawn TC shareware instruction
+        shell: powershell
+        run: |
+          $ocr=(Get-Command tesseract.exe -ErrorAction SilentlyContinue)
+          if(-not $ocr) {
+            choco install tesseract -y --no-progress --limit-output
+            if($LASTEXITCODE -ne 0) { throw 'CI Tesseract OCR install failed' }
+          }
+          $exe='C:\Program Files\Tesseract-OCR\tesseract.exe'
+          if(-not (Test-Path -LiteralPath $exe)) {
+            $ocr=Get-Command tesseract.exe -ErrorAction SilentlyContinue
+            if(-not $ocr) { throw 'CI OCR engine was not found after installation' }
+            $exe=$ocr.Source
+          }
+          & $exe --version
+          Write-Host 'OCR is used only for the Total Commander shareware prompt on CI'
       - name: Probe real TC 11.58 x64 and observe PackFilesW dispatch
         shell: powershell
         run: |
