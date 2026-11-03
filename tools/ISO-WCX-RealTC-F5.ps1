@@ -215,6 +215,54 @@ public static class RealTcHostProbe {
         return new int[]{rect.left,rect.top,
                          rect.right-rect.left,rect.bottom-rect.top};
     }
+    // The official first-run TC window "Configuration" / "Layout" can
+    // remain modal AFTER the publisher's numbered start reminder. This is
+    // a separate dialog; if it stays open, cm_GoToDir and cm_Copy never
+    // reach the panels. Accept only the exact known Configuration window
+    // with a single visible enabled OK and Cancel pair. This runs solely
+    // under disposable GitHub CI, with a private temporary wincmd.ini.
+    public static string AcceptDisposableFirstRunConfiguration(uint targetPid) {
+        int dialogs=0;
+        bool clicked=false;
+        string reason="not present";
+        EnumWindows((top,param)=>{
+            uint owner=0;
+            GetWindowThreadProcessId(top,out owner);
+            if(owner!=targetPid || !IsWindowVisible(top) ||
+               !CaptionOf(top).Equals("Configuration",
+                   StringComparison.OrdinalIgnoreCase))return true;
+            dialogs++;
+            IntPtr ok=IntPtr.Zero;
+            int okCount=0, cancelCount=0;
+            EnumChildWindows(top,(child,unused)=>{
+                if(!IsWindowEnabled(child))return true;
+                var cls=new StringBuilder(128);
+                GetClassName(child,cls,cls.Capacity);
+                if(cls.ToString().IndexOf("Button",
+                     StringComparison.OrdinalIgnoreCase)<0)return true;
+                string name=ReadChildCaption(child).Replace("&","").Trim();
+                if(name.Equals("OK",StringComparison.OrdinalIgnoreCase)) {
+                    ok=child;okCount++;
+                }else if(name.Equals("Cancel",
+                         StringComparison.OrdinalIgnoreCase))cancelCount++;
+                return true;
+            },IntPtr.Zero);
+            if(okCount==1 && cancelCount==1) {
+                IntPtr returned;
+                clicked=SendMessageTimeoutRaw(ok,BM_CLICK,IntPtr.Zero,
+                    IntPtr.Zero,2,1500,out returned)!=IntPtr.Zero;
+                reason=clicked?"accepted temporary first-run configuration":
+                    "configuration OK click failed";
+            }else {
+                reason="ambiguous Configuration dialog controls: ok="+
+                    okCount+" cancel="+cancelCount;
+            }
+            return true;
+        },IntPtr.Zero);
+        return "TC_FIRST_RUN_CONFIGURATION dialogs="+dialogs+
+               " accepted="+(dialogs==1&&clicked?1:0)+
+               " result="+(dialogs>1?"ambiguous dialogs":reason);
+    }
     // Find by both class AND PID: FindWindow(TTOTAL_CMD) alone returns the
     // first window globally, potentially a different TC process on a
     // shared Windows runner. This previously produced a false no-window
@@ -655,6 +703,14 @@ exts=wim*
             }
         }
         $case.trial_acknowledged=$trialCompleted
+        if($trialCompleted) {
+            # A distinct, modal Configuration > Layout window was visible
+            # in the previous real-TC evidence screenshots and blocked
+            # cm_GoToDir. Acknowledge it only in this disposable CI host.
+            $case.trial_dialog+=
+                [RealTcHostProbe]::AcceptDisposableFirstRunConfiguration(
+                    [uint32]$tc.Id)
+        }
         if(-not $trialCompleted) {
             $case.session=Session-Snapshot $tc.Id
             $case.windows=$case.session.top_level_windows
