@@ -23,7 +23,7 @@ changes. It requires confirmation and never silently overwrites user INIs.
 The Preview DLL also ships a **native Repair WCX associations** control
 inside **Files > Pack > Configure... > ISO-WCX Settings** (no additional
 installer EXE, PowerShell, CMD or DLL). It detects only ISO-WCX-owned records,
-normalizes masks to `158`, removes duplicate extension keys for that plugin,
+normalizes editable ISO/WIM masks to `159` (read-only formats stay `158`), removes duplicate extension keys for that plugin,
 and invalidates the derived `[PackerPlugins64]` checksum. It preserves
 third-party WCX registrations, conflicting associations, arbitrary custom
 TC configuration, INI encodings and redirected INI sections. The user reviews
@@ -151,10 +151,10 @@ After unpacking the outer Actions artifact, open the inner installer ZIP
 using **Enter** in Total Commander and accept the native `pluginst.inf`
 installation. The INF now offers **only WIM** as a bootstrap extension,
 so there is just one standard Associate dialog. TC does not expose a
-`pluginst.inf` option to preselect the `158,` capability entry: accept
-the prefilled ISO-WCX path even when it appears without `158`. Opening
+`pluginst.inf` option to preselect the `159,` capability entry: accept
+the prefilled ISO-WCX path even when it appears without `159`. Opening
 WIM afterward offers a single confirmed, backed-up registration of the
-remaining unassigned formats and fixes the WIM flag to `158`.
+remaining unassigned formats and fixes the WIM flag to `159`.
 Restart all TC windows after the repair. The INF cannot silently install
 all extensions, remove older binaries or conditionally extract only one
 architecture. Existing
@@ -164,7 +164,7 @@ native PE machine types.
 
 To prevent sluggish normal ZIP opens, the Preview plugin no longer advertises
 `PK_CAPS_BY_CONTENT`. The cached/native WCX capability mask changes from
-Stable `222` to Preview `158`, and both `CanYouHandleThisFile(W)` and
+Stable `222` to Preview `159`, and both `CanYouHandleThisFile(W)` and
 `OpenArchive(W)` immediately refuse unrelated extensions. The updater also
 does not start solely because Total Commander queries WCX capabilities.
 ZIP remains handled by Total Commander. Native Win32/x64 smoke tests
