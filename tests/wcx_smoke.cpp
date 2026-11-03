@@ -64,7 +64,7 @@ int main(int argc,char** argv){
         std::cerr<<"Missing WCX updater ConfigPacker or probe export/options capability\n";
         return 3;
     }
-    if(caps()!=158 || (caps()&64)!=0) {
+    if(caps()!=159 || (caps()&64)!=0) {
         std::cerr<<"WCX is advertising global content probing; can slow down ordinary ZIP archives\n";
         return 39;
     }
@@ -135,7 +135,7 @@ int main(int argc,char** argv){
     constexpr int zip_attempts=512;
     for(int i=0;i<zip_attempts;i++) {
         // TC may query both capabilities and the archive probe before open.
-        if(caps()!=158 || probe_w(large_name.data())!=0)return 46;
+        if(caps()!=159 || probe_w(large_name.data())!=0)return 46;
         OpenW rejected{};
         rejected.ArcName=large_name.data();
         if(auto unexpected=open(&rejected)) {
