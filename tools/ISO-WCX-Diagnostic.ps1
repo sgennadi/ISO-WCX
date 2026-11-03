@@ -12,6 +12,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:Lines = New-Object 'System.Collections.Generic.List[string]'
+# F5 writable images require TC capability mask 159; read-only remain 158.
+$script:F5Writable = @('iso','udf','wim','img','raw','vhd','vhdx','ima','vfd','flp','bif')
 
 function Say([string]$Message) {
     $script:Lines.Add($Message)
@@ -93,9 +95,11 @@ function Check-Ini {
                     if ($target -match '(?i)ISO-WCX\.wcx(64)?$' -and
                         ($mask -band 2) -eq 0) {
                         Say ('ПРОБЛЕМА: ' + $extension + ' не имеет PK_CAPS_MODIFY; F5 может быть отключён.')
-                    } elseif ($target -match '(?i)ISO-WCX\.wcx(64)?$' -and
-                              $mask -ne 158) {
-                        Say ('ПРОБЛЕМА: ' + $extension + ' использует флаги ' + $mask + ' вместо 158.')
+                    } elseif ($target -match '(?i)ISO-WCX\.wcx(64)?$') {
+                        $expected = if ($script:F5Writable -contains $extension) { 159 } else { 158 }
+                        if ($mask -ne $expected) {
+                            Say ('ПРОБЛЕМА: ' + $extension + ' использует флаги ' + $mask + ' вместо ' + $expected + '.')
+                        }
                     }
                 }
             }
@@ -181,7 +185,7 @@ function Check-AssociationSummary {
             }
         }
     } finally { $reader.Dispose() }
-    $owned158=0
+    $ownedExpected=0
     $ownedOther=0
     $missing=0
     $foreign=0
@@ -196,8 +200,9 @@ function Check-AssociationSummary {
         foreach ($entry in $entries) {
             $plugin = ($entry -replace '^\s*\d+\s*,\s*','').Trim('"')
             if ($plugin -match '(?i)(?:^|[\\/])ISO-WCX\.wcx(64)?$') {
-                if ($entry -match '^\s*158\s*,') {
-                    $owned158++
+                $expected = if ($script:F5Writable -contains $extension) { 159 } else { 158 }
+                if ($entry -match ('^\s*' + $expected + '\s*,')) {
+                    $ownedExpected++
                 } else {
                     $ownedOther++
                     Say ('WCX_ASSOC_BAD_MASK=' + $extension + ' value=' + $entry)
@@ -207,7 +212,7 @@ function Check-AssociationSummary {
             }
         }
     }
-    Say ('WCX_ASSOC_SUMMARY owned_158=' + $owned158 +
+    Say ('WCX_ASSOC_SUMMARY owned_expected=' + $ownedExpected +
          ' owned_other=' + $ownedOther + ' missing=' + $missing +
          ' foreign=' + $foreign + ' duplicates=' + $duplicates)
     if ($missing -eq 0 -and $ownedOther -eq 0 -and $duplicates -eq 0) {
