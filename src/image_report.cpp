@@ -4,6 +4,11 @@
 // other image formats are described without guessing their raw layout.
 #include "iso_wcx/image_report.hpp"
 #include "iso_wcx/disc.hpp"
+#ifdef _WIN32
+#include "iso_wcx/wim_index_report.hpp"
+#include "iso_wcx/wim_parts.hpp"
+#include <sstream>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -341,6 +346,25 @@ std::string build_image_structure_report(const std::filesystem::path& image){
     report.append("Image payloads copied: no");
     report.append("Image modified: no");
     report.append("");
+#ifdef _WIN32
+    // DISM /Get-WimInfo style summary for an explicitly exported report.
+    // This is intentionally not called on normal TC directory open:
+    // loading every WIM index merely to render metadata can be expensive.
+    wim_detail::Header wim{};
+    if(wim_detail::read_header(image,wim)) {
+        report.append("WIM IMAGE INDEXES (native Windows Imaging API)");
+        try {
+            const auto summary=build_wim_index_summary(image);
+            std::istringstream lines(summary);
+            std::string line;
+            while(std::getline(lines,line))report.append(line);
+        }catch(const std::exception& ex) {
+            report.append("WIM index summary unavailable: "+
+                          safe_text(ex.what()));
+        }
+        report.append("");
+    }
+#endif
     const auto optical=probe_optical(report,image,bytes);
     report.append("");
     report.append("DIRECTORY TREE (selected by Total Commander; metadata only; UTF-8)");
