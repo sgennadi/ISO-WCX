@@ -24,6 +24,20 @@ else()
 endif()
 set(ISO_WCX_VERSION_FILE
     "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${ISO_WCX_EFFECTIVE_PATCH},${ISO_WCX_BUILD_NUMBER}")
+if(ISO_WCX_RC_NUMBER GREATER 0)
+  set(ISO_WCX_VERSION_FLAGS "VS_FF_PRERELEASE")
+  set(ISO_WCX_VERSION_INI
+      "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${ISO_WCX_EFFECTIVE_PATCH}")
+  configure_file(pluginst-preview.inf.in "${CMAKE_CURRENT_BINARY_DIR}/pluginst.inf" @ONLY)
+else()
+  set(ISO_WCX_VERSION_FLAGS "0x0L")
+  configure_file(pluginst.inf "${CMAKE_CURRENT_BINARY_DIR}/pluginst.inf" COPYONLY)
+endif()
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+  set(ISO_WCX_WCX_BINARY_NAME "ISO-WCX.wcx")
+else()
+  set(ISO_WCX_WCX_BINARY_NAME "ISO-WCX.wcx64")
+endif()
 message(STATUS "ISO-WCX identity: ${ISO_WCX_VERSION_DISPLAY}")
 
 # Retain C++20 as a backward-compatible local default. Stable v0.21.0
