@@ -12,8 +12,8 @@ using PackFn = int (__stdcall*)(wchar_t*,wchar_t*,wchar_t*,wchar_t*,int);
 using DeleteFn = int (__stdcall*)(wchar_t*,wchar_t*);
 
 int wmain(int argc,wchar_t** argv) {
-    if(argc!=5) {
-        std::cerr<<"Usage: wcx_iso_edit_runner DLL ISO pack|delete SOURCE_DIR\n";
+    if(argc!=5 && argc!=6) {
+        std::cerr<<"Usage: wcx_iso_edit_runner DLL ISO pack|delete SOURCE_DIR [ENTRY_NAME]\n";
         return 2;
     }
     HMODULE plugin=LoadLibraryW(argv[1]);
@@ -28,13 +28,22 @@ int wmain(int argc,wchar_t** argv) {
         FreeLibrary(plugin);
         return 4;
     }
-    wchar_t names[]=L"EDIT.TXT\0\0";
+    const std::wstring wanted=argc==6?argv[5]:L"EDIT.TXT";
+    if(wanted.empty() || wanted.find_first_of(L"\\/:*?<>|")!=std::wstring::npos) {
+        std::cerr<<"Invalid fixture entry name\n";
+        FreeLibrary(plugin);
+        return 6;
+    }
+    // WCX filenames are terminated with an extra NUL in a multi-string.
+    std::wstring names=wanted;
+    names.push_back(L'\0');
+    names.push_back(L'\0');
     wchar_t sub[]=L"";
     int rc=0;
     if(std::wstring(argv[3])==L"pack")
-        rc=pack(argv[2],sub,argv[4],names,0);
+        rc=pack(argv[2],sub,argv[4],names.data(),0);
     else if(std::wstring(argv[3])==L"delete")
-        rc=erase(argv[2],names);
+        rc=erase(argv[2],names.data());
     else {
         std::cerr<<"Unknown edit operation\n";
         FreeLibrary(plugin);
