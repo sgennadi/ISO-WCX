@@ -82,7 +82,35 @@ def main(plugin, runner):
         assert edit("pack", "hello") != 0
         assert image.read_bytes() == original
 
-    print("PASS: WCX ABI plain ISO edits and bounded bootable UDF-only payload replacement")
+        # Native WCX API F5/Del against a bootable ISO/UDF Type-1 bridge.
+        # The synthetic image has a verified free-space bitmap/LVID;
+        # protected ISO boot sectors must survive metadata updates.
+        bridge = descriptor_bridge(
+            boot=True, udf_only=True, boot_count=4, writable=True)
+        image.write_bytes(bridge)
+        (source / "NEWFILE.TXT").write_bytes(b"DATA" * 900)
+        assert edit("pack", "NEWFILE.TXT") == 0, (
+            "WCX F5 add into bootable ISO/UDF bridge failed")
+        written = image.read_bytes()
+        assert written != bridge
+        assert written[:256 * B] == bridge[:256 * B], (
+            "WCX add changed bootable ISO metadata/El Torito")
+        assert len(written) == len(bridge)
+        assert edit("delete", "NEWFILE.TXT") == 0, (
+            "WCX DeleteFilesW into bootable ISO/UDF bridge failed")
+        deleted = image.read_bytes()
+        assert deleted[:256 * B] == bridge[:256 * B]
+        assert len(deleted) == len(bridge)
+
+        # Reject an unbounded EFI/BIOS image rather than guessing protected
+        # sector counts. No half-written or leaked staging files.
+        image.write_bytes(descriptor_bridge(
+            boot=True, udf_only=True, writable=True))
+        original = image.read_bytes()
+        assert edit("pack", "NEWFILE.TXT") != 0
+        assert image.read_bytes() == original
+
+    print("PASS: WCX API ISO add/replace/delete + bootable ISO/UDF bitmap-backed F5/Delete and rollback")
 
 
 if __name__ == "__main__":
