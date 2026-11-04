@@ -213,6 +213,10 @@ if(BUILD_TESTING)
   target_link_libraries(image_structure_report_tests PRIVATE iso_disc)
   add_test(NAME image_structure_metadata_export_read_only
            COMMAND image_structure_report_tests)
+  add_executable(optical_edit_guard_tests tests/optical_edit_guard.cpp)
+  target_include_directories(optical_edit_guard_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME universal_optical_protected_region_guard
+           COMMAND optical_edit_guard_tests)
 endif()
 target_compile_features(iso_disc PUBLIC cxx_std_20)
 if(MSVC)
