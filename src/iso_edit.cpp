@@ -111,6 +111,9 @@ public:
     std::uint64_t size;
     std::vector<std::pair<std::uint32_t,Bytes>> descriptors;
     std::set<std::uint32_t> boot_lbas;
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> boot_regions;
+    bool boot_regions_bounded=true;
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> udf_metadata_regions;
     std::unique_ptr<Node> root;
     bool joliet=false;
     bool udf_bridge=false;
@@ -144,8 +147,33 @@ public:
                 if(i!=4)sum+=tag[i];
             return static_cast<unsigned char>(sum)==tag[4];
         };
-        udf_bridge=udf_bridge || avdp(256) ||
-                   (sectors>256 && avdp(sectors-256)) || avdp(sectors-1);
+        auto add_udf_anchor=[&](std::uint64_t lba) {
+            if(!avdp(lba))return false;
+            udf_metadata_regions.emplace_back(lba*block,block);
+            // Both descriptor sequences described by the AVDP are immutable
+            // when the payload-only bridge patcher is active.
+            const auto descriptor=read(lba*block,32);
+            for(const std::size_t offset:{std::size_t(16),std::size_t(24)}) {
+                const auto length=le(descriptor,offset);
+                const auto start=le(descriptor,offset+4);
+                if(!length)continue;
+                need(start<=sectors && length<=size-std::uint64_t(start)*block,
+                     "UDF volume descriptor sequence outside ISO image");
+                udf_metadata_regions.emplace_back(
+                    std::uint64_t(start)*block,length);
+            }
+            return true;
+        };
+        udf_bridge=udf_bridge || add_udf_anchor(256) ||
+                   (sectors>256 && add_udf_anchor(sectors-256)) ||
+                   add_udf_anchor(sectors-1);
+        // Always inspect all standard anchor positions; short-circuiting
+        // would silently omit a protected backup descriptor range.
+        if(udf_bridge) {
+            add_udf_anchor(256);
+            if(sectors>256)add_udf_anchor(sectors-256);
+            add_udf_anchor(sectors-1);
+        }
         need(allow_udf_bridge || !udf_bridge,
              "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         Bytes primary,supplementary;bool end=false;
@@ -173,9 +201,9 @@ public:
         // physical file end. ISO/UDF bridges may have zero padding after the
         // actual ECMA-167 anchor, and cannot use the plain ISO rebuild path.
         if(declared_volume_blocks<sectors) {
-            udf_bridge=udf_bridge ||
-                (declared_volume_blocks>256 && avdp(declared_volume_blocks-256)) ||
-                avdp(declared_volume_blocks-1);
+            if(declared_volume_blocks>256)
+                udf_bridge=add_udf_anchor(declared_volume_blocks-256) || udf_bridge;
+            udf_bridge=add_udf_anchor(declared_volume_blocks-1) || udf_bridge;
             need(allow_udf_bridge || !udf_bridge,
                  "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         }
@@ -213,7 +241,24 @@ public:
     Bytes read(std::uint64_t at,std::size_t count){need(at<=size&&count<=size-at,"ISO extent outside image");Bytes b(count);file.clear();file.seekg(static_cast<std::streamoff>(at));file.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(count));need(bool(file),"ISO read failed");return b;}
     void boot_catalog(std::uint32_t lba) {
         auto b=read(std::uint64_t(lba)*block,block);need(b[0]==1&&b[30]==0x55&&b[31]==0xaa,"invalid boot catalog");unsigned checksum=0;for(unsigned i=0;i<32;i+=2)checksum+=le(b,i,2);need((checksum&0xffff)==0,"invalid boot catalog checksum");boot_lbas.insert(lba);
-        auto entry=[&](std::size_t at){need(b[at]==0||b[at]==0x88,"unsupported boot entry");if(b[at]==0x88){need(b[at+1]==0,"emulated boot ISO editing is not supported");auto loc=le(b,at+8);need(std::uint64_t(loc)*block<size,"invalid boot image extent");boot_lbas.insert(loc);}};
+        boot_regions.emplace_back(std::uint64_t(lba)*block,block);
+        auto entry=[&](std::size_t at){
+            need(b[at]==0||b[at]==0x88,"unsupported boot entry");
+            if(b[at]!=0x88)return;
+            need(b[at+1]==0,"emulated boot ISO editing is not supported");
+            const auto loc=le(b,at+8);
+            need(std::uint64_t(loc)*block<size,"invalid boot image extent");
+            boot_lbas.insert(loc);
+            // El Torito's sector count is expressed in 512-byte units.
+            // An absent count is not an authorization to edit near the
+            // image: bridge writes fail closed until its full span is known.
+            const auto count=le(b,at+6,2);
+            if(!count){boot_regions_bounded=false;return;}
+            const auto bytes=(std::uint64_t(count)*512+block-1)/block*block;
+            const auto start=std::uint64_t(loc)*block;
+            need(bytes<=size-start,"El Torito boot image outside ISO bounds");
+            boot_regions.emplace_back(start,bytes);
+        };
         entry(32);std::size_t at=64;
         while(at<block&&b[at]){need(b[at]==0x90||b[at]==0x91,"unsupported boot catalog extension");bool last=b[at]==0x91;unsigned count=le(b,at+2,2);at+=32;need(count<=(block-at)/32,"large boot catalog unsupported");for(unsigned i=0;i<count;++i,at+=32)entry(at);if(last)break;}
     }
