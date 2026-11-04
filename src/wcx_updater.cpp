@@ -364,7 +364,8 @@ void check_release(HWND dlg,State& state,bool forced) {
     try {
         state.latest_tag=latest_release();
         const auto parsed=update::parse_version(narrow(state.latest_tag));
-        state.newer=parsed && update::newer(*parsed,installed);
+        state.newer=parsed && (update::newer(*parsed,installed) ||
+                          (ISO_WCX_RC_NUMBER>0 && *parsed==installed));
         save_last_check();
         if(state.newer) {
             put_status(dlg,std::wstring(tr(state.russian,
@@ -613,7 +614,9 @@ DWORD WINAPI background_worker(LPVOID argument) {
     try {
         const auto tag=latest_release();
         const auto parsed=update::parse_version(narrow(tag));
-        if(parsed && update::newer(*parsed,installed) && !has_notified(tag) &&
+        if(parsed && (update::newer(*parsed,installed) ||
+             (ISO_WCX_RC_NUMBER>0 && *parsed==installed)) &&
+             !has_notified(tag) &&
            read_dword(L"AutoCheck",1)) {
             // Notify only once per version, and only after a complete
             // successful HTTPS check. The dialog is not part of archive I/O.
