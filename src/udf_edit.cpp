@@ -1,4 +1,5 @@
 #include "iso_wcx/archive_edit.hpp"
+#include "iso_wcx/udf_edit_inspection.hpp"
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/edit_transaction.hpp"
 #include <algorithm>
@@ -2366,5 +2367,22 @@ void edit_udf(const std::filesystem::path& image,
     }
     if(validate_stage)validate_stage(tx.output);
     tx.commit(progress);
+}
+
+// Reuse exactly the same strict parser used before a real write. The report
+// deliberately does not claim that a standalone parse authorizes mutation
+// of shared ISO/El Torito extents or guarantees allocation for a file.
+UdfEditInspection inspect_udf_edit(
+    const std::filesystem::path& image,bool allow_bridge) {
+    UdfEditInspection result;
+    try {
+        Type1 volume(image,allow_bridge);
+        result.parser_compatible=true;
+        result.allocation_bitmap=volume.has_bitmap();
+    }catch(const std::exception& ex) {
+        result.reason=ex.what();
+        if(result.reason.size()>600)result.reason.resize(600);
+    }
+    return result;
 }
 } // namespace iso_wcx
