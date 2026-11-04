@@ -2200,7 +2200,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     // bitmap/LVID mismatches and parent allocation errors. Read every new
     // file through Disc extents and compare its complete source stream.
     {
-        Type1 strict(tx.output);
+        Type1 strict(tx.output,allow_bridge);
         for(const auto& region:deleted_regions) {
             const auto start=strict.logical_of(region.at);
             for(std::uint64_t i=0;i<region.bytes/block;++i)
