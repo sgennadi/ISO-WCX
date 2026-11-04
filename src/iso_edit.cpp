@@ -114,6 +114,7 @@ public:
     std::unique_ptr<Node> root;
     bool joliet=false;
     bool udf_bridge=false;
+    std::uint32_t declared_volume_blocks=0;
     std::size_t items=0;
     explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false)
         :file(p,std::ios::binary),size(std::filesystem::file_size(p)) {
@@ -155,9 +156,46 @@ public:
             if(b[0]==1){need(primary.empty(),"multiple primary descriptors");primary=b;}
             else {need(supplementary.empty()&&b[88]=='%'&&b[89]=='/'&&(b[90]=='@'||b[90]=='C'||b[90]=='E'),"unsupported supplementary descriptor");supplementary=b;joliet=true;}
             need(le(b,128,2)==block&&le(b,120,2)==1&&le(b,124,2)==1,"unsupported volume geometry");
-            need(le(b,80)==size/block,"ISO volume size does not match image file");descriptors.emplace_back(lba,std::move(b));
+            // Some valid ISO files are padded after the declared ISO9660
+            // volume. A strict equality test rejected F5/delete on them,
+            // even though none of the ISO metadata or data lives in the pad.
+            const auto volume_blocks=le(b,80);
+            need(volume_blocks>=18 && volume_blocks<=sectors,
+                 "ISO descriptor volume exceeds actual image bounds");
+            if(declared_volume_blocks)
+                need(declared_volume_blocks==volume_blocks,
+                     "ISO primary and Joliet volume sizes disagree");
+            declared_volume_blocks=volume_blocks;
+            descriptors.emplace_back(lba,std::move(b));
         }
         need(end&&!primary.empty(),"missing ISO primary/terminator");
+        // A non-UDF ISO can have an all-zero sector-aligned trailer. Preserve
+        // it during staging, then update the descriptor's volume size when
+        // appending changed files/metadata. Never accept hidden nonzero
+        // partitions, boot payloads or other data after the declared volume.
+        // A detected ISO/UDF bridge takes the separate equal-size-only path,
+        // which validates both filesystem namespaces and never moves extents.
+        if(!udf_bridge && declared_volume_blocks<sectors) {
+            const auto trailer_bytes=(sectors-declared_volume_blocks)*block;
+            constexpr std::uint64_t max_padding=256ull*1024*1024;
+            need(trailer_bytes<=max_padding,
+                 "ISO trailer exceeds safe zero-padding inspection limit (256 MiB)");
+            file.clear();
+            file.seekg(static_cast<std::streamoff>(
+                std::uint64_t(declared_volume_blocks)*block));
+            std::array<char,64*1024> chunk{};
+            auto remaining=trailer_bytes;
+            while(remaining) {
+                const auto n=static_cast<std::streamsize>(
+                    std::min<std::uint64_t>(remaining,chunk.size()));
+                file.read(chunk.data(),n);
+                need(bool(file),"cannot validate ISO trailer");
+                need(std::all_of(chunk.begin(),chunk.begin()+n,
+                    [](char c){return c==0;}),
+                    "nonzero data beyond ISO volume (possible boot/partition metadata)");
+                remaining-=static_cast<std::uint64_t>(n);
+            }
+        }
         std::set<std::uint32_t> seen;root=parse(Bytes(primary.begin()+156,primary.begin()+190),false,nullptr,0,seen);
         root->name="";root->logical="";
         if(joliet){seen.clear();auto other=parse(Bytes(supplementary.begin()+156,supplementary.begin()+190),true,nullptr,0,seen);pair(*root,*other);}
