@@ -11,6 +11,7 @@ import tempfile
 
 from test_images import B
 from test_iso_edit import fixture, read_image, validate_path_tables
+from test_udf_bridge_edit import descriptor_bridge
 
 
 def main(plugin, runner):
@@ -23,8 +24,8 @@ def main(plugin, runner):
         image.write_bytes(fixture(joliet=True) + bytes(9 * B))
         replacement.write_bytes(b"inserted-via-PackFilesW")
 
-        def edit(operation):
-            command = [runner, plugin, str(image), operation, str(source)]
+        def edit(operation, name="EDIT.TXT"):
+            command = [runner, plugin, str(image), operation, str(source), name]
             result = subprocess.run(command, capture_output=True, text=True)
             assert result.returncode == 0, (
                 "Cannot invoke native WCX test runner",
@@ -58,7 +59,30 @@ def main(plugin, runner):
         assert edit("pack") != 0, "nonzero trailer must be read-only"
         assert image.read_bytes() == before, "unsafe ISO edit modified source"
 
-    print("PASS: WCX ABI F5 add/replace/delete on padded Joliet, nonzero trailer rollback")
+        # AOMEI-style WinPE ISO: the ISO9660 namespace contains boot files,
+        # while normal files are visible through UDF only. A bounded,
+        # equal-length payload replacement must work via WCX F5 without
+        # touching El Torito/ISO9660 or UDF metadata.
+        original = descriptor_bridge(boot=True, udf_only=True, boot_count=4)
+        image.write_bytes(original)
+        (source / "hello").write_bytes(b"EARTH")
+        assert edit("pack", "hello") == 0, "WCX rejected safe bootable UDF payload replacement"
+        result = image.read_bytes()
+        assert len(result) == len(original)
+        assert result[:303 * B] == original[:303 * B]
+        assert result[303 * B:303 * B + 5] == b"EARTH"
+        assert result[303 * B + 5:] == original[303 * B + 5:]
+        assert read_image(image) == {}, "ISO9660 namespace was unexpectedly changed"
+        # Delete and growing a file require UDF metadata changes and must
+        # remain blocked until the dual-namespace writer is available.
+        original = result
+        assert edit("delete", "hello") != 0
+        assert image.read_bytes() == original
+        (source / "hello").write_bytes(b"TOO LONG")
+        assert edit("pack", "hello") != 0
+        assert image.read_bytes() == original
+
+    print("PASS: WCX ABI plain ISO edits and bounded bootable UDF-only payload replacement")
 
 
 if __name__ == "__main__":
