@@ -51,13 +51,20 @@ using WimCloseFn=BOOL(WINAPI*)(HANDLE);
 static std::atomic<unsigned> pack_progress_calls{0};
 static std::atomic<unsigned> wim_percent_calls{0};
 static std::atomic<unsigned> wim_stage_calls{0};
+static std::atomic<unsigned> wim_copy_stage_calls{0};
+static std::atomic<unsigned> wim_export_stage_calls{0};
 static std::atomic<bool> cancel_next_wim{false};
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
     if(size<0){
         ++wim_percent_calls;
-        if(stage && std::wstring_view(stage).starts_with(L"WIM: "))
+        if(stage && std::wstring_view(stage).starts_with(L"WIM: ")) {
             ++wim_stage_calls;
+            if(std::wstring_view(stage).find(L"Copy WIM")!=std::wstring_view::npos)
+                ++wim_copy_stage_calls;
+            if(std::wstring_view(stage).find(L"Export unchanged WIM image")!=std::wstring_view::npos)
+                ++wim_export_stage_calls;
+        }
         if(cancel_next_wim.load() && stage &&
            std::wstring_view(stage).find(L"Extract WIM image")!=std::wstring_view::npos)
             return 0;
@@ -88,12 +95,15 @@ int wmain(int argc,wchar_t** argv) {
         fs::create_directories(root);
         const auto first=root/L"first";
         const auto second=root/L"second";
+        const auto third=root/L"third";
         write(first/L"HELLO.TXT","hello-one");
         write(first/L"EmptyFile.bin","");
         write(first/L"Nested"/L"folder.bin","nested-data");
         fs::create_directories(first/L"Empty");
         write(second/L"HELLO.TXT","hello-two");
         write(second/L"SECOND.TXT","second-image");
+        write(third/L"HELLO.TXT","hello-three");
+        write(third/L"THIRD.TXT","third-image");
         // Incompressible distinct resources force multiple SWM parts.
         std::vector<std::string> payloads;
         std::uint32_t random=0x13579bdf;
@@ -118,7 +128,7 @@ int wmain(int argc,wchar_t** argv) {
                               CREATE_ALWAYS,0,2u,&creation);
         if(!archive||archive==INVALID_HANDLE_VALUE)return 4;
         if(!set_temp(archive,root.c_str())){close_wim(archive);return 5;}
-        for(const auto& folder:{first,second}) {
+        for(const auto& folder:{first,second,third}) {
             const HANDLE image=capture(archive,folder.c_str(),0);
             if(!image||image==INVALID_HANDLE_VALUE){
                 std::cerr<<"WIMCaptureImage failed: "<<GetLastError()<<"\n";
@@ -158,6 +168,8 @@ int wmain(int argc,wchar_t** argv) {
                    name==L"image1\\Nested\\folder.bin"||
                    name==L"image2\\HELLO.TXT"||
                    name==L"image2\\SECOND.TXT"||
+                   name==L"image3\\HELLO.TXT"||
+                   name==L"image3\\THIRD.TXT"||
                    name==L"image1\\EmptyFile.bin") {
                     const fs::path output=root/L"extracted"/fs::path(name);
                     fs::create_directories(output.parent_path());
@@ -175,12 +187,15 @@ int wmain(int argc,wchar_t** argv) {
                names.count(L"image1\\Empty")==0 ||
                names.count(L"image1\\Nested\\folder.bin")==0 ||
                names.count(L"image1\\EmptyFile.bin")==0 ||
-               names.count(L"image2\\SECOND.TXT")==0)return false;
+               names.count(L"image2\\SECOND.TXT")==0||
+               names.count(L"image3\\THIRD.TXT")==0)return false;
             if(load(root/L"extracted"/L"image1"/L"HELLO.TXT")!="hello-one" ||
                load(root/L"extracted"/L"image1"/L"Nested"/L"folder.bin")!="nested-data"||
                load(root/L"extracted"/L"image1"/L"EmptyFile.bin")!="" ||
                load(root/L"extracted"/L"image2"/L"HELLO.TXT")!="hello-two" ||
-               load(root/L"extracted"/L"image2"/L"SECOND.TXT")!="second-image")
+               load(root/L"extracted"/L"image2"/L"SECOND.TXT")!="second-image"||
+               load(root/L"extracted"/L"image3"/L"HELLO.TXT")!="hello-three"||
+               load(root/L"extracted"/L"image3"/L"THIRD.TXT")!="third-image")
                 return false;
             for(unsigned n=0;n<payloads.size();++n)
                 if(load(root/L"extracted"/L"image1"/(L"payload"+std::to_wstring(n)+L".bin"))!=payloads[n])return false;
@@ -284,13 +299,36 @@ int wmain(int argc,wchar_t** argv) {
         if(!content(L"image1\\HELLO.TXT",data)||data!="replacement"||
            !content(L"image1\\ADDED.TXT",data)||data!="new-file"||
            !content(L"image2\\HELLO.TXT",data)||data!="hello-two")return 22;
+        // A three-index WIM reproduces the field-reported delay. Editing
+        // only the last index must not export image1 or image2 again.
+        write(incoming/L"THIRD_NEW.TXT","fast-final-index");
+        std::wstring last_sub=L"image3";
+        wchar_t final_list[]=L"THIRD_NEW.TXT\0\0";
+        wim_copy_stage_calls.store(0);
+        wim_export_stage_calls.store(0);
+        set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+        const int final_rc=pack(packed.data(),last_sub.data(),src.data(),final_list,0);
+        set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(final_rc!=0) {
+            std::cerr<<"Final WIM index pack failed: "<<final_rc<<"\n";
+            return 34;
+        }
+        if(wim_copy_stage_calls.load()==0 || wim_export_stage_calls.load()!=0)
+            return 35; // Must retain unchanged indexes without re-export.
+        if(!content(L"image3\\THIRD_NEW.TXT",data)||data!="fast-final-index"||
+           !content(L"image1\\HELLO.TXT",data)||data!="replacement"||
+           !content(L"image2\\SECOND.TXT",data)||data!="second-image")
+            return 36;
         wchar_t delete_list[]=L"image1\\ADDED.TXT\0\0";
         if(erase(packed.data(),delete_list)||content(L"image1\\ADDED.TXT",data))return 23;
         // A rejected traversal must not change one byte of the original.
         const auto original_bytes=load(original);wchar_t bad_list[]=L"..\\escape\0\0";
         if(pack(packed.data(),sub.data(),src.data(),bad_list,0)==0||load(original)!=original_bytes)return 24;
         wchar_t delete_index[]=L"image1\0\0";
-        if(erase(packed.data(),delete_index)||!content(L"image1\\HELLO.TXT",data)||data!="hello-two"||content(L"image2\\HELLO.TXT",data))return 25;
+        if(erase(packed.data(),delete_index)||
+           !content(L"image1\\HELLO.TXT",data)||data!="hello-two"||
+           !content(L"image2\\HELLO.TXT",data)||data!="hello-three"||
+           content(L"image3\\HELLO.TXT",data))return 25;
         // Malformed files must not be reported as a valid WIM archive.
         const auto bad=root/L"corrupt.wim";
         write(bad,"NOT A WIM");
