@@ -1,6 +1,31 @@
 cmake_minimum_required(VERSION 3.21)
 project(ISO_WCX VERSION 0.21.0 LANGUAGES C CXX)
 
+# Stable source metadata stays at 0.21.0 until a separately validated release.
+# RC builds deliberately advertise the *next patch*, not the published stable.
+# CI passes one monotonically increasing workflow run number per build.
+set(ISO_WCX_RC_NUMBER "0" CACHE STRING "Release candidate number (0=Stable)")
+set(ISO_WCX_BUILD_NUMBER "0" CACHE STRING "Unique preview CI build number")
+foreach(field ISO_WCX_RC_NUMBER ISO_WCX_BUILD_NUMBER)
+  if(NOT "${${field}}" MATCHES "^(0|[1-9][0-9]{0,4})$")
+    message(FATAL_ERROR "${field} must be an integer from 0 to 65535")
+  endif()
+  if(${field} GREATER 65535)
+    message(FATAL_ERROR "${field} exceeds the Windows VERSIONINFO field limit")
+  endif()
+endforeach()
+set(ISO_WCX_EFFECTIVE_PATCH ${PROJECT_VERSION_PATCH})
+if(ISO_WCX_RC_NUMBER GREATER 0)
+  math(EXPR ISO_WCX_EFFECTIVE_PATCH "${PROJECT_VERSION_PATCH} + 1")
+  set(ISO_WCX_VERSION_DISPLAY
+      "v${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${ISO_WCX_EFFECTIVE_PATCH} RC${ISO_WCX_RC_NUMBER} (Build ${ISO_WCX_BUILD_NUMBER})")
+else()
+  set(ISO_WCX_VERSION_DISPLAY "v${PROJECT_VERSION}")
+endif()
+set(ISO_WCX_VERSION_FILE
+    "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${ISO_WCX_EFFECTIVE_PATCH},${ISO_WCX_BUILD_NUMBER}")
+message(STATUS "ISO-WCX identity: ${ISO_WCX_VERSION_DISPLAY}")
+
 # Retain C++20 as a backward-compatible local default. Stable v0.21.0
 # explicitly enables tested Visual Studio 2026 C++26 draft for Win32/x64.
 # Total Commander WCX ABI and package filenames remain unchanged.
@@ -335,12 +360,18 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
 endif()
 
 if(WIN32)
-  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp)
+  enable_language(RC)
+  configure_file(src/version.rc.in
+                 "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc" @ONLY)
+  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp
+              "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc")
   target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32)
   target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
     ISO_WCX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     ISO_WCX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
-    ISO_WCX_VERSION_PATCH=${PROJECT_VERSION_PATCH})
+    ISO_WCX_VERSION_PATCH=${ISO_WCX_EFFECTIVE_PATCH}
+    ISO_WCX_RC_NUMBER=${ISO_WCX_RC_NUMBER}
+    ISO_WCX_BUILD_NUMBER=${ISO_WCX_BUILD_NUMBER})
   if(MSVC)
     target_compile_options(ISO-WCX PRIVATE /W4 /EHsc /utf-8)
   else()
