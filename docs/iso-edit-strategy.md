@@ -43,11 +43,19 @@ then commits atomically. In a bootable ISO with zero or ambiguous El Torito
 sector counts, editing remains disabled until the complete boot image
 extents can be independently established.
 
-**Not yet available:** F5 to create a new file, Delete, folder changes,
-or changes to file length in this bootable ISO/UDF Bridge. Those require
-a coordinated UDF allocation/FID/FE writer with boot-preserving validation,
-not merely a raw payload patch. This capability must be tested on a
-disposable copy of the actual AOMEI ISO before general availability.
+**Preview support now implemented:** F5 new UDF-only files, F7 new
+empty directories, Delete regular UDF files and file-size-changing
+replacements are routed into the native Type-1 FE/FID/bitmap/LVID writer
+when its strict parser and allocation checks succeed. The ISO9660 namespace
+remains immutable, and every staged transaction must pass a byte-for-byte
+El Torito/system-area/ISO namespace guard before commit. Deleting directories
+and changing ISO-visible paths remain unsupported.
+
+The actual AOMEI ISO has not been checked for a writable UDF bitmap, Type-1
+partition map, or boot-extent compatibility. **Export Image Structure**
+now includes `UDF NATIVE EDIT PREFLIGHT (READ ONLY)`, which reports
+whether the parser accepts its metadata and whether a writable allocator
+bitmap exists. A real-image boot test is mandatory before Stable.
 
 ## Universal Optical Edit Guard (Preview)
 
