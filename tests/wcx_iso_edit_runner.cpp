@@ -28,7 +28,7 @@ int wmain(int argc,wchar_t** argv) {
         FreeLibrary(plugin);
         return 4;
     }
-    wchar_t names[]=L"HELLO.TXT\0\0";
+    wchar_t names[]=L"EDIT.TXT\0\0";
     wchar_t sub[]=L"";
     int rc=0;
     if(std::wstring(argv[3])==L"pack")
