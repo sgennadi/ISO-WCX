@@ -715,18 +715,20 @@ function Tail-Wcx {
     if(Test-Path -LiteralPath $logFile) { return @(Get-Content -LiteralPath $logFile -Tail 45) }
     return @()
 }
-function Test-Mask([int]$mask,[string]$source,[string]$templateWim) {
-    Write-Host ("TC_F5_STAGE=START mask="+$mask)
-    $caseDir=Join-Path $work "caps-$mask"
+function Test-Mask([int]$mask,[string]$source,[string]$templateImage,[string]$format='wim') {
+    if($format -notin @('wim','iso')) { throw 'Unsupported TC F5 test format' }
+    $suffix=if($format -eq 'wim') { '' } else { '-'+$format }
+    Write-Host ("TC_F5_STAGE=START format="+$format+" mask="+$mask)
+    $caseDir=Join-Path $work ("caps-"+$mask+$suffix)
     New-Item -ItemType Directory -Force -Path $caseDir | Out-Null
-    $image=Join-Path $caseDir 'test.wim'
-    Copy-Item -LiteralPath $templateWim -Destination $image
+    $image=Join-Path $caseDir ("test."+$format)
+    Copy-Item -LiteralPath $templateImage -Destination $image
     # Keep the INI OUTSIDE the archive-directory listing, otherwise
     # cm_GoToFirstFile could pick wincmd.ini rather than our only test.wim.
-    $profileDir=Join-Path $work "profile-$mask"
+    $profileDir=Join-Path $work ("profile-"+$mask+$suffix)
     New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
     $ini=Join-Path $profileDir 'wincmd.ini'
-    $caseLocalApp=Join-Path $work "local-app-data-$mask"
+    $caseLocalApp=Join-Path $work ("local-app-data-"+$mask+$suffix)
     New-Item -ItemType Directory -Force -Path $caseLocalApp | Out-Null
     $env:LOCALAPPDATA=$caseLocalApp
     $script:logFile=Join-Path $caseLocalApp 'ISO-WCX/Logs/edit-errors.log'
@@ -743,15 +745,16 @@ FirstTime=0
 FirstTimeIconLib=0
 FirstLang=0
 [PackerPlugins]
-wim=$mask,$casePlugin
+$format=$mask,$casePlugin
 "@
     [IO.File]::WriteAllText($ini,$contents,[Text.Encoding]::Unicode)
     $case=[ordered]@{
-        mask=$mask; opened_wcx=$false; source_selected=$false
+        format=$format; mask=$mask; opened_wcx=$false; source_selected=$false
         active=$null; left_type=$null; right_type=$null
         right_archive_name_length=$null
         f5_sent=$false; packfiles_callback=$false
-        packfiles_success=$false; wim_contents_verified=$false; events=@()
+        packfiles_success=$false; wim_contents_verified=$false
+        iso_contents_verified=$false; image_contents_verified=$false; events=@()
         confirmation=$null; windows=@(); session=$null
         trial_acknowledged=$false; trial_dialog=@()
         observed_ini_binding=$null
@@ -837,7 +840,7 @@ wim=$mask,$casePlugin
             $case.outcome='INCONCLUSIVE: TC window unavailable, trial_acknowledged='+$case.trial_acknowledged+'; F5 NOT SENT'
             return $case
         }
-        # Only the disposable test.wim exists in the right filesystem
+        # Only the disposable test image exists in the right filesystem
         # folder. All commands below are documented Total Commander IDs:
         # cm_FocusRight=4002, cm_GoToFirstFile=2050,
         # cm_GoToDir=2003, cm_GoToFirstEntry=2049,
@@ -849,10 +852,10 @@ wim=$mask,$casePlugin
         $case.navigation+= '4002 cm_FocusRight'
         Command-Tc $window 4002
         Start-Sleep -Milliseconds 250
-        $case.navigation+= '2050 cm_GoToFirstFile (test.wim)'
+        $case.navigation+= '2050 cm_GoToFirstFile (test.'+$format+')'
         Command-Tc $window 2050
         Start-Sleep -Milliseconds 250
-        $case.navigation+= '2003 cm_GoToDir (open WCX test.wim)'
+        $case.navigation+= '2003 cm_GoToDir (open WCX test.'+$format+')'
         Write-Host ("TC_F5_STAGE=OPEN_WIM mask="+$mask+
             " rightType="+(Query-Tc $window 1026))
         Command-Tc $window 2003
@@ -876,15 +879,18 @@ wim=$mask,$casePlugin
             $case.session=Session-Snapshot $tc.Id
             $case.windows=$case.session.top_level_windows
             $case.events=Tail-Wcx
-            $case.outcome='INCONCLUSIVE: cm_GoToDir did not open disposable WIM, trial_acknowledged='+$case.trial_acknowledged+'; F5 NOT SENT'
+            $case.outcome='INCONCLUSIVE: cm_GoToDir did not open disposable '+$format+', trial_acknowledged='+$case.trial_acknowledged+'; F5 NOT SENT'
             return $case
         }
-        $case.navigation+= '2049 cm_GoToFirstEntry (image1)'
-        Command-Tc $window 2049
-        Start-Sleep -Milliseconds 250
-        $case.navigation+= '2003 cm_GoToDir (enter image1)'
-        Command-Tc $window 2003
-        Start-Sleep -Milliseconds 750
+        if($format -eq 'wim') {
+            # WIM has synthetic imageN roots. ISO opens directly at /.
+            $case.navigation+= '2049 cm_GoToFirstEntry (image1)'
+            Command-Tc $window 2049
+            Start-Sleep -Milliseconds 250
+            $case.navigation+= '2003 cm_GoToDir (enter image1)'
+            Command-Tc $window 2003
+            Start-Sleep -Milliseconds 750
+        }
         $case.navigation+= '4001 cm_FocusLeft (return to source)'
         Command-Tc $window 4001
         Start-Sleep -Milliseconds 350
@@ -920,10 +926,16 @@ wim=$mask,$casePlugin
             $case.outcome='INCONCLUSIVE: WCX navigation or focus not confirmed; F5 was NOT SENT'
             return $case
         }
-        if($case.right_path -and
+        if($format -eq 'wim' -and $case.right_path -and
            $case.right_path -notmatch '(?i)\\image1(?:\\|$)') {
             $case.events=Tail-Wcx
-            $case.outcome='INCONCLUSIVE: right WCX panel is not inside image1; F5 was NOT SENT'
+            $case.outcome='INCONCLUSIVE: WIM panel is not inside image1; F5 was NOT SENT'
+            return $case
+        }
+        if($format -eq 'iso' -and $case.right_path -and
+           $case.right_path -notmatch '(?i)\.iso(?:[\\/]|$)') {
+            $case.events=Tail-Wcx
+            $case.outcome='INCONCLUSIVE: right panel is not inside the disposable ISO; F5 was NOT SENT'
             return $case
         }
         # Official TC external command API WM_USER+51=1075:
