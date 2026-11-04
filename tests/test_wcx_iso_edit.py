@@ -13,7 +13,7 @@ from test_iso_edit import fixture, read_image, validate_path_tables
 
 
 def multi(*names):
-    return ctypes.create_unicode_buffer("\\0".join(names) + "\\0\\0")
+    return ctypes.create_unicode_buffer("\0".join(names) + "\0\0")
 
 
 def main(plugin):
