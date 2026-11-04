@@ -14,7 +14,7 @@ USB/CD metadata.
 | Same layout with a bounded **all-zero** trailing pad | Preview native rebuild; PVD/Joliet sizes are synchronized | Preview native rebuild |
 | Standalone UDF Type-1 2048-byte images | Limited native writer Preview, gated by UDF format validations | Limited native writer Preview |
 | ISO/UDF Bridge without boot catalog | Not supported | Preview: single contiguous existing UDF or shared ISO/UDF file, exactly same length; both namespaces validated |
-| Bootable ISO/UDF Bridge | Not supported | Preview: existing UDF-only or shared-extent file, same length and fully separated from all bounded El Torito boot and UDF descriptor ranges; unknown boot lengths remain blocked |
+| Bootable ISO/UDF Bridge | **Preview:** UDF-only F5 add, delete, F7 and bounded resize when strict native Type-1 bitmap/FE/FID/LVID validation passes and the ISO namespace is immutable | Existing contiguous UDF-only or shared-extent equal-size payload replacement; embedded/complex replacements route to the protected UDF writer |
 | Hybrid MBR/GPT or nonzero system area | Not supported | Currently blocked; never discard boot/partition metadata |
 | Rock Ridge, multi-extent and unrecognized variants | Not supported | Currently blocked if parser cannot guarantee all metadata is preserved |
 
@@ -48,6 +48,42 @@ or changes to file length in this bootable ISO/UDF Bridge. Those require
 a coordinated UDF allocation/FID/FE writer with boot-preserving validation,
 not merely a raw payload patch. This capability must be tested on a
 disposable copy of the actual AOMEI ISO before general availability.
+
+## Universal Optical Edit Guard (Preview)
+
+`include/iso_wcx/optical_edit_guard.hpp` is a reusable native validator
+for immutable byte ranges. Each filesystem writer registers its protected
+areas, then the guard compares the staged output byte-for-byte with the
+original before the atomic commit, with cancellation and rollback.
+
+For a bootable **ISO/UDF Bridge**, the UDF Type-1 writer is now connected
+to this guard via a mandatory staged-image callback. New UDF-only files,
+logical file deletion, directory creation and bounded replacement/resizing
+are attempted by the existing native FE/FID/bitmap/LVID engine. Before
+commit, the callback additionally reparses ISO9660, checks unchanged
+descriptors and tree extents, and compares the full protected BIOS/UEFI
+boot image/catalog, system area, ISO namespace data, UDF anchors and
+volume descriptor sequences. The *original ISO remains untouched* if
+any preflight or stage check fails.
+
+El Torito's `SectorCount` describes initial loaded 512-byte sectors, **not
+necessarily the full boot image size**. The guard always protects full
+ISO9660 file extents containing a referenced boot LBA. A zero count
+can be accepted only if that full extent is independently resolved
+from the ISO file namespace; otherwise the write fails closed. Rock
+Ridge/SUSP records may be carried through unchanged on a UDF-only edit,
+but the module never regenerates RRIP or edits an ISO-visible file.
+
+This is a constrained capability, not blanket rewrite support.
+ISO-visible additions/deletions, modifications of ISO-shared names,
+unsupported UDF allocation maps (VAT/Sparable/Metadata), a missing or
+inconsistent writable bitmap, unbounded boot-image extents, and hybrid
+MBR/GPT remain **read-only**.
+
+The synthetic dual-namespace test `universal_iso_udf_boot_preserving_edit`
+and the format-agnostic guard test run on CI. A boot test on a
+disposable copy of the real AOMEI WinPE image is still necessary before
+a Stable release.
 
 ## Native editor decision flow (no mount tools)
 
