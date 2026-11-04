@@ -582,11 +582,153 @@ void edit_iso_udf_bridge_equal_length(
     }
     tx.commit(progress);
 }
+// Native Universal Optical Edit Guard.  ISO9660/Joliet and boot data are
+// immutable while a UDF Type-1 writer modifies FIDs/FE/bitmap/LVID.
+// A single staged-image validator handles create, delete and resize.
+void protect_iso_udf_stage(const std::filesystem::path& original,
+                           const std::filesystem::path& staged,
+                           const Image& before,const EditProgress& progress) {
+    need(before.udf_bridge && before.boot_regions_bounded,
+         "bootable ISO/UDF validation needs bounded boot extents");
+    need(std::filesystem::file_size(original)==before.size &&
+         std::filesystem::file_size(staged)==before.size,
+         "ISO/UDF image size changed during UDF edit");
+    Image after(staged,true);
+    need(after.udf_bridge && after.boot_regions_bounded &&
+         after.size==before.size &&
+         after.descriptors==before.descriptors &&
+         after.boot_regions==before.boot_regions &&
+         after.boot_lbas==before.boot_lbas,
+         "ISO/Joliet or El Torito boot descriptors changed in UDF staging");
+
+    // Compare all visible ISO namespace metadata before bytes are committed.
+    // UDF-only files are intentionally absent from these trees.
+    auto tree_same=[&](auto&& self,const Node& first,const Node& second)->bool {
+        if(first.name!=second.name || first.logical!=second.logical ||
+           first.identifier!=second.identifier ||
+           first.joliet_identifier!=second.joliet_identifier ||
+           first.directory!=second.directory ||
+           first.lba!=second.lba || first.size!=second.size ||
+           first.record!=second.record ||
+           first.children.size()!=second.children.size())
+            return false;
+        for(std::size_t i=0;i<first.children.size();++i)
+            if(!self(self,*first.children[i],*second.children[i]))
+                return false;
+        return true;
+    };
+    need(tree_same(tree_same,*before.root,*after.root),
+         "ISO9660 namespace changed during UDF-only editing");
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> immutable;
+    immutable.emplace_back(0,256ull*block); // PVD, VRS and boot/system area
+    immutable.insert(immutable.end(),
+                     before.boot_regions.begin(),before.boot_regions.end());
+    immutable.insert(immutable.end(),before.udf_metadata_regions.begin(),
+                     before.udf_metadata_regions.end());
+    std::vector<const Node*> nodes{before.root.get()};
+    for(std::size_t i=0;i<nodes.size();++i) {
+        const auto* node=nodes[i];
+        if(node->size)
+            immutable.emplace_back(std::uint64_t(node->lba)*block,node->size);
+        for(const auto& child:node->children)
+            nodes.push_back(child.get());
+        need(nodes.size()<=200000,"ISO namespace exceeds validation limit");
+    }
+    // Merge overlapping/adjacent immutable ranges to avoid rereading an ISO
+    // file twice if its boot extent is also present in the directory tree.
+    std::sort(immutable.begin(),immutable.end());
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> spans;
+    for(const auto& [start,length]:immutable) {
+        need(start<=before.size && length<=before.size-start,
+             "protected optical extent exceeds image size");
+        if(!length)continue;
+        if(!spans.empty() && start<=spans.back().first+spans.back().second) {
+            const auto end=std::max(spans.back().first+spans.back().second,
+                                    start+length);
+            spans.back().second=end-spans.back().first;
+        } else spans.emplace_back(start,length);
+    }
+    std::ifstream a(original,std::ios::binary),b(staged,std::ios::binary);
+    need(bool(a)&&bool(b),"cannot reopen ISO images for boot preservation");
+    std::array<char,1024*1024> aa{},bb{};
+    for(const auto& [start,length]:spans) {
+        a.clear();b.clear();
+        a.seekg(static_cast<std::streamoff>(start));
+        b.seekg(static_cast<std::streamoff>(start));
+        need(bool(a)&&bool(b),"cannot seek protected optical region");
+        for(auto left=length;left;) {
+            edit_tick(progress);
+            const auto n=static_cast<std::streamsize>(
+                std::min<std::uint64_t>(left,aa.size()));
+            a.read(aa.data(),n);b.read(bb.data(),n);
+            need(bool(a)&&bool(b)&&std::equal(aa.begin(),aa.begin()+n,bb.begin()),
+                 "ISO/UDF staging modified ISO or BIOS/UEFI boot region");
+            left-=static_cast<std::uint64_t>(n);
+        }
+    }
+}
+void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
+                                  Image& image,
+                                  const std::vector<ArchiveChange>& changes,
+                                  const EditProgress& progress) {
+    need(image.udf_bridge && image.boot_regions_bounded,
+         "ISO/UDF metadata edit requires bounded El Torito boot images");
+    // ISO-visible objects are immutable in this mode. Shared ISO/UDF file
+    // replacements are handled exclusively by the equal-length patcher.
+    std::vector<std::string> iso_files;
+    auto gather=[&](auto&& self,const Node& node,const std::string& prefix)->void {
+        for(const auto& child:node.children) {
+            const auto key=prefix.empty()?child->logical:prefix+"/"+child->logical;
+            iso_files.push_back(upper(key));
+            if(child->directory)self(self,*child,key);
+        }
+    };
+    gather(gather,*image.root,"");
+    for(const auto& change:changes) {
+        const auto key=upper(edit_path(change.path));
+        need(std::find(iso_files.begin(),iso_files.end(),key)==iso_files.end(),
+             "ISO-visible path requires coordinated ISO/UDF metadata editing");
+    }
+    // Release the original input handle so Windows can atomically replace
+    // the image after the staged UDF writer and boot validator succeed.
+    image.file.close();
+    const EditStageValidator validate=
+        [&path,&image,&progress](const std::filesystem::path& staged) {
+            protect_iso_udf_stage(path,staged,image,progress);
+        };
+    edit_udf(path,changes,progress,true,validate);
+}
 }
 void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
     edit_tick(progress);Image image(path,true);
     if(image.udf_bridge) {
-        edit_iso_udf_bridge_equal_length(path,image,changes,progress);
+        // Prefer the non-metadata equal-length replacement for a pre-existing
+        // single-extent file (including UDF-only paths).
+        const Disc udf(path);
+        need(udf.format()=="UDF","ISO/UDF filesystem is unreadable");
+        bool same_size_replace=!changes.empty();
+        for(const auto& change:changes) {
+            if(change.remove || change.directory ||
+               !std::filesystem::is_regular_file(
+                   std::filesystem::symlink_status(change.source))) {
+                same_size_replace=false;
+                break;
+            }
+            const auto key=edit_path(change.path);
+            const auto it=std::find_if(udf.items().begin(),udf.items().end(),
+                [&](const Item& entry){return !entry.directory && entry.path==key;});
+            if(it==udf.items().end() ||
+               std::filesystem::file_size(change.source)!=it->size ||
+               it->size==0 || it->extents.size()!=1 || it->extents[0].sparse ||
+               !it->inline_data.empty()) {
+                same_size_replace=false;
+                break;
+            }
+        }
+        if(same_size_replace)
+            edit_iso_udf_bridge_equal_length(path,image,changes,progress);
+        else
+            edit_iso_udf_bridge_metadata(path,image,changes,progress);
         return;
     }
     for(const auto& change:changes){auto p=edit_path(change.path);std::istringstream split(p);std::string name;Node* parent=image.root.get();
