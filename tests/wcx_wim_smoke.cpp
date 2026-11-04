@@ -6,6 +6,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "iso_wcx/wim_index_report.hpp"
 // WIMGAPI is resolved dynamically; the optional Windows ADK header is not needed.
 
 #include <array>
@@ -137,6 +138,18 @@ int wmain(int argc,wchar_t** argv) {
             close_wim(image);
         }
         close_wim(archive);
+        // DISM /Get-WimInfo-equivalent, built into the plugin with no
+        // helper EXE or mount. Check all three indexes and the no-mount label.
+        const auto summary=iso_wcx::build_wim_index_summary(original);
+        if(summary.find("Image indexes: 3")==std::string::npos ||
+           summary.find("WIM parts: 1")==std::string::npos ||
+           summary.find("Index 1\n")==std::string::npos ||
+           summary.find("Index 2\n")==std::string::npos ||
+           summary.find("Index 3\n")==std::string::npos ||
+           summary.find("not mounted")==std::string::npos) {
+            std::cerr<<"DISM-style WIM index summary incomplete\n"<<summary;
+            return 37;
+        }
 
         const HMODULE dll=LoadLibraryW(argv[1]);
         if(!dll)return 7;
