@@ -10,6 +10,8 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
+For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
+
 ## Edit-path improvements under test (2026-11-04)
 
 - **WIM (Windows, unsplit only):** when the only changes are within the
