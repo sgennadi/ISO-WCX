@@ -4,7 +4,7 @@
 // regardless of whether their editable filesystem is ISO9660 or UDF.
 #include "iso_wcx/archive_edit.hpp"
 #include <algorithm>
-#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -48,7 +48,14 @@ public:
         std::ifstream copy(staged,std::ios::binary);
         if(!source||!copy)
             throw EditUnsupported("cannot reopen staged optical image");
-        std::array<char,1024*1024> original_bytes{},staged_bytes{};
+        // Do not allocate multi-megabyte buffers on the Win32 WCX call
+        // stack. Windows worker threads often have 1 MiB reserved stack;
+        // two 1 MiB std::array buffers caused STATUS_STACK_OVERFLOW in CI.
+        // Dynamic buffers are independent of TC's stack size and keep
+        // cancellation checks at each bounded read.
+        constexpr std::size_t buffer_size=256u*1024u;
+        std::vector<char> original_bytes(buffer_size);
+        std::vector<char> staged_bytes(buffer_size);
         for(const auto& [begin,length]:merged) {
             source.clear();copy.clear();
             source.seekg(static_cast<std::streamoff>(begin));
