@@ -78,6 +78,26 @@ ZIP/RAR/7z before scanning an image. Preview capabilities now have
 mask 159 rather than Stable v0.21.0 mask 222; TC's normal ZIP support
 remains intact. Verify actual ZIP timing after installing this Preview.
 
+One-package F5 verification for both WIM and ISO (Preview)
+--------------------------------------------------------------
+Use disposable COPIES; do not use bootable ISO, hybrid ISO/UDF Bridge,
+ESD/SWM, or valuable original images for these write tests.
+1. Exit every Total Commander instance. Install ISO-WCX-preview.zip using
+   its native pluginst.inf, confirm repair of this plugin's associations
+   when offered, and fully restart TC.
+2. WIM: select add.txt in the ordinary source panel, open the copied
+   boot.wim\\image1\\ in the other panel, then F5 > Copy. Reopen the
+   WIM and independently check that add.txt contains the original bytes.
+3. ISO: open a plain, nonbootable ISO9660/Joliet COPY in the destination
+   panel (no image1 layer), select add.txt in the source, and F5 > Copy.
+   Reopen the ISO and check that the new and preexisting files are intact.
+4. On a separate ISO COPY, test same-name small-file replacement and F8
+   deletion of only the previously added file. Compare other files.
+5. Both editable iso and wim bindings should now begin with 159, whereas
+   read-only formats retain 158. Never edit TC's INI while TC is running.
+Write operations on hybrid boot images or ISO/UDF Bridge may be explicitly
+refused: never force them through an unsafe generic remastering step.
+
 No setup EXE, repair CMD, PowerShell script, external parser DLL, virtual
 disk mount, driver, or standalone disk extraction program is necessary.
 The WCX binaries include ISO/UDF, supported virtual-disk readers and
