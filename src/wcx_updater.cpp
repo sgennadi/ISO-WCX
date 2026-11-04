@@ -33,6 +33,12 @@
 #define ISO_WCX_VERSION_MINOR 18
 #define ISO_WCX_VERSION_PATCH 0
 #endif
+#ifndef ISO_WCX_RC_NUMBER
+#define ISO_WCX_RC_NUMBER 0
+#endif
+#ifndef ISO_WCX_BUILD_NUMBER
+#define ISO_WCX_BUILD_NUMBER 0
+#endif
 
 namespace iso_wcx {
 namespace {
@@ -79,8 +85,15 @@ std::string narrow(std::wstring_view value) {
     return out;
 }
 std::wstring version_name(update::Version v) {
-    return L"v"+std::to_wstring(v.major)+L"."+std::to_wstring(v.minor)+
-            L"."+std::to_wstring(v.patch);
+    std::wstring version=L"v"+std::to_wstring(v.major)+L"."+std::to_wstring(v.minor)+
+                         L"."+std::to_wstring(v.patch);
+    // Stable comparisons keep their exact semantic version. Only the
+    // installed preview gets its unique RC/build suffix in the GUI.
+    if(v==installed && ISO_WCX_RC_NUMBER>0) {
+        version+=L" RC"+std::to_wstring(ISO_WCX_RC_NUMBER);
+        version+=L" (Build "+std::to_wstring(ISO_WCX_BUILD_NUMBER)+L")";
+    }
+    return version;
 }
 bool read_dword(const wchar_t* name, DWORD fallback) {
     DWORD v=fallback;
@@ -358,6 +371,10 @@ void check_release(HWND dlg,State& state,bool forced) {
                 L"New verified Stable release: ",L"Доступна новая Stable-версия: "))+
                 state.latest_tag);
             EnableWindow(GetDlgItem(dlg,id_install),TRUE);
+        } else if(ISO_WCX_RC_NUMBER>0) {
+            put_status(dlg,std::wstring(tr(state.russian,
+                L"Installed RC; no newer published Stable release.",
+                L"Установлен RC; новой Stable-версии нет.")));
         } else put_status(dlg,tr(state.russian,
                 L"You have the latest Stable version.",
                 L"Установлена последняя Stable-версия."));
@@ -629,6 +646,8 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_INITDIALOG: {
         state=reinterpret_cast<State*>(lp);
         SetWindowLongPtrW(dlg,DWLP_USER,lp);
+        const auto title=L"ISO-WCX "+version_name(installed)+L" - Settings";
+        SetWindowTextW(dlg,title.c_str());
         state->russian=russian();
         state->automatic=read_dword(L"AutoCheck",1);
         add_control(dlg,L"STATIC",L"",SS_LEFT,id_status,12,10,340,38);
