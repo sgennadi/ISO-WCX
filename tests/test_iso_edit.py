@@ -143,6 +143,35 @@ def main(binary, reader=None):
             r=subprocess.run(args,capture_output=True,text=True)
             assert (r.returncode==0)==ok,(r.stdout,r.stderr,op,name)
             if not ok:assert image.read_bytes()==before,'original changed on failure'
+        # The physical ISO may contain a sector-aligned zero trailer not
+        # included in the ISO9660 descriptor's Volume Space Size. This is
+        # padding, not an additional partition: edits must work and update
+        # the final descriptor size to the real output length.
+        padded=fixture()+bytes(4*B)
+        image.write_bytes(padded)
+        run('add','PADDED.TXT')
+        assert read_image(image)['PADDED.TXT']==source.read_bytes()
+        edited=image.read_bytes()
+        assert int.from_bytes(edited[16*B+80:16*B+84],'little')==len(edited)//B
+        run('add','PADDED.TXT')  # replacement of the same existing file
+        run('delete','PADDED.TXT')
+        assert 'PADDED.TXT' not in read_image(image)
+        # A nonzero trailer may be appended boot, partition or vendor data,
+        # so it is never silently discarded or overwritten.
+        image.write_bytes(fixture()+bytes(4*B-1)+b'X')
+        run('add','MUST_FAIL.TXT',False)
+        # Truncation and namespace disagreement remain hard failures.
+        truncated=fixture()
+        both(truncated,16*B+80,len(truncated)//B+1)
+        image.write_bytes(truncated)
+        run('add','MUST_FAIL.TXT',False)
+        inconsistent=fixture(joliet=True)
+        both(inconsistent,17*B+80,len(inconsistent)//B-1)
+        image.write_bytes(inconsistent)
+        run('add','MUST_FAIL.TXT',False)
+        # An ISO/UDF bridge can legitimately have a physical file longer
+        # than ISO's declared extent. Its writer must still validate UDF,
+        # sharing and equal-length replacement; this test focuses on ISO.
         image.write_bytes(fixture());run('add','HELLO.TXT');run('add','DOCS/NEW.TXT');run('mkdir','EMPTY');run('mkdir','AAA');run('mkdir','DOCS/Z_CHILD');run('mkdir','DOCS/A_CHILD')
         expected={'HELLO.TXT':source.read_bytes(),'DOCS/':None,'DOCS/NEW.TXT':source.read_bytes(),'EMPTY/':None,'AAA/':None,'DOCS/Z_CHILD/':None,'DOCS/A_CHILD/':None}
         assert read_image(image)==expected
