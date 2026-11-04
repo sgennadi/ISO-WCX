@@ -12,6 +12,29 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## DISM GUI-derived WIM improvements (integrated into native WCX)
+
+ISO-WCX reuses the **workflow ideas**, not the DISM GUI application or a
+`dism.exe` child process. The plugin remains a self-contained WCX binary.
+
+- **Get-WimInfo-style index summary:** explicit **Export Image Structure**
+  now reads the per-index WIM XML through Windows WIMGAPI/MSXML and displays
+  `imageN`, boot index, edition, description, architecture, Windows version
+  and size metadata when those fields are available.
+- **No surprise mount:** ordinary F5 WIM edits continue using isolated
+  Apply/Edit/Capture stages, with proper cancellation, index-level status,
+  original-file preservation and post-write verification.
+- **One-index optimization:** single-index verification does not enumerate
+  the untouched indexes again. A special staged-copy path avoids exporting
+  other indexes when only the **last** `imageN` changes.
+- No `DISM-GUI.exe`, `dism.exe`, external DLL, mounted WIM folder, or
+  background service is required. Other image indexes remain unaffected
+  unless explicitly selected.
+
+Real multi-index `install.wim` performance and write tests on Windows
+are mandatory before calling this Stable. See
+[ISO editing strategy](docs/iso-edit-strategy.md) for optical write limits.
+
 ## Edit-path improvements under test (2026-11-04)
 
 - **WIM (Windows, unsplit only):** when the only changes are within the
