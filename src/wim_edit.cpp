@@ -127,6 +127,30 @@ struct Callback {
 };
 using Register=DWORD(WINAPI*)(HANDLE,FARPROC,void*);
 using Unregister=BOOL(WINAPI*)(HANDLE,FARPROC);
+// Copy-on-edit keeps all untouched WIM indexes byte-for-byte in the
+// staged archive. Progress and cancellation remain visible in Total Commander.
+struct CopyContext {
+    Callback& callback;
+    unsigned start, span;
+    static DWORD CALLBACK on_progress(LARGE_INTEGER total,LARGE_INTEGER transferred,
+                                      LARGE_INTEGER,LARGE_INTEGER,DWORD,DWORD,
+                                      HANDLE,HANDLE,LPVOID context) noexcept {
+        auto& self=*static_cast<CopyContext*>(context);
+        try {
+            unsigned progress=0;
+            if(total.QuadPart>0) {
+                const auto done=std::clamp<LONGLONG>(transferred.QuadPart,0,total.QuadPart);
+                progress=static_cast<unsigned>(
+                    static_cast<long double>(done)*self.span/total.QuadPart);
+            }
+            std::lock_guard lock(self.callback.mutex);
+            self.callback.notify_locked(self.start+progress);
+        } catch(...) {
+            self.callback.cancelled.store(true);
+        }
+        return self.callback.cancelled.load()?PROGRESS_CANCEL:PROGRESS_CONTINUE;
+    }
+};
 struct Registered {HANDLE h;Unregister unregister;Registered(HMODULE m,HANDLE file,Callback& c):h(file),unregister(api<Unregister>(m,"WIMUnregisterMessageCallback")){
     checked(api<Register>(m,"WIMRegisterMessageCallback")(h,reinterpret_cast<FARPROC>(&Callback::call),&c)!=0xffffffffu,"register WIM progress");}
     ~Registered(){unregister(h,reinterpret_cast<FARPROC>(&Callback::call));}
@@ -188,6 +212,13 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         auto digits=top.substr(5);if(digits.empty()||digits.size()>3||digits[0]=='0'||digits.find_first_not_of("0123456789")!=std::string::npos)throw EditUnsupported("invalid WIM index");unsigned index=static_cast<unsigned>(std::stoul(digits));if(!index||index>images)throw EditUnsupported("creating WIM indexes is not supported yet");
         if(slash==std::string::npos){if(!c.remove)throw EditUnsupported("cannot replace an image index");deleted.insert(index);}else{c.path=p.substr(slash+1);edits[index].push_back(std::move(c));}}
     if(deleted.size()==images)throw EditUnsupported("cannot delete the last WIM image");
+    // Existing WIMGAPI exports all untouched indexes into a new WIM.
+    // When only the final index changes, it can instead be replaced inside
+    // an isolated copy, keeping all preceding index records in place.
+    // WIMDeleteImage cannot be used for one-image WIMs or non-final indexes:
+    // the former is rejected by Windows; the latter would renumber indexes.
+    const bool replace_last_only=images>1 && deleted.empty() &&
+                                 edits.size()==1 && edits.contains(images);
     report(L"Prepare NTFS staging",3);
     Privileges privileges;Apartment apartment;EditTransaction tx(path);Library library;auto m=library.h;
     // Native Windows capture/apply preserve security and alternate streams on NTFS.
@@ -199,13 +230,38 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     {
         Handle source(create(path.c_str(),GENERIC_READ,OPEN_EXISTING,2,0,nullptr),close);
         const DWORD flags=wim_detail::u32(header,16);const DWORD compression=(flags&0x40000)?2u:(flags&0x20000)?1u:0u;
-        Handle output(create(tx.output.c_str(),GENERIC_READ|GENERIC_WRITE,CREATE_NEW,2,compression,nullptr),close);
+        if(replace_last_only){
+            // Copy, never mutate, the original. A failure or cancellation
+            // destroys only the private workspace in EditTransaction.
+            callback.begin_stage(L"Copy WIM (preserve unchanged indexes)",6,17);
+            CopyContext copy{callback,6,17};
+            const BOOL copied=CopyFileExW(path.c_str(),tx.output.c_str(),
+                                          &CopyContext::on_progress,&copy,nullptr,0);
+            if(!copied){
+                if(callback.cancelled.load())throw EditCancelled();
+                checked(false,"copy WIM before selected-index edit");
+            }
+        }
+        Handle output(create(tx.output.c_str(),GENERIC_READ|GENERIC_WRITE,
+                             replace_last_only?OPEN_EXISTING:CREATE_NEW,2,
+                             replace_last_only?0u:compression,nullptr),close);
         checked(temp(source.h,tx.workspace.c_str())&&temp(output.h,tx.workspace.c_str()),"set WIM temporary directory");Registered source_callback(m,source.h,callback),output_callback(m,output.h,callback);
-        unsigned out_index=0,new_boot=0;
+        if(replace_last_only){
+            callback.begin_stage(L"Remove old final WIM index",23,0);
+            // No output image handles are open. This is safe only for the
+            // last index in a multi-image, unsplit WIM.
+            checked(api<BOOL(WINAPI*)(HANDLE,DWORD)>(m,"WIMDeleteImage")(output.h,images),
+                    "remove old final WIM index from staged copy");
+        }
+        unsigned out_index=replace_last_only?images-1u:0u;
+        unsigned new_boot=replace_last_only?boot:0u;
         for(unsigned index=1;index<=images;++index){
             callback.tick();
-            const unsigned begin=6u+static_cast<unsigned>(75ull*(index-1u)/images);
-            const unsigned end=6u+static_cast<unsigned>(75ull*index/images);
+            if(replace_last_only && index!=images)continue;
+            const unsigned begin=replace_last_only?25u:
+                6u+static_cast<unsigned>(75ull*(index-1u)/images);
+            const unsigned end=replace_last_only?81u:
+                6u+static_cast<unsigned>(75ull*index/images);
             const std::wstring number=std::to_wstring(index)+L"/"+std::to_wstring(images);
             if(deleted.count(index)){
                 callback.begin_stage(L"Skipping removed WIM image "+number,begin,0);
@@ -244,6 +300,8 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             HANDLE captured=api<HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMCaptureImage")(output.h,expanded.c_str(),2u|0x100u);
             callback.tick();Handle result(captured,close);preserve_metadata(m,image.h,result.h);
         }
+        checked(api<DWORD(WINAPI*)(HANDLE)>(m,"WIMGetImageCount")(output.h)==out_index,
+                "staged WIM index count changed unexpectedly");
         checked(api<BOOL(WINAPI*)(HANDLE,DWORD)>(m,"WIMSetBootImage")(output.h,new_boot),"preserve WIM boot index");
     }
     // Reopen the rebuilt image, validate all index trees, and independently
@@ -251,7 +309,9 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     // file: this made creating even an empty directory take minutes longer.
     report(L"Verify WIM structure",85);
     {
-        WimArchive verified(tx.output);
+        // The retained indexes were copied directly from the original;
+        // enumerate only the changed last image for this fast transaction.
+        WimArchive verified(tx.output,replace_last_only?images:0u);
         std::map<std::string,std::size_t> found;
         const auto& items=verified.items();
         for(std::size_t i=0;i<items.size();++i){
@@ -266,6 +326,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         for(unsigned index=1;index<=images;++index){
             if(deleted.count(index))continue;
             ++new_index;
+            if(replace_last_only && new_index!=images)continue;
             const auto prefix="image"+std::to_string(new_index);
             if(!found.contains(prefix))throw EditUnsupported("missing output WIM image index");
             if(!edits.contains(index))continue;
