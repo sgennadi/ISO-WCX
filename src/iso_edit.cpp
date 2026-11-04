@@ -169,6 +169,16 @@ public:
             descriptors.emplace_back(lba,std::move(b));
         }
         need(end&&!primary.empty(),"missing ISO primary/terminator");
+        // Detect UDF anchors relative to the logical volume as well as the
+        // physical file end. ISO/UDF bridges may have zero padding after the
+        // actual ECMA-167 anchor, and cannot use the plain ISO rebuild path.
+        if(declared_volume_blocks<sectors) {
+            udf_bridge=udf_bridge ||
+                (declared_volume_blocks>256 && avdp(declared_volume_blocks-256)) ||
+                avdp(declared_volume_blocks-1);
+            need(allow_udf_bridge || !udf_bridge,
+                 "ISO/UDF Bridge directory edits require a synchronized UDF writer");
+        }
         // A non-UDF ISO can have an all-zero sector-aligned trailer. Preserve
         // it during staging, then update the descriptor's volume size when
         // appending changed files/metadata. Never accept hidden nonzero
