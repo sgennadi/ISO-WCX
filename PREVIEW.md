@@ -12,6 +12,27 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC build identity (current PR #69)
+
+The **published Stable release remains v0.21.0**. Every Windows Preview
+artifact produced by `.github/workflows/wcx-preview.yml` now identifies
+itself as **v0.21.1 RC1 (Build N)**, where `N` is the unique GitHub
+Actions workflow run number. The plugin Settings title, installed-version
+label and Windows DLL Version Information share this identity, and the
+auto-installable Total Commander `pluginst.inf` describes the same RC
+and build. Its numeric `version=0.21.1` field preserves standard TC
+installer compatibility. The ZIP is named
+`ISO-WCX-v0.21.1-RC1-B<N>.zip` and includes **only** the two
+architecture-specific WCX binaries and the normal installation notes.
+
+CMake defaults to the Stable identity for local/release builds;
+passing `-DISO_WCX_RC_NUMBER=1 -DISO_WCX_BUILD_NUMBER=<N>` produces an
+RC-labelled build without editing Stable CMake/release metadata. Later
+RCs increment the RC number deliberately, while repeated CI builds
+of the same RC receive a different build number. The updater
+continues checking official published Stable releases and also offers
+Stable v0.21.1 to RC1 users when it is published.
+
 ## DISM GUI-derived WIM improvements (integrated into native WCX)
 
 ISO-WCX reuses the **workflow ideas**, not the DISM GUI application or a
