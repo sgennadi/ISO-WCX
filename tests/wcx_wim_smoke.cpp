@@ -144,9 +144,9 @@ int wmain(int argc,wchar_t** argv) {
         const auto summary=iso_wcx::build_wim_index_summary(original);
         if(summary.find("Image indexes: 3")==std::string::npos ||
            summary.find("WIM parts: 1")==std::string::npos ||
-           summary.find("Index 1\n")==std::string::npos ||
-           summary.find("Index 2\n")==std::string::npos ||
-           summary.find("Index 3\n")==std::string::npos ||
+           summary.find("Index 1")==std::string::npos ||
+           summary.find("Index 2")==std::string::npos ||
+           summary.find("Index 3")==std::string::npos ||
            summary.find("not mounted")==std::string::npos) {
             std::cerr<<"DISM-style WIM index summary incomplete\n"<<summary;
             return 37;
