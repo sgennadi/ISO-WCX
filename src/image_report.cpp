@@ -261,8 +261,8 @@ OpticalProbeInfo probe_optical(Report& report,
         report.append("- Protected HYBRID system area: ordinary ISO rebuild refused; use specialized boot-preserving writer");
     else if(nsr02||nsr03||candidate_anchor)
         report.append(el_torito?
-            "- Bootable ISO/UDF Bridge: add/delete/resize and equal-size replacement are currently blocked":
-            "- ISO/UDF Bridge: only equal-size replacement of a single validated shared extent may work");
+            "- Bootable ISO/UDF Bridge: universal guarded UDF Type-1 writer may allow UDF-only F5/F7/Delete/resize if bitmap, FID, FE and complete boot ranges validate":
+            "- ISO/UDF Bridge: guarded UDF Type-1 edits and exact-length payload replacement may work after validation");
     else
         report.append(el_torito?
             "- Plain ISO/Joliet + El Torito: rebuild may work if catalog/boot extents, names and trees validate":
@@ -274,12 +274,14 @@ OpticalProbeInfo probe_optical(Report& report,
     if(nsr02||nsr03||candidate_anchor)
         report.append("- UDF detected: modifying ISO9660 alone may damage UDF metadata");
     if(pvd && (nsr02||nsr03||candidate_anchor)) {
-        report.append("- ISO/UDF Bridge candidate: adding/deleting/resizing "
-                      "can require coordinated changes to both namespaces; "
-                      "the current editor does not support these operations");
+        report.append("- ISO/UDF Bridge: ISO-visible files and paths cannot be "
+                      "added/deleted/resized without synchronized ISO/UDF metadata");
+        report.append("- UDF-only paths: a native Type-1 writer may change UDF "
+                      "metadata if the source bitmap and allocation schema validate");
         if(el_torito)
-            report.append("- Bootable ISO/UDF Bridge: the current editor also "
-                          "rejects equal-size in-place replacement");
+            report.append("- Bootable ISO/UDF Bridge: all El Torito BIOS/UEFI "
+                          "byte ranges and ISO namespace remain immutable; "
+                          "unknown/unbounded ranges reject writes");
     }
     report.append("- This is NOT a write-permission check. Readability does not imply safe deletion");
     return {pvd,joliet,nsr02||nsr03||candidate_anchor,el_torito};
