@@ -242,6 +242,37 @@ def main(binary, reader=None):
         run('delete','HELLO.TXT',False)
         run('add','HELLO.TXT',False)
 
+        # Authoring programs may append zero sectors after the ISO9660
+        # declared volume. The writer must accept bounded zero padding,
+        # normalize the descriptor size, and retain the new file on readback.
+        image.write_bytes(fixture() + bytes(12*B))
+        run('add','PADDED.TXT')
+        assert read_image(image)['PADDED.TXT']==source.read_bytes()
+        padded=image.read_bytes()
+        assert int.from_bytes(padded[16*B+80:16*B+84],'little')==len(padded)//B
+        validate_path_tables(image)
+        image.write_bytes(fixture(joliet=True) + bytes(12*B))
+        run('add','PADDED.TXT')
+        assert read_image(image,True)['PADDED.TXT']==source.read_bytes()
+        validate_path_tables(image)
+        # Nonzero bytes beyond the declared volume could be hidden boot or
+        # partition metadata; they must never be overwritten.
+        image.write_bytes(fixture() + b'X' + bytes(B-1))
+        run('add','NEW.TXT',False)
+        # A valid UDF anchor can be located at the declared volume boundary,
+        # rather than at the physical EOF if the disc was padded.
+        hidden=bytearray(fixture())
+        hidden.extend(bytes((600-len(hidden)//B)*B))
+        both(hidden,16*B+80,600)
+        hidden.extend(bytes(40*B))
+        anchor_at=(600-256)*B
+        struct.pack_into('<H',hidden,anchor_at,2)
+        struct.pack_into('<H',hidden,anchor_at+2,2)
+        struct.pack_into('<I',hidden,anchor_at+12,600-256)
+        hidden[anchor_at+4]=sum(hidden[anchor_at+i] for i in range(16) if i!=4)&255
+        image.write_bytes(hidden)
+        run('add','NEW.TXT',False)
+
         # Even without the NSR02/NSR03 VRS sequence, a valid UDF anchor
         # means the editor must NOT update only the ISO namespace.
         anchor=bytearray(fixture())
