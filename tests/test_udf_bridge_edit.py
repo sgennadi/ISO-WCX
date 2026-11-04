@@ -9,7 +9,7 @@ import tempfile
 from test_images import iso_image, iso_record, udf_image, B
 from test_iso_edit import both, read_image
 
-def descriptor_bridge(boot=False,shared=True):
+def descriptor_bridge(boot=False,shared=True,udf_only=False,boot_count=None):
     data=bytearray(udf_image())
     iso=bytearray(iso_image(filename='hello;1'))
     if boot:
@@ -17,6 +17,8 @@ def descriptor_bridge(boot=False,shared=True):
         source=fixture(boot=True)
         data[16*B:19*B]=source[16*B:19*B]
         data[24*B:26*B]=source[24*B:26*B]
+        if boot_count is not None:
+            struct.pack_into('<H',data,24*B+38,boot_count)
     else:
         data[16*B:18*B]=iso[16*B:18*B]
     both(data,16*B+80,len(data)//B)
@@ -26,8 +28,9 @@ def descriptor_bridge(boot=False,shared=True):
     data[16*B+881]=1
     physical=303 if shared else 21
     root=(iso_record(20,B,2,bytes([0]))+
-          iso_record(20,B,2,bytes([1]))+
-          iso_record(physical,5,0,b'hello;1'))
+          iso_record(20,B,2,bytes([1])))
+    if not udf_only:
+        root+=iso_record(physical,5,0,b'hello;1')
     data[20*B:21*B]=bytes(B)
     data[20*B:20*B+len(root)]=root
     fe=302*B
@@ -66,6 +69,38 @@ def main(editor,inspector):
         target=root/'udf-out'
         run([inspector,str(image),'--extract',str(target)])
         assert (target/'hello').read_bytes()==b'EARTH'
+        # AOMEI-style bootable ISO/UDF Bridge: the editable file exists
+        # in the UDF namespace only. ISO9660 contains boot-related files.
+        # Fully bounded El Torito boot-image spans must remain unchanged.
+        image.write_bytes(descriptor_bridge(boot=True,udf_only=True,boot_count=4))
+        original=image.read_bytes()
+        source.write_bytes(b'EARTH')
+        run([editor,str(image),'add','hello',str(source)])
+        after=image.read_bytes()
+        assert len(after)==len(original)
+        assert after[:303*B]==original[:303*B]
+        assert after[303*B+5:]==original[303*B+5:]
+        assert after[24*B:26*B]==original[24*B:26*B]
+        assert read_image(image)=={},'ISO9660 boot-only tree changed'
+        target=root/'bootable-udf-out'
+        run([inspector,str(image),'--extract',str(target)])
+        assert (target/'hello').read_bytes()==b'EARTH'
+
+        # Refuse equal-size changes if they overlap a boot image, even when
+        # the UDF filename is not represented in the ISO9660 namespace.
+        collision=descriptor_bridge(boot=True,udf_only=True,boot_count=4)
+        struct.pack_into('<I',collision,24*B+40,303)
+        image.write_bytes(collision)
+        before=image.read_bytes()
+        run([editor,str(image),'add','hello',str(source)],expected=1)
+        assert image.read_bytes()==before,'El Torito alias was overwritten'
+
+        # Unknown boot extent length must still fail safely.
+        image.write_bytes(descriptor_bridge(boot=True,udf_only=True))
+        before=image.read_bytes()
+        run([editor,str(image),'add','hello',str(source)],expected=1)
+        assert image.read_bytes()==before
+
         def rejected(operation,name,content=b'EARTH',boot=False,shared=True):
             image.write_bytes(descriptor_bridge(boot=boot,shared=shared))
             source.write_bytes(content)
@@ -81,7 +116,7 @@ def main(editor,inspector):
         rejected('add','missing',b'EARTH')
         rejected('add','hello',b'EARTH',shared=False)
         rejected('add','hello',b'EARTH',boot=True)
-    print('PASS: UDF Bridge shared-extent equal-length edit, dual readback, rollback, rejects')
+    print('PASS: UDF Bridge shared/UDF-only equal-length edit, bounded El Torito preservation, dual readback, rollback')
 
 if __name__=='__main__':
     main(sys.argv[1],sys.argv[2])
