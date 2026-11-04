@@ -41,7 +41,7 @@ $env:ISO_WCX_DISABLE_ASSOC_REPAIR='1'
 $logFile=Join-Path $logDir 'ISO-WCX/Logs/edit-errors.log'
 $report=[ordered]@{
     purpose='Isolate whether Total Commander 11.58 invokes PackFilesW on F5'
-    source='Disposable CI-only WIM, not any user image'
+    source='Disposable CI-only WIM and ISO, never user images'
     shipping_caps=159
     control_158_is_test_only=$true
     template_wim_unchanged=$true
@@ -1153,21 +1153,50 @@ try {
         throw "DISM cannot capture disposable one-index WIM: $LASTEXITCODE"
     }
     $sha=(Get-FileHash -LiteralPath $templateWim -Algorithm SHA256).Hash
+    # Evaluate both real TC modes on a one-index disposable WIM.
     foreach($mask in @(158,159)) {
-        $report.cases+=Test-Mask $mask $source $templateWim
+        $report.cases+=Test-Mask $mask $source $templateWim 'wim'
     }
+    Write-Host 'TC_F5_STAGE=WIM_CASES_RETURNED'
+    # Independently generated plain ISO9660 with existing HELLO.TXT.
+    # No user image is ever opened or modified by these GitHub CI cases.
+    $templateIso=Join-Path $work 'original-test.iso'
+    $python=(Get-Command python.exe -ErrorAction Stop).Source
+    & $python 'tools/iso_wcx_ci_iso_f5.py' create $templateIso
+    if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $templateIso)) {
+        throw 'Could not generate disposable ISO9660 F5 fixture'
+    }
+    $isoSha=(Get-FileHash -LiteralPath $templateIso -Algorithm SHA256).Hash
+    # The production GetPackerCaps=159 binary must accept normal F5 to
+    # the ISO root; replacement/delete are covered in ISO writer tests.
+    $report.cases+=Test-Mask 159 $source $templateIso 'iso'
     Write-Host 'TC_F5_STAGE=CASES_RETURNED'
+    Write-Host 'TC_F5_STAGE=VERIFY_TEMPLATES_BEGIN'
     $report.template_wim_unchanged=
         $sha -eq (Get-FileHash -LiteralPath $templateWim -Algorithm SHA256).Hash
-    if(-not $report.template_wim_unchanged) { throw 'WIM template unexpectedly changed' }
+    $report.template_iso_unchanged=
+        $isoSha -eq (Get-FileHash -LiteralPath $templateIso -Algorithm SHA256).Hash
+    Write-Host ('TC_F5_STAGE=VERIFY_TEMPLATES_END wim='+
+        $report.template_wim_unchanged+' iso='+$report.template_iso_unchanged)
+    if(-not $report.template_wim_unchanged -or
+       -not $report.template_iso_unchanged) {
+        throw 'A disposable ISO/WIM template unexpectedly changed'
+    }
     $attempted=@($report.cases | Where-Object {$_.f5_sent})
-    if($attempted.Count -eq 0) {
-        throw 'INCONCLUSIVE HOST: F5 was NOT SENT (trial prompt, main-window discovery or navigation blocked). Inspect session and window evidence.'
+    Write-Host ('TC_F5_STAGE=CHECK_OUTCOMES attempted='+$attempted.Count)
+    if($attempted.Count -lt 2) {
+        throw 'INCONCLUSIVE HOST: F5 was not sent to BOTH WIM and ISO panels.'
     }
-    if(@($report.cases | Where-Object {$_.packfiles_success -and
-                                      $_.wim_contents_verified}).Count -eq 0) {
-        throw 'Real TC F5 did not complete a verified WIM edit; inspect host trace.'
+    foreach($format in @('wim','iso')) {
+        if(@($report.cases | Where-Object {
+               $_.format -eq $format -and $_.mask -eq 159 -and
+               $_.packfiles_success -and $_.image_contents_verified
+           }).Count -ne 1) {
+            throw ('Real TC F5 did not produce independently verified '+$format+
+                   ' output from shipping WCX 159.')
+        }
     }
+    Write-Host 'TC_F5_STAGE=CHECK_OUTCOMES_PASS'
 }catch{
     $failure=$_.Exception.Message
     $report.errors+= $failure
