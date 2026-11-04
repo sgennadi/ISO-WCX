@@ -1030,29 +1030,37 @@ $format=$mask,$casePlugin
         $case.packfiles_success=@($case.events |
             Where-Object { $_ -match 'PackFilesW finished' -and
                            $_ -match 'return=0' }).Count -gt 0
-        $case.wim_contents_verified=$false
         if($case.packfiles_success) {
-            $verify=Join-Path $caseDir 'verify-applied'
-            New-Item -ItemType Directory -Path $verify -Force | Out-Null
-            & "$env:WINDIR\System32\dism.exe" /English /Apply-Image "/ImageFile:$image" /Index:1 "/ApplyDir:$verify" | Out-Null
-            $actual=Join-Path $verify 'add.txt'
-            $baseline=Join-Path $verify 'original.txt'
-            $case.wim_contents_verified=($LASTEXITCODE -eq 0 -and
-                (Test-Path -LiteralPath $actual -PathType Leaf) -and
-                (Test-Path -LiteralPath $baseline -PathType Leaf) -and
-                ((Get-Content -LiteralPath $actual -Raw).Trim() -eq
-                  'Real TC F5 input file'))
-            Write-Host ("TC_F5_STAGE=VERIFY_WIM mask="+$mask+
-                " success="+$case.wim_contents_verified)
+            if($format -eq 'wim') {
+                $verify=Join-Path $caseDir 'verify-applied'
+                New-Item -ItemType Directory -Path $verify -Force | Out-Null
+                & "$env:WINDIR\System32\dism.exe" /English /Apply-Image "/ImageFile:$image" /Index:1 "/ApplyDir:$verify" | Out-Null
+                $actual=Join-Path $verify 'add.txt'
+                $baseline=Join-Path $verify 'original.txt'
+                $case.wim_contents_verified=($LASTEXITCODE -eq 0 -and
+                    (Test-Path -LiteralPath $actual -PathType Leaf) -and
+                    (Test-Path -LiteralPath $baseline -PathType Leaf) -and
+                    ((Get-Content -LiteralPath $actual -Raw).Trim() -eq
+                      'Real TC F5 input file'))
+                $case.image_contents_verified=$case.wim_contents_verified
+            } else {
+                # Check ISO via an independent ISO9660 parser and path tables.
+                $python=(Get-Command python.exe -ErrorAction Stop).Source
+                & $python 'tools/iso_wcx_ci_iso_f5.py' verify $image
+                $case.iso_contents_verified=($LASTEXITCODE -eq 0)
+                $case.image_contents_verified=$case.iso_contents_verified
+            }
+            Write-Host ("TC_F5_STAGE=VERIFY_IMAGE format="+$format+
+                " mask="+$mask+" success="+$case.image_contents_verified)
         }
         Write-Host ("TC_F5_STAGE=AFTER_F5 mask="+$mask+
             " callback="+$case.packfiles_callback+
             " outcome_hint="+$confirmation.kind)
         $case.outcome=if($case.packfiles_success -and
-                            $case.wim_contents_verified) {
-            'PASS: real TC F5 wrote WIM and content verified'
+                            $case.image_contents_verified) {
+            'PASS: real TC F5 wrote '+$format+' and contents verified'
         }elseif($case.packfiles_callback) {
-            'FAIL: WCX callback invoked but WIM write not verified'
+            'FAIL: WCX callback invoked but '+$format+' contents not verified'
         }elseif($confirmation.prompted -and -not $confirmation.confirmed) {
             'INCONCLUSIVE: F5 raised a modal copy/error dialog without a confirmed WCX callback'
         }elseif(-not $confirmation.prompted) {
@@ -1077,13 +1085,13 @@ $format=$mask,$casePlugin
         return $case
     } finally {
         Write-Host ("TC_F5_STAGE=CLEANUP_BEGIN mask="+$mask+
-            " verified="+$case.wim_contents_verified)
+            " format="+$format+" verified="+$case.image_contents_verified)
         if($tc) {
             # On successful WIM verification the before-F5 screenshot is
             # already preserved. CopyFromScreen in a newly disposed VCL
             # desktop can hang on a headless Windows runner; skip this
             # best-effort postmortem screenshot on confirmed success.
-            if(-not $case.wim_contents_verified) {
+            if(-not $case.image_contents_verified) {
                 try { Save-RunnerScreenshot $caseDir } catch {}
             }
             Write-Host ("TC_F5_STAGE=STOP_TC mask="+$mask)
