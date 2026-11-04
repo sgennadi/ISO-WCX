@@ -415,8 +415,11 @@ void edit_iso_udf_bridge_equal_length(
     const std::filesystem::path& path,Image& iso,
     const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
     need(iso.udf_bridge,"not an ISO/UDF bridge");
-    need(iso.boot_lbas.empty(),
-         "bootable ISO/UDF Bridge editing requires further boot-range checks");
+    // Payload-only edits are allowed in bootable bridges only if every
+    // El Torito boot entry has a bounded data span. We do not regenerate or
+    // relocate the catalog, boot images or any UDF descriptors.
+    need(iso.boot_regions_bounded,
+         "El Torito boot image has no bounded sector count; editing refused");
     const Disc udf(path);
     need(udf.format()=="UDF","UDF filesystem could not be validated");
     std::map<std::string,const Item*> udf_files;
@@ -440,50 +443,63 @@ void edit_iso_udf_bridge_equal_length(
         Node* node=iso.root.get();
         std::istringstream parts(key);
         std::string component;
-        while(std::getline(parts,component,'/')) {
+        while(node && std::getline(parts,component,'/')) {
             auto it=std::find_if(node->children.begin(),node->children.end(),
                 [&](const auto& candidate){return candidate->logical==component;});
-            need(it!=node->children.end(),"path missing from ISO bridge namespace");
-            node=it->get();
+            node=it==node->children.end()?nullptr:it->get();
         }
-        need(node && !node->directory && node->size>0,
-             "bridge target must be an existing nonempty ISO file");
+        need(!node || (!node->directory && node->size>0),
+             "bridge target maps to an ISO directory");
         const auto it=udf_files.find(key);
-        need(it!=udf_files.end(),"path missing from UDF bridge namespace");
+        need(it!=udf_files.end(),"file missing from UDF bridge namespace");
         const auto& entry=*it->second;
-        need(entry.inline_data.empty() && entry.direct_source.empty() &&
+        need(entry.size>0 && entry.inline_data.empty() &&
+             entry.direct_source.empty() &&
              entry.extents.size()==1 && !entry.extents[0].sparse,
-             "bridge file requires a single nonembedded, nonsparse UDF extent");
-        const auto offset=std::uint64_t(node->lba)*block;
-        need(offset>=257ull*block && node->size==entry.size &&
-             entry.extents[0].offset==offset &&
-             entry.extents[0].length==node->size &&
-             offset<=iso.size && node->size<=iso.size-offset,
-             "ISO and UDF do not share an identical bounded file extent");
+             "bridge payload requires a single nonembedded, nonsparse UDF extent");
+        const auto offset=entry.extents[0].offset;
+        need(offset>=257ull*block && entry.extents[0].length==entry.size &&
+             offset<=iso.size && entry.size<=iso.size-offset,
+             "UDF file extent is not a bounded standalone payload");
+        if(node) {
+            need(std::uint64_t(node->lba)*block==offset &&
+                 node->size==entry.size,
+                 "ISO and UDF aliases disagree about file extent");
+            protect_boot(*node,iso.boot_lbas);
+        }
         need(std::filesystem::is_regular_file(
                  std::filesystem::symlink_status(change.source)),
              "replacement must be a regular file, not a link");
-        need(std::filesystem::file_size(change.source)==node->size,
+        need(std::filesystem::file_size(change.source)==entry.size,
              "bridge replacement must have exactly the original file size");
-        protect_boot(*node,iso.boot_lbas);
+        // A payload-only edit must not overlap any El Torito boot range,
+        // descriptor, ISO9660 directory, or UDF VDS/anchor.
+        need(offset>=256ull*block,
+             "replacement overlaps ISO/VRS/reserved optical descriptors");
+        for(const auto& [start,length]:iso.boot_regions)
+            need(!intersect(offset,entry.size,start,length),
+                 "replacement intersects El Torito boot image or catalog");
+        for(const auto& [start,length]:iso.udf_metadata_regions)
+            need(!intersect(offset,entry.size,start,length),
+                 "replacement intersects UDF anchor or descriptor sequence");
         for(const auto* other:iso_nodes) {
             if(other==node || other->size==0)continue;
-            need(!intersect(offset,node->size,
+            need(!intersect(offset,entry.size,
                             std::uint64_t(other->lba)*block,other->size),
-                 "bridge file extent overlaps another ISO entry");
+                 "bridge file overlaps ISO directory, boot image or other entry");
         }
         for(const auto& other:udf.items()) {
             if(other.path==key)continue;
             for(const auto& extent:other.extents)
                 if(!extent.sparse)
-                    need(!intersect(offset,node->size,
+                    need(!intersect(offset,entry.size,
                                     extent.offset,extent.length),
                          "bridge file shares an extent with another UDF entry");
         }
         for(const auto& previous:patches)
-            need(!intersect(offset,node->size,previous.at,previous.bytes),
+            need(!intersect(offset,entry.size,previous.at,previous.bytes),
                  "overlapping or repeated bridge file replacements");
-        patches.push_back({key,change.source,offset,node->size});
+        patches.push_back({key,change.source,offset,entry.size});
     }
     need(!patches.empty(),"empty ISO/UDF Bridge replacement list");
 
