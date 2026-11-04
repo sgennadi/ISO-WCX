@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <new>
@@ -231,6 +232,33 @@ template<class Char> std::vector<std::wstring> edit_list(const Char* list) {
         if constexpr(std::is_same_v<Char,wchar_t>)out.emplace_back(list,n);else out.push_back(from_bytes(list,CP_ACP));list+=n+1;
     }return out;
 }
+// Preserve the underlying ISO edit refusal reason for troubleshooting.
+// WCX can only return an integer error code, so TC cannot display what
+// the native writer rejected. Never log source file contents or credentials.
+void log_edit_failure(const std::wstring& archive,bool remove,const char* reason,int code) noexcept {
+    try {
+        wchar_t local[32768]{};
+        const DWORD n=GetEnvironmentVariableW(L"LOCALAPPDATA",local,32768);
+        if(n==0 || n>=32768)return;
+        const auto directory=std::filesystem::path(local)/L"ISO-WCX"/L"Logs";
+        std::filesystem::create_directories(directory);
+        std::ofstream log(directory/L"edit-errors.log",std::ios::app);
+        if(!log)return;
+        SYSTEMTIME stamp{};
+        GetLocalTime(&stamp);
+        const auto suffix=std::filesystem::path(archive).extension().wstring();
+        const char* kind=(suffix==L".iso" || suffix==L".ISO" || suffix==L".udf" || suffix==L".UDF")
+                             ?"ISO":"IMAGE";
+        log << '[' << stamp.wYear << '-' << stamp.wMonth << '-' << stamp.wDay
+            << ' ' << stamp.wHour << ':' << stamp.wMinute << ':' << stamp.wSecond
+            << "] WCX_EDIT_FAILURE format=" << kind
+            << " action=" << (remove?"delete":"pack")
+            << " code=" << code
+            << " reason=" << (reason?reason:"unknown") << '\n';
+    } catch(...) {
+        // Diagnostics must never change the WCX operation result.
+    }
+}
 int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::wstring& source,
             const std::vector<std::wstring>& names,bool remove,int flags) {
     try {
@@ -275,9 +303,10 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         else iso_wcx::edit_fat(image,changes,progress);
         return 0;
     }catch(const iso_wcx::EditCancelled&){return E_EABORTED;}
-     catch(const iso_wcx::EditUnsupported&){return E_NOT_SUPPORTED;}
-     catch(const std::filesystem::filesystem_error&){return E_ECREATE;}
-     catch(...){return E_BAD_ARCHIVE;}
+     catch(const iso_wcx::EditUnsupported& e){log_edit_failure(archive,remove,e.what(),E_NOT_SUPPORTED);return E_NOT_SUPPORTED;}
+     catch(const std::filesystem::filesystem_error& e){log_edit_failure(archive,remove,e.what(),E_ECREATE);return E_ECREATE;}
+     catch(const std::exception& e){log_edit_failure(archive,remove,e.what(),E_BAD_ARCHIVE);return E_BAD_ARCHIVE;}
+     catch(...){log_edit_failure(archive,remove,"unknown native exception",E_BAD_ARCHIVE);return E_BAD_ARCHIVE;}
 }
 }
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
