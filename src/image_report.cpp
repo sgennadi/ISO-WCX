@@ -4,6 +4,7 @@
 // other image formats are described without guessing their raw layout.
 #include "iso_wcx/image_report.hpp"
 #include "iso_wcx/disc.hpp"
+#include "iso_wcx/udf_edit_inspection.hpp"
 #ifdef _WIN32
 #include "iso_wcx/wim_index_report.hpp"
 #include "iso_wcx/wim_parts.hpp"
@@ -368,6 +369,33 @@ std::string build_image_structure_report(const std::filesystem::path& image){
     }
 #endif
     const auto optical=probe_optical(report,image,bytes);
+    if(disc.format().rfind("UDF",0)==0) {
+        report.append("");
+        report.append("UDF NATIVE EDIT PREFLIGHT (READ ONLY)");
+        const auto capability=inspect_udf_edit(image,optical.iso_primary);
+        report.append_kv("Strict UDF Type-1 writer parser",
+                         capability.parser_compatible?"compatible":"unsupported");
+        if(capability.parser_compatible) {
+            report.append_kv("Validated UDF free-space bitmap",
+                             capability.allocation_bitmap?"present":"absent");
+            report.append(capability.allocation_bitmap?
+                "- New file/F7: allocator available, subject to free space, "
+                "per-path checks and boot/ISO overlap verification":
+                "- New file/F7: disabled without a validated allocation bitmap");
+            report.append("- Delete/replace: may be available after per-file "
+                          "and ISO/El Torito protected-range validation");
+        } else {
+            report.append_kv("UDF Type-1 restriction",
+                             safe_text(capability.reason));
+            report.append("- Native metadata edits remain disabled; "
+                          "payload-only same-size replacement may still be eligible");
+        }
+        if(optical.iso_primary)
+            report.append("- ISO/UDF Bridge: the ISO9660 namespace and "
+                          "El Torito boot regions must pass an independent "
+                          "byte-for-byte staged-image verification");
+        report.append("- This is a diagnostic, NOT permission to modify the image");
+    }
     report.append("");
     report.append("DIRECTORY TREE (selected by Total Commander; metadata only; UTF-8)");
     append_tree(report,disc.items());
