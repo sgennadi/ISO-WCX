@@ -119,6 +119,13 @@ jobs:
           merge-multiple: true
       - name: Build auto-installable Total Commander package
         run: |
+          # With additional build/pluginst.inf, upload-artifact may
+          # retain Release/ for the binaries. Normalize to a flat TC ZIP.
+          for binary in ISO-WCX.wcx ISO-WCX.wcx64; do
+            if test -f "package/Release/$binary"; then
+              mv "package/Release/$binary" "package/$binary"
+            fi
+          done
           test -s package/ISO-WCX.wcx
           test -s package/ISO-WCX.wcx64
           # Exactly two self-contained WCX DLLs; exclude *additional*
