@@ -1072,8 +1072,13 @@ $format=$mask,$casePlugin
             } else {
                 # Check ISO via an independent ISO9660 parser and path tables.
                 $python=(Get-Command python.exe -ErrorAction Stop).Source
-                & $python 'tools/iso_wcx_ci_iso_f5.py' verify $image
-                $case.iso_contents_verified=($LASTEXITCODE -eq 0)
+                $verifyOutput=@(& $python 'tools/iso_wcx_ci_iso_f5.py' verify $image)
+                $verifyExitCode=$LASTEXITCODE
+                Write-Host ('TC_F5_ISO_READBACK '+($verifyOutput -join ' | '))
+                # Never let the Python process' ordinary stdout leak into
+                # Test-Mask function output: the only return object must be
+                # the structured per-case result, not a stray status string.
+                $case.iso_contents_verified=($verifyExitCode -eq 0)
                 $case.image_contents_verified=$case.iso_contents_verified
             }
             Write-Host ("TC_F5_STAGE=VERIFY_IMAGE format="+$format+
