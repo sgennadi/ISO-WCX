@@ -1,0 +1,270 @@
+// Standalone C++20 tests for ISO-WCX's own old WCX association migration.
+// No registry, user profile or Total Commander installation is touched.
+#include "iso_wcx/tc_registration_repair.hpp"
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+using iso_wcx::tc_registration::repair_packer_plugins;
+using iso_wcx::tc_registration::invalidate_cache;
+using iso_wcx::tc_registration::register_missing_packer_plugins;
+using iso_wcx::tc_registration::owned_plugin;
+using iso_wcx::tc_registration::value;
+using iso_wcx::tc_registration::command_line_ini_override;
+
+static void need(bool yes,const char* text) {
+    if(!yes)throw std::runtime_error(text);
+}
+int main() {
+    try {
+        // A portable or /i= TC profile can be different from HKCU. Always
+        // prefer the actual launch command line when resolving the INI for
+        // WCX F5 capability checks and registration repair.
+        need(command_line_ini_override(
+            {L"TOTALCMD64.EXE",L"/i=C:\\TC Profiles\\active.ini",
+             L"/f=C:\\Other\\wcx_ftp.ini"})==
+             L"C:\\TC Profiles\\active.ini",
+             "TC /i= path containing spaces not recognized");
+        need(command_line_ini_override(
+            {L"TOTALCMD.EXE",L"/I=C:\\Work\\wincmd.ini"})==
+             L"C:\\Work\\wincmd.ini",
+             "uppercase TC /I= not recognized");
+        need(command_line_ini_override(
+            {L"TOTALCMD64.EXE",L"-i=",L"C:\\Profiles\\test.ini"})==
+             L"C:\\Profiles\\test.ini",
+             "split TC -i= path not recognized");
+        need(command_line_ini_override(
+            {L"TOTALCMD64.EXE",L"/f=C:\\FTP\\ftp.ini"}).empty(),
+             "TC /f= mistakenly interpreted as active main INI");
+        bool ambiguous_rejected=false;
+        try {
+            (void)command_line_ini_override(
+                {L"TOTALCMD64.EXE",L"/i=C:\\A.ini",L"/I=D:\\B.ini"});
+        }catch(const std::runtime_error&) {
+            ambiguous_rejected=true;
+        }
+        need(ambiguous_rejected,"Conflicting /i= switches were accepted");
+        const std::wstring current=
+            L"C:\\Program Files\\TotalCmd\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx";
+        const std::wstring old=
+            L"C:\\Old\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx";
+        need(owned_plugin(L"158,"+old) && owned_plugin(old),
+             "prefixed and bare WCX registrations must be recognized");
+        need(owned_plugin(L"222,\""+old+L"\""),
+             "quoted WCX path with flags not recognized");
+        need(!owned_plugin(L"158,C:\\Other\\WIM.wcx"),
+             "foreign WIM plugin must not be replaced");
+        need(!owned_plugin(L"158,C:\\Other\\ISO\\iso.wcx"),
+             "legacy third-party ISO plugin must remain intact");
+
+        // Different stale representations from TC's Associate dropdown:
+        // 158,path; 222,path; bare path. Only one normalized entry remains.
+        const std::wstring input=
+            L"; User toolbar settings are never edited\r\n"
+            L"[Configuration]\r\nUseIniInProgramDir=7\r\n"
+            L"[PackerPlugins]\r\n"
+            L"wim="+old+L"\r\n"
+            L"WIM=222,"+old+L"\r\n"
+            L"iso=159,"+current+L"\r\n"
+            L"esd=192,"+old+L"\r\n"
+            L"zip=777,C:\\Other\\zip.wcx\r\n"
+            L"rar=1,C:\\Other\\rar.wcx\r\n"
+            L"[Buttonbar]\r\nButtonbar=custom.bar\r\n"
+            L"[PackerPlugins64]\r\n$checksum$=123\r\nexts=wim*iso*\r\n";
+        const auto repaired=repair_packer_plugins(input,current);
+        need(repaired.changed && repaired.duplicates_removed==1,
+             "stale duplicate WIM binding must be removed");
+        need(repaired.extensions.size()==2,
+             "only stale WIM/ESD should be changed");
+        need(repaired.text.find(L"wim=159,"+current+L"\r\n")!=std::wstring::npos,
+             "WIM flags and loaded WCX path must be normalized");
+        need(repaired.text.find(L"WIM=222,")==std::wstring::npos,
+             "duplicate WIM extension was not removed");
+        need(repaired.text.find(L"esd=158,"+current)!=std::wstring::npos,
+             "legacy ESD flags not migrated");
+        need(repaired.text.find(L"zip=777,C:\\Other\\zip.wcx")!=std::wstring::npos,
+             "existing ZIP plugin was changed");
+        need(repaired.text.find(L"[Buttonbar]\r\nButtonbar=custom.bar")!=
+             std::wstring::npos,"TC buttons were changed");
+        need(repair_packer_plugins(repaired.text,current).changed==false,
+             "repair must be idempotent");
+        const auto cache=invalidate_cache(repaired.text);
+        need(cache.changed && cache.text.find(L"$checksum$=")==std::wstring::npos,
+             "64-bit WCX cache checksum not invalidated");
+        need(cache.text.find(L"exts=wim*iso*")!=std::wstring::npos,
+             "other cache entries must remain untouched");
+        need(!invalidate_cache(cache.text).changed,
+             "cache invalidation must be idempotent");
+        need(value(repaired.text,L"Configuration",L"UseIniInProgramDir")==L"7",
+             "INI section parser lost unrelated settings");
+
+        // A previously correct-path 158 registration must be migrated
+        // to 159 for editable images: real TC F5 is blocked at 158.
+        const auto old_158=repair_packer_plugins(
+            L"[PackerPlugins]\r\nwim=158,"+current+
+            L"\r\niso=158,"+current+
+            L"\r\nesd=158,"+current+L"\r\n",current);
+        need(old_158.changed &&
+             old_158.text.find(L"wim=159,"+current)!=std::wstring::npos &&
+             old_158.text.find(L"iso=159,"+current)!=std::wstring::npos &&
+             old_158.text.find(L"esd=158,"+current)!=std::wstring::npos,
+             "158 must migrate to 159 for F5 while ESD stays read-only");
+        need(!repair_packer_plugins(old_158.text,current).changed,
+             "new 159 migration is not idempotent");
+
+        // The one native WIM dialog can prefill a bare WCX path.
+        // Total Commander gives us no supported way to preselect 159.
+        // On the first WIM open, normalize that path and register all
+        // other unassigned image types in one confirmed operation.
+        const std::wstring bootstrap =
+            L"[PackerPlugins]\r\nwim="+current+L"\r\n"
+            L"zip=777,C:\\Other\\zip.wcx\r\n"
+            L"[Buttonbar]\r\nButtonbar=custom.bar\r\n";
+        const auto normalized=repair_packer_plugins(bootstrap,current);
+        need(normalized.changed &&
+             normalized.text.find(L"wim=159,"+current)!=std::wstring::npos,
+             "WIM bare-path install must be converted to 159");
+        const auto installed=register_missing_packer_plugins(
+            normalized.text,current);
+        need(installed.changed && installed.extensions.size()==22 &&
+             installed.text.find(L"iso=159,"+current)!=std::wstring::npos &&
+             installed.text.find(L"vhdx=159,"+current)!=std::wstring::npos &&
+             installed.text.find(L"zip=777,C:\\Other\\zip.wcx")!=std::wstring::npos &&
+             installed.text.find(L"Buttonbar=custom.bar")!=std::wstring::npos,
+             "one-click WIM bootstrap must preserve user handlers and buttons");
+        need(!repair_packer_plugins(installed.text,current).changed &&
+             !register_missing_packer_plugins(installed.text,current).changed,
+             "one-click WIM bootstrap must be idempotent");
+
+        // Older builds may already have both ISO and WIM registered.
+        // The WCX offers one confirmed batch for other free formats.
+        // Every unrelated plugin, toolbar, and explicit empty association
+        // must remain byte-for-byte preserved.
+        const std::wstring native_two=
+            L"[Configuration]\r\nUseIniInProgramDir=7\r\n"
+            L"[PackerPlugins]\r\n"
+            L"iso=159,"+current+L"\r\n"
+            L"wim=159,"+current+L"\r\n"
+            L"udf=333,C:\\Other\\UDF.wcx\r\n"
+            L"nrg=\r\n" // Explicit empty entry must not be replaced.
+            L"zip=777,C:\\Other\\zip.wcx\r\n"
+            L"[Buttonbar]\r\nButtonbar=custom.bar\r\n"
+            L"[PackerPlugins64]\r\n$checksum$=987\r\nexts=iso*wim*\r\n";
+        const auto batch=register_missing_packer_plugins(native_two,current);
+        need(batch.changed && batch.extensions.size()==19,
+             "one-click batch should add 19 missing extensions (2 owned, 2 reserved)");
+        need(batch.text.find(L"esd=158,"+current)!=std::wstring::npos &&
+             batch.text.find(L"swm=158,"+current)!=std::wstring::npos &&
+             batch.text.find(L"vhdx=159,"+current)!=std::wstring::npos,
+             "missing WIM and disk image associations were not registered");
+        need(batch.text.find(L"udf=333,C:\\Other\\UDF.wcx")!=std::wstring::npos &&
+             batch.text.find(L"nrg=\r\n")!=std::wstring::npos &&
+             batch.text.find(L"zip=777,C:\\Other\\zip.wcx")!=std::wstring::npos &&
+             batch.text.find(L"[Buttonbar]\r\nButtonbar=custom.bar")!=std::wstring::npos,
+             "bulk install overwrote another plug-in, custom button, or user's unassigned format");
+        need(!register_missing_packer_plugins(batch.text,current).changed &&
+             !repair_packer_plugins(batch.text,current).changed,
+             "bulk installation not idempotent");
+        const auto folded_batch=register_missing_packer_plugins(
+            L"[PackerPlugins]\nISO=159,"+current+L"\nWiM=158,"+current+
+            L"\n[Buttonbar]\nButtonbar=custom.bar\n",current);
+        need(folded_batch.changed && folded_batch.extensions.size()==21 &&
+             folded_batch.text.find(L"iso=159,"+current+L"\n")==std::wstring::npos,
+             "mixed-case format keys must not be registered twice");
+        const auto no_section=register_missing_packer_plugins(
+            L"[Buttonbar]\nButtonbar=custom.bar\n",current);
+        need(!no_section.changed && no_section.text==
+             L"[Buttonbar]\nButtonbar=custom.bar\n",
+             "missing PackerPlugins section must not create a new unrelated section");
+        const auto duplicate_sections=register_missing_packer_plugins(
+            L"[PackerPlugins]\niso=159,"+current+
+            L"\n[PackerPlugins]\nwim=159,"+current+L"\n",current);
+        need(!duplicate_sections.changed,
+             "ambiguous duplicate PackerPlugins sections must not be edited");
+        // Do not take over another working WIM handler if both are present.
+        const std::wstring foreign=
+            std::wstring(L"[PackerPlugins]\nwim=2,C:\\ThirdParty\\wim.wcx\n")+
+            L"wim=192,"+old+L"\niso=159,"+current+L"\n";
+        const auto blocked=repair_packer_plugins(foreign,current);
+        need(!blocked.changed && blocked.conflicts.size()==1 &&
+             blocked.conflicts[0]==L"wim" && blocked.text==foreign,
+             "foreign WIM association should be reported, not overwritten");
+
+        // TC x64 can cache stale capabilities after reinstalling an
+        // already-correct "158" ISO-WCX. Manual Repair must be able to
+        // clear ONLY the x64 checksum, preserving flags, third-party
+        // plug-ins, custom toolbar and all unrelated cached data.
+        const std::wstring cache_only=
+            L"[PackerPlugins]\r\n"
+            L"iso=159,"+current+L"\r\n"
+            L"wim=159,"+current+L"\r\n"
+            L"zip=777,C:\\Other\\zip.wcx\r\n"
+            L"[PackerPlugins64]\r\n"
+            L"$checksum$=stale\r\n"
+            L"exts=iso*wim*zip*\r\n"
+            L"[Buttonbar]\r\nButtonbar=custom.bar\r\n";
+        const auto already_good=repair_packer_plugins(cache_only,current);
+        need(!already_good.changed,
+             "cache-only WCX repair must not touch already-correct flags");
+        const auto reset_x64=invalidate_cache(already_good.text);
+        need(reset_x64.changed &&
+             reset_x64.text.find(L"$checksum$") == std::wstring::npos &&
+             reset_x64.text.find(L"zip=777,C:\\Other\\zip.wcx") !=
+                 std::wstring::npos &&
+             reset_x64.text.find(L"exts=iso*wim*zip*") !=
+                 std::wstring::npos &&
+             reset_x64.text.find(L"Buttonbar=custom.bar") !=
+                 std::wstring::npos,
+             "cache-only WCX repair damaged third-party TC settings");
+        need(!invalidate_cache(reset_x64.text).changed &&
+             !repair_packer_plugins(reset_x64.text,current).changed,
+             "cache-only x64 invalidation must be idempotent");
+
+        // Paths with commas are valid, unless a leading decimal flag
+        // before the first comma is actually present.
+        need(owned_plugin(L"C:\\Program,Files\\ISO-WCX.wcx"),
+             "comma in path misparsed as TC flag");
+        const std::wstring empty=L"[Configuration]\r\nSomeSetting=1\r\n";
+        need(!repair_packer_plugins(empty,current).changed,
+             "unknown INI without WCX section must not be rewritten");
+        const std::wstring unicode=
+            L"[PackerPlugins]\nwim=159,C:\\\u05e9\u05dc\u05d5\u05dd\\ISO-WCX.wcx\n";
+        const auto migrated=repair_packer_plugins(unicode,current);
+        need(migrated.changed && migrated.text.find(L"wim=159,"+current)!=
+             std::wstring::npos,"Unicode legacy path not migrated");
+        // Reinstalling on a portable Total Commander must not rewrite
+        // already-correct %COMMANDER_PATH% bindings as absolute machine paths.
+        const std::wstring portable=
+            L"[PackerPlugins]\r\n"
+            L"wim=159,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
+            L"esd=158,C:/Program Files/TotalCmd/plugins/wcx/ISO-WCX/ISO-WCX.wcx\r\n"
+            L"[Buttonbar]\r\nButtonbar=portable.bar\r\n";
+        const auto preserved=repair_packer_plugins(portable,current);
+        need(!preserved.changed && preserved.text==portable,
+             "repair converted valid portable or slash-normalized paths");
+        const std::wstring mixed_duplicates=
+            L"[PackerPlugins]\r\n"
+            L"wim=222,C:\\Old\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
+            L"WIM=159,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx\r\n"
+            L"[Buttonbar]\r\nButtonbar=portable.bar\r\n";
+        const auto picked=repair_packer_plugins(mixed_duplicates,current);
+        need(picked.changed && picked.duplicates_removed==1 &&
+             picked.extensions.size()==1 &&
+             picked.text.find(L"wim=222,")==std::wstring::npos &&
+             picked.text.find(
+                 L"WIM=159,%COMMANDER_PATH%\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx")
+                 !=std::wstring::npos,
+             "duplicate migration did not prefer the valid portable WCX");
+        need(picked.text.find(L"[Buttonbar]\r\nButtonbar=portable.bar")!=
+             std::wstring::npos,
+             "migration damaged unrelated TC buttonbar configuration");
+        need(!repair_packer_plugins(picked.text,current).changed,
+             "portable duplicate cleanup is not idempotent");
+        std::cout<<"PASS: WCX old masks and duplicate cleanup, foreign plugin "
+                   "preservation, idempotence, x64 cache, Unicode and user INI\n";
+        return 0;
+    }catch(const std::exception& e) {
+        std::cerr<<"FAIL: WCX association migration: "<<e.what()<<"\n";
+        return 2;
+    }
+}

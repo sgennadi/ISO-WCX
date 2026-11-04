@@ -41,7 +41,8 @@ constexpr wchar_t wim_registry_path[] = L"Software\\ISO-WCX\\WIM";
 constexpr wchar_t github_api[] =
     L"https://api.github.com/repos/sgennadi/ISO-WCX/releases/latest";
 constexpr int id_never=4101, id_check=4102, id_install=4103,
-              id_status=4104, id_export=4105, id_wim_fast=4106;
+              id_status=4104, id_export=4105, id_wim_fast=4106,
+              id_repair=4107;
 constexpr UINT check_later=WM_APP+191;
 constexpr std::size_t max_response=64u*1024u;
 constexpr std::size_t max_package=64u*1024u*1024u;
@@ -56,6 +57,7 @@ struct State {
     bool automatic=true;
     bool russian=false;
     bool wim_fast=false;
+    HINSTANCE module=nullptr;
     std::wstring latest_tag;
     bool newer=false;
 };
@@ -677,6 +679,10 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
              L"Creates a temporary WIM copy. Keep disabled for production images.",
              L"Создаёт временную копию WIM. Для рабочих образов оставьте выключенным."),
              SS_LEFT,0,12,175,340,31);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Repair WCX associations (WIM F5 / old plugins)",
+             L"Исправить привязки WCX (WIM F5 / старые версии)"),
+             BS_PUSHBUTTON|WS_TABSTOP,id_repair,12,212,340,28);
         CheckDlgButton(dlg,id_wim_fast,
                        state->wim_fast?BST_CHECKED:BST_UNCHECKED);
         CheckDlgButton(dlg,id_never,
@@ -733,6 +739,10 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         if(cmd==id_check) {check_release(dlg,*state,true);return TRUE;}
         if(cmd==id_install) {download_and_offer(dlg,*state);return TRUE;}
         if(cmd==id_export) {export_structure_dialog(dlg,state->russian);return TRUE;}
+        if(cmd==id_repair) {
+            repair_tc_registrations(dlg,state->module,state->russian);
+            return TRUE;
+        }
         if(cmd==IDCANCEL || cmd==IDOK) {EndDialog(dlg,0);return TRUE;}
         break;
     }
@@ -783,10 +793,11 @@ void configure_updates(HWND parent,HINSTANCE instance) {
     const auto store16=[&](std::size_t at,WORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
     store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER);
     store32(4,0);store16(8,0);store16(10,0);store16(12,0);
-    store16(14,367);store16(16,214);store16(18,0);store16(20,0);
+    store16(14,367);store16(16,258);store16(18,0);store16(20,0);
     constexpr wchar_t caption[]=L"ISO-WCX Settings";
     std::memcpy(raw.data()+22,caption,sizeof(caption));
     State state{};
+    state.module=instance;
     (void)DialogBoxIndirectParamW(instance,
         reinterpret_cast<const DLGTEMPLATE*>(raw.data()),
         parent,dialog_proc,reinterpret_cast<LPARAM>(&state));

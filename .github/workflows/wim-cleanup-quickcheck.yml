@@ -1,0 +1,31 @@
+name: WIM scratch cleanup safety quickcheck
+
+on:
+  pull_request:
+    paths:
+      - 'include/iso_wcx/private_workspace_cleanup.hpp'
+      - 'include/iso_wcx/edit_transaction.hpp'
+      - 'include/iso_wcx/wim_mount_state.hpp'
+      - 'tests/edit_transaction_ntfs.cpp'
+      - '.github/workflows/wim-cleanup-quickcheck.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  private-ntfs-workspaces:
+    name: WIM private workspace safety / ${{ matrix.arch }}
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [Win32, x64]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure VS2026 native C++26
+        run: cmake -S . -B build-quick -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26
+      - name: Build standalone NTFS cleanup fixture (no WCX installer)
+        run: cmake --build build-quick --config Release --target edit_transaction_ntfs --parallel 2
+      - name: Verify real NTFS ACLs, ADS, reparse links, mounts and locked backup cleanup
+        run: ctest --test-dir build-quick -C Release --output-on-failure -R "^ntfs_atomic_replace_acl_ads_and_rollback$"

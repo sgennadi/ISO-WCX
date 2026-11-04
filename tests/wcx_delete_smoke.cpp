@@ -4,6 +4,7 @@
 #endif
 #include <windows.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -13,6 +14,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -21,6 +23,36 @@ using PackFn = int (__stdcall*)(wchar_t*,wchar_t*,wchar_t*,wchar_t*,int);
 using DeleteWFn = int (__stdcall*)(wchar_t*,wchar_t*);
 using DeleteAFn = int (__stdcall*)(char*,char*);
 using CapsFn = int (__stdcall*)();
+using SetPackProgressFn = void (__stdcall*)(HANDLE,int (__stdcall*)(wchar_t*,int));
+static std::atomic<unsigned> iso_stage_updates{0};
+static std::atomic<unsigned> iso_highest_percent{0};
+static int __stdcall record_iso_progress(wchar_t*,int size) {
+    if(size<0) {
+        iso_stage_updates.fetch_add(1,std::memory_order_relaxed);
+        const auto percent=static_cast<unsigned>(-size);
+        auto previous=iso_highest_percent.load(std::memory_order_relaxed);
+        while(percent>previous &&
+              !iso_highest_percent.compare_exchange_weak(
+                  previous,percent,std::memory_order_relaxed)) {}
+    }
+    return 1;
+}
+static std::atomic<unsigned> iso_source_scan_callbacks{0};
+static int __stdcall cancel_iso_source_scan(wchar_t* name,int size) {
+    if(size==0 && name && std::wstring_view(name).starts_with(
+            L"ISO-WCX: Scanning F5 source entries ")) {
+        // The scan must produce a SECOND update after 128 entries, then
+        // honor cancellation BEFORE the first image staging operation.
+        return ++iso_source_scan_callbacks<2 ? 1 : 0;
+    }
+    return 1;
+}
+static int __stdcall cancel_iso_staging(wchar_t* name,int size) {
+    (void)name;
+    // Fail at a real CopyFileEx clone checkpoint, not only at preflight.
+    if(size<=-30 && size>=-75)return 0;
+    return 1;
+}
 struct OpenW {
     wchar_t* ArcName; int OpenMode,OpenResult;
     wchar_t* CmtBuf; int CmtBufSize,CmtSize,CmtState;
@@ -148,16 +180,46 @@ int wmain(int argc,wchar_t** argv) {
         const auto delW=reinterpret_cast<DeleteWFn>(sym("DeleteFilesW"));
         const auto delA=reinterpret_cast<DeleteAFn>(sym("DeleteFiles"));
         const auto caps=reinterpret_cast<CapsFn>(sym("GetPackerCaps"));
+        const auto setpack=reinterpret_cast<SetPackProgressFn>(
+            sym("SetProcessDataProcW"));
         const auto open=reinterpret_cast<OpenFn>(sym("OpenArchiveW"));
         const auto header=reinterpret_cast<HeaderFn>(sym("ReadHeaderExW"));
         const auto process=reinterpret_cast<ProcessFn>(sym("ProcessFileW"));
         const auto close=reinterpret_cast<CloseFn>(sym("CloseArchive"));
         need((caps()&8)!=0,"GetPackerCaps omitted delete capability");
+        need(pack(nullptr,nullptr,nullptr,nullptr,0)==24,
+             "Null-argument WCX PackFilesW must return E_NOT_SUPPORTED safely");
 
         fs::create_directories(root);
         const auto image=root/L"edited.iso";
         save(image,fixture());
         const auto input=root/L"source";
+        // Real TC F5 with the old ISO panel retained. If input and archive
+        // entries have equal byte length, replace only the existing extent:
+        // no new sectors, directories or volume-descriptor modifications.
+        write_source(input/L"HELLO.TXT","NEW!!");
+        const auto before_equal=load(image);
+        auto fast_arc=image.wstring(),fast_src=input.wstring();
+        std::wstring fast_sub;
+        wchar_t fast_list[]=L"HELLO.TXT\0\0";
+        OpenW fast_panel{};
+        fast_panel.ArcName=fast_arc.data();
+        const HANDLE fast_handle=open(&fast_panel);
+        need(fast_handle && fast_panel.OpenResult==0,
+             "ISO fast F5 cannot retain an open TC panel");
+        const int fast_result=pack(fast_arc.data(),fast_sub.data(),
+                                   fast_src.data(),fast_list,2);
+        need(close(fast_handle)==0,"ISO fast F5 CloseArchive failed");
+        need(fast_result==0,"real WCX F5 same-size replacement failed");
+        const auto after_equal=load(image);
+        need(after_equal.size()==before_equal.size() &&
+             std::memcmp(after_equal.data()+21*2048,"NEW!!",5)==0 &&
+             std::equal(after_equal.begin(),after_equal.begin()+21*2048,
+                        before_equal.begin()) &&
+             std::equal(after_equal.begin()+21*2048+5,after_equal.end(),
+                        before_equal.begin()+21*2048+5),
+             "WCX equal-length ISO F5 changed metadata, file layout or size");
+        save(image,fixture());
         write_source(input/L"HELLO.TXT","top-level-file");
         write_source(input/L"DOCS"/L"ONE.TXT","nested-file");
         auto arc=image.wstring(),src=input.wstring();
@@ -170,6 +232,200 @@ int wmain(int argc,wchar_t** argv) {
              names.contains(L"DOCS") &&
              names.contains(L"DOCS\\ONE.TXT"),
              "WCX failed to list packed test files");
+
+        // Real Total Commander F5: source from the opposite panel,
+        // target is a nested directory within the ISO, and the common
+        // PK_PACK_SAVE_PATHS (bit 2) flag is set. F7/F8 do not test this.
+        const auto f5_source=root/L"Incoming ISO files";
+        write_source(f5_source/L"COPIED.BIN","native ISO F5 copy bytes");
+        write_source(f5_source/L"HELLO.TXT","native ISO F5 overwrite bytes");
+        auto f5_dir=f5_source.wstring();
+        std::wstring f5_sub=L"DOCS";
+        wchar_t f5_list[]=L"COPIED.BIN\0HELLO.TXT\0\0";
+        need((caps()&2)!=0,
+             "GetPackerCaps omits MODIFY and TC prevents F5 into ISO");
+        OpenW retained{};
+        retained.ArcName=arc.data();
+        const HANDLE original_panel=open(&retained);
+        need(original_panel && retained.OpenResult==0,
+             "WCX cannot retain an ISO panel while copying via F5");
+        iso_stage_updates.store(0);
+        iso_highest_percent.store(0);
+        setpack(INVALID_HANDLE_VALUE,&record_iso_progress);
+        const int f5_status=pack(arc.data(),f5_sub.data(),f5_dir.data(),
+                                 f5_list,2);
+        setpack(INVALID_HANDLE_VALUE,nullptr);
+        need(iso_stage_updates.load()>0 && iso_highest_percent.load()>=90,
+             "ISO F5 never published native optical stage progress to TC");
+        need(close(original_panel)==0,
+             "WCX CloseArchive failed after editing an open ISO panel");
+        need(f5_status==0,
+             "TC F5 PK_PACK_SAVE_PATHS cannot copy into existing ISO directory");
+        names=list_names(image,open,header,process,close);
+        need(names.contains(L"DOCS\\COPIED.BIN") &&
+             names.contains(L"DOCS\\HELLO.TXT"),
+             "WCX ISO F5 entries missing after nested copy");
+        // Verify both payloads via WCX extraction, not only the listing.
+        const auto verify_data=[&](const wchar_t* archive_file,
+                                   const std::string& expected) {
+            auto current=image.wstring();
+            OpenW options{};options.ArcName=current.data();
+            const HANDLE handle=open(&options);
+            need(handle && options.OpenResult==0,
+                 "WCX failed to reopen ISO after F5");
+            bool found=false;
+            try {
+                for(unsigned i=0;i<500;++i) {
+                    HeaderExW entry{};
+                    const int code=header(handle,&entry);
+                    if(code==10)break;
+                    need(code==0,"F5 ISO verification listing failed");
+                    if(std::wstring_view(entry.FileName)==archive_file) {
+                        const auto target=root/L"extracted";
+                        fs::create_directories(target);
+                        std::wstring dest=target.wstring();
+                        wchar_t output_name[]=L"verified.bin";
+                        need(process(handle,2,dest.data(),output_name)==0,
+                             "WCX cannot extract F5 copied ISO file");
+                        const auto bytes=load(target/L"verified.bin");
+                        need(std::string(bytes.begin(),bytes.end())==expected,
+                             "extracted ISO F5 content differs from source");
+                        found=true;
+                        break;
+                    }
+                    need(process(handle,0,nullptr,nullptr)==0,
+                         "WCX skip after F5 failed");
+                }
+                need(found,"ISO F5 file missing from WCX readback");
+            }catch(...) {close(handle);throw;}
+            need(close(handle)==0,"WCX CloseArchive after F5 failed");
+        };
+        verify_data(L"DOCS\\COPIED.BIN","native ISO F5 copy bytes");
+        verify_data(L"DOCS\\HELLO.TXT","native ISO F5 overwrite bytes");
+        // A real F5 directory selection can contain ONLY the parent in
+        // AddList. WCX must include all descendants, including empty
+        // directories. The preflight must happen before any ISO mutation.
+        const auto folder_source=root/L"Selected folders";
+        write_source(folder_source/L"SELECTED"/L"INSIDE.TXT",
+                     "ISO F5 selected directory data");
+        write_source(folder_source/L"SELECTED"/L"DEEP"/L"MORE.BIN",
+                     "ISO F5 nested directory data");
+        fs::create_directories(folder_source/L"SELECTED"/L"EMPTY");
+        auto folder_dir=folder_source.wstring();
+        wchar_t selected_folder[]=L"SELECTED\0\0";
+        // Enumerating a large directory is a cancellable F5 phase on its
+        // own, with exact visited-entry counts and no invented percent.
+        // Test after the first 128 children without ever editing the ISO.
+        const auto scan_only=folder_source/L"SCAN_ONLY";
+        for(unsigned i=0;i<130;++i) {
+            write_source(scan_only/
+                (L"item"+std::to_wstring(i)+L".dat"),"x");
+        }
+        wchar_t scan_list[]=L"SCAN_ONLY\0\0";
+        const auto before_scan_cancel=load(image);
+        const auto before_scan_time=fs::last_write_time(image);
+        iso_source_scan_callbacks.store(0);
+        setpack(INVALID_HANDLE_VALUE,&cancel_iso_source_scan);
+        const int scan_cancel_rc=pack(arc.data(),f5_sub.data(),
+                                      folder_dir.data(),scan_list,2);
+        setpack(INVALID_HANDLE_VALUE,nullptr);
+        need(scan_cancel_rc==21 && iso_source_scan_callbacks.load()>=2 &&
+             load(image)==before_scan_cancel &&
+             fs::last_write_time(image)==before_scan_time,
+             "ISO F5 source-tree scan cancel modified image or ignored callback");
+        for(const auto& entry:fs::directory_iterator(root))
+            need(!entry.path().filename().wstring().starts_with(
+                     L".iso-wcx-edit-"),
+                 "Cancelled ISO F5 enumeration created a staging workspace");
+        need(pack(arc.data(),f5_sub.data(),folder_dir.data(),
+                  selected_folder,2)==0,
+             "ISO F5 selected directory did not pack recursively");
+        names=list_names(image,open,header,process,close);
+        need(names.contains(L"DOCS\\SELECTED") &&
+             names.contains(L"DOCS\\SELECTED\\DEEP") &&
+             names.contains(L"DOCS\\SELECTED\\EMPTY") &&
+             names.contains(L"DOCS\\SELECTED\\INSIDE.TXT") &&
+             names.contains(L"DOCS\\SELECTED\\DEEP\\MORE.BIN"),
+             "ISO F5 selected directory lost child files or empty folders");
+        verify_data(L"DOCS\\SELECTED\\INSIDE.TXT",
+                    "ISO F5 selected directory data");
+        verify_data(L"DOCS\\SELECTED\\DEEP\\MORE.BIN",
+                    "ISO F5 nested directory data");
+        // Some TC versions send both the parent and its children in the
+        // same AddList. Deduplicate identical sources and preserve content.
+        wchar_t duplicate_tree[]=
+            L"SELECTED\\INSIDE.TXT\0SELECTED\0"
+            L"SELECTED\\DEEP\\MORE.BIN\0\0";
+        need(pack(arc.data(),f5_sub.data(),folder_dir.data(),
+                  duplicate_tree,2)==0,
+             "ISO F5 duplicate source entries could not be coalesced");
+        names=list_names(image,open,header,process,close);
+        need(names.contains(L"DOCS\\SELECTED\\DEEP\\MORE.BIN"),
+             "ISO F5 duplicate selection lost nested file");
+        verify_data(L"DOCS\\SELECTED\\DEEP\\MORE.BIN",
+                    "ISO F5 nested directory data");
+        // Repeat a NONEMPTY directory F5 with byte-identical content:
+        // the ISO and its last-write timestamp must remain unchanged.
+        const auto identical_folder_bytes=load(image);
+        const auto identical_folder_time=fs::last_write_time(image);
+        need(pack(arc.data(),f5_sub.data(),folder_dir.data(),
+                  selected_folder,2)==0 &&
+             load(image)==identical_folder_bytes &&
+             fs::last_write_time(image)==identical_folder_time,
+             "Repeated identical ISO folder F5 unnecessarily remastered image");
+        // Optional Windows symlink privilege: when creation is permitted,
+        // a reparse point inside F5 source must be refused atomically.
+        std::error_code link_error;
+        fs::create_directory_symlink(
+            folder_source/L"SELECTED",folder_source/L"BAD-LINK",link_error);
+        if(!link_error) {
+            const auto unchanged=load(image);
+            wchar_t unsafe_folder[]=L"BAD-LINK\0\0";
+            need(pack(arc.data(),f5_sub.data(),folder_dir.data(),
+                      unsafe_folder,2)!=0 &&
+                 load(image)==unchanged,
+                 "ISO F5 followed a reparse point or changed image on refusal");
+        }
+        // F8 delete of just one file must preserve the second new file.
+        wchar_t f8_copied[]=L"DOCS\\COPIED.BIN\0\0";
+        need(delW(arc.data(),f8_copied)==0,
+             "ISO F8 cannot remove F5 copied file");
+        names=list_names(image,open,header,process,close);
+        need(!names.contains(L"DOCS\\COPIED.BIN") &&
+             names.contains(L"DOCS\\HELLO.TXT"),
+             "ISO F8 removed wrong file or left deleted file visible");
+
+        // Cancelling an ISO F5 during the native staged clone must roll
+        // back the entire private transaction, preserve the original bytes,
+        // and leave no scratch folders. The original user data remains live.
+        const auto before_cancel=load(image);
+        wchar_t cancel_list[]=L"COPIED.BIN\0\0";
+        setpack(INVALID_HANDLE_VALUE,&cancel_iso_staging);
+        const int cancelled_iso=pack(arc.data(),f5_sub.data(),f5_dir.data(),
+                                     cancel_list,2);
+        setpack(INVALID_HANDLE_VALUE,nullptr);
+        need(cancelled_iso==21 && load(image)==before_cancel,
+             "cancelled ISO F5 changed source image or ignored cancellation");
+        for(const auto& entry:fs::directory_iterator(root)) {
+            if(entry.path().filename().wstring().starts_with(L".iso-wcx-edit-"))
+                need(false,"cancelled ISO F5 left a private edit workspace");
+        }
+        // F5 of a NONEMPTY folder must update all children (tested above).
+        // Test mkdir idempotency separately using a truly EMPTY source
+        // directory: copying it twice must not rewrite an unchanged ISO.
+        fs::create_directories(input/L"EMPTY_REPEAT");
+        wchar_t repeat_folder[]=L"EMPTY_REPEAT\0\0";
+        need(pack(arc.data(),sub.data(),src.data(),repeat_folder,0)==0,
+             "PackFilesW could not add empty ISO directory");
+        names=list_names(image,open,header,process,close);
+        need(names.contains(L"EMPTY_REPEAT"),
+             "PackFilesW omitted the new empty ISO directory");
+        const auto before_repeat=load(image);
+        const auto before_repeat_time=fs::last_write_time(image);
+        need(pack(arc.data(),sub.data(),src.data(),repeat_folder,0)==0 &&
+             load(image)==before_repeat &&
+             fs::last_write_time(image)==before_repeat_time,
+             "Repeated empty folder F5 unexpectedly remastered ISO");
 
         // TC sometimes supplies both a folder and its children in the same
         // NUL-separated DeleteFilesW request. One parent delete must win.
@@ -191,6 +447,18 @@ int wmain(int argc,wchar_t** argv) {
         need(delW(arc.data(),missing)==24 &&
              load(image)==prior,
              "missing file silently succeeded or changed source ISO");
+
+        // Repeating the F8 selection after deleting the directory must
+        // NOT report a successful ISO rewrite. The terminal wildcard is
+        // only a directory selection token, never a filename glob.
+        wchar_t stale_folder[]=L"DOCS\\*.*\0\0";
+        need(delW(arc.data(),stale_folder)==24 &&
+             load(image)==prior,
+             "stale ISO directory F8 delete changed the archive or succeeded");
+        wchar_t unsafe_glob[]=L"FOO*BAR\\ONE.TXT\0\0";
+        need(delW(arc.data(),unsafe_glob)==24 &&
+             load(image)==prior,
+             "ISO wildcard inside a filename bypassed edit path validation");
 
         // TC's ANSI ABI is still used by older callers.
         std::string mbcs=image.string();

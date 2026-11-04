@@ -247,6 +247,12 @@ jobs:
   package:
     name: Verify Stable installable ZIP
     needs: [windows, windows-cxx20, linux-cxx26, linux, sanitizer, real-udf, large-udf, stage-benchmark, native-qemu-vhd]
+    # Stable v0.21.0 is immutable. PRs may legitimately carry Preview metadata
+    # (e.g. pluginst.inf version=0.21.0-preview), so never attempt to validate
+    # or package these sources as an already-published Stable release.
+    # All native build/test jobs above still run on pull requests; the Preview
+    # workflow independently verifies and packages the installable Preview ZIP.
+    if: github.ref == 'refs/heads/main' && github.repository == 'sgennadi/ISO-WCX'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

@@ -4,11 +4,15 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
 #include <set>
 #include <sstream>
+#ifdef _WIN32
+#include <winioctl.h>
+#endif
 
 namespace iso_wcx { namespace {
 using Bytes=std::vector<unsigned char>;
@@ -96,7 +100,7 @@ std::string decode(const Bytes& name,bool joliet,bool directory) {
 }
 struct Node {
     std::string name,logical;
-    Bytes record,identifier,joliet_identifier;
+    Bytes record,identifier,joliet_identifier,joliet_record;
     bool directory=false;
     std::uint32_t lba=0,size=0;
     // Locations of the on-disc directory record representing this entry
@@ -119,11 +123,17 @@ public:
     std::unique_ptr<Node> root;
     bool joliet=false;
     bool udf_bridge=false;
+    bool system_nonzero=false;
     std::size_t items=0;
-    explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false)
+    explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false,
+                   bool allow_system_area=false)
         :file(p,std::ios::binary),size(std::filesystem::file_size(p)) {
         need(file.good()&&size>=18*block&&size%block==0&&size/block<0xffffffffu,"unsupported ISO size/layout");
-        auto system=read(0,16*block);need(std::all_of(system.begin(),system.end(),[](auto c){return c==0;}),"hybrid/system-area ISO editing is not supported");
+        auto system=read(0,16*block);
+        system_nonzero=std::any_of(system.begin(),system.end(),
+            [](auto c){return c!=0;});
+        need(allow_system_area || !system_nonzero,
+             "hybrid/system-area ISO editing requires boot-preserving unlink");
         // Detect UDF bridges. General directory rebuilding is still
         // forbidden: only a separately validated equal-length data edit
         // may leave both on-disc ISO and UDF namespaces unchanged.
@@ -198,6 +208,7 @@ public:
     }
     void pair(Node& a,const Node& b) {
         a.joliet_identifier=b.identifier;
+        a.joliet_record=b.record;
         a.joliet_record_at=b.iso_record_at;
         a.joliet_lba=b.lba;
         a.joliet_size=b.size;
@@ -318,6 +329,196 @@ void copy_bytes(std::istream& in,std::fstream& out,std::uint64_t size,const Edit
     Bytes b(1024*1024);while(size){edit_tick(progress);auto count=std::min<std::uint64_t>(size,b.size());in.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(count));need(bool(in),"source shortened during ISO edit");out.write(reinterpret_cast<const char*>(b.data()),static_cast<std::streamsize>(count));if(!out)throw std::runtime_error("ISO output write failed");size-=count;}
 }
 
+// Optional CoW block clone, never a hard link. If the filesystem does not
+// support FSCTL_DUPLICATE_EXTENTS_TO_FILE, discard the partial stage and
+// fall back to CopyFileExW. The original ISO is never opened for writing.
+#ifdef _WIN32
+class IsoCloneHandle {
+    HANDLE handle_=INVALID_HANDLE_VALUE;
+public:
+    explicit IsoCloneHandle(HANDLE handle):handle_(handle) {}
+    ~IsoCloneHandle(){close();}
+    IsoCloneHandle(const IsoCloneHandle&)=delete;
+    IsoCloneHandle& operator=(const IsoCloneHandle&)=delete;
+    bool valid() const noexcept {return handle_!=INVALID_HANDLE_VALUE;}
+    HANDLE get() const noexcept {return handle_;}
+    bool close() noexcept {
+        if(!valid())return true;
+        const HANDLE old=handle_;
+        handle_=INVALID_HANDLE_VALUE;
+        return CloseHandle(old)!=0;
+    }
+};
+bool try_clone_iso_blocks(const std::filesystem::path& original,
+                          const std::filesystem::path& output,
+                          std::uint64_t size,const EditProgress& progress,
+                          const OpticalEditStatus& status) {
+    constexpr std::uint64_t alignment=64ull*1024u;
+    constexpr std::uint64_t chunk=64ull*1024u*1024u;
+    // Deterministic fallback regression and emergency disable switch.
+    // This bypasses the optional acceleration, never the verified writer.
+    if(std::getenv("ISO_WCX_ISO_DISABLE_BLOCK_CLONE"))return false;
+    if(size<64ull*1024u*1024u ||
+       size>static_cast<std::uint64_t>(
+           std::numeric_limits<LONGLONG>::max()))
+        return false;
+    const auto src=workspace_cleanup::extended_path(original);
+    const auto dst=workspace_cleanup::extended_path(output);
+    IsoCloneHandle source(CreateFileW(src.c_str(),GENERIC_READ,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+    if(!source.valid())return false;
+    IsoCloneHandle stage(CreateFileW(dst.c_str(),GENERIC_READ|GENERIC_WRITE,0,
+        nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));
+    if(!stage.valid())return false;
+    LARGE_INTEGER actual{},end{};
+    end.QuadPart=static_cast<LONGLONG>(size);
+    bool cloned=GetFileSizeEx(source.get(),&actual)!=0 &&
+                actual.QuadPart==end.QuadPart &&
+                SetFilePointerEx(stage.get(),end,nullptr,FILE_BEGIN)!=0 &&
+                SetEndOfFile(stage.get())!=0;
+    const auto aligned=(size/alignment)*alignment;
+    for(std::uint64_t offset=0;cloned && offset<aligned;) {
+        edit_tick(progress);
+        if(status && !status(L"Cloning ISO data blocks",
+                             static_cast<unsigned>(offset*75u/size)))
+            throw EditCancelled();
+        const auto length=std::min<std::uint64_t>(
+            aligned-offset,chunk);
+        DUPLICATE_EXTENTS_DATA data{};
+        data.FileHandle=source.get();
+        data.SourceFileOffset.QuadPart=static_cast<LONGLONG>(offset);
+        data.TargetFileOffset.QuadPart=static_cast<LONGLONG>(offset);
+        data.ByteCount.QuadPart=static_cast<LONGLONG>(length);
+        DWORD unused=0;
+        cloned=DeviceIoControl(stage.get(),FSCTL_DUPLICATE_EXTENTS_TO_FILE,
+                               &data,sizeof(data),nullptr,0,
+                               &unused,nullptr)!=0;
+        offset+=length;
+    }
+    // ISO sectors are 2 KiB, so the final extent may not be 64-KiB aligned.
+    // Copy the exact remaining 1..65535 bytes; no additional full-image read.
+    if(cloned && aligned<size) {
+        LARGE_INTEGER at{};
+        at.QuadPart=static_cast<LONGLONG>(aligned);
+        cloned=SetFilePointerEx(source.get(),at,nullptr,FILE_BEGIN)!=0 &&
+               SetFilePointerEx(stage.get(),at,nullptr,FILE_BEGIN)!=0;
+        std::array<unsigned char,64u*1024u> tail{};
+        const auto bytes=static_cast<DWORD>(size-aligned);
+        DWORD read=0,written=0;
+        if(cloned)cloned=ReadFile(source.get(),tail.data(),bytes,&read,nullptr)!=0 &&
+                          read==bytes &&
+                          WriteFile(stage.get(),tail.data(),bytes,&written,nullptr)!=0 &&
+                          written==bytes;
+    }
+    if(cloned) {
+        edit_tick(progress);
+        if(status && !status(L"ISO data blocks cloned",75))
+            throw EditCancelled();
+    }
+    // Close handles before filesystem::remove / CopyFileExW fallback.
+    cloned=stage.close() && cloned;
+    cloned=source.close() && cloned;
+    if(cloned && std::filesystem::file_size(output)==size)return true;
+    std::error_code ec;
+    std::filesystem::remove(output,ec);
+    if(ec)throw std::runtime_error(
+        "cannot remove incomplete ISO block-clone stage");
+    return false;
+}
+#endif
+
+// Clone the original ISO with the Windows copy engine when available.
+// CopyFileExW can use local kernel/server-side copy acceleration and issues
+// cancellation checks at bounded intervals. It also avoids thousands of
+// 1-MiB WCX callbacks while duplicating a multi-gigabyte optical image.
+// The original is NEVER opened for writing; any partial clone stays inside
+// EditTransaction's private workspace and is removed on rollback.
+#ifdef _WIN32
+struct IsoCloneProgress {
+    const EditProgress* callback=nullptr;
+    const OpticalEditStatus* status=nullptr;
+    std::uint64_t next_check=0;
+    bool aborted=false;
+};
+DWORD CALLBACK iso_clone_callback(LARGE_INTEGER total,
+                                  LARGE_INTEGER transferred,
+                                  LARGE_INTEGER,LARGE_INTEGER,
+                                  DWORD,DWORD,HANDLE,HANDLE,
+                                  LPVOID context) {
+    auto& state=*static_cast<IsoCloneProgress*>(context);
+    const auto done=static_cast<std::uint64_t>(
+        std::max<LONGLONG>(0,transferred.QuadPart));
+    const bool final_chunk=total.QuadPart>0 &&
+                            transferred.QuadPart>=total.QuadPart;
+    if(done<state.next_check && !final_chunk)return PROGRESS_CONTINUE;
+    state.next_check=done+16ull*1024ull*1024ull;
+    try {
+        if(state.callback && *state.callback && !(*state.callback)()) {
+            state.aborted=true;
+            return PROGRESS_CANCEL;
+        }
+        const auto pct=total.QuadPart>0?
+            static_cast<unsigned>(std::min<std::uint64_t>(
+                75u,done*75u/static_cast<std::uint64_t>(total.QuadPart))):
+            0u;
+        if(state.status && *state.status &&
+           !(*state.status)(L"Copying ISO image to private workspace",pct)) {
+            state.aborted=true;
+            return PROGRESS_CANCEL;
+        }
+    }catch(...) {
+        state.aborted=true;
+        return PROGRESS_CANCEL;
+    }
+    return PROGRESS_CONTINUE;
+}
+#endif
+void clone_iso_stage(const std::filesystem::path& original,
+                     const std::filesystem::path& output,
+                     std::ifstream& input,std::uint64_t size,
+                     const EditProgress& progress,
+                     const OpticalEditStatus& status) {
+    edit_tick(progress);
+    if(status && !status(L"Preparing ISO copy",0))throw EditCancelled();
+#ifdef _WIN32
+    (void)input;
+    // On supported NTFS/ReFS, clone full data extents without reading them.
+    // Other filesystems and smaller ISO files use CopyFileExW unchanged.
+    if(try_clone_iso_blocks(original,output,size,progress,status))return;
+    IsoCloneProgress state{&progress,&status};
+    // ISO files can live inside deep TC profile folders or UNC shares.
+    // Preserve long-path support when using the Windows native copy engine.
+    const auto source_native=workspace_cleanup::extended_path(original);
+    const auto output_native=workspace_cleanup::extended_path(output);
+    if(!CopyFileExW(source_native.c_str(),output_native.c_str(),
+                    &iso_clone_callback,&state,nullptr,
+                    COPY_FILE_FAIL_IF_EXISTS)) {
+        if(state.aborted)throw EditCancelled();
+        throw std::runtime_error("ISO staging copy failed (Win32 "+
+                                 std::to_string(GetLastError())+")");
+    }
+    edit_tick(progress);
+    // The private working copy is modified before replacement. An original
+    // ISO marked read-only may be read, but its staged clone must be writable.
+    const auto attributes=GetFileAttributesW(output_native.c_str());
+    if(attributes==INVALID_FILE_ATTRIBUTES ||
+       ((attributes&FILE_ATTRIBUTE_READONLY) &&
+        !SetFileAttributesW(output_native.c_str(),
+                            attributes&~FILE_ATTRIBUTE_READONLY)))
+        throw std::runtime_error("cannot make private ISO stage writable");
+#else
+    (void)original;
+    std::fstream stage(output,std::ios::in|std::ios::out|
+                               std::ios::binary|std::ios::trunc);
+    need(bool(stage),"cannot create private ISO stage");
+    input.clear();
+    input.seekg(0);
+    copy_bytes(input,stage,size,progress);
+    stage.flush();
+    need(bool(stage),"cannot flush private ISO stage");
+#endif
+}
 struct BridgeIsoVisible {
     bool directory=false;
     std::uint64_t offset=0;
@@ -392,7 +593,7 @@ Bytes compact_bridge_directory(
 void edit_iso_udf_bridge_delete(
         const std::filesystem::path& path,Image& iso,
         const std::vector<ArchiveChange>& changes,
-        const EditProgress& progress) {
+        const EditProgress& progress,const OpticalEditStatus& status) {
     need(iso.udf_bridge && iso.boot_lbas.empty(),
          "bootable ISO/UDF Bridge deletion is not supported");
     need(!changes.empty() && changes.size()<=4096,
@@ -451,14 +652,10 @@ void edit_iso_udf_bridge_delete(
     preflight_udf_bridge_file_deletes(path,files);
     EditTransaction tx(path);
     {
+        clone_iso_stage(path,tx.output,iso.file,iso.size,progress,status);
         std::fstream stage(tx.output,std::ios::binary|std::ios::in|
-                           std::ios::out|std::ios::trunc);
-        need(bool(stage),"cannot create private ISO/UDF Bridge transaction");
-        iso.file.clear();iso.file.seekg(0);
-        copy_bytes(iso.file,stage,iso.size,progress);
-        need(bool(stage),"cannot clone ISO/UDF Bridge into private workspace");
-        stage.flush();
-        need(bool(stage),"cannot flush original bridge bytes into stage");
+                           std::ios::out);
+        need(bool(stage),"cannot open private ISO/UDF Bridge transaction");
         for(const auto& [key,edit]:dirs) {
             (void)key;
             edit_tick(progress);
@@ -514,7 +711,8 @@ bool intersect(std::uint64_t a,std::uint64_t a_bytes,
 
 void edit_iso_udf_bridge_equal_length(
     const std::filesystem::path& path,Image& iso,
-    const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
+    const std::vector<ArchiveChange>& changes,const EditProgress& progress,
+    const OpticalEditStatus& status) {
     need(iso.udf_bridge,"not an ISO/UDF bridge");
     need(iso.boot_lbas.empty(),
          "bootable ISO/UDF Bridge editing requires further boot-range checks");
@@ -591,12 +789,11 @@ void edit_iso_udf_bridge_equal_length(
     // Full sibling copy and byte-restricted patches: no UDF/ISO metadata,
     // file extents or boot sectors are modified by this operation.
     EditTransaction tx(path);
-    std::fstream out(tx.output,std::ios::in|std::ios::out|
-                     std::ios::binary|std::ios::trunc);
-    need(bool(out),"cannot create staged bridge ISO");
-    iso.file.clear();
-    iso.file.seekg(0);
-    copy_bytes(iso.file,out,iso.size,progress);
+    clone_iso_stage(path,tx.output,iso.file,iso.size,progress,status);
+    std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary);
+    need(bool(out),"cannot open staged bridge ISO");
+    if(status && !status(L"Replacing ISO/UDF bridge file data",82))
+        throw EditCancelled();
     Bytes chunk(1024*1024);
     for(const auto& item:patches) {
         edit_tick(progress);
@@ -667,9 +864,444 @@ void edit_iso_udf_bridge_equal_length(
     }
     tx.commit(progress);
 }
+// Boot-preserving ISO9660+Joliet "unlink": remove ONLY file directory records.
+// This is deliberately not the general ISO re-master. In a hybrid-boot image
+// the system area can contain MBR/GPT/isohybrid offsets and the boot catalog
+// refers to original LBAs. Preserve all sectors and file payload bytes except
+// the exact directory sectors holding the removed records. Do not reclaim.
+void unlink_boot_iso_files(const std::filesystem::path& path,
+                           Image& iso,const std::vector<ArchiveChange>& changes,
+                           const EditProgress& progress,
+                           const OpticalEditStatus& status) {
+    need(iso.system_nonzero && !iso.udf_bridge,
+         "boot-preserving unlink requires ISO9660 without a UDF bridge");
+    need(!changes.empty() && changes.size()<=256,
+         "boot-preserving ISO unlink supports 1..256 file deletions");
+    struct Cut {std::size_t at{},length{};};
+    std::map<std::uint64_t,std::vector<Cut>> cuts;
+    std::set<const Node*> deleted_nodes;
+    std::vector<std::string> removed_paths;
+    for(const auto& change:changes) {
+        edit_tick(progress);
+        need(change.remove && !change.directory,
+             "hybrid-boot ISO supports file deletion only (no add, mkdir or resize)");
+        const auto key=edit_path(change.path);
+        std::istringstream split(key);
+        std::string component;
+        Node* target=iso.root.get();
+        while(std::getline(split,component,'/')) {
+            const auto wanted=upper(component);
+            const auto it=std::find_if(target->children.begin(),target->children.end(),
+                [&](const auto& candidate){return upper(candidate->logical)==wanted;});
+            need(it!=target->children.end(),"ISO file to unlink is not present");
+            target=it->get();
+        }
+        need(target!=iso.root.get() && !target->directory && target->parent,
+             "boot-preserving unlink refuses directories and root");
+        need(deleted_nodes.insert(target).second,"duplicate ISO file deletion");
+        protect_boot(*target,iso.boot_lbas);
+        removed_paths.push_back(key);
+        const Node& parent=*target->parent;
+        for(unsigned view=0;view<(iso.joliet?2u:1u);++view) {
+            const auto lba=view?parent.joliet_lba:parent.lba;
+            const auto bytes=view?parent.joliet_size:parent.size;
+            const Bytes& expected=view?target->joliet_record:target->record;
+            need(bytes!=0 && bytes%block==0 && !expected.empty() &&
+                 std::uint64_t(lba)*block<=iso.size &&
+                 bytes<=iso.size-std::uint64_t(lba)*block,
+                 "unrecognized ISO directory geometry");
+            auto directory=iso.read(std::uint64_t(lba)*block,bytes);
+            unsigned matches=0;
+            for(std::size_t offset=0;offset<directory.size();) {
+                const auto length=directory[offset];
+                if(!length) {
+                    offset=(offset/block+1)*block;
+                    continue;
+                }
+                need(length>=34 && length<=directory.size()-offset &&
+                     offset%block+length<=block,
+                     "malformed ISO directory sector");
+                if(length==expected.size() &&
+                   std::equal(expected.begin(),expected.end(),
+                              directory.begin()+static_cast<std::ptrdiff_t>(offset))) {
+                    const auto sector=std::uint64_t(lba)*block+(offset/block)*block;
+                    need(std::none_of(iso.boot_lbas.begin(),iso.boot_lbas.end(),
+                          [&](std::uint32_t boot){return sector==std::uint64_t(boot)*block;}),
+                         "ISO directory intersects an El Torito boot sector");
+                    cuts[sector].push_back({offset%block,length});
+                    ++matches;
+                }
+                offset+=length;
+            }
+            need(matches==1,"ISO/Joliet file record is missing or ambiguous");
+        }
+    }
+    need(!cuts.empty() && cuts.size()<=512,"too many ISO directory sectors");
+    // In untrusted optical images, a directory extent can alias an ordinary
+    // file extent. Do not edit any sector that is also exposed as a payload:
+    // this additionally guards full boot-image files whose El Torito entry
+    // points into the middle of their extent.
+    std::vector<const Node*> check_nodes{iso.root.get()};
+    for(std::size_t i=0;i<check_nodes.size();++i) {
+        const Node* current=check_nodes[i];
+        if(!current->directory && current->size!=0) {
+            const auto occupied=(std::uint64_t(current->size)+block-1)/block;
+            for(const auto& [sector,_]:cuts) {
+                const auto lba=sector/block;
+                need(!(lba>=current->lba && lba-current->lba<occupied),
+                     "ISO directory sector aliases file or boot payload");
+            }
+        }
+        for(const auto& child:current->children)
+            check_nodes.push_back(child.get());
+        need(check_nodes.size()<=200000,"oversized hybrid ISO tree");
+    }
+    // Prepare every edited sector in memory, then stage a full sibling copy.
+    // Higher offsets are removed first so offsets of earlier records remain
+    // stable. Changes in the same directory sector are combined atomically.
+    std::map<std::uint64_t,Bytes> sectors;
+    for(auto& [position,list]:cuts) {
+        auto sector=iso.read(position,block);
+        std::sort(list.begin(),list.end(),
+                  [](const Cut& a,const Cut& b){return a.at>b.at;});
+        auto next=std::size_t(block);
+        for(const auto& cut:list) {
+            need(cut.length>=34 && cut.at+cut.length<=next,
+                 "overlapping ISO file unlink records");
+            next=cut.at;
+            std::memmove(sector.data()+cut.at,sector.data()+cut.at+cut.length,
+                         block-cut.at-cut.length);
+            std::fill(sector.end()-static_cast<std::ptrdiff_t>(cut.length),
+                      sector.end(),0);
+        }
+        sectors.emplace(position,std::move(sector));
+    }
+    const auto preserved_system=iso.read(0,16*block);
+    std::map<std::uint32_t,Bytes> preserved_boot;
+    for(const auto lba:iso.boot_lbas)
+        preserved_boot.emplace(lba,iso.read(std::uint64_t(lba)*block,block));
+    EditTransaction tx(path);
+    clone_iso_stage(path,tx.output,iso.file,iso.size,progress,status);
+    std::fstream output(tx.output,std::ios::in|std::ios::out|std::ios::binary);
+    need(bool(output),"cannot open staged bootable ISO");
+    if(status && !status(L"Updating ISO directory records",88))
+        throw EditCancelled();
+    for(const auto& [position,sector]:sectors) {
+        edit_tick(progress);
+        output.seekp(static_cast<std::streamoff>(position),std::ios::beg);
+        need(bool(output),"cannot seek staged ISO directory");
+        write(output,sector);
+    }
+    output.flush();
+    need(bool(output),"cannot flush staged hybrid-boot ISO");
+    output.close();
+    iso.file.close();
+    {
+        // Independently reparse BOTH optical namespaces after editing.
+        Image verified(tx.output,true,true);
+        need(verified.size==iso.size && verified.system_nonzero &&
+             !verified.udf_bridge && verified.joliet==iso.joliet,
+             "staged ISO changed its geometry or filesystem layout");
+        need(verified.read(0,16*block)==preserved_system,
+             "hybrid MBR/GPT/system area changed");
+        for(const auto& [lba,original]:preserved_boot)
+            need(verified.read(std::uint64_t(lba)*block,block)==original,
+                 "El Torito catalog or boot image sector changed");
+        for(const auto& [position,expected]:sectors)
+            need(verified.read(position,block)==expected,
+                 "staged ISO directory patch readback failed");
+        for(const auto& key:removed_paths) {
+            std::istringstream split(key);
+            std::string component;
+            const Node* node=verified.root.get();
+            bool still_present=true;
+            while(std::getline(split,component,'/')) {
+                const auto match=std::find_if(node->children.begin(),node->children.end(),
+                    [&](const auto& candidate) {
+                        return upper(candidate->logical)==upper(component);
+                    });
+                if(match==node->children.end()) {
+                    still_present=false;
+                    break;
+                }
+                node=match->get();
+            }
+            need(!still_present,"ISO file remains visible after unlink");
+        }
+    }
+    tx.commit(progress);
 }
-void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
-    edit_tick(progress);Image image(path,true);
+}
+// Fast F5 replacement for a *plain* ISO9660/Joliet tree. Existing file
+// extents can be overwritten in a private same-volume CoW/CopyFileEx stage
+// without extending the image or rewriting any directory/path table/PVD.
+// Disallow mixed operations, boot catalogs, shared sectors and intersecting
+// filesystem metadata; those keep using the previously verified full writer.
+bool try_replace_iso_same_size(const std::filesystem::path& path,Image& image,
+                               const std::vector<ArchiveChange>& changes,
+                               const EditProgress& progress,
+                               const OpticalEditStatus& status) {
+    if(changes.empty() || image.udf_bridge || image.system_nonzero ||
+       !image.boot_lbas.empty())return false;
+    struct Patch {
+        std::string path;
+        std::filesystem::path source;
+        std::uint64_t offset=0;
+        std::uint64_t length=0;
+        const Node* node=nullptr;
+        bool identical=false;
+    };
+    std::vector<Patch> patches;
+    patches.reserve(changes.size());
+    std::set<const Node*> targeted;
+    for(const auto& change:changes) {
+        edit_tick(progress);
+        if(change.remove || change.directory)return false;
+        const auto normalized=edit_path(change.path);
+        const Node* node=image.root.get();
+        std::istringstream parts(normalized);
+        std::string part;
+        while(std::getline(parts,part,'/')) {
+            const auto key=upper(part);
+            const auto child=std::find_if(node->children.begin(),
+                node->children.end(),[&](const auto& candidate) {
+                    return upper(candidate->logical)==key;
+                });
+            if(child==node->children.end())return false;
+            node=child->get();
+        }
+        if(node==image.root.get() || node->directory)return false;
+        if(!targeted.insert(node).second)return false;
+        protect_boot(*node,image.boot_lbas);
+        need(std::filesystem::is_regular_file(
+                 std::filesystem::symlink_status(change.source)),
+             "ISO replacement source must be a regular file");
+        if(std::filesystem::file_size(change.source)!=node->size)
+            return false; // Normal writer handles unequal-size replacements.
+        std::error_code equivalent_error;
+        if(std::filesystem::equivalent(change.source,path,equivalent_error))
+            throw EditUnsupported("ISO cannot be its own replacement source");
+        patches.push_back({
+            normalized,change.source,std::uint64_t(node->lba)*block,
+            node->size,node
+        });
+    }
+    const auto overlaps=[](std::uint64_t a,std::uint64_t size_a,
+                           std::uint64_t b,std::uint64_t size_b) {
+        return size_a && size_b && a<b+size_b && b<a+size_a;
+    };
+    // Fail closed on shared physical sectors: another directory/file could
+    // alias the target extent and silently change after an in-place write.
+    std::vector<const Node*> all{image.root.get()};
+    for(std::size_t i=0;i<all.size();++i)
+        for(const auto& child:all[i]->children)all.push_back(child.get());
+    for(const auto& patch:patches) {
+        if(patch.offset<16ull*block ||
+           patch.offset+patch.length>image.size)
+            throw EditUnsupported("ISO file overlaps volume system data");
+        const auto sectors=(patch.length+block-1)/block;
+        const auto physical_size=sectors*block;
+        for(const auto* other:all) {
+            if(other==patch.node)continue;
+            // Primary and Joliet directories may occupy DIFFERENT sectors.
+            // The logical node stores the primary extent in lba/size, while
+            // its paired supplementary directory is in joliet_lba/size.
+            // Never patch bytes of either namespace's directory records.
+            if(image.joliet && other->directory && other->joliet_size &&
+               overlaps(patch.offset,physical_size,
+                        std::uint64_t(other->joliet_lba)*block,
+                        ((std::uint64_t(other->joliet_size)+block-1)/block)*block))
+                throw EditUnsupported(
+                    "ISO file shares a sector with Joliet directory metadata");
+            const auto other_size=
+                ((std::uint64_t(other->size)+block-1)/block)*block;
+            if(overlaps(patch.offset,physical_size,
+                        std::uint64_t(other->lba)*block,other_size)) {
+                if(other->directory)
+                    throw EditUnsupported(
+                        "ISO file overlaps filesystem directory metadata");
+                return false; // Shared file extent: use full writer.
+            }
+        }
+        for(const auto& other:patches) {
+            if(other.node==patch.node)continue;
+            if(overlaps(patch.offset,physical_size,other.offset,
+                        ((other.length+block-1)/block)*block))
+                return false;
+        }
+        // Volume descriptor sequence, including its terminator.
+        const auto last_descriptor=image.descriptors.empty()?16u:
+            image.descriptors.back().first;
+        if(overlaps(patch.offset,physical_size,16ull*block,
+                    (std::uint64_t(last_descriptor)+2u-16u)*block))
+            throw EditUnsupported(
+                "ISO file overlaps volume descriptor sequence");
+        // All four ISO9660 path tables are protected. Optional little/
+        // big-endian tables must not be overwritten just because they are
+        // absent from our logical directory tree.
+        for(const auto& [lba,vd]:image.descriptors) {
+            (void)lba;
+            const auto length=std::uint64_t(le(vd,132));
+            const auto big_lba=[&](std::size_t at) {
+                return (std::uint64_t(vd[at])<<24) |
+                       (std::uint64_t(vd[at+1])<<16) |
+                       (std::uint64_t(vd[at+2])<<8) |
+                       std::uint64_t(vd[at+3]);
+            };
+            for(const auto table_lba:{
+                    std::uint64_t(le(vd,140)),
+                    std::uint64_t(le(vd,144)),
+                    big_lba(148),big_lba(152)}) {
+                if(table_lba &&
+                   overlaps(patch.offset,physical_size,table_lba*block,
+                            ((length+block-1)/block)*block))
+                    throw EditUnsupported(
+                        "ISO file shares a sector with an ISO path table");
+            }
+        }
+    }
+    // Avoid staging an entire multi-gigabyte ISO when F5 copies an existing
+    // small file whose contents are already byte-identical. Bound the total
+    // comparison to 32 MiB so this optimization cannot turn a large-source
+    // replacement into a second full-image read. The normal verified writer
+    // remains available for larger files or changed data.
+    constexpr std::uint64_t comparison_limit=32ull*1024ull*1024ull;
+    std::vector<char> compare_input(256*1024),compare_archive(compare_input.size());
+    std::uint64_t compared=0;
+    for(auto& patch:patches) {
+        edit_tick(progress);
+        if(patch.length==0) {patch.identical=true;continue;}
+        if(patch.length>comparison_limit-compared)continue;
+        std::ifstream input(patch.source,std::ios::binary);
+        need(bool(input),"cannot open ISO replacement for comparison");
+        image.file.clear();
+        image.file.seekg(static_cast<std::streamoff>(patch.offset));
+        need(bool(image.file),"cannot seek ISO comparison extent");
+        patch.identical=true;
+        for(std::uint64_t remaining=patch.length;remaining;) {
+            edit_tick(progress);
+            const auto count=static_cast<std::streamsize>(
+                std::min<std::uint64_t>(remaining,compare_input.size()));
+            input.read(compare_input.data(),count);
+            image.file.read(compare_archive.data(),count);
+            need(input.gcount()==count && image.file.gcount()==count,
+                 "short read while comparing ISO replacement");
+            if(std::memcmp(compare_input.data(),compare_archive.data(),
+                           static_cast<std::size_t>(count))!=0) {
+                patch.identical=false;
+                break;
+            }
+            remaining-=static_cast<std::uint64_t>(count);
+        }
+        compared+=patch.length;
+    }
+    if(std::all_of(patches.begin(),patches.end(),
+                   [](const Patch& patch){return patch.identical;})) {
+        if(status && !status(L"ISO file contents already match",99))
+            throw EditCancelled();
+        edit_tick(progress);
+        return true;
+    }
+    EditTransaction tx(path);
+    clone_iso_stage(path,tx.output,image.file,image.size,progress,status);
+    std::fstream stage(tx.output,std::ios::in|std::ios::out|std::ios::binary);
+    need(bool(stage),"cannot open same-length ISO stage");
+    std::vector<char> buffer(1024*1024);
+    std::uint64_t total=0,done=0;
+    for(const auto& patch:patches)total+=patch.length;
+    for(const auto& patch:patches) {
+        edit_tick(progress);
+        // The whole-archive stage already contains identical file bytes.
+        // Avoid rewriting CoW extents for unchanged members of a batch.
+        if(patch.identical) {
+            done+=patch.length;
+            continue;
+        }
+        std::ifstream input(patch.source,std::ios::binary);
+        need(bool(input),"cannot open ISO replacement input");
+        stage.clear();
+        stage.seekp(static_cast<std::streamoff>(patch.offset));
+        need(bool(stage),"cannot seek original ISO file extent");
+        for(std::uint64_t remaining=patch.length;remaining;) {
+            edit_tick(progress);
+            const auto count=static_cast<std::streamsize>(
+                std::min<std::uint64_t>(remaining,buffer.size()));
+            input.read(buffer.data(),count);
+            need(input.gcount()==count,"short read of ISO replacement input");
+            stage.write(buffer.data(),count);
+            need(bool(stage),"ISO same-length extent write failed");
+            remaining-=static_cast<std::uint64_t>(count);
+            done+=static_cast<std::uint64_t>(count);
+            if(status && !status(L"Replacing existing ISO file data",
+                                 76u+static_cast<unsigned>(done*17u/total)))
+                throw EditCancelled();
+        }
+    }
+    stage.flush();
+    need(bool(stage),"cannot flush same-length ISO replacement");
+    stage.close();
+    image.file.close();
+    if(status && !status(L"Verifying ISO replacement bytes",96))
+        throw EditCancelled();
+    // Independently reopen ISO/Joliet and byte-compare every changed extent
+    // against its input before committing. No metadata tables were touched.
+    Image verified(tx.output);
+    need(verified.size==image.size &&
+         verified.joliet==image.joliet && !verified.udf_bridge,
+         "same-length ISO staging changed filesystem geometry");
+    std::ifstream check(tx.output,std::ios::binary);
+    need(bool(check),"cannot reopen ISO stage for verification");
+    std::vector<char> actual(buffer.size());
+    for(const auto& patch:patches) {
+        edit_tick(progress);
+        const Node* node=verified.root.get();
+        std::istringstream parts(patch.path);
+        std::string part;
+        while(std::getline(parts,part,'/')) {
+            const auto key=upper(part);
+            const auto child=std::find_if(node->children.begin(),
+                node->children.end(),[&](const auto& candidate){
+                    return upper(candidate->logical)==key;
+                });
+            need(child!=node->children.end(),
+                 "ISO replacement name disappeared from staged directory");
+            node=child->get();
+        }
+        need(!node->directory && node->size==patch.length &&
+             std::uint64_t(node->lba)*block==patch.offset,
+             "ISO replacement changed original file geometry");
+        std::ifstream input(patch.source,std::ios::binary);
+        need(bool(input),"cannot reopen replacement input for verification");
+        check.clear();
+        check.seekg(static_cast<std::streamoff>(patch.offset));
+        need(bool(check),"cannot seek ISO stage verification extent");
+        for(std::uint64_t remaining=patch.length;remaining;) {
+            edit_tick(progress);
+            const auto count=static_cast<std::streamsize>(
+                std::min<std::uint64_t>(remaining,buffer.size()));
+            input.read(buffer.data(),count);
+            check.read(actual.data(),count);
+            need(input.gcount()==count && check.gcount()==count &&
+                 std::memcmp(buffer.data(),actual.data(),
+                             static_cast<std::size_t>(count))==0,
+                 "ISO staged file bytes differ from replacement input");
+            remaining-=static_cast<std::uint64_t>(count);
+        }
+    }
+    check.close();
+    verified.file.close();
+    if(status && !status(L"Committing same-size ISO replacement",99))
+        throw EditCancelled();
+    tx.commit(progress);
+    return true;
+}
+void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,
+              const EditProgress& progress,const OpticalEditStatus& status) {
+    edit_tick(progress);
+    if(status && !status(L"Inspecting ISO filesystem",0))throw EditCancelled();
+    Image image(path,true,true);
+    if(image.system_nonzero && image.udf_bridge)
+        throw EditUnsupported("hybrid ISO/UDF Bridge editing remains unsupported");
     if(image.udf_bridge) {
         // A bridge has two namespaces. The strict delete path handles
         // existing shared-extent regular files in both directory trees
@@ -677,12 +1309,93 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         // before any original bytes are modified.
         if(std::any_of(changes.begin(),changes.end(),
                        [](const ArchiveChange& c){return c.remove;})) {
-            edit_iso_udf_bridge_delete(path,image,changes,progress);
+            edit_iso_udf_bridge_delete(path,image,changes,progress,status);
             return;
         }
-        edit_iso_udf_bridge_equal_length(path,image,changes,progress);
+        edit_iso_udf_bridge_equal_length(path,image,changes,progress,status);
         return;
     }
+    if(image.system_nonzero) {
+        // Never remaster isohybrid MBR/GPT or move El Torito sectors.
+        // This path accepts only already-existing regular-file deletions.
+        unlink_boot_iso_files(path,image,changes,progress,status);
+        return;
+    }
+    // Fast path for replacing existing same-length file data. Never change
+    // an ISO directory record, path table, descriptor, or volume byte count.
+    if(try_replace_iso_same_size(path,image,changes,progress,status))return;
+    // Folder-only F5 additions (and mixed folder + file selections) bypass
+    // the extent-only fast replace optimization. On a repeat copy, every
+    // entry may ALREADY match the archive. Probe only bounded file data
+    // BEFORE creating an EditTransaction, so a multi-GB ISO is not cloned
+    // merely to rewrite its existing directory records and timestamps.
+    // A missing/changed entry falls through to the verified full writer.
+    const auto identical_copy_tree=[&]() -> bool {
+        if(changes.empty())return false;
+        constexpr std::uint64_t max_compared=32ull*1024ull*1024ull;
+        std::uint64_t compared=0;
+        std::vector<char> source_buffer(256*1024);
+        std::vector<char> image_buffer(source_buffer.size());
+        for(const auto& change:changes) {
+            edit_tick(progress);
+            if(change.remove)return false;
+            const auto normalized=edit_path(change.path);
+            const Node* node=image.root.get();
+            std::istringstream parts(normalized);
+            std::string part;
+            while(std::getline(parts,part,'/')) {
+                const auto key=upper(part);
+                const auto match=std::find_if(
+                    node->children.begin(),node->children.end(),
+                    [&](const auto& entry) {
+                        return upper(entry->logical)==key;
+                    });
+                if(match==node->children.end())return false;
+                node=match->get();
+            }
+            if(node==image.root.get() ||
+               node->directory!=change.directory)return false;
+            if(change.directory)continue;
+            need(std::filesystem::is_regular_file(
+                     std::filesystem::symlink_status(change.source)),
+                 "ISO F5 source must remain a regular file");
+            std::error_code error;
+            if(std::filesystem::equivalent(change.source,path,error))
+                throw EditUnsupported("ISO cannot be its own F5 source");
+            if(std::filesystem::file_size(change.source)!=node->size ||
+               node->size>max_compared-compared)
+                return false;
+            std::ifstream incoming(change.source,std::ios::binary);
+            need(bool(incoming),"cannot open F5 source for ISO comparison");
+            image.file.clear();
+            image.file.seekg(static_cast<std::streamoff>(
+                std::uint64_t(node->lba)*block));
+            need(bool(image.file),"cannot seek ISO comparison file");
+            for(std::uint64_t remaining=node->size;remaining;) {
+                edit_tick(progress);
+                const auto count=static_cast<std::streamsize>(
+                    std::min<std::uint64_t>(remaining,source_buffer.size()));
+                incoming.read(source_buffer.data(),count);
+                image.file.read(image_buffer.data(),count);
+                need(incoming.gcount()==count && image.file.gcount()==count,
+                     "short read while comparing repeated ISO F5");
+                if(std::memcmp(source_buffer.data(),image_buffer.data(),
+                               static_cast<std::size_t>(count))!=0)
+                    return false;
+                remaining-=static_cast<std::uint64_t>(count);
+            }
+            compared+=node->size;
+        }
+        if(status && !status(L"ISO selected files already match",99))
+            throw EditCancelled();
+        edit_tick(progress);
+        return true;
+    };
+    if(identical_copy_tree())return;
+    // Creating a directory that is already present is idempotent. Avoid
+    // copying/rebuilding an entire multi-gigabyte ISO and growing its path
+    // tables on a request that changes no directory or file metadata.
+    bool changed=false;
     for(const auto& change:changes){auto p=edit_path(change.path);std::istringstream split(p);std::string name;Node* parent=image.root.get();
         std::vector<std::string> parts;while(std::getline(split,name,'/'))parts.push_back(name);
         for(std::size_t i=0;i<parts.size();++i){const bool last=i+1==parts.size();const auto key=upper(parts[i]);auto it=std::find_if(parent->children.begin(),parent->children.end(),[&](const auto& n){return upper(n->logical)==key;});
@@ -693,6 +1406,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                      "ISO entry to delete was not found (no changes committed)");
                 protect_boot(**it,image.boot_lbas);
                 parent->children.erase(it);
+                changed=true;
                 break;
             }
             if(it==parent->children.end()){
@@ -717,18 +1431,41 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                     need(c->identifier!=n->identifier,"ISO alias collision");
                 if(image.joliet)n->joliet_identifier=identifier(parts[i],true,n->directory);
                 parent->children.push_back(std::move(n));it=std::prev(parent->children.end());
+                changed=true;
             }
             auto& n=**it;
             if(!last){need(n.directory,"parent is not a directory");parent=&n;continue;}
             need(n.directory==change.directory,"file/directory replacement is not supported");
-            if(!n.directory){protect_boot(n,image.boot_lbas);need(std::filesystem::is_regular_file(std::filesystem::symlink_status(change.source)),"edit source must be a regular file");auto size=std::filesystem::file_size(change.source);need(size<=0xffffffffu,"files over 4GiB require unsupported multi-extent writing");n.size=static_cast<std::uint32_t>(size);n.source=change.source;}
+            if(!n.directory){protect_boot(n,image.boot_lbas);need(std::filesystem::is_regular_file(std::filesystem::symlink_status(change.source)),"edit source must be a regular file");auto size=std::filesystem::file_size(change.source);need(size<=0xffffffffu,"files over 4GiB require unsupported multi-extent writing");n.size=static_cast<std::uint32_t>(size);n.source=change.source;changed=true;}
         }
     }
-    EditTransaction tx(path);std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary|std::ios::trunc);need(bool(out),"cannot create staged ISO");image.file.clear();image.file.seekg(0);copy_bytes(image.file,out,image.size,progress);
+    // The source is already validated; no-op mkdir must preserve it byte for
+    // byte, without allocating a staged ISO or resetting its timestamps.
+    if(!changed)return;
+    EditTransaction tx(path);
+    clone_iso_stage(path,tx.output,image.file,image.size,progress,status);
+    std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary);
+    need(bool(out),"cannot reopen private ISO stage for editing");
+    out.seekp(0,std::ios::end);
+    need(bool(out),"cannot seek end of private ISO stage");
     std::uint64_t next=image.size/block;
     std::vector<Node*> all{image.root.get()},dirs{image.root.get()};
     for(std::size_t i=0;i<all.size();++i){for(auto& c:all[i]->children){all.push_back(c.get());if(c->directory)dirs.push_back(c.get());}need(all.size()<=200000&&dirs.size()<=65535,"ISO edit tree too large");}
-    for(auto* n:all)if(!n->source.empty()){need(next+(std::uint64_t(n->size)+block-1)/block<0xffffffffu,"ISO size limit");n->lba=static_cast<std::uint32_t>(next);std::ifstream source(n->source,std::ios::binary);copy_bytes(source,out,n->size,progress);auto pad=(block-n->size%block)%block;write(out,Bytes(pad));next+=(std::uint64_t(n->size)+block-1)/block;}
+    std::uint64_t total_payload=0,payload_written=0;
+    for(const auto* n:all)if(!n->source.empty())total_payload+=n->size;
+    for(auto* n:all)if(!n->source.empty()){
+        need(next+(std::uint64_t(n->size)+block-1)/block<0xffffffffu,"ISO size limit");
+        n->lba=static_cast<std::uint32_t>(next);
+        std::ifstream source(n->source,std::ios::binary);
+        copy_bytes(source,out,n->size,progress);
+        auto pad=(block-n->size%block)%block;write(out,Bytes(pad));
+        next+=(std::uint64_t(n->size)+block-1)/block;
+        payload_written+=n->size;
+        const unsigned pct=total_payload?76u+static_cast<unsigned>(
+            payload_written*16u/total_payload):92u;
+        if(status && !status(L"Writing ISO file data",pct))throw EditCancelled();
+    }
+    if(status && !status(L"Updating ISO directory tables",93))throw EditCancelled();
     for(unsigned view=0;view<(image.joliet?2u:1u);++view){
         for(auto* d:dirs){d->new_size[view]=static_cast<std::uint32_t>(directory_data(*d,view).size());need(next+d->new_size[view]/block<0xffffffffu,"ISO size limit");d->new_lba[view]=static_cast<std::uint32_t>(next);next+=d->new_size[view]/block;}
         for(auto* d:dirs){edit_tick(progress);write(out,directory_data(*d,view));}
@@ -762,8 +1499,43 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     }
     for(auto& [lba,vd]:image.descriptors){both(vd,80,static_cast<std::uint32_t>(next));out.seekp(std::uint64_t(lba)*block);write(out,vd);}
     out.flush();need(bool(out),"ISO flush failed");out.close();image.file.close();
-    // Reparse the staged namespaces, path tables and retained boot descriptors.
-    {Image verified(tx.output);need(verified.size==next*block,"staged ISO size mismatch");}
+    if(status && !status(L"Verifying ISO changes",96))throw EditCancelled();
+    // Reparse the staged namespaces and independently check every requested
+    // result against the newly written directory/path table metadata. Do
+    // NOT replace the original ISO on a false-success F8/Delete, missing
+    // add, wrong type, or size mismatch. The same check covers Joliet names
+    // because Image::pair() reconciles the primary/Joliet directories.
+    {
+        Image verified(tx.output);
+        need(verified.size==next*block,"staged ISO size mismatch");
+        for(const auto& change:changes) {
+            edit_tick(progress);
+            const auto normalized=edit_path(change.path);
+            Node* node=verified.root.get();
+            std::istringstream stream(normalized);
+            std::string part;
+            while(node && std::getline(stream,part,'/')) {
+                const auto wanted=upper(part);
+                const auto child=std::find_if(node->children.begin(),
+                    node->children.end(),[&](const auto& candidate) {
+                        return upper(candidate->logical)==wanted;
+                    });
+                node=child==node->children.end()?nullptr:child->get();
+            }
+            if(change.remove) {
+                need(node==nullptr,
+                     "removed ISO entry still appears in staged directory");
+                continue;
+            }
+            need(node!=nullptr,"added ISO entry is missing from staged directory");
+            need(node->directory==change.directory,
+                 "staged ISO entry differs from requested file/directory type");
+            if(!change.directory)
+                need(node->size==std::filesystem::file_size(change.source),
+                     "staged ISO file size differs from added source");
+        }
+    }
+    if(status && !status(L"Committing verified ISO",99))throw EditCancelled();
     tx.commit(progress);
 }
 }

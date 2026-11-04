@@ -14,6 +14,7 @@ on:
       - 'INSTALL_*.txt'
       - 'ISO-WCX-Repair*'
       - 'ISO-WCX-RemoveAssociation.ps1'
+      - 'ISO-WCX-AssociateAll*'
       - 'pluginst.inf'
       - 'README.md'
       - 'PREVIEW.md'
@@ -33,6 +34,111 @@ jobs:
         arch: [Win32, x64]
     steps:
       - uses: actions/checkout@v7
+      - name: Validate read-only WCX diagnostics (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $tokens=$null
+          $parseErrors=$null
+          $harness=Join-Path (Get-Location) 'tools\ISO-WCX-RealTC-F5.ps1'
+          $hTokens=$null
+          $hErrors=$null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $harness,[ref]$hTokens,[ref]$hErrors) | Out-Null
+          if($hErrors.Count -gt 0) {
+            $hErrors | ForEach-Object { Write-Host $_.ToString() }
+            throw 'Real TC F5 harness fails Windows PowerShell 5.1 parse'
+          }
+          Write-Host 'PASS: experimental F5 harness script syntax'
+          $file=Join-Path (Get-Location) 'tools\ISO-WCX-Diagnostic.ps1'
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $file,[ref]$tokens,[ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | ForEach-Object { Write-Host $_.ToString() }
+            throw 'ISO-WCX diagnostic script contains PowerShell syntax errors'
+          }
+          Write-Host 'PASS: ISO-WCX diagnostic syntax (Windows PowerShell 5.1)'
+          $fixture=Join-Path $env:RUNNER_TEMP 'isowcx-stale-cache.ini'
+          Set-Content -LiteralPath $fixture -Encoding Unicode -Value @(
+            '[PackerPlugins]'
+            'wim=159,C:\NoSuchFolder\ISO-WCX.wcx'
+            '[PackerPlugins64]'
+            'exts=iso*'
+            '$checksum$=123'
+          )
+          $report= & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -IniPath $fixture | Out-String
+          if ($report -notmatch 'WCX64_CACHE_MISSING=wim') {
+            Write-Host $report
+            throw 'Read-only diagnostic missed stale WIM cache'
+          }
+          if ($report -notmatch 'WCX_ASSOC_SUMMARY owned_expected=1 owned_other=0 missing=22 foreign=0 duplicates=0') {
+            Write-Host $report
+            throw 'Read-only diagnostic did not count exactly the 23 supported image bindings'
+          }
+          if ($report -notmatch 'TC_F5_BINDING=default cm_Copy') {
+            Write-Host $report
+            throw 'Read-only diagnostic missed default plain F5 binding'
+          }
+          Add-Content -LiteralPath $fixture -Encoding Unicode -Value @(
+            '[Shortcuts]'
+            'F5=cm_PackFiles'
+          )
+          $remapped=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -IniPath $fixture | Out-String
+          if ($remapped -notmatch 'TC_F5_BINDING=custom cm_PackFiles' -or
+              $remapped -notmatch 'TC_F5_SHORTCUT_WARNING') {
+            Write-Host $remapped
+            throw 'Read-only diagnostic missed remapped plain F5'
+          }
+          Add-Content -LiteralPath $fixture -Encoding Unicode -Value @(
+            '[Configuration]'
+            'ExplorerForCopy=1'
+            'AlwaysPackInBackground=2'
+          )
+          $shellCopy=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -IniPath $fixture | Out-String
+          if ($shellCopy -notmatch 'TC_F5_EXPLORER_FOR_COPY=1' -or
+              $shellCopy -notmatch 'TC_F5_COPY_ENGINE_WARNING' -or
+              $shellCopy -notmatch 'TC_F5_PACK_BACKGROUND=2') {
+            Write-Host $shellCopy
+            throw 'Read-only diagnostic missed ExplorerForCopy/packing mode'
+          }
+          Write-Host 'PASS: F5 ExplorerForCopy and pack-background diagnosis'
+          Write-Host 'PASS: F5 default/remap read-only diagnosis'
+          Write-Host 'PASS: ISO-WCX x64 cache read-only diagnostic'
+          . $file -IniPath $fixture | Out-Null
+          $left=Get-TcF5Context -Active left -LeftType filesystem -RightType WCX-plugin -LeftFiles 1 -RightFiles 0 -LeftDirs 0 -RightDirs 0
+          $right=Get-TcF5Context -Active right -LeftType WCX-plugin -RightType filesystem -LeftFiles 0 -RightFiles 1 -LeftDirs 0 -RightDirs 0
+          $wrong=Get-TcF5Context -Active right -LeftType filesystem -RightType WCX-plugin -LeftFiles 0 -RightFiles 1 -LeftDirs 0 -RightDirs 0
+          $empty=Get-TcF5Context -Active left -LeftType filesystem -RightType WCX-plugin -LeftFiles 0 -RightFiles 0 -LeftDirs 0 -RightDirs 0
+          if (-not $left.IsValid -or $left.Destination -ne 'right' -or
+              -not $right.IsValid -or $right.Destination -ne 'left' -or
+              $wrong.IsValid -or $empty.IsValid) {
+            throw 'TC F5 panel regression: source can be left OR right'
+          }
+          Write-Host 'PASS: bidirectional TC F5 read-only panel routing regression'
+          $working=Join-Path $env:RUNNER_TEMP 'wcx-ps-report-location'
+          New-Item -ItemType Directory -Path $working -Force | Out-Null
+          Push-Location -LiteralPath $working
+          try {
+            $reportResult=& $file -IniPath $fixture -ReportPath '.\ISO-WCX-F5.txt' | Out-String
+            $expectedReport=Join-Path $working 'ISO-WCX-F5.txt'
+            if (-not (Test-Path -LiteralPath $expectedReport -PathType Leaf)) {
+              Write-Host $reportResult
+              throw 'Diagnostic report was written outside the PowerShell current directory'
+            }
+            $reportText=Get-Content -LiteralPath $expectedReport -Raw
+            if ($reportText -notmatch 'WCX_ASSOC_SUMMARY' -or $reportText -notmatch 'TC_PANEL_QUERY: no running Total Commander process') {
+              throw 'Diagnostic report missing required read-only observations'
+            }
+            Write-Host 'PASS: relative diagnostic report path follows PowerShell Get-Location'
+          } finally {
+            Pop-Location
+          }
+          if ($report -notmatch 'TC_PANEL_QUERY: no running Total Commander process') {
+            Write-Host 'No TC process on CI runner or future interactive smoke context:'
+            Write-Host $report
+            Write-Host 'PASS: live TC panel state reported or runner was interactive'
+          } else {
+            Write-Host 'PASS: no TC process on CI runner handled safely'
+          }
       - name: Configure Visual Studio 2026 with experimental C++26
         run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_ENABLE_REAL_WIM_MOUNT_TEST=ON
       - name: Require VS2026 and C++26 configuration
@@ -44,6 +150,25 @@ jobs:
           Write-Host "Visual Studio 2026 C++26 Preview: ${{ matrix.arch }}"
       - name: Build
         run: cmake --build build --config Release --parallel 2
+      - name: Verify actual built WCX exports in PowerShell (read-only)
+        shell: pwsh
+        run: |
+          $suffix = if ('${{ matrix.arch }}' -eq 'Win32') { '.wcx' } else { '.wcx64' }
+          $module = Join-Path (Get-Location) ('build\Release\ISO-WCX' + $suffix)
+          if (-not (Test-Path -LiteralPath $module -PathType Leaf)) {
+            throw "Missing freshly built WCX: $module"
+          }
+          $powershellExe = if ('${{ matrix.arch }}' -eq 'Win32') {
+            Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+          } else {
+            Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          }
+          $output = & $powershellExe -NoProfile -ExecutionPolicy Bypass -File tools/ISO-WCX-Diagnostic.ps1 -WcxPath $module | Out-String
+          if ($LASTEXITCODE -ne 0 -or $output -notmatch 'WCX_EXPORT_SUMMARY=PASS') {
+            Write-Host $output
+            throw 'The built WCX is missing a required Total Commander export'
+          }
+          Write-Host 'PASS: actual on-disk WCX exports include PackFilesW/GetPackerCaps'
       - name: Fail fast if the WCX DLL loader stalls
         run: ctest --test-dir build -C Release --output-on-failure -R "^wcx_dll_load_unload$"
       - name: Run tests including WCX DLL loading
@@ -55,6 +180,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'WCX association repair regression failed' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_unassociate_wcx.ps1
           if ($LASTEXITCODE -ne 0) { throw 'WCX selective association removal regression failed' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_associate_all_wcx.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'WCX bulk association and ZIP isolation regression failed' }
       # Build the developer-only real-WIM validator on both architectures,
       # but ship it separately from the auto-installable Total Commander ZIP.
       - name: Upload real-WIM validator (developer utility)
@@ -73,6 +200,29 @@ jobs:
             build/Release/ISO-WCX.wcx64
           if-no-files-found: error
           retention-days: 14
+      # Perform this build only AFTER uploading the real 158 shipping DLL.
+      # Its capability mask 159 is deliberately NOT bundled in the user
+      # installer, published release or normal preview binary artifact.
+      - name: Build CI-only x64 GetPackerCaps 158 negative control
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DISO_WCX_CI_CAPS_OLD_CONTROL=ON
+          if ($LASTEXITCODE -ne 0) { throw 'CI-only 158 configuration failed' }
+          cmake --build build --config Release --target ISO-WCX --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'CI-only 158 module build failed' }
+          if (-not (Test-Path -LiteralPath build/Release/ISO-WCX.wcx64)) {
+            throw 'CI-only 158 module missing'
+          }
+          Write-Host 'Experimental GetPackerCaps 159 module built; never ship this artifact'
+      - name: Upload CI-only 158 capability control
+        if: matrix.arch == 'x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ISO-WCX-x64-158-F5-CI-only
+          path: build/Release/ISO-WCX.wcx64
+          if-no-files-found: error
+          retention-days: 2
   linux:
     name: Linux core tests
     runs-on: ubuntu-24.04
@@ -111,37 +261,152 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
         run: ctest --test-dir build-sanitized --output-on-failure
   package:
-    name: Total Commander ZIP installer
+    name: Total Commander combined INF ZIP installer
     needs: windows
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Collect x86 and x64 plugins
+      - name: Collect both native WCX architectures
         uses: actions/download-artifact@v8
         with:
           pattern: ISO-WCX-*-preview
           path: package
           merge-multiple: true
-      - name: Build auto-installable Total Commander package
+      - name: Verify 32-bit and 64-bit modules and build native INF ZIP
+        shell: bash
         run: |
+          set -euo pipefail
           test -s package/ISO-WCX.wcx
           test -s package/ISO-WCX.wcx64
-          # Exactly two self-contained WCX DLLs; exclude *additional*
-          # third-party shared libraries from this self-contained package.
-          if find package -maxdepth 1 -type f \( -iname '*.dll' -o -iname '*.so*' -o -iname '*.dylib' \) | grep -q .; then
-            echo "Unexpected third-party shared library in ISO-WCX installer" >&2
+          # Both modules share the base name. TC automatically loads WCX64
+          # when running x64; Win32 loads the WCX from file= in pluginst.inf.
+          grep -qx 'type=wcx' pluginst.inf
+          grep -qx 'file=ISO-WCX.wcx' pluginst.inf
+          grep -qx 'defaultdir=ISO-WCX' pluginst.inf
+          grep -qx 'defaultextension=wim' pluginst.inf
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          for name, machine in [('ISO-WCX.wcx', 0x14c), ('ISO-WCX.wcx64', 0x8664)]:
+              data = (Path('package') / name).read_bytes()
+              assert len(data) > 256 and data[:2] == b'MZ', name
+              pos = struct.unpack_from('<I', data, 0x3c)[0]
+              assert pos + 6 <= len(data), name
+              assert data[pos:pos+4] == b'PE\x00\x00', name
+              assert struct.unpack_from('<H', data, pos+4)[0] == machine, name
+          PY
+          if [ "$(find package -maxdepth 1 -type f \( -iname '*.wcx' -o -iname '*.wcx64' \) | wc -l)" -ne 2 ]; then
+            echo 'Both and only the two expected native WCX modules are required' >&2
             exit 1
           fi
-          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-Repair.ps1 ISO-WCX-RemoveAssociation.ps1 package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-Repair.ps1 ISO-WCX-RemoveAssociation.ps1 ISO-WCX.wcx ISO-WCX.wcx64)
+          if find package -maxdepth 1 -type f \( -iname '*.dll' -o -iname '*.exe' -o -iname '*.cmd' -o -iname '*.ps1' \) | grep -q .; then
+            echo 'No additional DLL or installer program is permitted' >&2
+            exit 1
+          fi
+          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip \
+            pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt \
+            THIRD_PARTY_NOTICES.txt ISO-WCX.wcx ISO-WCX.wcx64)
           unzip -t ISO-WCX-preview.zip
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'THIRD_PARTY_NOTICES.txt'
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-Repair.ps1'
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX-RemoveAssociation.ps1'
-      - name: Upload combined preview installer
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'pluginst.inf'
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX.wcx'
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'ISO-WCX.wcx64'
+          if [ "$(unzip -Z1 ISO-WCX-preview.zip | grep -Ei '\.wcx(64)?$' | wc -l)" -ne 2 ]; then
+            echo 'Combined INF installer contains an unexpected WCX module' >&2
+            exit 1
+          fi
+          if unzip -Z1 ISO-WCX-preview.zip | grep -Ei '\.(dll|cmd|ps1|exe)$'; then
+            echo 'Unexpected extra program/script in native INF package' >&2
+            exit 1
+          fi
+      - name: Validate the single universal TC installer ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/test_native_installer_zips.py ISO-WCX-preview.zip
+          count="$(find . -maxdepth 1 -type f -name 'ISO-WCX*.zip' | wc -l)"
+          if [ "$count" -ne 1 ]; then
+            echo "Exactly one universal installable ZIP is allowed; found $count" >&2
+            exit 1
+          fi
+      - name: Upload the only native universal INF installer
         uses: actions/upload-artifact@v7
         with:
           name: ISO-WCX-Installable-Preview
           path: ISO-WCX-preview.zip
           if-no-files-found: error
+          retention-days: 14
+
+  genuine_tc_f5:
+    name: Real Total Commander F5 into disposable WIM + ISO
+    needs: windows
+    runs-on: windows-2025
+    timeout-minutes: 25
+    # Capture the current failure without blocking parser, writer, or ZIP CI.
+    # This is experimental and must not be claimed as a passing F5 test.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ISO-WCX-Win32-preview
+          path: native
+      - uses: actions/download-artifact@v8
+        with:
+          name: ISO-WCX-x64-preview
+          path: native
+      - uses: actions/download-artifact@v8
+        with:
+          name: ISO-WCX-x64-158-F5-CI-only
+          path: native-experimental
+      - name: Validate F5 harness with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $hTokens=$null
+          $hErrors=$null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path (Get-Location) 'tools\ISO-WCX-RealTC-F5.ps1'),
+            [ref]$hTokens,[ref]$hErrors) | Out-Null
+          if($hErrors.Count -gt 0) {
+            $hErrors | ForEach-Object { Write-Host $_.ToString() }
+            throw 'Real TC F5 harness PowerShell 5.1 syntax invalid'
+          }
+          Write-Host 'PASS: real TC F5 harness syntax under WinPS 5.1'
+      - name: Install CI-only OCR for owner-drawn TC shareware instruction
+        shell: powershell
+        run: |
+          $ocr=(Get-Command tesseract.exe -ErrorAction SilentlyContinue)
+          if(-not $ocr) {
+            choco install tesseract -y --no-progress --limit-output
+            if($LASTEXITCODE -ne 0) { throw 'CI Tesseract OCR install failed' }
+          }
+          $exe='C:\Program Files\Tesseract-OCR\tesseract.exe'
+          if(-not (Test-Path -LiteralPath $exe)) {
+            $ocr=Get-Command tesseract.exe -ErrorAction SilentlyContinue
+            if(-not $ocr) { throw 'CI OCR engine was not found after installation' }
+            $exe=$ocr.Source
+          }
+          & $exe --version
+          Write-Host 'OCR is used only for the Total Commander shareware prompt on CI'
+      - name: Verify real TC 11.58 F5 and ISO/WIM payloads
+        shell: powershell
+        # A frozen Windows UI Automation call must fail as inconclusive
+        # instead of occupying a runner until the 25-minute job timeout.
+        timeout-minutes: 12
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/ISO-WCX-RealTC-F5.ps1 -Wcx32 native/ISO-WCX.wcx -Wcx64 native/ISO-WCX.wcx64 -Wcx64Control native-experimental/ISO-WCX.wcx64 -ReportPath tc-f5-evidence/real-tc-f5.json
+      - name: Preserve read-only host evidence (no user files)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ISO-WCX-RealTC-F5-Evidence
+          path: |
+            tc-f5-evidence/real-tc-f5.json
+            ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-158/before-f5.png
+            ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-158/totalcmd-screen.png
+            ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-159/before-f5.png
+            ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-159/totalcmd-screen.png
+            ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-159-iso/before-f5.png
+            ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-159-iso/totalcmd-screen.png
+          if-no-files-found: warn
           retention-days: 14

@@ -13,6 +13,7 @@
 #include "iso_wcx/virtual_archive.hpp"
 #ifdef _WIN32
 #include "iso_wcx/wim_archive.hpp"
+#include "iso_wcx/ntfs_preallocation.hpp"
 #endif
 #include <algorithm>
 #include <array>
@@ -1397,6 +1398,9 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
     }
     std::ofstream sink;
     std::filesystem::path pending;
+#ifdef _WIN32
+    bool ntfs_preallocated=false;
+#endif
     // Keep the original destination intact until every extent is read,
     // written and closed successfully. A cancelled extraction must not leave
     // an apparently valid but truncated file in Total Commander.
@@ -1430,9 +1434,31 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
             const std::uint64_t nonce=(std::uint64_t(random())<<32)|random();
             candidate += ".iso-wcx-" + std::to_string(nonce) + ".part";
             if(std::filesystem::exists(candidate))continue;
+#ifdef _WIN32
+            // AMI UEFI firmware can read fragmented NTFS files incorrectly
+            // across short read boundaries. Reserve the whole output BEFORE
+            // streaming it (as Rufus/7-Zip do). CREATE_NEW also rules out a
+            // racing replacement of the private .part file by a symlink.
+            // Keep the file's existing logical size: reopening with trunc
+            // would undo the reservation and defeat the mitigation.
+            const auto staged=ntfs_preallocation::create_stage(
+                candidate,entry.size);
+            if(!staged.created)continue;
+            sink.open(candidate,std::ios::binary|
+                                std::ios::in|std::ios::out);
+            if(sink.is_open()) {
+                ntfs_preallocated=staged.preallocated;
+                pending=std::move(candidate);
+            } else {
+                sink.clear();
+                std::error_code ec;
+                std::filesystem::remove(candidate,ec);
+            }
+#else
             sink.open(candidate,std::ios::binary|std::ios::trunc);
             if(sink.is_open())pending=std::move(candidate);
             else sink.clear();
+#endif
         }
         require(sink.is_open(),"cannot create temporary extracted file");
     }
@@ -1505,6 +1531,13 @@ bool Disc::copy(std::size_t index, const std::filesystem::path& output,
     if(sink.is_open()) {
         sink.close();
         require(!sink.fail(),"output close failed");
+#ifdef _WIN32
+        // Optional read-only NTFS extent reporting is deliberately deferred
+        // until all bytes are closed, while the private stage still exists.
+        // It cannot change extraction success or alter source bytes.
+        ntfs_preallocation::log_extents_if_requested(
+            pending,ntfs_preallocated);
+#endif
         // Atomic replacement on the same filesystem, including an existing
         // destination, is provided by std::filesystem::rename. A failed rename
         // leaves the prior destination unchanged; cleanup removes the staging.

@@ -30,6 +30,12 @@ public:
     WimArchive(const WimArchive&) = delete;
     WimArchive& operator=(const WimArchive&) = delete;
 
+    // Before atomically replacing a WIM, release read handles retained by
+    // open Total Commander panels for this exact source file. Their existing
+    // listings become stale and must not extract against the new image.
+    // Concurrent stream reads finish before handles are released.
+    static void release_open_readers(const std::filesystem::path& image);
+
     [[nodiscard]] const std::vector<Item>& items() const noexcept { return entries_; }
     [[nodiscard]] const std::string& format() const noexcept { return format_; }
 
@@ -49,6 +55,7 @@ private:
     std::vector<Location> locations_;
     std::string format_;
     std::mutex read_mutex_;
+    bool invalidated_by_edit_ = false;
     // Shared under read_mutex_: reusing one read buffer avoids zero-filling
     // and allocating 1 MiB for every small file in large install.wim images.
     std::vector<std::uint8_t> read_buffer_;

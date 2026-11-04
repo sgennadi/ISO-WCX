@@ -13,6 +13,8 @@ EXPORTS
     SetChangeVolProc=_SetChangeVolProc@8
     SetChangeVolProcW=_SetChangeVolProcW@8
     GetPackerCaps=_GetPackerCaps@0
+    GetBackgroundFlags=_GetBackgroundFlags@0
+    PackSetDefaultParams=_PackSetDefaultParams@4
     ConfigurePacker=_ConfigurePacker@8
     CanYouHandleThisFile=_CanYouHandleThisFile@4
     CanYouHandleThisFileW=_CanYouHandleThisFileW@4

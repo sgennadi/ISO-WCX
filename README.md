@@ -15,6 +15,81 @@ remain limited; this is not full NTFS/ext4/UDF compatibility.**
 
 Development builds remain available through the [Preview workflow](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml).
 
+### Preview: one universal installer ZIP for both Total Commander editions
+
+**Permanent project distribution rule:** Publish exactly **one**
+`ISO-WCX-preview.zip` for **both 32-bit and 64-bit Total Commander**.
+Do not publish separate Win32/x64 installation ZIPs. Do not bundle or
+require a standalone EXE, CMD, PowerShell script, external DLL, or mount
+service.
+
+Download the **single** `ISO-WCX-Installable-Preview` artifact from
+[GitHub Actions](https://github.com/sgennadi/ISO-WCX/actions/workflows/wcx-preview.yml),
+unpack its Actions wrapper, and open `ISO-WCX-preview.zip` with **Enter**
+inside Total Commander. The standard `pluginst.inf` installs the WCX plugin
+and offers only one native association, `wim`. The built-in confirmed repair on first WIM open registers editable image types as `159,ISO-WCX.wcx` and read-only formats as `158,ISO-WCX.wcx`. It specifies
+`file=ISO-WCX.wcx`; Total Commander loads the adjacent
+`ISO-WCX.wcx64` **only when running its 64-bit edition**. Both compiled
+modules have to be present *inside this one universal ZIP* so native TC
+installation works for either edition; TC only **loads** the matching one.
+
+The stock `pluginst.inf` installer unpacks both binaries and displays
+**one WIM Associate dialog**, not 23. The INF cannot preselect Total
+Commander's numeric capability entry `159`; accept its prefilled
+`ISO-WCX.wcx` path instead. When WIM is opened afterward, the plugin
+offers **one confirmation** to normalize its own entry to `159` and add
+other unassigned image formats, keeping unrelated handlers and toolbar
+settings. Restart TC after accepting this confirmation. The native
+installer cannot conditionally skip the unused binary or remove stale
+binaries left by a previous installation. ZIP/RAR/7z are not assigned to ISO-WCX.
+Toolbar buttons, existing custom commands and unrelated WCX associations
+must remain untouched. CI rejects extra installation ZIPs and checks
+both WCX machine types and the one native INF package.
+
+**Recursive TC F5 folder copy (Preview):** selecting one directory expands all
+nested regular files and subdirectories inside the native WCX editor for
+supported ISO/WIM operations. Duplicate TC file-list entries are coalesced;
+unsafe reparse points and conflicting sources fail before staging. During
+folder enumeration Total Commander receives real scanned-entry counts and can
+cancel before an ISO/WIM staging workspace exists. For plain
+ISO9660/Joliet, a repeated byte-identical folder copy may skip rebuilding
+when its total compared file content is at most 32 MiB. Hybrid boot and
+ISO/UDF Bridge write restrictions remain unchanged.
+
+**Editing status (Preview, not universal):** standard unsplit WIM supports
+bounded add/replace/delete of files and folders; it uses expensive WIMGAPI
+Apply/Capture, and the optional fast mount/commit route currently supports
+only directory creation and is disabled by default. Plain ISO9660/Joliet
+supports constrained editing on validated layouts. Experimental UDF Type-1
+supports selected creates/replacements/deletions. Bootable hybrid ISO supports strictly validated file-only unlink in
+Preview without remastering MBR/GPT or El Torito sectors; ESD/SWM are read-only. See
+[Preview](PREVIEW.md) and [WIM integration](docs/wim-integration.md).
+
+**ZIP performance regression fix in Preview:** ISO-WCX no longer advertises
+`PK_CAPS_BY_CONTENT` (64), which could make TC consult its expensive image
+probe when handling unrelated archives. `GetPackerCaps` now returns **159**
+rather than old **222**. `PK_CAPS_NEW` (1) is needed for real TC F5 into existing ISO/WIM; it does not imply that ISO-WCX can create a brand-new image. Both `CanYouHandleThisFile` and `OpenArchive` reject
+non-image extensions *before* creating a Disc parser or starting the updater.
+ZIP remains handled by Total Commander's normal ZIP reader. This is a
+preventive fix; actual speed on a specific TC installation still requires a
+real-host comparison. The previously released Stable v0.21.0 is unchanged.
+
+**AMI UEFI NTFS compatibility (Preview):** When extracting an ISO/WIM
+file onto a local NTFS destination, the WCX now creates an exclusive
+random `.part` file and reserves its **full logical length** with
+`SetFilePointerEx` + `SetEndOfFile` *before* writing the first data block.
+This can reduce fragmentation that triggers the AMI UEFI NTFS firmware
+read bug. It **does not fix AMI firmware** or guarantee one physical
+extent on a fragmented USB drive. Non-NTFS locations and unsupported
+reservation fall back to ordinary streaming. The destination is still
+replaced only after a complete, verified extraction; cancellation and
+read errors remove only the private stage. Set
+`ISO_WCX_NTFS_PREALLOCATE=0` to disable the optimization; opt into
+read-only extent counts in the Windows debug log with
+`ISO_WCX_NTFS_EXTENTS=1`. Windows x86/x64 tests cover the optimization,
+zero-length files, safe collisions, cancellation and fallback.
+See [Preview details](PREVIEW.md#ami-uefi-ntfs-firmware-read-workaround-preview).
+
 **No separate setup EXE, parser DLL, unpacker, PowerShell script or mounting
 service is needed.** Existing native helper CLIs are development/test programs,
 not dependencies of the WCX installation.
@@ -27,8 +102,9 @@ association that prevents its DLL from loading in the first place.
 
 If the **Delete** button in the *WCX association dialog* does nothing,
 that is a Total Commander configuration/UI operation, not a call to
-`DeleteFilesW` inside an archive. The value `222,C:\\...\\ISO-WCX.wcx`
-is a valid WCX capability mask plus DLL path, **not error 222**. To remove
+`DeleteFilesW` inside an archive. The value `222,C:\\...\\ISO-WCX.wcx` is the older Stable WCX
+capability mask plus DLL path (**not error 222**); new Preview uses `159,` for editable formats
+to avoid global ZIP content probing. To remove
 a specific stale association safely, use the repository's optional
 [`ISO-WCX-RemoveAssociation.ps1`](ISO-WCX-RemoveAssociation.ps1) with
 `-IniPath "C:\\path\\to\\wincmd.ini" -Extension iso` for a **read-only
@@ -101,6 +177,16 @@ reassociate the WCX plugin so Total Commander refreshes its capability flags.
 
 ## Experimental fast WIM folder creation (development Preview after v0.21.0)
 
+**Existing WIM folders (new Preview no-op):** A repeated F7 that selects only
+already-existing directories now performs a read-only per-image metadata
+preflight and exits before allocating a staging workspace or running WIMGAPI
+Apply/Capture. This works with the native fast-mount checkbox OFF. The check
+rejects conflicting files or case-only aliases (including Cyrillic/Greek
+Unicode case pairs) and honors cancellation.
+It can still take time to enumerate metadata in a large `install.wim`;
+**new** folders still require the normal Apply/Capture edit or the explicit
+experimental fast mount path below.
+
 The new WIMGAPI **mount-and-commit** path can avoid applying and recapturing
 the complete WIM for a batch of empty directories in one image index.
 It is **opt-in only**, either from the new checkbox in
@@ -169,8 +255,9 @@ Total Commander after user confirmation.
 
 - **Manual:** In Total Commander, open **Files → Pack**, choose a packer
   extension associated with ISO-WCX, then **Configure... → Check now**.
-- **Automatic:** Once per day, on plugin initialization, a background WinHTTP
-  request checks the **latest Stable release** on our GitHub repository.
+- **Automatic:** Once per day, on first actual image handling in the new
+  Preview, a background WinHTTP request checks the **latest Stable release** on
+  our GitHub repository (older Stable checks at plugin initialization).
   A new version is shown only once; browsing/extraction never wait for the network.
 - **Disable automatic checks:** Choose **Do not check for updates automatically**
   (Russian: **Не проверять обновления автоматически**). Stored per user at
@@ -440,8 +527,8 @@ See [bounded optical container design](docs/packed-optical.md).
 - Split SWM sets: open any part with all `.swm` files in the same folder.
   Parts are matched by GUID and part number, including renamed files.
 - Plain ISO9660/Joliet editing adds/replaces/removes files and folders
-  transactionally; unsupported hybrid/Rock Ridge layouts fail without
-  modifying the input. A narrow ISO/UDF Bridge mode permits only identical-
+  transactionally. Strict hybrid-boot ISO file-only unlink preserves the
+  boot/system area; Rock Ridge and unsupported layouts fail unchanged. A narrow ISO/UDF Bridge mode permits only identical-
   length replacement of nonboot files whose physical data extent is shared
   across both namespaces; metadata-changing Bridge edits are refused.
   Existing supported boot-image sectors are preserved in plain ISO editing.

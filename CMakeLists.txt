@@ -124,6 +124,11 @@ if(BUILD_TESTING)
   target_include_directories(archive_edit_fixture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME iso_transactional_edit COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iso_edit.py" "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  add_test(NAME iso_hybrid_boot_preserving_unlink
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iso_hybrid_boot_unlink.py"
+      "$<TARGET_FILE:archive_edit_fixture>")
+  set_tests_properties(iso_hybrid_boot_preserving_unlink PROPERTIES TIMEOUT 120)
   add_test(NAME udf_bridge_same_length_edit
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_bridge_edit.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
@@ -306,6 +311,11 @@ if(BUILD_TESTING)
   target_include_directories(update_policy_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME native_updater_release_metadata_validation COMMAND update_policy_tests)
 endif()
+if(BUILD_TESTING)
+  add_executable(tc_registration_repair_tests tests/tc_registration_repair.cpp)
+  target_include_directories(tc_registration_repair_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME tc_wcx_owned_association_upgrade COMMAND tc_registration_repair_tests)
+endif()
 
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -332,7 +342,7 @@ endif()
 
 if(WIN32)
   add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp
-    src/wcx_wim_open_progress.cpp)
+    src/wcx_registration_repair.cpp src/wcx_wim_open_progress.cpp)
   # Do not statically import ComCtl32/TaskDialogIndirect: WCX DLL loading
   # must succeed in headless tools and CI before any GUI code is needed.
   target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32 user32)
@@ -340,6 +350,13 @@ if(WIN32)
     ISO_WCX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     ISO_WCX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
     ISO_WCX_VERSION_PATCH=${PROJECT_VERSION_PATCH})
+  # Real Total Commander F5 into an existing ISO/WIM requires 159.
+  # Only the disposable CI comparison build uses the old 158 control.
+  option(ISO_WCX_CI_CAPS_OLD_CONTROL
+    "Test-only 158 negative control for Total Commander F5" OFF)
+  if(ISO_WCX_CI_CAPS_OLD_CONTROL)
+    target_compile_definitions(ISO-WCX PRIVATE ISO_WCX_CI_CAPS_OLD_CONTROL=1)
+  endif()
   if(MSVC)
     target_compile_options(ISO-WCX PRIVATE /W4 /EHsc /utf-8)
   else()
@@ -479,6 +496,19 @@ if(BUILD_TESTING)
   add_executable(copy_transaction_tests tests/copy_transaction.cpp)
   target_link_libraries(copy_transaction_tests PRIVATE iso_disc)
   add_test(NAME copy_transaction_rollback COMMAND copy_transaction_tests)
+  if(WIN32)
+    # Native NTFS reservation for AMI UEFI firmware compatibility. No
+    # executable helper is bundled in the single universal WCX ZIP.
+    add_executable(ntfs_preallocation_tests tests/ntfs_preallocation.cpp)
+    target_include_directories(ntfs_preallocation_tests PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_compile_definitions(ntfs_preallocation_tests PRIVATE
+      WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    add_test(NAME ntfs_uefi_ami_preallocate_atomic_extract
+      COMMAND ntfs_preallocation_tests)
+    set_tests_properties(ntfs_uefi_ami_preallocate_atomic_extract PROPERTIES
+      SKIP_RETURN_CODE 77 TIMEOUT 90)
+  endif()
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
     add_test(NAME clonecd_track_smoke
