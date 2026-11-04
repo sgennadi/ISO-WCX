@@ -715,6 +715,32 @@ function Tail-Wcx {
     if(Test-Path -LiteralPath $logFile) { return @(Get-Content -LiteralPath $logFile -Tail 45) }
     return @()
 }
+# Keep final verification bounded even when another CI process holds an
+# obsolete Windows image handle. A stuck Get-FileHash must never block the
+# report after Total Commander has already completed both F5 operations.
+function Get-BoundedFileHash([string]$file,[int]$timeoutSeconds=20) {
+    $job=Start-Job -ScriptBlock {
+        param($path)
+        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    } -ArgumentList @($file)
+    try {
+        if($null -eq (Wait-Job -Job $job -Timeout $timeoutSeconds)) {
+            throw ('SHA256 verification exceeded '+$timeoutSeconds+
+                ' seconds: '+$file)
+        }
+        if($job.State -ne 'Completed') {
+            throw ('SHA256 verifier failed for '+$file+': '+$job.State)
+        }
+        $value=@(Receive-Job -Job $job -ErrorAction Stop)
+        if($value.Count -ne 1 -or
+           $value[0] -notmatch '^[0-9a-fA-F]{64}$') {
+            throw ('Unexpected SHA256 result for '+$file)
+        }
+        return [string]$value[0]
+    } finally {
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+}
 function Test-Mask([int]$mask,[string]$source,[string]$templateImage,[string]$format='wim') {
     if($format -notin @('wim','iso')) { throw 'Unsupported TC F5 test format' }
     $suffix=if($format -eq 'wim') { '' } else { '-'+$format }
@@ -1152,7 +1178,7 @@ try {
     if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $templateWim)) {
         throw "DISM cannot capture disposable one-index WIM: $LASTEXITCODE"
     }
-    $sha=(Get-FileHash -LiteralPath $templateWim -Algorithm SHA256).Hash
+    $sha=Get-BoundedFileHash $templateWim
     # Evaluate both real TC modes on a one-index disposable WIM.
     foreach($mask in @(158,159)) {
         $report.cases+=Test-Mask $mask $source $templateWim 'wim'
@@ -1166,16 +1192,16 @@ try {
     if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $templateIso)) {
         throw 'Could not generate disposable ISO9660 F5 fixture'
     }
-    $isoSha=(Get-FileHash -LiteralPath $templateIso -Algorithm SHA256).Hash
+    $isoSha=Get-BoundedFileHash $templateIso
     # The production GetPackerCaps=159 binary must accept normal F5 to
     # the ISO root; replacement/delete are covered in ISO writer tests.
     $report.cases+=Test-Mask 159 $source $templateIso 'iso'
     Write-Host 'TC_F5_STAGE=CASES_RETURNED'
     Write-Host 'TC_F5_STAGE=VERIFY_TEMPLATES_BEGIN'
     $report.template_wim_unchanged=
-        $sha -eq (Get-FileHash -LiteralPath $templateWim -Algorithm SHA256).Hash
+        $sha -eq (Get-BoundedFileHash $templateWim)
     $report.template_iso_unchanged=
-        $isoSha -eq (Get-FileHash -LiteralPath $templateIso -Algorithm SHA256).Hash
+        $isoSha -eq (Get-BoundedFileHash $templateIso)
     Write-Host ('TC_F5_STAGE=VERIFY_TEMPLATES_END wim='+
         $report.template_wim_unchanged+' iso='+$report.template_iso_unchanged)
     if(-not $report.template_wim_unchanged -or
@@ -1207,7 +1233,9 @@ try {
     $path=[IO.Path]::GetFullPath($ReportPath)
     $folder=Split-Path -Parent $path
     New-Item -ItemType Directory -Path $folder -Force | Out-Null
-    $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path -Encoding UTF8
+    Write-Host 'TC_F5_STAGE=REPORT_SERIALIZE_BEGIN'
+    $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding UTF8
+    Write-Host 'TC_F5_STAGE=REPORT_SERIALIZE_END'
     Write-Host ('REAL_TC_F5_REPORT=' + $path)
     Get-Content -LiteralPath $path
 }
