@@ -13,14 +13,41 @@ USB/CD metadata.
 | Validated nonhybrid ISO9660 / Joliet, optional El Torito | Native transactional rebuild, subject to boot-extent and name checks | Native transactional rebuild |
 | Same layout with a bounded **all-zero** trailing pad | Preview native rebuild; PVD/Joliet sizes are synchronized | Preview native rebuild |
 | Standalone UDF Type-1 2048-byte images | Limited native writer Preview, gated by UDF format validations | Limited native writer Preview |
-| ISO/UDF Bridge without boot catalog | Not supported | Limited shared-single-extent replacement only; both namespaces validated |
-| Bootable ISO/UDF Bridge | Not supported | Currently blocked pending boot-range checks |
+| ISO/UDF Bridge without boot catalog | Not supported | Preview: single contiguous existing UDF or shared ISO/UDF file, exactly same length; both namespaces validated |
+| Bootable ISO/UDF Bridge | Not supported | Preview: existing UDF-only or shared-extent file, same length and fully separated from all bounded El Torito boot and UDF descriptor ranges; unknown boot lengths remain blocked |
 | Hybrid MBR/GPT or nonzero system area | Not supported | Currently blocked; never discard boot/partition metadata |
 | Rock Ridge, multi-extent and unrecognized variants | Not supported | Currently blocked if parser cannot guarantee all metadata is preserved |
 
 These are *capability preconditions*, not blanket promises for any disc.
 For individual archive failures, the WCX adapter records the native refusal
 reason in `%LOCALAPPDATA%\ISO-WCX\Logs\edit-errors.log`.
+
+## AOMEI Partition Assistant 10.12.2 WinPE field-report profile (2026-11-04)
+
+The user's **read-only Export Image Structure** report describes a
+781,320,192-byte (381,504-sector) ISO/UDF Bridge with a PVD declaring
+381,213 sectors, El Torito boot catalog at LBA 349, UDF NSR02,
+anchors at LBAs 256, 381,248 and 381,503, and **UDF** as the selected
+filesystem. The ISO9660 primary namespace contains only
+`boot.images/boot.catalog`, `BIOS-0.img` and `EFI-1.img`; the actual
+WinPE files, including `sources/boot.wim`, reside exclusively in UDF.
+A pure-ISO editor therefore cannot F5 these files.
+
+The native payload-only bridge editor now recognizes existing files that
+exist **only in UDF**. It requires exactly one contiguous nonsparse extent,
+the same replacement length, an unchanged ISO9660 namespace, and strict
+non-overlap with every ISO namespace extent, bounded El Torito boot-image
+range, ISO/UDF descriptor and UDF peer-file extent. It stages an isolated
+ISO copy, verifies both namespace parsers and exact replacement bytes,
+then commits atomically. In a bootable ISO with zero or ambiguous El Torito
+sector counts, editing remains disabled until the complete boot image
+extents can be independently established.
+
+**Not yet available:** F5 to create a new file, Delete, folder changes,
+or changes to file length in this bootable ISO/UDF Bridge. Those require
+a coordinated UDF allocation/FID/FE writer with boot-preserving validation,
+not merely a raw payload patch. This capability must be tested on a
+disposable copy of the actual AOMEI ISO before general availability.
 
 ## Native editor decision flow (no mount tools)
 
