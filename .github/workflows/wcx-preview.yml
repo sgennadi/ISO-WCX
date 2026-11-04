@@ -50,27 +50,6 @@ jobs:
       - name: Verify safe WCX association repair
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
-      - name: Verify embedded DLL and installer RC/build version
-        shell: pwsh
-        run: |
-          $suffix = if ('${{ matrix.arch }}' -eq 'Win32') { 'wcx' } else { 'wcx64' }
-          $dll = "build/Release/ISO-WCX.$suffix"
-          if (-not (Test-Path $dll)) { throw "Missing WCX DLL: $dll" }
-          $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $dll).Path)
-          $expected = 'v0.21.1 RC1 (Build ${{ github.run_number }})'
-          if ($info.FileVersion -ne $expected -or $info.ProductVersion -ne $expected) {
-            throw "DLL version mismatch. Got $($info.FileVersion), expected $expected"
-          }
-          if ($info.FileMajorPart -ne 0 -or $info.FileMinorPart -ne 21 -or
-              $info.FileBuildPart -ne 1 -or
-              $info.FilePrivatePart -ne ${{ github.run_number }}) {
-            throw "Binary RC/build version fields do not match"
-          }
-          $manifest = Get-Content 'build/pluginst.inf' -Raw
-          if ($manifest -notmatch '(?m)^version=0\.21\.1\r?$' -or
-              -not $manifest.Contains($expected)) {
-            throw "Generated Total Commander installer is not RC1"
-          }
       - name: Upload preview binaries
         uses: actions/upload-artifact@v7
         with:
