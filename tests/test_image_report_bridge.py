@@ -37,7 +37,8 @@ def test_bridge(inspector: pathlib.Path, root: pathlib.Path, boot: bool):
     assert "Detected filesystem / container: UDF" in report
     assert "ISO9660 PVD present: yes" in report
     assert "UDF VRS NSR02: detected" in report
-    assert "ISO/UDF Bridge candidate:" in report
+    assert "ISO/UDF Bridge:" in report
+    assert "UDF-only paths:" in report
     assert "SECONDARY ISO9660 PRIMARY NAMESPACE" in report
     assert "ISO9660 primary parser format: ISO 9660" in report
     assert "ISO9660 primary entries listed:" in report
