@@ -14,8 +14,6 @@ on:
       - 'INSTALL_*.txt'
       - 'ISO-WCX-Repair*'
       - 'pluginst.inf'
-      - 'pluginst-preview.inf.in'
-      - 'src/version.rc.in'
       - 'README.md'
       - 'PREVIEW.md'
   workflow_dispatch:
@@ -53,11 +51,10 @@ jobs:
       - name: Upload preview binaries
         uses: actions/upload-artifact@v7
         with:
-          name: ISO-WCX-${{ matrix.arch }}-v0.21.1-RC1-B${{ github.run_number }}-preview
+          name: ISO-WCX-${{ matrix.arch }}-preview
           path: |
             build/Release/ISO-WCX.wcx
             build/Release/ISO-WCX.wcx64
-            build/pluginst.inf
           if-no-files-found: error
           retention-days: 14
   linux:
@@ -111,32 +108,22 @@ jobs:
           merge-multiple: true
       - name: Build auto-installable Total Commander package
         run: |
-          # A second upload path can preserve the Release/ prefix.
-          for binary in ISO-WCX.wcx ISO-WCX.wcx64; do
-            if test -f "package/Release/$binary"; then
-              mv "package/Release/$binary" "package/$binary"
-            fi
-          done
           test -s package/ISO-WCX.wcx
           test -s package/ISO-WCX.wcx64
-          test -s package/pluginst.inf
-          # Exactly two self-contained WCX DLLs; exclude third-party DLLs.
+          # Exactly two self-contained WCX DLLs; exclude *additional*
+          # third-party shared libraries from this self-contained package.
           if find package -maxdepth 1 -type f \( -iname '*.dll' -o -iname '*.so*' -o -iname '*.dylib' \) | grep -q .; then
             echo "Unexpected third-party shared library in ISO-WCX installer" >&2
             exit 1
           fi
-          grep -Fxq 'version=0.21.1' package/pluginst.inf
-          grep -Fq 'v0.21.1 RC1 (Build ${{ github.run_number }})' package/pluginst.inf
-          cp PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
-          (cd package && zip -9 "../ISO-WCX-v0.21.1-RC1-B${{ github.run_number }}.zip" pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX.wcx ISO-WCX.wcx64)
-          unzip -t "ISO-WCX-v0.21.1-RC1-B${{ github.run_number }}.zip"
-          unzip -Z1 "ISO-WCX-v0.21.1-RC1-B${{ github.run_number }}.zip" | grep -qx 'THIRD_PARTY_NOTICES.txt'
+          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
+          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX.wcx ISO-WCX.wcx64)
+          unzip -t ISO-WCX-preview.zip
+          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'THIRD_PARTY_NOTICES.txt'
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v7
         with:
-          name: ISO-WCX-Installable-v0.21.1-RC1-B${{ github.run_number }}
-          path: ISO-WCX-v0.21.1-RC1-B${{ github.run_number }}.zip
-          if-no-files-found: error
-          retention-days: 14
+          name: ISO-WCX-Installable-Preview
+          path: ISO-WCX-preview.zip
           if-no-files-found: error
           retention-days: 14
