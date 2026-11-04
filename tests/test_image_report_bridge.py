@@ -46,6 +46,8 @@ def test_bridge(inspector: pathlib.Path, root: pathlib.Path, boot: bool):
     assert "hello" in report
     assert "Image modified: no" in report
     assert "Image payloads copied: no" in report
+    assert "UDF NATIVE EDIT PREFLIGHT (READ ONLY)" in report
+    assert "Strict UDF Type-1 writer parser:" in report
     if boot:
         assert "El Torito boot descriptor: yes" in report
         assert "Bootable ISO/UDF Bridge:" in report
@@ -59,7 +61,16 @@ def main(inspector: pathlib.Path):
         root = pathlib.Path(d)
         test_bridge(inspector, root, boot=False)
         test_bridge(inspector, root, boot=True)
-    print("PASS: UDF+ISO primary trees, El Torito limits, read-only SHA256")
+        writable = root / "bitmap-bootable.iso"
+        writable.write_bytes(descriptor_bridge(
+            boot=True, udf_only=True, boot_count=4, writable=True))
+        result = inspect(inspector, writable)
+        assert "UDF NATIVE EDIT PREFLIGHT (READ ONLY)" in result
+        assert "Strict UDF Type-1 writer parser: compatible" in result, result
+        assert "Validated UDF free-space bitmap: present" in result, result
+        assert "ISO/UDF Bridge: the ISO9660 namespace" in result
+        assert "Image modified: no" in result
+    print("PASS: UDF+ISO boot trees and Type-1 bitmap preflight, read-only SHA256")
 
 
 if __name__ == "__main__":
