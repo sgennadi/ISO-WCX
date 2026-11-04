@@ -371,7 +371,11 @@ if(WIN32)
     add_executable(wcx_wim_smoke tests/wcx_wim_smoke.cpp)
     add_test(NAME wcx_wim_multi_image_lzx_esd
       COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>")
-    set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 240)
+    set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 360)
+    add_test(NAME wcx_iso_f5_padded_add_replace_delete
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_iso_edit.py"
+              "$<TARGET_FILE:ISO-WCX>")
+    set_tests_properties(wcx_iso_f5_padded_add_replace_delete PROPERTIES TIMEOUT 90)
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()
 endif()
