@@ -7,6 +7,7 @@
 #endif
 #include <windows.h>
 #include "iso_wcx/wim_index_report.hpp"
+#include "iso_wcx/image_report.hpp"
 // WIMGAPI is resolved dynamically; the optional Windows ADK header is not needed.
 
 #include <array>
@@ -149,6 +150,16 @@ int wmain(int argc,wchar_t** argv) {
            summary.find("not mounted")==std::string::npos) {
             std::cerr<<"DISM-style WIM index summary incomplete\n"<<summary;
             return 37;
+        }
+
+        // Verify the actual ConfigurePacker image-report path, not only the
+        // standalone metadata helper. It runs exclusively on user export.
+        const auto full_report=iso_wcx::build_image_structure_report(original);
+        if(full_report.find("WIM IMAGE INDEXES") == std::string::npos ||
+           full_report.find("Image indexes: 3") == std::string::npos ||
+           full_report.find("Index 3") == std::string::npos) {
+            std::cerr<<"WIM index summary missing from Export Image Structure\n";
+            return 38;
         }
 
         const HMODULE dll=LoadLibraryW(argv[1]);
