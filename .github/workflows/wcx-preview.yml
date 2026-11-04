@@ -338,7 +338,7 @@ jobs:
           retention-days: 14
 
   genuine_tc_f5:
-    name: Experimental real Total Commander F5 into a disposable WIM
+    name: Real Total Commander F5 into disposable WIM + ISO
     needs: windows
     runs-on: windows-2025
     timeout-minutes: 25
@@ -388,11 +388,11 @@ jobs:
           }
           & $exe --version
           Write-Host 'OCR is used only for the Total Commander shareware prompt on CI'
-      - name: Probe real TC 11.58 x64 and observe PackFilesW dispatch
+      - name: Verify real TC 11.58 F5 and ISO/WIM payloads
         shell: powershell
         # A frozen Windows UI Automation call must fail as inconclusive
         # instead of occupying a runner until the 25-minute job timeout.
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/ISO-WCX-RealTC-F5.ps1 -Wcx32 native/ISO-WCX.wcx -Wcx64 native/ISO-WCX.wcx64 -Wcx64Control native-experimental/ISO-WCX.wcx64 -ReportPath tc-f5-evidence/real-tc-f5.json
       - name: Preserve read-only host evidence (no user files)
@@ -406,5 +406,7 @@ jobs:
             ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-158/totalcmd-screen.png
             ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-159/before-f5.png
             ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-159/totalcmd-screen.png
+            ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-159-iso/before-f5.png
+            ${{ runner.temp }}/ISO-WCX-RealTC-F5/caps-159-iso/totalcmd-screen.png
           if-no-files-found: warn
           retention-days: 14
