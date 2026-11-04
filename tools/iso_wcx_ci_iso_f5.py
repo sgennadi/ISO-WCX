@@ -23,10 +23,29 @@ def create(image: pathlib.Path) -> None:
     if image.exists():
         raise RuntimeError(f"refusing to overwrite existing image: {image}")
     image.parent.mkdir(parents=True, exist_ok=True)
-    image.write_bytes(fixture())
+    # The writer's unit fixture is deliberately minimal. Real Total
+    # Commander must instead receive a standards-conforming ISO9660 root
+    # path table in BOTH endian orders before a WCX F5 is attempted.
+    sector = 2048
+    pvd = 16 * sector
+    data = bytearray(fixture())
+    root_lba = int.from_bytes(data[pvd + 158:pvd + 162], "little")
+    assert root_lba == 20, "ISO test root LBA changed unexpectedly"
+    path_table_size = 10  # root: 8-byte header, one-byte id, one pad
+    data[pvd + 132:pvd + 136] = path_table_size.to_bytes(4, "little")
+    data[pvd + 136:pvd + 140] = path_table_size.to_bytes(4, "big")
+    data[pvd + 140:pvd + 144] = (18).to_bytes(4, "little")
+    data[pvd + 148:pvd + 152] = (19).to_bytes(4, "big")
+    for lba, endian in ((18, "little"), (19, "big")):
+        entry = (bytes([1, 0]) + root_lba.to_bytes(4, endian) +
+                 (1).to_bytes(2, endian) + bytes([0, 0]))
+        assert len(entry) == path_table_size
+        data[lba * sector:lba * sector + path_table_size] = entry
+    image.write_bytes(data)
+    validate_path_tables(image)
     files = {name.casefold(): value for name, value in read_image(image).items()}
     assert files.get("hello.txt") == ORIGINAL, "invalid original fixture"
-    print("ISO_CI_FIXTURE_CREATED original_hello=True")
+    print("ISO_CI_FIXTURE_CREATED original_hello=True path_tables=True")
 
 
 def verify(image: pathlib.Path) -> None:
