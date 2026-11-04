@@ -113,6 +113,7 @@ public:
     std::set<std::uint32_t> boot_lbas;
     std::vector<std::pair<std::uint64_t,std::uint64_t>> boot_regions;
     bool boot_regions_bounded=true;
+    std::set<std::uint32_t> unbounded_boot_lbas;
     std::vector<std::pair<std::uint64_t,std::uint64_t>> udf_metadata_regions;
     std::unique_ptr<Node> root;
     bool joliet=false;
@@ -237,6 +238,29 @@ public:
         std::set<std::uint32_t> seen;root=parse(Bytes(primary.begin()+156,primary.begin()+190),false,nullptr,0,seen);
         root->name="";root->logical="";
         if(joliet){seen.clear();auto other=parse(Bytes(supplementary.begin()+156,supplementary.begin()+190),true,nullptr,0,seen);pair(*root,*other);}
+        // Some genuine bootable ISO/UDF bridges set El Torito's 512-byte
+        // sector count to zero or to just one boot sector. When the ISO9660
+        // namespace independently describes the full boot image extent,
+        // protect the WHOLE referenced file, not merely the catalog count.
+        // Unknown boot images absent from ISO remain strictly read-only.
+        std::vector<const Node*> boot_nodes{root.get()};
+        while(!boot_nodes.empty()) {
+            const Node* node=boot_nodes.back();
+            boot_nodes.pop_back();
+            for(const auto& child:node->children)
+                boot_nodes.push_back(child.get());
+            if(node->directory || !node->size)continue;
+            const auto start=std::uint64_t(node->lba)*block;
+            const auto end=start+node->size;
+            for(const auto lba:boot_lbas) {
+                const auto reference=std::uint64_t(lba)*block;
+                if(reference>=start && reference<end) {
+                    boot_regions.emplace_back(start,node->size);
+                    unbounded_boot_lbas.erase(lba);
+                }
+            }
+        }
+        boot_regions_bounded=unbounded_boot_lbas.empty();
     }
     Bytes read(std::uint64_t at,std::size_t count){need(at<=size&&count<=size-at,"ISO extent outside image");Bytes b(count);file.clear();file.seekg(static_cast<std::streamoff>(at));file.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(count));need(bool(file),"ISO read failed");return b;}
     void boot_catalog(std::uint32_t lba) {
@@ -253,7 +277,11 @@ public:
             // An absent count is not an authorization to edit near the
             // image: bridge writes fail closed until its full span is known.
             const auto count=le(b,at+6,2);
-            if(!count){boot_regions_bounded=false;return;}
+            if(!count){
+                boot_regions_bounded=false;
+                unbounded_boot_lbas.insert(loc);
+                return;
+            }
             const auto bytes=(std::uint64_t(count)*512+block-1)/block*block;
             const auto start=std::uint64_t(loc)*block;
             need(bytes<=size-start,"El Torito boot image outside ISO bounds");
@@ -268,14 +296,20 @@ public:
         auto n=std::make_unique<Node>();n->record=r;n->directory=(r[25]&2)!=0;n->lba=le(r,2);n->size=le(r,10);n->parent=parent;
         need(std::uint64_t(n->lba)*block+n->size<=size,"ISO resource out of bounds");
         const std::size_t idlen=r[32],base=33+idlen+(idlen%2==0?1:0);need(idlen&&base<=r.size(),"bad ISO identifier");
-        need(std::all_of(r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),[](auto c){return c==0;}),"Rock Ridge/system-use ISO editing is not supported");
+        need(udf_bridge ||
+             std::all_of(r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),
+                         [](auto c){return c==0;}),
+             "Rock Ridge/system-use ISO editing requires a protected UDF bridge");
         n->identifier.assign(r.begin()+33,r.begin()+33+static_cast<std::ptrdiff_t>(idlen));
         if(parent)n->name=n->logical=decode(n->identifier,j,n->directory);
         need(++items<=200000&&depth<=64,"ISO edit tree limit exceeded");
         if(n->directory){need(seen.insert(n->lba).second&&n->size<=64*1024*1024,"cyclic or oversized ISO directory");auto data=read(std::uint64_t(n->lba)*block,n->size);std::set<std::string> names;
             for(std::size_t at=0;at<data.size();){unsigned len=data[at];if(!len){at=(at/block+1)*block;continue;}need(len>=34&&len<=data.size()-at&&at%block+len<=block,"bad ISO directory record");Bytes child(data.begin()+static_cast<std::ptrdiff_t>(at),data.begin()+static_cast<std::ptrdiff_t>(at+len));at+=len;
                 if(child[32]==1&&child[33]<=1){ // Validate dot records too (Rock Ridge SP/CE can live here).
-                    auto tail=std::size_t(34);need(std::all_of(child.begin()+static_cast<std::ptrdiff_t>(tail),child.end(),[](auto c){return c==0;}),"Rock Ridge/system-use ISO editing is not supported");continue;}
+                    auto tail=std::size_t(34);need(udf_bridge ||
+                         std::all_of(child.begin()+static_cast<std::ptrdiff_t>(tail),
+                                     child.end(),[](auto c){return c==0;}),
+                         "Rock Ridge/system-use ISO editing requires protected UDF");continue;}
                 auto c=parse(child,j,n.get(),depth+1,seen);need(names.insert(upper(c->logical)).second,"ambiguous ISO names");n->children.push_back(std::move(c));
             }
         }return n;
