@@ -1,6 +1,7 @@
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/edit_transaction.hpp"
+#include "iso_wcx/optical_edit_guard.hpp"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -653,53 +654,24 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
     };
     need(tree_same(tree_same,*before.root,*after.root),
          "ISO9660 namespace changed during UDF-only editing");
-    std::vector<std::pair<std::uint64_t,std::uint64_t>> immutable;
-    immutable.emplace_back(0,256ull*block); // PVD, VRS and boot/system area
-    immutable.insert(immutable.end(),
-                     before.boot_regions.begin(),before.boot_regions.end());
-    immutable.insert(immutable.end(),before.udf_metadata_regions.begin(),
-                     before.udf_metadata_regions.end());
+    OpticalEditGuard guard(before.size);
+    guard.protect(0,256ull*block); // ISO PVD, VRS, boot/system area
+    for(const auto& [start,length]:before.boot_regions)
+        guard.protect(start,length);
+    for(const auto& [start,length]:before.udf_metadata_regions)
+        guard.protect(start,length);
     std::vector<const Node*> nodes{before.root.get()};
-    for(std::size_t i=0;i<nodes.size();++i) {
-        const auto* node=nodes[i];
+    for(std::size_t at=0;at<nodes.size();++at) {
+        const auto* node=nodes[at];
         if(node->size)
-            immutable.emplace_back(std::uint64_t(node->lba)*block,node->size);
+            guard.protect(std::uint64_t(node->lba)*block,node->size);
         for(const auto& child:node->children)
             nodes.push_back(child.get());
         need(nodes.size()<=200000,"ISO namespace exceeds validation limit");
     }
-    // Merge overlapping/adjacent immutable ranges to avoid rereading an ISO
-    // file twice if its boot extent is also present in the directory tree.
-    std::sort(immutable.begin(),immutable.end());
-    std::vector<std::pair<std::uint64_t,std::uint64_t>> spans;
-    for(const auto& [start,length]:immutable) {
-        need(start<=before.size && length<=before.size-start,
-             "protected optical extent exceeds image size");
-        if(!length)continue;
-        if(!spans.empty() && start<=spans.back().first+spans.back().second) {
-            const auto end=std::max(spans.back().first+spans.back().second,
-                                    start+length);
-            spans.back().second=end-spans.back().first;
-        } else spans.emplace_back(start,length);
-    }
-    std::ifstream a(original,std::ios::binary),b(staged,std::ios::binary);
-    need(bool(a)&&bool(b),"cannot reopen ISO images for boot preservation");
-    std::array<char,1024*1024> aa{},bb{};
-    for(const auto& [start,length]:spans) {
-        a.clear();b.clear();
-        a.seekg(static_cast<std::streamoff>(start));
-        b.seekg(static_cast<std::streamoff>(start));
-        need(bool(a)&&bool(b),"cannot seek protected optical region");
-        for(auto left=length;left;) {
-            edit_tick(progress);
-            const auto n=static_cast<std::streamsize>(
-                std::min<std::uint64_t>(left,aa.size()));
-            a.read(aa.data(),n);b.read(bb.data(),n);
-            need(bool(a)&&bool(b)&&std::equal(aa.begin(),aa.begin()+n,bb.begin()),
-                 "ISO/UDF staging modified ISO or BIOS/UEFI boot region");
-            left-=static_cast<std::uint64_t>(n);
-        }
-    }
+    // The common verifier coalesces protected spans and checks every byte
+    // after staged UDF metadata/payload verification, before atomic commit.
+    guard.verify(original,staged,progress);
 }
 void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                                   Image& image,
