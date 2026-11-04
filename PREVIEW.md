@@ -10,6 +10,29 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
+## Edit-path improvements under test (2026-11-04)
+
+- **WIM (Windows, unsplit only):** when the only changes are within the
+  final `imageN/` of a multi-index WIM, ISO-WCX now stages an exact copy
+  of the original WIM, removes only its last index in that private copy,
+  captures only the changed last index, and verifies its written files.
+  Other indexes remain in place and are not re-exported or fully enumerated.
+  This still requires one Apply/Capture of the changed image and storage
+  for the staged WIM and extracted image. Editing an earlier index, changing
+  several indexes, or deleting an index retains the original safer
+  export-and-capture implementation so index ordering is not altered.
+- **ISO:** images with matching ISO/Joliet volume descriptors and a bounded
+  all-zero sector-aligned trailer may be safely rewritten. Nonzero trailers,
+  hidden UDF anchors, hybrid boot/system areas and Rock Ridge remain blocked
+  unless a separately validated writer handles the layout.
+- **Diagnostics:** Windows edit failures are appended to
+  `%LOCALAPPDATA%\\ISO-WCX\\Logs\\edit-errors.log`. This preserves the
+  native rejection reason, instead of only showing a generic Total Commander
+  error code. No file contents are logged.
+
+These changes are preview-only until Windows/Total Commander tests pass.
+Make a backup of important installation media before testing.
+
 ## If Total Commander says `File iso.wcx not found!`
 
 This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.wcx`; it does **not** indicate that `ISO-WCX.wcx` or its adjacent 64-bit `ISO-WCX.wcx64` is missing. The automatic installer cannot remove existing old plugin associations. In Configuration > Options > Packer > Configure packer extension WCXs, select `iso`, delete **only** the obsolete missing ISO.WCX entry, then click **New type...** and choose the installed `ISO-WCX.wcx`. Restart Total Commander and retry with Ctrl+PgDn. Do not type `192,` in the filename field or delete unrelated working plugins. See [INSTALL_RU.txt](INSTALL_RU.txt) and [INSTALL_EN.txt](INSTALL_EN.txt).
