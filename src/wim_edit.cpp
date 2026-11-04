@@ -219,6 +219,10 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     // the former is rejected by Windows; the latter would renumber indexes.
     const bool replace_last_only=images>1 && deleted.empty() &&
                                  edits.size()==1 && edits.contains(images);
+    // For any single-index edit, the native export/capture path already
+    // validates unchanged indexes; avoid a second full directory walk.
+    const unsigned verify_only_index=deleted.empty() && edits.size()==1
+                                         ?edits.begin()->first:0u;
     report(L"Prepare NTFS staging",3);
     Privileges privileges;Apartment apartment;EditTransaction tx(path);Library library;auto m=library.h;
     // Native Windows capture/apply preserve security and alternate streams on NTFS.
@@ -309,9 +313,9 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     // file: this made creating even an empty directory take minutes longer.
     report(L"Verify WIM structure",85);
     {
-        // The retained indexes were copied directly from the original;
-        // enumerate only the changed last image for this fast transaction.
-        WimArchive verified(tx.output,replace_last_only?images:0u);
+        // For a single-index edit, enumerate only the changed directory
+        // tree. Image count and export status have already been checked.
+        WimArchive verified(tx.output,verify_only_index);
         std::map<std::string,std::size_t> found;
         const auto& items=verified.items();
         for(std::size_t i=0;i<items.size();++i){
@@ -326,7 +330,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         for(unsigned index=1;index<=images;++index){
             if(deleted.count(index))continue;
             ++new_index;
-            if(replace_last_only && new_index!=images)continue;
+            if(verify_only_index && new_index!=verify_only_index)continue;
             const auto prefix="image"+std::to_string(new_index);
             if(!found.contains(prefix))throw EditUnsupported("missing output WIM image index");
             if(!edits.contains(index))continue;
