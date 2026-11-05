@@ -1,6 +1,10 @@
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include "iso_wcx/universal_diagnostics.hpp"
 
@@ -8,6 +12,7 @@
 #include <array>
 #include <cctype>
 #include <cwchar>
+#include <cwctype>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -66,8 +71,11 @@ std::vector<wchar_t> safe_environment() {
     for(const wchar_t* current=environment; *current;
         current+=std::wcslen(current)+1) {
         const std::wstring_view entry(current);
-        if(entry.starts_with(L"GH_TOKEN=") ||
-           entry.starts_with(L"GITHUB_TOKEN="))continue;
+        auto key=std::wstring(entry.substr(0,entry.find(L'=')));
+        std::transform(key.begin(),key.end(),key.begin(),
+                       [](wchar_t c){return static_cast<wchar_t>(
+                           std::towupper(c));});
+        if(key==L"GH_TOKEN" || key==L"GITHUB_TOKEN")continue;
         safe.insert(safe.end(),entry.begin(),entry.end());
         safe.push_back(L'\0');
     }
