@@ -6,6 +6,17 @@ Core browsing/extraction and packaging are verified in Windows x86/x64 and
 Linux CI. **Advanced readers and write modes explicitly marked experimental
 remain limited; this is not full NTFS/ext4/UDF compatibility.**
 
+## Shared UniversalDiagnostics (pilot, no version change)
+
+A separate development branch adds a **Save diagnostic to local queue**
+action in ISO-WCX Settings. It talks only to the independently installed
+common `UniversalDiagnostics.exe`; the plugin does not transfer files,
+raw logs, credentials or machine identities. The action always needs an
+explicit confirmation and never submits to GitHub automatically.
+
+See [shared diagnostics setup](docs/universal-diagnostics.md). The stable
+ISO-WCX version remains **0.21.0** until this integration is verified.
+
 ## Install into Total Commander
 
 1. Open the [latest Stable release](https://github.com/sgennadi/ISO-WCX/releases/latest).
