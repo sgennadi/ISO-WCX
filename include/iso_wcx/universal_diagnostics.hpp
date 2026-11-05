@@ -40,9 +40,8 @@ inline std::string payload(Category category, int major, int minor, int patch) {
 }
 
 #ifdef _WIN32
-// Invoked solely from the explicit Settings button, never from WCX F5/
-// extraction callbacks and never automatically. Requires installed x64
-// UniversalDiagnostics.exe (works for 32-bit TC on 64-bit Windows).
+// Invoked only from the explicit Settings button, never from WCX I/O
+// callbacks. The canonical core is compiled inside WCX (no helper EXE).
 bool capture_local(Category category, int major, int minor, int patch,
                    std::wstring& status) noexcept;
 #endif
