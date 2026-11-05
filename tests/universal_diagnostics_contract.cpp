@@ -3,7 +3,7 @@
 #include <iostream>
 #include <string>
 
-static void require(bool ok, const char* what) {
+static void require(bool ok, const char* what = "UniversalDiagnostics event contract failed") {
     if(!ok)throw std::runtime_error(what);
 }
 int main() {
