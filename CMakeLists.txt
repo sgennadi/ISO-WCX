@@ -326,8 +326,18 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
   target_link_libraries(disc_inspect PRIVATE iso_disc)
 endif()
 
+if(BUILD_TESTING)
+  add_executable(universal_diagnostics_contract_tests
+    tests/universal_diagnostics_contract.cpp)
+  target_include_directories(universal_diagnostics_contract_tests
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME universal_diagnostics_contract
+    COMMAND universal_diagnostics_contract_tests)
+endif()
+
 if(WIN32)
-  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp)
+  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp
+    src/universal_diagnostics_bridge.cpp)
   target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32)
   target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
     ISO_WCX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
