@@ -6,6 +6,17 @@ Core browsing/extraction and packaging are verified in Windows x86/x64 and
 Linux CI. **Advanced readers and write modes explicitly marked experimental
 remain limited; this is not full NTFS/ext4/UDF compatibility.**
 
+## Embedded UniversalDiagnostics (no version change)
+
+The shared diagnostic queue is compiled directly into ISO-WCX: no
+extra EXE, DLL or installer. Under ISO-WCX Settings, choose the operation
+category and **Save diagnostic locally (built-in)**. It writes only a
+nonidentifying, explicitly approved event into the shared local queue.
+No upload occurs and WCX file operations are unchanged.
+
+See [embedded diagnostics setup](docs/universal-diagnostics.md).
+The plug-in version remains **0.21.0**.
+
 ## Install into Total Commander
 
 1. Open the [latest Stable release](https://github.com/sgennadi/ISO-WCX/releases/latest).

@@ -1,11 +1,13 @@
 // Built-in ISO-WCX update settings for the Total Commander WCX ConfigurePacker ABI.
-// Uses only Windows system WinHTTP, BCrypt and ShellExecute. No helper EXE,
-// bundled DLL, mount service or write to a loaded WCX image.
+// Core updater uses Windows WinHTTP, BCrypt and ShellExecute. The optional
+// manually invoked UniversalDiagnostics collector is independently installed,
+// never required for WCX archive I/O or updates.
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include "iso_wcx/wcx_updater.hpp"
+#include "iso_wcx/universal_diagnostics.hpp"
 #include "iso_wcx/image_report.hpp"
 #include "iso_wcx/update_policy.hpp"
 
@@ -39,7 +41,8 @@ namespace {
 constexpr wchar_t registry_path[] = L"Software\\ISO-WCX\\Updates";
 constexpr wchar_t github_api[] =
     L"https://api.github.com/repos/sgennadi/ISO-WCX/releases/latest";
-constexpr int id_never=4101, id_check=4102, id_install=4103, id_status=4104, id_export=4105;
+constexpr int id_never=4101, id_check=4102, id_install=4103, id_status=4104,
+              id_export=4105, id_save_diagnostic=4106, id_diagnostic_type=4107;
 constexpr UINT check_later=WM_APP+191;
 constexpr std::size_t max_response=64u*1024u;
 constexpr std::size_t max_package=64u*1024u*1024u;
@@ -647,6 +650,29 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         add_control(dlg,L"BUTTON",tr(state->russian,
              L"Export Image Structure...",L"Экспорт структуры образа..."),
              BS_PUSHBUTTON|WS_TABSTOP,id_export,12,113,340,26);
+        add_control(dlg,L"STATIC",tr(state->russian,
+             L"Failed area:",L"Операция:"),SS_LEFT,0,12,148,89,18);
+        add_control(dlg,L"COMBOBOX",L"",
+             CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,
+             id_diagnostic_type,102,144,250,150);
+        if(const auto types=GetDlgItem(dlg,id_diagnostic_type)) {
+            const wchar_t* categories_en[] = {
+                L"ISO file copy (F5)",L"WIM file copy (F5)",L"ISO/UDF edit",
+                L"WIM mount / commit",L"Read / extract",L"Other"
+            };
+            const wchar_t* categories_ru[] = {
+                L"ISO копирование (F5)",L"WIM копирование (F5)",L"ISO/UDF изменение",
+                L"WIM mount / commit",L"Чтение / извлечение",L"Другое"
+            };
+            for(int i=0;i<6;++i) {
+                SendMessageW(types,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(
+                    state->russian?categories_ru[i]:categories_en[i]));
+            }
+            SendMessageW(types,CB_SETCURSEL,0,0);
+        }
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Save diagnostic locally (built-in)...",L"Сохранить диагностику (встроено)..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_save_diagnostic,12,175,340,26);
         CheckDlgButton(dlg,id_never,
               state->automatic?BST_UNCHECKED:BST_CHECKED);
         EnableWindow(GetDlgItem(dlg,id_install),FALSE);
@@ -671,6 +697,33 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         if(cmd==id_check) {check_release(dlg,*state,true);return TRUE;}
         if(cmd==id_install) {download_and_offer(dlg,*state);return TRUE;}
         if(cmd==id_export) {export_structure_dialog(dlg,state->russian);return TRUE;}
+        if(cmd==id_save_diagnostic) {
+            const auto combo=GetDlgItem(dlg,id_diagnostic_type);
+            const auto idx=combo?SendMessageW(combo,CB_GETCURSEL,0,0):CB_ERR;
+            if(idx==CB_ERR || idx<0 || idx>5)return TRUE;
+            const auto category=static_cast<universal_diagnostics::Category>(idx);
+            const auto prompt=tr(state->russian,
+                L"Save a selected ISO-WCX error category in the LOCAL shared "
+                L"UniversalDiagnostics queue?\n\n"
+                L"No image, file paths, usernames, raw logs, or credentials "
+                L"are included. Nothing is uploaded to GitHub.",
+                L"Сохранить выбранную категорию ошибки ISO-WCX в ЛОКАЛЬНУЮ "
+                L"общую очередь UniversalDiagnostics?\n\n"
+                L"Образы, пути, имена пользователей, логи и пароли "
+                L"не передаются. На GitHub ничего не отправляется.");
+            if(MessageBoxW(dlg,prompt,L"ISO-WCX diagnostics",
+                           MB_YESNO|MB_ICONQUESTION)!=IDYES)return TRUE;
+            put_status(dlg,tr(state->russian,
+                L"Saving the redacted local event...",
+                L"Сохраняем локальное событие..."));
+            std::wstring message;
+            const bool saved=universal_diagnostics::capture_local(
+                category,installed.major,installed.minor,installed.patch,message);
+            put_status(dlg,message);
+            MessageBoxW(dlg,message.c_str(),L"ISO-WCX diagnostics",
+                        MB_OK|(saved?MB_ICONINFORMATION:MB_ICONWARNING));
+            return TRUE;
+        }
         if(cmd==IDCANCEL || cmd==IDOK) {EndDialog(dlg,0);return TRUE;}
         break;
     }
@@ -721,7 +774,7 @@ void configure_updates(HWND parent,HINSTANCE instance) {
     const auto store16=[&](std::size_t at,WORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
     store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER);
     store32(4,0);store16(8,0);store16(10,0);store16(12,0);
-    store16(14,367);store16(16,152);store16(18,0);store16(20,0);
+    store16(14,367);store16(16,215);store16(18,0);store16(20,0);
     constexpr wchar_t caption[]=L"ISO-WCX Settings";
     std::memcpy(raw.data()+22,caption,sizeof(caption));
     State state{};
