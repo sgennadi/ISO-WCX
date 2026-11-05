@@ -375,6 +375,17 @@ if(WIN32)
   endif()
   set_target_properties(ISO-WCX PROPERTIES PREFIX "" SUFFIX "${WCX_SUFFIX}")
   if(BUILD_TESTING)
+    add_executable(universal_diagnostics_mock_collector
+      tests/universal_diagnostics_mock_collector.cpp)
+    add_executable(universal_diagnostics_windows_test
+      tests/universal_diagnostics_windows.cpp
+      src/universal_diagnostics_bridge.cpp)
+    target_include_directories(universal_diagnostics_windows_test
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    add_test(NAME universal_diagnostics_windows_subprocess
+      COMMAND universal_diagnostics_windows_test
+        "$<TARGET_FILE:universal_diagnostics_mock_collector>")
+    set_tests_properties(universal_diagnostics_windows_subprocess PROPERTIES TIMEOUT 40)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
