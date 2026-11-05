@@ -671,7 +671,7 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
             SendMessageW(types,CB_SETCURSEL,0,0);
         }
         add_control(dlg,L"BUTTON",tr(state->russian,
-             L"Save diagnostic to local queue...",L"Сохранить диагностику локально..."),
+             L"Save diagnostic locally (built-in)...",L"Сохранить диагностику (встроено)..."),
              BS_PUSHBUTTON|WS_TABSTOP,id_save_diagnostic,12,175,340,26);
         CheckDlgButton(dlg,id_never,
               state->automatic?BST_UNCHECKED:BST_CHECKED);
