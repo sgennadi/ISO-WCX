@@ -4,7 +4,10 @@ param(
     [string] $Arch,
     [Parameter(Mandatory=$true)]
     [ValidateRange(1,65535)]
-    [int] $ExpectedBuild
+    [int] $ExpectedBuild,
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(1,99)]
+    [int] $ExpectedRC=1
 )
 
 Set-StrictMode -Version Latest
@@ -19,7 +22,7 @@ if (-not (Test-Path -LiteralPath $pluginPath)) {
 }
 $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(
     (Resolve-Path -LiteralPath $pluginPath).Path)
-$expected = "v0.21.1 RC1 (Build $ExpectedBuild)"
+$expected = "v0.21.1 RC$ExpectedRC (Build $ExpectedBuild)"
 if ($info.FileVersion -ne $expected -or $info.ProductVersion -ne $expected) {
     throw "Invalid DLL version: $($info.FileVersion); expected: $expected"
 }
@@ -35,7 +38,7 @@ if (-not (Test-Path -LiteralPath $manifestPath)) {
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
 if ($manifest -notmatch "(?m)^version=0\.21\.1\r?$" -or
     -not $manifest.Contains($expected)) {
-    throw "Total Commander installer metadata is not RC1 Build $ExpectedBuild"
+    throw "Total Commander installer metadata is not RC$ExpectedRC Build $ExpectedBuild"
 }
 
 Write-Host "PASS: $binary - $expected (DLL, VERSIONINFO and pluginst.inf agree)"
