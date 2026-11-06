@@ -15,6 +15,7 @@ public:
     Operation(const Operation&)=delete;
     Operation& operator=(const Operation&)=delete;
     ~Operation() noexcept;
+    void set_action(const char* action) noexcept; // directory pack -> mkdir
     void stage(std::wstring_view stage, unsigned percentage=0) noexcept;
     void complete(int wcx_code, std::string_view reason={}) noexcept;
 private:
