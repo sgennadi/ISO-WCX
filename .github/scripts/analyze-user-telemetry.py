@@ -20,7 +20,8 @@ ACTIONS = {"open", "close", "pack", "delete", "extract", "test", "skip"}
 REASONS = {"none", "cancelled", "integrity_failed", "verification_failed",
            "out_of_space", "access_denied", "protected_layout",
            "missing_input", "unsupported_layout", "io_error",
-           "unexpected_exception"}
+           "unexpected_exception", "wim_last_index", "wim_index_path",
+           "wim_variant_unsupported", "wim_workspace", "wim_reparse"}
 REGRESSION_LABEL = "iso-wcx-regression-confirmed"
 TITLE_PREFIX = "ISO-WCX Diagnostics:"
 TABLE = re.compile(
@@ -100,16 +101,26 @@ def analyze(issues: list[dict], *, available: bool = True) -> dict:
         and row["reason"] in ("integrity_failed", "verification_failed",
                               "unexpected_exception")
     ]
+    # A code 24 may indicate a legitimate format limit or a regression.
+    # Repeated user-facing WIM Delete refusals should be investigated, but
+    # must never block CI solely because user-submitted data says so.
+    needs_review = [
+        row for row in rows if row["format"]=="wim"
+        and row["action"]=="delete" and row["code"]==24
+        and row["count"]>=2
+    ]
     return {"schema":1, "source_available":available, "issues":matched,
             "operation_results":sum(row["count"] for row in rows),
-            "critical_confirmed":critical, "groups":rows[:40]}
+            "critical_confirmed":critical,
+            "needs_review":needs_review[:20], "groups":rows[:40]}
 
 def markdown(result: dict) -> str:
     output=["## ISO-WCX — pre-build user diagnostics", "",
             "Source: public GitHub Issues, user-reviewed summaries (last 30 days).",
             f"Issues analyzed: **{result['issues']}**",
             f"Operation results: **{result['operation_results']}**",
-            f"Confirmed critical regressions: **{len(result['critical_confirmed'])}**", ""]
+            f"Confirmed critical regressions: **{len(result['critical_confirmed'])}**",
+            f"Repeated WIM Delete refusals needing investigation: **{len(result['needs_review'])}**", ""]
     if not result["source_available"]:
         output.append("**Telemetry unavailable — no clean bill of health.**")
     elif not result["groups"]:
@@ -119,6 +130,14 @@ def markdown(result: dict) -> str:
                    "|---|---|---|---:|---|---:|---|"]
         for row in result["groups"][:20]:
             output.append("| {build} | {format} | {action} | {code} | {reason} | {count} | {confirmed} |".format(**row))
+    if result["needs_review"]:
+        output += [
+            "",
+            "**WIM Delete issue detected:** repeated WCX 24 rejections. "
+            "This may be a supported safety limit rather than a defect. "
+            "Check local edit-errors.log for the native reason; do not "
+            "infer root cause from aggregate telemetry.",
+        ]
     output.append("\n**Untrusted reports do not block builds.** Only maintainer-confirmed, repeated critical regressions can block the build.")
     return "\n".join(output)+"\n"
 
@@ -144,6 +163,10 @@ def main() -> int:
     result = analyze(issues, available=available)
     summary = markdown(result)
     print(summary)
+    for row in result["needs_review"]:
+        print("::warning title=ISO-WCX WIM Delete refused::"
+              "Repeated WCX 24 unsupported-layout outcomes; "
+              "review native local error details before changing WIM writer")
     Path(args.output).write_text(json.dumps(result,indent=2)+"\n",encoding="utf-8")
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"],"a",encoding="utf-8") as stream:
