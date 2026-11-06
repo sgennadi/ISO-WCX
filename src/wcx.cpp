@@ -389,8 +389,9 @@ WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* sourc
         }
         return do_edit(archive,sub?sub:L"",source,edit_list(list),false,flags);
     }catch(...) {
-        iso_wcx::diagnostics::Operation event(
-            "pack",archive?std::filesystem::path(archive):std::filesystem::path{});
+        // Do not attempt to dereference an untrusted WCX argument while
+        // already unwinding from a parsing/encoding exception.
+        iso_wcx::diagnostics::Operation event("pack",{});
         event.complete(E_BAD_ARCHIVE,"unparseable WCX pack arguments");
         return E_BAD_ARCHIVE;
     }
