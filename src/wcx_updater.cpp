@@ -9,6 +9,7 @@
 #include "iso_wcx/image_report.hpp"
 #include "iso_wcx/update_policy.hpp"
 #include "iso_wcx/operation_diagnostics.hpp"
+#include "iso_wcx/tc_registration_audit.hpp"
 #include "iso_wcx/universal_diagnostics.hpp"
 
 #include <bcrypt.h>
@@ -49,7 +50,7 @@ constexpr wchar_t github_api[] =
     L"https://api.github.com/repos/sgennadi/ISO-WCX/releases/latest";
 constexpr int id_never=4101, id_check=4102, id_install=4103, id_status=4104, id_export=4105;
 constexpr int id_diag_export=4106, id_diag_github=4107;
-constexpr int id_universal_save=4108, id_universal_type=4109;
+constexpr int id_universal_save=4108, id_universal_type=4109, id_tc_assoc_check=4110;
 constexpr UINT check_later=WM_APP+191;
 constexpr std::size_t max_response=64u*1024u;
 constexpr std::size_t max_package=64u*1024u*1024u;
@@ -702,6 +703,10 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
              L"Save in shared diagnostics queue (local)...",
              L"Сохранить в общую очередь диагностики..."),
              BS_PUSHBUTTON|WS_TABSTOP,id_universal_save,12,211,340,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Check WCX associations / F5 (158, 159, 222)...",
+             L"Проверить привязки WCX / F5 (158, 159, 222)..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_tc_assoc_check,12,247,340,26);
         CheckDlgButton(dlg,id_never,
               state->automatic?BST_UNCHECKED:BST_CHECKED);
         EnableWindow(GetDlgItem(dlg,id_install),FALSE);
@@ -753,6 +758,21 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
                     L"Could not open GitHub. Use Export diagnostics instead.",
                     L"Не удалось открыть GitHub. Используйте экспорт диагностики."),
                     L"ISO-WCX Diagnostics",MB_OK|MB_ICONWARNING);
+            return TRUE;
+        }
+        if(cmd==id_tc_assoc_check) {
+            const auto report=export_tc_registration_audit();
+            if(report.empty()) {
+                MessageBoxW(dlg,tr(state->russian,
+                    L"Cannot read Total Commander registrations or write the report.",
+                    L"Не удалось прочитать регистрации Total Commander или записать отчёт."),
+                    L"ISO-WCX WCX Registration",MB_OK|MB_ICONWARNING);
+            } else {
+                ShellExecuteW(dlg,L"open",report.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+                put_status(dlg,tr(state->russian,
+                    L"Read-only WCX registration report created. No settings changed.",
+                    L"Отчёт о привязках WCX создан. Настройки не изменялись."));
+            }
             return TRUE;
         }
         if(cmd==id_universal_save) {
@@ -827,7 +847,7 @@ void configure_updates(HWND parent,HINSTANCE instance) {
     const auto store16=[&](std::size_t at,WORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
     store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER);
     store32(4,0);store16(8,0);store16(10,0);store16(12,0);
-    store16(14,367);store16(16,250);store16(18,0);store16(20,0);
+    store16(14,367);store16(16,288);store16(18,0);store16(20,0);
     constexpr wchar_t caption[]=L"ISO-WCX Settings";
     std::memcpy(raw.data()+22,caption,sizeof(caption));
     State state{};
