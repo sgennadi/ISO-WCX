@@ -337,6 +337,8 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             }changes.push_back(std::move(c));
         }
         if(changes.empty())return finish(0);
+        if(!remove && changes.size()==1 && changes.front().directory)
+            diagnostic.set_action("mkdir");
         auto wide=archive;auto ansi=to_ansi(archive);const auto pw=pack_progress_w.load();const auto pa=pack_progress_a.load();
         const auto progress=[&]{if(pw)return pw(wide.data(),0)!=0;if(pa)return pa(ansi.data(),0)!=0;return true;};
         diagnostic.stage(L"write",0);
