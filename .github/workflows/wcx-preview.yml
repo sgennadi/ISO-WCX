@@ -19,11 +19,31 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  issues: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  diagnostics:
+    name: Analyze GitHub user diagnostic reports before build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test telemetry analyzer and strict category handling
+        run: python3 tests/test_telemetry_analysis.py
+      - name: Analyze recent GitHub Issues with sanitized diagnostics
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/analyze-user-telemetry.py --output user-telemetry-analysis.json --fail-confirmed
+      - name: Archive pre-build error summary
+        uses: actions/upload-artifact@v7
+        with:
+          name: ISO-WCX-Prebuild-Error-Analysis
+          path: user-telemetry-analysis.json
+          if-no-files-found: error
+          retention-days: 14
   windows:
+    needs: diagnostics
     name: VS2026 C++26 Windows ${{ matrix.arch }} WCX
     runs-on: windows-2025
     strategy:
@@ -61,6 +81,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   linux:
+    needs: diagnostics
     name: Linux core tests
     runs-on: ubuntu-24.04
     steps:
@@ -80,6 +101,7 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
   sanitizer:
+    needs: diagnostics
     name: Linux Clang ASan + UBSan
     runs-on: ubuntu-24.04
     steps:
