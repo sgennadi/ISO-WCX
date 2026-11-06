@@ -8,6 +8,7 @@
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/image_report.hpp"
 #include "iso_wcx/update_policy.hpp"
+#include "iso_wcx/operation_diagnostics.hpp"
 
 #include <bcrypt.h>
 #include <commdlg.h>
@@ -46,6 +47,7 @@ constexpr wchar_t registry_path[] = L"Software\\ISO-WCX\\Updates";
 constexpr wchar_t github_api[] =
     L"https://api.github.com/repos/sgennadi/ISO-WCX/releases/latest";
 constexpr int id_never=4101, id_check=4102, id_install=4103, id_status=4104, id_export=4105;
+constexpr int id_diag_export=4106, id_diag_github=4107;
 constexpr UINT check_later=WM_APP+191;
 constexpr std::size_t max_response=64u*1024u;
 constexpr std::size_t max_package=64u*1024u*1024u;
@@ -669,6 +671,12 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         add_control(dlg,L"BUTTON",tr(state->russian,
              L"Export Image Structure...",L"Экспорт структуры образа..."),
              BS_PUSHBUTTON|WS_TABSTOP,id_export,12,113,340,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Export diagnostics...",L"Экспорт диагностики..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_diag_export,12,148,163,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Review on GitHub...",L"Отправить на GitHub..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_diag_github,181,148,171,26);
         CheckDlgButton(dlg,id_never,
               state->automatic?BST_UNCHECKED:BST_CHECKED);
         EnableWindow(GetDlgItem(dlg,id_install),FALSE);
@@ -693,6 +701,35 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         if(cmd==id_check) {check_release(dlg,*state,true);return TRUE;}
         if(cmd==id_install) {download_and_offer(dlg,*state);return TRUE;}
         if(cmd==id_export) {export_structure_dialog(dlg,state->russian);return TRUE;}
+        if(cmd==id_diag_export) {
+            const auto report=diagnostics::export_report();
+            if(report.empty()) {
+                MessageBoxW(dlg,tr(state->russian,
+                    L"Could not export diagnostics to LOCALAPPDATA.",
+                    L"Не удалось экспортировать диагностику в LOCALAPPDATA."),
+                    L"ISO-WCX Diagnostics",MB_OK|MB_ICONERROR);
+            } else {
+                ShellExecuteW(dlg,L"open",report.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+                put_status(dlg,tr(state->russian,
+                    L"Local diagnostic summary created. Nothing was sent.",
+                    L"Локальный отчёт создан. Данные никуда не отправлялись."));
+            }
+            return TRUE;
+        }
+        if(cmd==id_diag_github) {
+            const auto opened=diagnostics::open_github_issue();
+            if(opened)
+                MessageBoxW(dlg,tr(state->russian,
+                    L"Review the prefilled, sanitized report in your browser, then submit the GitHub issue yourself. No data was sent by the plugin.",
+                    L"Проверьте обезличенный отчёт в браузере и подтвердите создание Issue самостоятельно. Плагин ничего не отправлял."),
+                    L"ISO-WCX Diagnostics",MB_OK|MB_ICONINFORMATION);
+            else
+                MessageBoxW(dlg,tr(state->russian,
+                    L"Could not open GitHub. Use Export diagnostics instead.",
+                    L"Не удалось открыть GitHub. Используйте экспорт диагностики."),
+                    L"ISO-WCX Diagnostics",MB_OK|MB_ICONWARNING);
+            return TRUE;
+        }
         if(cmd==IDCANCEL || cmd==IDOK) {EndDialog(dlg,0);return TRUE;}
         break;
     }
@@ -743,7 +780,7 @@ void configure_updates(HWND parent,HINSTANCE instance) {
     const auto store16=[&](std::size_t at,WORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
     store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER);
     store32(4,0);store16(8,0);store16(10,0);store16(12,0);
-    store16(14,367);store16(16,152);store16(18,0);store16(20,0);
+    store16(14,367);store16(16,188);store16(18,0);store16(20,0);
     constexpr wchar_t caption[]=L"ISO-WCX Settings";
     std::memcpy(raw.data()+22,caption,sizeof(caption));
     State state{};
