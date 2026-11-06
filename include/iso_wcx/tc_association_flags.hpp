@@ -6,8 +6,16 @@ namespace iso_wcx::tc_association {
 constexpr unsigned cap_new=1, cap_modify=2, cap_multiple=4,
                    cap_delete=8, cap_options=16, cap_by_content=64,
                    cap_searchtext=128;
-constexpr unsigned reported_caps=cap_modify|cap_multiple|cap_delete|
-                                 cap_options|cap_by_content|cap_searchtext; // 222
+// Total Commander 11.58.1 real host F5 integration (PR #68):
+// 158 was refused before PackFilesW, while 159 reached PackFilesW.
+// PK_CAPS_NEW is advertised for host routing of existing-image F5;
+// creating a brand-new archive still returns WCX E_NOT_SUPPORTED.
+constexpr unsigned reported_caps=cap_new|cap_modify|cap_multiple|
+                                 cap_delete|cap_options|cap_searchtext; // 159
+constexpr unsigned host_tested_f5_caps=159;
+constexpr bool host_tested_f5(unsigned mask) noexcept {
+    return mask==host_tested_f5_caps;
+}
 
 // wincmd.ini entries are a decimal capability mask followed by a comma
 // and the path to the WCX. Invalid or empty masks are never writable.
