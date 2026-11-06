@@ -74,6 +74,20 @@ std::string classify(std::string_view reason, int code) {
         return "out_of_space";
     if(has("access")||has("permission")||has("denied"))
         return "access_denied";
+    // All categories below are fixed enums; never include native exception
+    // text, image names, paths or WIM metadata in a shareable report.
+    if(has("cannot delete the last wim image"))
+        return "wim_last_index";
+    if(has("select an imagen folder")||has("invalid wim index")||
+       has("creating wim indexes")||has("cannot replace an image index"))
+        return "wim_index_path";
+    if(has("split, solid/esd")||has("read-only wim editing")||
+       has("invalid wim header"))
+        return "wim_variant_unsupported";
+    if(has("ntfs workspace")||has("administrator backup/restore"))
+        return "wim_workspace";
+    if(has("wim reparse points"))
+        return "wim_reparse";
     if(has("boot")||has("protected")||has("el torito"))
         return "protected_layout";
     if(has("missing")||has("not found"))return "missing_input";
