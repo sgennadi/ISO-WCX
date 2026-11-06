@@ -9,6 +9,12 @@ New-Item -ItemType Directory -Path $root -Force | Out-Null
 function Assert-Equal([object]$expected, [object]$actual, [string]$msg) {
     if ($expected -cne $actual) { throw "$msg expected='$expected' got='$actual'" }
 }
+function Assert-Bytes([byte[]]$expected, [byte[]]$actual, [string]$message) {
+    if ($expected.Length -ne $actual.Length) { throw "$message (size differs)" }
+    for ($i=0; $i -lt $expected.Length; ++$i) {
+        if ($expected[$i] -ne $actual[$i]) { throw "$message at byte $i" }
+    }
+}
 function Make-Fixture {
     param([string]$path)
     $dll = Join-Path $root 'ISO-WCX\ISO-WCX.wcx'
@@ -35,9 +41,7 @@ try {
     $dll = Make-Fixture -path $ini
     $original = [IO.File]::ReadAllBytes($ini)
     & $repair -IniPath $ini | Out-Null
-    if (-not ([Linq.Enumerable]::SequenceEqual([byte[]]$original, [byte[]][IO.File]::ReadAllBytes($ini)))) {
-        throw 'Dry run changed wincmd.ini bytes.'
-    }
+    Assert-Bytes $original ([IO.File]::ReadAllBytes($ini)) 'Dry run changed wincmd.ini bytes'
     & $repair -IniPath $ini -Apply | Out-Null
     $now = [IO.File]::ReadAllBytes($ini)
     $text = [Text.Encoding]::UTF8.GetString($now, 3, $now.Length-3)
@@ -58,22 +62,16 @@ try {
     }
     $bak = @(Get-ChildItem -Path $root -Filter '*.iso-wcx-f5-*.bak')
     Assert-Equal 1 $bak.Count 'Expected one backup'
-    if (-not ([Linq.Enumerable]::SequenceEqual([byte[]]$original, [byte[]][IO.File]::ReadAllBytes($bak[0].FullName)))) {
-        throw 'Backup did not preserve original bytes.'
-    }
+    Assert-Bytes $original ([IO.File]::ReadAllBytes($bak[0].FullName)) 'Backup did not preserve original bytes'
     & $repair -IniPath $ini -Apply | Out-Null
     Assert-Equal 1 @(Get-ChildItem -Path $root -Filter '*.iso-wcx-f5-*.bak').Count 'Repeated repair wrote backup'
-    if (-not ([Linq.Enumerable]::SequenceEqual([byte[]]$now, [byte[]][IO.File]::ReadAllBytes($ini)))) {
-        throw 'Repeated repair changed already normalized INI.'
-    }
+    Assert-Bytes $now ([IO.File]::ReadAllBytes($ini)) 'Repeated repair changed already normalized INI'
     # A different plugin must never be reassigned.
     $other = Join-Path $root 'external.ini'
     [IO.File]::WriteAllText($other, "[PackerPlugins]`r`nwim=222,C:\Other\Custom.wcx`r`n")
     $untouched = [IO.File]::ReadAllBytes($other)
     & $repair -IniPath $other -Apply | Out-Null
-    if (-not ([Linq.Enumerable]::SequenceEqual([byte[]]$untouched, [byte[]][IO.File]::ReadAllBytes($other)))) {
-        throw 'Other plugin was modified.'
-    }
+    Assert-Bytes $untouched ([IO.File]::ReadAllBytes($other)) 'Other plugin was modified'
     # Redirects are not auto-followed by this repair; refuse silently
     # creating a second registration in the wrong file.
     $redirect = Join-Path $root 'redirect.ini'
@@ -83,9 +81,7 @@ try {
     $blocked = $false
     try { & $repair -IniPath $redirect -Apply | Out-Null } catch { $blocked = $true }
     if (-not $blocked) { throw 'Redirect was not refused.' }
-    if (-not ([Linq.Enumerable]::SequenceEqual([byte[]]$before, [byte[]][IO.File]::ReadAllBytes($redirect)))) {
-        throw 'Redirected INI changed.'
-    }
+    Assert-Bytes $before ([IO.File]::ReadAllBytes($redirect)) 'Redirected INI changed'
     Write-Host 'PASS: 222/158/192 -> 159, x64 cache, backup, dry run, redirection and privacy'
 } finally {
     Remove-Item -LiteralPath $root -Force -Recurse -ErrorAction SilentlyContinue
