@@ -373,11 +373,23 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
   target_link_libraries(disc_inspect PRIVATE iso_disc)
 endif()
 
+if(BUILD_TESTING)
+  add_executable(universal_diagnostics_contract_tests
+    tests/universal_diagnostics_contract.cpp)
+  target_include_directories(universal_diagnostics_contract_tests
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME universal_diagnostics_contract
+    COMMAND universal_diagnostics_contract_tests)
+endif()
+
 if(WIN32)
   enable_language(RC)
   configure_file(src/version.rc.in
                  "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc" @ONLY)
-  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp src/operation_diagnostics.cpp
+  add_library(ISO-WCX MODULE
+              src/wcx.cpp src/wcx_updater.cpp src/operation_diagnostics.cpp
+              src/universal_diagnostics_bridge.cpp
+              src/vendor/universal_diagnostics_embedded.cpp
               "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc")
   target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32)
   target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
@@ -418,6 +430,17 @@ if(WIN32)
   endif()
   set_target_properties(ISO-WCX PROPERTIES PREFIX "" SUFFIX "${WCX_SUFFIX}")
   if(BUILD_TESTING)
+    add_executable(universal_diagnostics_windows_test
+      tests/universal_diagnostics_windows.cpp
+      src/universal_diagnostics_bridge.cpp
+      src/vendor/universal_diagnostics_embedded.cpp)
+    target_include_directories(universal_diagnostics_windows_test
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include"
+              "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(universal_diagnostics_windows_test PRIVATE bcrypt)
+    add_test(NAME universal_diagnostics_windows_embedded
+      COMMAND universal_diagnostics_windows_test)
+    set_tests_properties(universal_diagnostics_windows_embedded PROPERTIES TIMEOUT 40)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
