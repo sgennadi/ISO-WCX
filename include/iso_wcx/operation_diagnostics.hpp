@@ -1,6 +1,6 @@
 #pragma once
-// Lightweight, privacy-preserving WCX diagnostics. All functions are noexcept:
-// file operation results must never depend on log I/O or telemetry availability.
+// Temporary local WCX operation journal until UniversalDiagnosticsModule
+// integration. Never blocks file I/O, includes file paths or sends silently.
 #ifdef _WIN32
 #include <cstdint>
 #include <filesystem>
@@ -25,13 +25,12 @@ private:
     unsigned count_=0, image_index_=0, last_stage_pct_=0;
     bool completed_=false;
 };
-[[nodiscard]] bool sending_enabled() noexcept;
-void set_sending_enabled(bool enabled) noexcept;
-[[nodiscard]] std::wstring endpoint() noexcept;
-[[nodiscard]] bool set_endpoint(std::wstring_view https_url) noexcept;
+// Logs: %LOCALAPPDATA%\ISO-WCX\Logs\operations.jsonl (rotated).
+// User-controlled GitHub browser flow: no embedded GitHub token, and no
+// unattended transmission of diagnostic data.
 [[nodiscard]] std::filesystem::path log_directory() noexcept;
-void request_upload(bool force=false) noexcept;
-void clear_pending() noexcept;
-[[nodiscard]] std::wstring upload_status() noexcept;
+[[nodiscard]] std::filesystem::path export_report() noexcept;
+[[nodiscard]] bool open_github_issue() noexcept;
+[[nodiscard]] std::wstring status() noexcept;
 } // namespace iso_wcx::diagnostics
 #endif
