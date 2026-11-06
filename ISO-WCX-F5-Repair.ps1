@@ -121,28 +121,11 @@ if ($running.Count -gt 0) { throw 'Close ALL Total Commander windows before appl
 $section = ''
 for ($i=0; $i -lt $lines.Count; ++$i) {
     $body = [string]$lines[$i]
-    $head = [regex]::Match($body.Trim(), '^\[([^\]]+)\]
-$bom = $decoded.Encoding.GetPreamble()
-$bytes = [byte[]]::new($bom.Length + $payload.Length)
-[Array]::Copy($bom, 0, $bytes, 0, $bom.Length)
-[Array]::Copy($payload, 0, $bytes, $bom.Length, $payload.Length)
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
-$backup = "$ini.iso-wcx-f5-$stamp-$([guid]::NewGuid().ToString('N').Substring(0,6)).bak"
-$temporary = "$ini.iso-wcx-f5-$([guid]::NewGuid().ToString('N')).tmp"
-try {
-    [IO.File]::WriteAllBytes($temporary, $bytes)
-    # Atomic replacement on the same volume, with original backup bytes.
-    [IO.File]::Replace($temporary, $ini, $backup, $true)
-    Write-Host "SUCCESS: F5 capability associations are now 159."
-    Write-Host "Backup: $backup"
-    Write-Host 'Restart Total Commander to rebuild its x64 WCX cache.'
-} finally {
-    if (Test-Path -LiteralPath $temporary) {
-        Remove-Item -LiteralPath $temporary -Force
+    $head = [regex]::Match($body.Trim(), '^\[([^\]]+)\]$')
+    if ($head.Success) {
+        $section = $head.Groups[1].Value.Trim().ToLowerInvariant()
+        continue
     }
-}
-)
-    if ($head.Success) { $section = $head.Groups[1].Value.Trim().ToLowerInvariant(); continue }
     if ($section -ne 'packerplugins64') { continue }
     if ($body -match '^\s*RedirectSection\s*=') {
         throw 'PackerPlugins64 is redirected: review its cache location first.'
@@ -160,7 +143,6 @@ $backup = "$ini.iso-wcx-f5-$stamp-$([guid]::NewGuid().ToString('N').Substring(0,
 $temporary = "$ini.iso-wcx-f5-$([guid]::NewGuid().ToString('N')).tmp"
 try {
     [IO.File]::WriteAllBytes($temporary, $bytes)
-    # Atomic replacement on the same volume, with original backup bytes.
     [IO.File]::Replace($temporary, $ini, $backup, $true)
     Write-Host "SUCCESS: F5 capability associations are now 159."
     Write-Host "Backup: $backup"
