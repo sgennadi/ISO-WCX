@@ -148,7 +148,7 @@ std::filesystem::path export_tc_registration_audit() noexcept {
         }
         const std::wstring exts=is_file(cache)?
               profile(cache,L"PackerPlugins64",L"exts"):L"";
-        put(out,L"Derived 64-bit [PackerPlugins64] exts: "+
+        put(out,std::wstring(L"Derived 64-bit [PackerPlugins64] exts: ")+
                 (exts.empty()?L"not found":L"present"));
         for(const wchar_t* extension:{L"wim",L"iso",L"udf",L"esd",L"swm"}) {
             const std::wstring value=profile(associations,L"PackerPlugins",extension);
