@@ -377,7 +377,7 @@ if(WIN32)
   enable_language(RC)
   configure_file(src/version.rc.in
                  "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc" @ONLY)
-  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp
+  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp src/operation_diagnostics.cpp
               "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc")
   target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32)
   target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
