@@ -1,6 +1,7 @@
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/edit_transaction.hpp"
+#include "iso_wcx/optical_edit_guard.hpp"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -111,9 +112,14 @@ public:
     std::uint64_t size;
     std::vector<std::pair<std::uint32_t,Bytes>> descriptors;
     std::set<std::uint32_t> boot_lbas;
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> boot_regions;
+    bool boot_regions_bounded=true;
+    std::set<std::uint32_t> unbounded_boot_lbas;
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> udf_metadata_regions;
     std::unique_ptr<Node> root;
     bool joliet=false;
     bool udf_bridge=false;
+    std::uint32_t declared_volume_blocks=0;
     std::size_t items=0;
     explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false)
         :file(p,std::ios::binary),size(std::filesystem::file_size(p)) {
@@ -143,8 +149,33 @@ public:
                 if(i!=4)sum+=tag[i];
             return static_cast<unsigned char>(sum)==tag[4];
         };
-        udf_bridge=udf_bridge || avdp(256) ||
-                   (sectors>256 && avdp(sectors-256)) || avdp(sectors-1);
+        auto add_udf_anchor=[&](std::uint64_t lba) {
+            if(!avdp(lba))return false;
+            udf_metadata_regions.emplace_back(lba*block,block);
+            // Both descriptor sequences described by the AVDP are immutable
+            // when the payload-only bridge patcher is active.
+            const auto descriptor=read(lba*block,32);
+            for(const std::size_t offset:{std::size_t(16),std::size_t(24)}) {
+                const auto length=le(descriptor,offset);
+                const auto start=le(descriptor,offset+4);
+                if(!length)continue;
+                need(start<=sectors && length<=size-std::uint64_t(start)*block,
+                     "UDF volume descriptor sequence outside ISO image");
+                udf_metadata_regions.emplace_back(
+                    std::uint64_t(start)*block,length);
+            }
+            return true;
+        };
+        udf_bridge=udf_bridge || add_udf_anchor(256) ||
+                   (sectors>256 && add_udf_anchor(sectors-256)) ||
+                   add_udf_anchor(sectors-1);
+        // Always inspect all standard anchor positions; short-circuiting
+        // would silently omit a protected backup descriptor range.
+        if(udf_bridge) {
+            add_udf_anchor(256);
+            if(sectors>256)add_udf_anchor(sectors-256);
+            add_udf_anchor(sectors-1);
+        }
         need(allow_udf_bridge || !udf_bridge,
              "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         Bytes primary,supplementary;bool end=false;
@@ -155,17 +186,108 @@ public:
             if(b[0]==1){need(primary.empty(),"multiple primary descriptors");primary=b;}
             else {need(supplementary.empty()&&b[88]=='%'&&b[89]=='/'&&(b[90]=='@'||b[90]=='C'||b[90]=='E'),"unsupported supplementary descriptor");supplementary=b;joliet=true;}
             need(le(b,128,2)==block&&le(b,120,2)==1&&le(b,124,2)==1,"unsupported volume geometry");
-            need(le(b,80)==size/block,"ISO volume size does not match image file");descriptors.emplace_back(lba,std::move(b));
+            // Some valid ISO files are padded after the declared ISO9660
+            // volume. A strict equality test rejected F5/delete on them,
+            // even though none of the ISO metadata or data lives in the pad.
+            const auto volume_blocks=le(b,80);
+            need(volume_blocks>=18 && volume_blocks<=sectors,
+                 "ISO descriptor volume exceeds actual image bounds");
+            if(declared_volume_blocks)
+                need(declared_volume_blocks==volume_blocks,
+                     "ISO primary and Joliet volume sizes disagree");
+            declared_volume_blocks=volume_blocks;
+            descriptors.emplace_back(lba,std::move(b));
         }
         need(end&&!primary.empty(),"missing ISO primary/terminator");
+        // Detect UDF anchors relative to the logical volume as well as the
+        // physical file end. ISO/UDF bridges may have zero padding after the
+        // actual ECMA-167 anchor, and cannot use the plain ISO rebuild path.
+        if(declared_volume_blocks<sectors) {
+            if(declared_volume_blocks>256)
+                udf_bridge=add_udf_anchor(declared_volume_blocks-256) || udf_bridge;
+            udf_bridge=add_udf_anchor(declared_volume_blocks-1) || udf_bridge;
+            need(allow_udf_bridge || !udf_bridge,
+                 "ISO/UDF Bridge directory edits require a synchronized UDF writer");
+        }
+        // A non-UDF ISO can have an all-zero sector-aligned trailer. Preserve
+        // it during staging, then update the descriptor's volume size when
+        // appending changed files/metadata. Never accept hidden nonzero
+        // partitions, boot payloads or other data after the declared volume.
+        // A detected ISO/UDF bridge takes the separate equal-size-only path,
+        // which validates both filesystem namespaces and never moves extents.
+        if(!udf_bridge && declared_volume_blocks<sectors) {
+            const auto trailer_bytes=(sectors-declared_volume_blocks)*block;
+            constexpr std::uint64_t max_padding=256ull*1024*1024;
+            need(trailer_bytes<=max_padding,
+                 "ISO trailer exceeds safe zero-padding inspection limit (256 MiB)");
+            file.clear();
+            file.seekg(static_cast<std::streamoff>(
+                std::uint64_t(declared_volume_blocks)*block));
+            std::array<char,64*1024> chunk{};
+            auto remaining=trailer_bytes;
+            while(remaining) {
+                const auto n=static_cast<std::streamsize>(
+                    std::min<std::uint64_t>(remaining,chunk.size()));
+                file.read(chunk.data(),n);
+                need(bool(file),"cannot validate ISO trailer");
+                need(std::all_of(chunk.begin(),chunk.begin()+n,
+                    [](char c){return c==0;}),
+                    "nonzero data beyond ISO volume (possible boot/partition metadata)");
+                remaining-=static_cast<std::uint64_t>(n);
+            }
+        }
         std::set<std::uint32_t> seen;root=parse(Bytes(primary.begin()+156,primary.begin()+190),false,nullptr,0,seen);
         root->name="";root->logical="";
         if(joliet){seen.clear();auto other=parse(Bytes(supplementary.begin()+156,supplementary.begin()+190),true,nullptr,0,seen);pair(*root,*other);}
+        // Some genuine bootable ISO/UDF bridges set El Torito's 512-byte
+        // sector count to zero or to just one boot sector. When the ISO9660
+        // namespace independently describes the full boot image extent,
+        // protect the WHOLE referenced file, not merely the catalog count.
+        // Unknown boot images absent from ISO remain strictly read-only.
+        std::vector<const Node*> boot_nodes{root.get()};
+        while(!boot_nodes.empty()) {
+            const Node* node=boot_nodes.back();
+            boot_nodes.pop_back();
+            for(const auto& child:node->children)
+                boot_nodes.push_back(child.get());
+            if(node->directory || !node->size)continue;
+            const auto start=std::uint64_t(node->lba)*block;
+            const auto end=start+node->size;
+            for(const auto lba:boot_lbas) {
+                const auto reference=std::uint64_t(lba)*block;
+                if(reference>=start && reference<end) {
+                    boot_regions.emplace_back(start,node->size);
+                    unbounded_boot_lbas.erase(lba);
+                }
+            }
+        }
+        boot_regions_bounded=unbounded_boot_lbas.empty();
     }
     Bytes read(std::uint64_t at,std::size_t count){need(at<=size&&count<=size-at,"ISO extent outside image");Bytes b(count);file.clear();file.seekg(static_cast<std::streamoff>(at));file.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(count));need(bool(file),"ISO read failed");return b;}
     void boot_catalog(std::uint32_t lba) {
         auto b=read(std::uint64_t(lba)*block,block);need(b[0]==1&&b[30]==0x55&&b[31]==0xaa,"invalid boot catalog");unsigned checksum=0;for(unsigned i=0;i<32;i+=2)checksum+=le(b,i,2);need((checksum&0xffff)==0,"invalid boot catalog checksum");boot_lbas.insert(lba);
-        auto entry=[&](std::size_t at){need(b[at]==0||b[at]==0x88,"unsupported boot entry");if(b[at]==0x88){need(b[at+1]==0,"emulated boot ISO editing is not supported");auto loc=le(b,at+8);need(std::uint64_t(loc)*block<size,"invalid boot image extent");boot_lbas.insert(loc);}};
+        boot_regions.emplace_back(std::uint64_t(lba)*block,block);
+        auto entry=[&](std::size_t at){
+            need(b[at]==0||b[at]==0x88,"unsupported boot entry");
+            if(b[at]!=0x88)return;
+            need(b[at+1]==0,"emulated boot ISO editing is not supported");
+            const auto loc=le(b,at+8);
+            need(std::uint64_t(loc)*block<size,"invalid boot image extent");
+            boot_lbas.insert(loc);
+            // El Torito's sector count is expressed in 512-byte units.
+            // An absent count is not an authorization to edit near the
+            // image: bridge writes fail closed until its full span is known.
+            const auto count=le(b,at+6,2);
+            if(!count){
+                boot_regions_bounded=false;
+                unbounded_boot_lbas.insert(loc);
+                return;
+            }
+            const auto bytes=(std::uint64_t(count)*512+block-1)/block*block;
+            const auto start=std::uint64_t(loc)*block;
+            need(bytes<=size-start,"El Torito boot image outside ISO bounds");
+            boot_regions.emplace_back(start,bytes);
+        };
         entry(32);std::size_t at=64;
         while(at<block&&b[at]){need(b[at]==0x90||b[at]==0x91,"unsupported boot catalog extension");bool last=b[at]==0x91;unsigned count=le(b,at+2,2);at+=32;need(count<=(block-at)/32,"large boot catalog unsupported");for(unsigned i=0;i<count;++i,at+=32)entry(at);if(last)break;}
     }
@@ -175,14 +297,20 @@ public:
         auto n=std::make_unique<Node>();n->record=r;n->directory=(r[25]&2)!=0;n->lba=le(r,2);n->size=le(r,10);n->parent=parent;
         need(std::uint64_t(n->lba)*block+n->size<=size,"ISO resource out of bounds");
         const std::size_t idlen=r[32],base=33+idlen+(idlen%2==0?1:0);need(idlen&&base<=r.size(),"bad ISO identifier");
-        need(std::all_of(r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),[](auto c){return c==0;}),"Rock Ridge/system-use ISO editing is not supported");
+        need(udf_bridge ||
+             std::all_of(r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),
+                         [](auto c){return c==0;}),
+             "Rock Ridge/system-use ISO editing requires a protected UDF bridge");
         n->identifier.assign(r.begin()+33,r.begin()+33+static_cast<std::ptrdiff_t>(idlen));
         if(parent)n->name=n->logical=decode(n->identifier,j,n->directory);
         need(++items<=200000&&depth<=64,"ISO edit tree limit exceeded");
         if(n->directory){need(seen.insert(n->lba).second&&n->size<=64*1024*1024,"cyclic or oversized ISO directory");auto data=read(std::uint64_t(n->lba)*block,n->size);std::set<std::string> names;
             for(std::size_t at=0;at<data.size();){unsigned len=data[at];if(!len){at=(at/block+1)*block;continue;}need(len>=34&&len<=data.size()-at&&at%block+len<=block,"bad ISO directory record");Bytes child(data.begin()+static_cast<std::ptrdiff_t>(at),data.begin()+static_cast<std::ptrdiff_t>(at+len));at+=len;
                 if(child[32]==1&&child[33]<=1){ // Validate dot records too (Rock Ridge SP/CE can live here).
-                    auto tail=std::size_t(34);need(std::all_of(child.begin()+static_cast<std::ptrdiff_t>(tail),child.end(),[](auto c){return c==0;}),"Rock Ridge/system-use ISO editing is not supported");continue;}
+                    auto tail=std::size_t(34);need(udf_bridge ||
+                         std::all_of(child.begin()+static_cast<std::ptrdiff_t>(tail),
+                                     child.end(),[](auto c){return c==0;}),
+                         "Rock Ridge/system-use ISO editing requires protected UDF");continue;}
                 auto c=parse(child,j,n.get(),depth+1,seen);need(names.insert(upper(c->logical)).second,"ambiguous ISO names");n->children.push_back(std::move(c));
             }
         }return n;
@@ -322,8 +450,11 @@ void edit_iso_udf_bridge_equal_length(
     const std::filesystem::path& path,Image& iso,
     const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
     need(iso.udf_bridge,"not an ISO/UDF bridge");
-    need(iso.boot_lbas.empty(),
-         "bootable ISO/UDF Bridge editing requires further boot-range checks");
+    // Payload-only edits are allowed in bootable bridges only if every
+    // El Torito boot entry has a bounded data span. We do not regenerate or
+    // relocate the catalog, boot images or any UDF descriptors.
+    need(iso.boot_regions_bounded,
+         "El Torito boot image has no bounded sector count; editing refused");
     const Disc udf(path);
     need(udf.format()=="UDF","UDF filesystem could not be validated");
     std::map<std::string,const Item*> udf_files;
@@ -347,50 +478,63 @@ void edit_iso_udf_bridge_equal_length(
         Node* node=iso.root.get();
         std::istringstream parts(key);
         std::string component;
-        while(std::getline(parts,component,'/')) {
+        while(node && std::getline(parts,component,'/')) {
             auto it=std::find_if(node->children.begin(),node->children.end(),
                 [&](const auto& candidate){return candidate->logical==component;});
-            need(it!=node->children.end(),"path missing from ISO bridge namespace");
-            node=it->get();
+            node=it==node->children.end()?nullptr:it->get();
         }
-        need(node && !node->directory && node->size>0,
-             "bridge target must be an existing nonempty ISO file");
+        need(!node || (!node->directory && node->size>0),
+             "bridge target maps to an ISO directory");
         const auto it=udf_files.find(key);
-        need(it!=udf_files.end(),"path missing from UDF bridge namespace");
+        need(it!=udf_files.end(),"file missing from UDF bridge namespace");
         const auto& entry=*it->second;
-        need(entry.inline_data.empty() && entry.direct_source.empty() &&
+        need(entry.size>0 && entry.inline_data.empty() &&
+             entry.direct_source.empty() &&
              entry.extents.size()==1 && !entry.extents[0].sparse,
-             "bridge file requires a single nonembedded, nonsparse UDF extent");
-        const auto offset=std::uint64_t(node->lba)*block;
-        need(offset>=257ull*block && node->size==entry.size &&
-             entry.extents[0].offset==offset &&
-             entry.extents[0].length==node->size &&
-             offset<=iso.size && node->size<=iso.size-offset,
-             "ISO and UDF do not share an identical bounded file extent");
+             "bridge payload requires a single nonembedded, nonsparse UDF extent");
+        const auto offset=entry.extents[0].offset;
+        need(offset>=257ull*block && entry.extents[0].length==entry.size &&
+             offset<=iso.size && entry.size<=iso.size-offset,
+             "UDF file extent is not a bounded standalone payload");
+        if(node) {
+            need(std::uint64_t(node->lba)*block==offset &&
+                 node->size==entry.size,
+                 "ISO and UDF aliases disagree about file extent");
+            protect_boot(*node,iso.boot_lbas);
+        }
         need(std::filesystem::is_regular_file(
                  std::filesystem::symlink_status(change.source)),
              "replacement must be a regular file, not a link");
-        need(std::filesystem::file_size(change.source)==node->size,
+        need(std::filesystem::file_size(change.source)==entry.size,
              "bridge replacement must have exactly the original file size");
-        protect_boot(*node,iso.boot_lbas);
+        // A payload-only edit must not overlap any El Torito boot range,
+        // descriptor, ISO9660 directory, or UDF VDS/anchor.
+        need(offset>=256ull*block,
+             "replacement overlaps ISO/VRS/reserved optical descriptors");
+        for(const auto& [start,length]:iso.boot_regions)
+            need(!intersect(offset,entry.size,start,length),
+                 "replacement intersects El Torito boot image or catalog");
+        for(const auto& [start,length]:iso.udf_metadata_regions)
+            need(!intersect(offset,entry.size,start,length),
+                 "replacement intersects UDF anchor or descriptor sequence");
         for(const auto* other:iso_nodes) {
             if(other==node || other->size==0)continue;
-            need(!intersect(offset,node->size,
+            need(!intersect(offset,entry.size,
                             std::uint64_t(other->lba)*block,other->size),
-                 "bridge file extent overlaps another ISO entry");
+                 "bridge file overlaps ISO directory, boot image or other entry");
         }
         for(const auto& other:udf.items()) {
             if(other.path==key)continue;
             for(const auto& extent:other.extents)
                 if(!extent.sparse)
-                    need(!intersect(offset,node->size,
+                    need(!intersect(offset,entry.size,
                                     extent.offset,extent.length),
                          "bridge file shares an extent with another UDF entry");
         }
         for(const auto& previous:patches)
-            need(!intersect(offset,node->size,previous.at,previous.bytes),
+            need(!intersect(offset,entry.size,previous.at,previous.bytes),
                  "overlapping or repeated bridge file replacements");
-        patches.push_back({key,change.source,offset,node->size});
+        patches.push_back({key,change.source,offset,entry.size});
     }
     need(!patches.empty(),"empty ISO/UDF Bridge replacement list");
 
@@ -473,11 +617,124 @@ void edit_iso_udf_bridge_equal_length(
     }
     tx.commit(progress);
 }
+// Native Universal Optical Edit Guard.  ISO9660/Joliet and boot data are
+// immutable while a UDF Type-1 writer modifies FIDs/FE/bitmap/LVID.
+// A single staged-image validator handles create, delete and resize.
+void protect_iso_udf_stage(const std::filesystem::path& original,
+                           const std::filesystem::path& staged,
+                           const Image& before,const EditProgress& progress) {
+    need(before.udf_bridge && before.boot_regions_bounded,
+         "bootable ISO/UDF validation needs bounded boot extents");
+    need(std::filesystem::file_size(original)==before.size &&
+         std::filesystem::file_size(staged)==before.size,
+         "ISO/UDF image size changed during UDF edit");
+    Image after(staged,true);
+    need(after.udf_bridge && after.boot_regions_bounded &&
+         after.size==before.size &&
+         after.descriptors==before.descriptors &&
+         after.boot_regions==before.boot_regions &&
+         after.boot_lbas==before.boot_lbas,
+         "ISO/Joliet or El Torito boot descriptors changed in UDF staging");
+
+    // Compare all visible ISO namespace metadata before bytes are committed.
+    // UDF-only files are intentionally absent from these trees.
+    auto tree_same=[&](auto&& self,const Node& first,const Node& second)->bool {
+        if(first.name!=second.name || first.logical!=second.logical ||
+           first.identifier!=second.identifier ||
+           first.joliet_identifier!=second.joliet_identifier ||
+           first.directory!=second.directory ||
+           first.lba!=second.lba || first.size!=second.size ||
+           first.record!=second.record ||
+           first.children.size()!=second.children.size())
+            return false;
+        for(std::size_t i=0;i<first.children.size();++i)
+            if(!self(self,*first.children[i],*second.children[i]))
+                return false;
+        return true;
+    };
+    need(tree_same(tree_same,*before.root,*after.root),
+         "ISO9660 namespace changed during UDF-only editing");
+    OpticalEditGuard guard(before.size);
+    guard.protect(0,256ull*block); // ISO PVD, VRS, boot/system area
+    for(const auto& [start,length]:before.boot_regions)
+        guard.protect(start,length);
+    for(const auto& [start,length]:before.udf_metadata_regions)
+        guard.protect(start,length);
+    std::vector<const Node*> nodes{before.root.get()};
+    for(std::size_t at=0;at<nodes.size();++at) {
+        const auto* node=nodes[at];
+        if(node->size)
+            guard.protect(std::uint64_t(node->lba)*block,node->size);
+        for(const auto& child:node->children)
+            nodes.push_back(child.get());
+        need(nodes.size()<=200000,"ISO namespace exceeds validation limit");
+    }
+    // The common verifier coalesces protected spans and checks every byte
+    // after staged UDF metadata/payload verification, before atomic commit.
+    guard.verify(original,staged,progress);
+}
+void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
+                                  Image& image,
+                                  const std::vector<ArchiveChange>& changes,
+                                  const EditProgress& progress) {
+    need(image.udf_bridge && image.boot_regions_bounded,
+         "ISO/UDF metadata edit requires bounded El Torito boot images");
+    // ISO-visible objects are immutable in this mode. Shared ISO/UDF file
+    // replacements are handled exclusively by the equal-length patcher.
+    std::vector<std::string> iso_files;
+    auto gather=[&](auto&& self,const Node& node,const std::string& prefix)->void {
+        for(const auto& child:node.children) {
+            const auto key=prefix.empty()?child->logical:prefix+"/"+child->logical;
+            iso_files.push_back(upper(key));
+            if(child->directory)self(self,*child,key);
+        }
+    };
+    gather(gather,*image.root,"");
+    for(const auto& change:changes) {
+        const auto key=upper(edit_path(change.path));
+        need(std::find(iso_files.begin(),iso_files.end(),key)==iso_files.end(),
+             "ISO-visible path requires coordinated ISO/UDF metadata editing");
+    }
+    // Release the original input handle so Windows can atomically replace
+    // the image after the staged UDF writer and boot validator succeed.
+    image.file.close();
+    const EditStageValidator validate=
+        [&path,&image,&progress](const std::filesystem::path& staged) {
+            protect_iso_udf_stage(path,staged,image,progress);
+        };
+    edit_udf(path,changes,progress,true,validate);
+}
 }
 void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
     edit_tick(progress);Image image(path,true);
     if(image.udf_bridge) {
-        edit_iso_udf_bridge_equal_length(path,image,changes,progress);
+        // Prefer the non-metadata equal-length replacement for a pre-existing
+        // single-extent file (including UDF-only paths).
+        const Disc udf(path);
+        need(udf.format()=="UDF","ISO/UDF filesystem is unreadable");
+        bool same_size_replace=!changes.empty();
+        for(const auto& change:changes) {
+            if(change.remove || change.directory ||
+               !std::filesystem::is_regular_file(
+                   std::filesystem::symlink_status(change.source))) {
+                same_size_replace=false;
+                break;
+            }
+            const auto key=edit_path(change.path);
+            const auto it=std::find_if(udf.items().begin(),udf.items().end(),
+                [&](const Item& entry){return !entry.directory && entry.path==key;});
+            if(it==udf.items().end() ||
+               std::filesystem::file_size(change.source)!=it->size ||
+               it->size==0 || it->extents.size()!=1 || it->extents[0].sparse ||
+               !it->inline_data.empty()) {
+                same_size_replace=false;
+                break;
+            }
+        }
+        if(same_size_replace)
+            edit_iso_udf_bridge_equal_length(path,image,changes,progress);
+        else
+            edit_iso_udf_bridge_metadata(path,image,changes,progress);
         return;
     }
     for(const auto& change:changes){auto p=edit_path(change.path);std::istringstream split(p);std::string name;Node* parent=image.root.get();

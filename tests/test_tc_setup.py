@@ -74,7 +74,7 @@ def test_missing_legacy_and_repeat(binary: pathlib.Path):
         assert not backups(ini), "Dry run created backup"
         invoke(helper, tc, ini, target)
         text = read_ini(ini)
-        assert f"iso=192,{target / 'ISO-WCX.wcx'}" in text
+        assert f"iso=159,{target / 'ISO-WCX.wcx'}" in text
         assert "cue=128,C:\\Existing\\cue.wcx" in text
         assert "other=5,C:\\Existing\\other.wcx" in text
         assert "Keep=unchanged" in text
@@ -104,7 +104,7 @@ def test_keep_existing_user_plugin_and_force(binary: pathlib.Path):
         assert f"iso=192,{legacy}" in read_ini(ini), "Overwrote working legacy plugin"
         assert "cue=64,C:\\Other\\cue.wcx" in read_ini(ini)
         invoke(helper, tc, ini, target, "--force-iso")
-        assert f"iso=192,{target / 'ISO-WCX.wcx'}" in read_ini(ini)
+        assert f"iso=159,{target / 'ISO-WCX.wcx'}" in read_ini(ini)
         assert legacy.read_bytes() == b"existing user plugin", "Deleted legacy binary"
 
 
@@ -128,11 +128,39 @@ def test_redirected_sections(binary: pathlib.Path):
         before_primary = ini.read_bytes()
         invoke(helper, tc, ini, target)
         assert ini.read_bytes() == before_primary, "Should only touch redirected files"
-        assert f"iso=192,{target / 'ISO-WCX.wcx'}" in read_ini(assoc)
+        assert f"iso=159,{target / 'ISO-WCX.wcx'}" in read_ini(assoc)
         assert "rar=7,C:\\Working\\rar.wcx" in read_ini(assoc)
         assert "$checksum$" not in read_ini(cache)
         assert "exts=iso*rar*" in read_ini(cache)
         assert backups(assoc) and backups(cache)
+
+
+def test_stale_192_158_222_to_159_without_other_plugin_changes(binary: pathlib.Path):
+    with tempfile.TemporaryDirectory() as tmp:
+        helper, tc, ini, target = setup_fixture(binary, pathlib.Path(tmp))
+        dll = target / "ISO-WCX.wcx"
+        ini.write_text(
+            "[PackerPlugins]\n"
+            f"wim=192,{dll}\n"
+            f"udf=222,{dll}\n"
+            f"iso=158,{dll}\n"
+            f"cue=159,{dll}\n"
+            f"esd=192,{dll}\n"
+            f"swm=192,{dll}\n"
+            "[PackerPlugins64]\nexts=wim*iso*udf*esd*swm*\n",
+            encoding="utf-8"
+        )
+        invoke(helper, tc, ini, target)
+        text = read_ini(ini)
+        assert f"wim=159,{dll}" in text, text
+        assert f"udf=159,{dll}" in text, text
+        assert f"iso=159,{dll}" in text, text
+        assert f"cue=159,{dll}" in text, text
+        assert f"esd=192,{dll}" in text, text
+        assert f"swm=192,{dll}" in text, text
+        old_ini = ini.read_bytes()
+        invoke(helper, tc, ini, target)
+        assert ini.read_bytes() == old_ini, "Repair was not idempotent"
 
 
 def test_invalid_source_no_modify(binary: pathlib.Path):
@@ -179,6 +207,7 @@ if __name__ == "__main__":
     test_missing_legacy_and_repeat(binary)
     test_keep_existing_user_plugin_and_force(binary)
     test_redirected_sections(binary)
+    test_stale_192_158_222_to_159_without_other_plugin_changes(binary)
     test_invalid_source_no_modify(binary)
     test_utf8_bom_is_preserved_on_refusal(binary)
     test_duplicate_iso_refused(binary)

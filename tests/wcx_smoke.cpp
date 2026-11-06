@@ -56,8 +56,8 @@ int main(int argc,char** argv){
     auto caps=reinterpret_cast<PackerCaps>(GetProcAddress(dll,"GetPackerCaps"));
     const auto configure=GetProcAddress(dll,"ConfigurePacker");
     if(!open||!header||!process||!close||!set_progress_w||!set_progress_a||
-       !caps||!configure||(caps()&16)==0){
-        std::cerr<<"Missing WCX updater ConfigPacker export/options capability\n";
+       !caps||!configure||caps()!=159){
+        std::cerr<<"Missing WCX export or host-tested F5 GetPackerCaps=159\n";
         return 3;
     }
     constexpr std::size_t block=2048;

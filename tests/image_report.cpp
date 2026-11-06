@@ -161,6 +161,30 @@ int main() {
                 (std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>{});
             need(unchanged==bytes,"Image changed during metadata report");
         }
+        need(report.find("ISO trailer: none; PVD matches physical size")!=std::string::npos,
+             "Matching PVD/physical size was not diagnosed");
+        need(report.find("Protected HYBRID system area")!=std::string::npos,
+             "Hybrid ISO writer refusal was not explained");
+        // The diagnostic must distinguish a safe-looking zero pad from
+        // unknown nonzero data, without altering a byte.
+        bytes.resize(41*sector,0);
+        {
+            std::ofstream out(image,std::ios::binary|std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(bytes.data()),
+                      static_cast<std::streamsize>(bytes.size()));
+        }
+        const auto padded_report=iso_wcx::build_image_structure_report(image);
+        need(padded_report.find("ISO trailer content: all zero")!=std::string::npos,
+             "Zero-padded ISO layout was not diagnosed");
+        bytes[32*sector]=0x5a;
+        {
+            std::ofstream out(image,std::ios::binary|std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(bytes.data()),
+                      static_cast<std::streamsize>(bytes.size()));
+        }
+        const auto nonzero_report=iso_wcx::build_image_structure_report(image);
+        need(nonzero_report.find("ISO trailer content: NONZERO")!=std::string::npos,
+             "Nonzero trailing partition/boot data was not diagnosed");
         fs::remove_all(directory);
         std::cout<<"PASS: read-only UTF-8 ISO image structure, boot and tree metadata\n";
         return 0;

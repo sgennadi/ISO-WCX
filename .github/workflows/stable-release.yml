@@ -22,10 +22,12 @@ on:
       - 'src/**'
       - 'include/**'
       - 'tests/**'
+      - '.github/scripts/analyze-user-telemetry.py'
   workflow_dispatch:
 
 permissions:
   contents: read
+  issues: read
 
 concurrency:
   group: iso-wcx-v0.21.0-stable-${{ github.event.pull_request.number || github.ref }}
@@ -37,7 +39,26 @@ env:
   ISO_WCX_RELEASE_FILE: ISO-WCX-v0.21.0.zip
 
 jobs:
+  diagnostics:
+    name: Verify submitted ISO-WCX error reports before Stable builds
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run offline diagnostic analyzer tests
+        run: python3 tests/test_telemetry_analysis.py
+      - name: Analyze sanitized GitHub Issues for confirmed regressions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/analyze-user-telemetry.py --output user-telemetry-analysis.json --fail-confirmed
+      - name: Archive diagnostic analysis for release audit
+        uses: actions/upload-artifact@v7
+        with:
+          name: ISO-WCX-Stable-Prebuild-Diagnostics
+          path: user-telemetry-analysis.json
+          if-no-files-found: error
+          retention-days: 30
   windows:
+    needs: diagnostics
     name: VS2026 C++26 Stable WCX - ${{ matrix.arch }}
     runs-on: windows-2025
     timeout-minutes: 70
@@ -74,6 +95,7 @@ jobs:
           retention-days: 90
 
   windows-cxx20:
+    needs: diagnostics
     name: VS2026 Win32/x64 C++20 backward compatibility - ${{ matrix.arch }}
     runs-on: windows-2025
     timeout-minutes: 70
@@ -91,6 +113,7 @@ jobs:
         run: ctest --test-dir build-compat -C Release --output-on-failure
 
   linux-cxx26:
+    needs: diagnostics
     name: Stable Linux C++26 - ${{ matrix.compiler }}
     runs-on: ubuntu-24.04
     timeout-minutes: 55
@@ -129,6 +152,7 @@ jobs:
           ctest --test-dir build-cxx26 --output-on-failure
 
   linux:
+    needs: diagnostics
     name: Stable Linux C++20 regression
     runs-on: ubuntu-24.04
     steps:
@@ -146,6 +170,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   sanitizer:
+    needs: diagnostics
     name: Stable ASan + UBSan regression
     runs-on: ubuntu-24.04
     steps:
@@ -164,6 +189,7 @@ jobs:
         run: ctest --test-dir build-sanitized --output-on-failure
 
   real-udf:
+    needs: diagnostics
     name: Independent mkudffs/udfinfo/7-Zip interoperability
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -184,6 +210,7 @@ jobs:
         run: python3 tests/test_udf_mkudffs.py build/archive_edit_fixture build/disc_inspect
 
   large-udf:
+    needs: diagnostics
     name: Full UDF >4-GiB create/grow/replace and 7-Zip SHA256
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -203,6 +230,7 @@ jobs:
         run: python3 tests/test_udf_over4gb.py build/archive_edit_fixture build/disc_inspect
 
   stage-benchmark:
+    needs: diagnostics
     name: UDF COW vs sparse staging parity and 512-MiB benchmark
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -216,6 +244,7 @@ jobs:
         run: python3 tests/test_udf_stage_performance.py build/archive_edit_fixture build/disc_inspect --benchmark
 
   native-qemu-vhd:
+    needs: diagnostics
     name: Stable independent QEMU VHDX and dynamic VHD write interoperability
     runs-on: ubuntu-24.04
     timeout-minutes: 30

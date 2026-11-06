@@ -15,9 +15,14 @@ struct ArchiveChange {
 };
 using EditProgress = std::function<bool()>;
 void edit_iso(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
-// UDF Type-1 Preview: bounded new file/dir allocation with a verified bitmap,
-// existing-file replacement and logical FID deletion; no bridge rewriting.
-void edit_udf(const std::filesystem::path&, const std::vector<ArchiveChange>&, const EditProgress& = {});
+// Optional staged-image validator. It runs after UDF readback verification,
+// before the original image is atomically replaced, for ISO/UDF bridges.
+using EditStageValidator = std::function<void(const std::filesystem::path&)>;
+// UDF Type-1 Preview: plain-UDF writes by default. Bridge writes are opt-in
+// and MUST supply an ISO/El Torito protection validator.
+void edit_udf(const std::filesystem::path&, const std::vector<ArchiveChange>&,
+              const EditProgress& = {}, bool allow_bridge = false,
+              const EditStageValidator& = {});
 // Transactional native FAT12/16/32 editor: exact raw/fixed VHD filesystems.
 void edit_dynamic_vhd(const std::filesystem::path&,
                       const std::vector<ArchiveChange>&,

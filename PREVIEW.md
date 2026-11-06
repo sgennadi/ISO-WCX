@@ -10,6 +10,135 @@ make creating a folder inside a large WIM instantaneous: WIMGAPI
 Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
 in PR #65 is **not** part of this Stable build.
 
+For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
+
+## RC3 — WIM F5 host dispatch repair (2026-11-06)
+
+The operator confirmed that RC2 `GetPackerCaps=222` and the live
+`wincmd.ini` used `wim=222`, but **F5 did not enter `PackFilesW`**;
+deleting a WIM folder succeeded. This is a TC host-dispatch symptom,
+not proof that WIMGAPI failed. Separate real Total Commander 11.58.1
+tests from PR #68 previously showed `158` rejected before the callback
+and `159` successfully invoked the writer.
+
+**RC3 restores `GetPackerCaps=159`**, specifically for a host-tested
+existing-image F5 path, and deliberately removes `BY_CONTENT=64`.
+This adds the `NEW=1` capability that Total Commander 11.58.1
+used for dispatch, but `PackFilesW` still rejects creating an
+actual new ISO/WIM archive. Real user-host confirmation is pending.
+
+The *already cached* `wim=222` / `iso=222` / `udf=222`
+registrations need to change to `159`, even after replacing the DLL.
+The optional `ISO-WCX-F5-Repair.ps1` in the same ZIP:
+1. Runs in **read-only dry-run mode** by default.
+2. When explicitly run with `-Apply` after closing **all** TC
+   windows, changes only these three ISO-WCX associations, preserves
+   other WCXs and all INI encoding/line endings, creates a backup,
+   and invalidates the derived `[PackerPlugins64]` checksum.
+3. Refuses redirected or ambiguous INI layouts rather than guessing.
+   If TC uses `/I=other.ini`, pass that INI via `-IniPath`.
+4. A restart of Total Commander is required.
+
+The repair is **not executed by pluginst.inf**; Total Commander does not
+provide a safe documented post-install script hook for WCX. No EXE,
+third-party DLL, background service or automatic INI mutation is added.
+For an alternate manual solution, remove/re-add the existing WIM WCX
+association after the updated DLLs are installed and TC is restarted.
+
+Report the result of F5 using a disposable `boot.wim\\image1`,
+then separately repeat for `install.wim` and ISO/UDF.
+No production WIM should be edited until the issue is field-resolved.
+
+## RC2: investigate F5/Delete regression after installation (2026-11-06)
+
+The installed plugin advertises `GetPackerCaps=222` and the Total
+Commander registration can legitimately contain `158`, `159` or
+`222` for supported writable formats. **158 and 159 both allow
+modification and deletion**, whereas the legacy optional test-helper
+was incorrectly writing `192`, which has neither capability.
+The test-only helper now corrects stale `192` registrations even
+when the WCX path already matches, preserving valid `158`/`159`.
+
+The RC2 production plugin has a **read-only Check WCX associations / F5**
+button in Settings. It creates a local report at
+`%LOCALAPPDATA%\\ISO-WCX\\Reports\\ISO-WCX-TC-Associations.txt`,
+covering `wim`, `iso`, `udf`, `esd`, `swm`, effective INI
+redirects, registered 32-bit WCX and companion 64-bit WCX paths, and
+the derived `PackerPlugins64` extension cache. No INI editing occurs
+while Total Commander is open; the installed package remains one ZIP
+containing x86/x64 WCX libraries only.
+
+See [registration diagnosis and exact masks](docs/tc-registration-audit.md).
+A CI build and a real user WIM reproduction are required before claiming
+the original F5 regression is resolved.
+
+## RC build identity (current PR #69)
+
+The **published Stable release remains v0.21.0**. Every Windows Preview
+artifact produced by `.github/workflows/wcx-preview.yml` now identifies
+itself as **v0.21.1 RC3 (Build N)**, where `N` is the unique GitHub
+Actions workflow run number. The plugin Settings title, installed-version
+label and Windows DLL Version Information share this identity, and the
+auto-installable Total Commander `pluginst.inf` describes the same RC
+and build. Its numeric `version=0.21.1` field preserves standard TC
+installer compatibility. The ZIP is named
+`ISO-WCX-v0.21.1-RC3-B<N>.zip` and includes **only** the two
+architecture-specific WCX binaries and the normal installation notes.
+
+CMake defaults to the Stable identity for local/release builds;
+passing `-DISO_WCX_RC_NUMBER=3 -DISO_WCX_BUILD_NUMBER=<N>` produces an
+RC-labelled build without editing Stable CMake/release metadata. Later
+RCs increment the RC number deliberately, while repeated CI builds
+of the same RC receive a different build number. The updater
+continues checking official published Stable releases and also offers
+Stable v0.21.1 to RC2 users when it is published.
+
+## DISM GUI-derived WIM improvements (integrated into native WCX)
+
+ISO-WCX reuses the **workflow ideas**, not the DISM GUI application or a
+`dism.exe` child process. The plugin remains a self-contained WCX binary.
+
+- **Get-WimInfo-style index summary:** explicit **Export Image Structure**
+  now reads the per-index WIM XML through Windows WIMGAPI/MSXML and displays
+  `imageN`, boot index, edition, description, architecture, Windows version
+  and size metadata when those fields are available.
+- **No surprise mount:** ordinary F5 WIM edits continue using isolated
+  Apply/Edit/Capture stages, with proper cancellation, index-level status,
+  original-file preservation and post-write verification.
+- **One-index optimization:** single-index verification does not enumerate
+  the untouched indexes again. A special staged-copy path avoids exporting
+  other indexes when only the **last** `imageN` changes.
+- No `DISM-GUI.exe`, `dism.exe`, external DLL, mounted WIM folder, or
+  background service is required. Other image indexes remain unaffected
+  unless explicitly selected.
+
+Real multi-index `install.wim` performance and write tests on Windows
+are mandatory before calling this Stable. See
+[ISO editing strategy](docs/iso-edit-strategy.md) for optical write limits.
+
+## Edit-path improvements under test (2026-11-04)
+
+- **WIM (Windows, unsplit only):** when the only changes are within the
+  final `imageN/` of a multi-index WIM, ISO-WCX now stages an exact copy
+  of the original WIM, removes only its last index in that private copy,
+  captures only the changed last index, and verifies its written files.
+  Other indexes remain in place and are not re-exported or fully enumerated.
+  This still requires one Apply/Capture of the changed image and storage
+  for the staged WIM and extracted image. Editing an earlier index, changing
+  several indexes, or deleting an index retains the original safer
+  export-and-capture implementation so index ordering is not altered.
+- **ISO:** images with matching ISO/Joliet volume descriptors and a bounded
+  all-zero sector-aligned trailer may be safely rewritten. Nonzero trailers,
+  hidden UDF anchors, hybrid boot/system areas and Rock Ridge remain blocked
+  unless a separately validated writer handles the layout.
+- **Diagnostics:** Windows edit failures are appended to
+  `%LOCALAPPDATA%\\ISO-WCX\\Logs\\edit-errors.log`. This preserves the
+  native rejection reason, instead of only showing a generic Total Commander
+  error code. No file contents are logged.
+
+These changes are preview-only until Windows/Total Commander tests pass.
+Make a backup of important installation media before testing.
+
 ## If Total Commander says `File iso.wcx not found!`
 
 This indicates a **stale old association** such as `...\\plugins\\wcx\\ISO\\iso.wcx`; it does **not** indicate that `ISO-WCX.wcx` or its adjacent 64-bit `ISO-WCX.wcx64` is missing. The automatic installer cannot remove existing old plugin associations. In Configuration > Options > Packer > Configure packer extension WCXs, select `iso`, delete **only** the obsolete missing ISO.WCX entry, then click **New type...** and choose the installed `ISO-WCX.wcx`. Restart Total Commander and retry with Ctrl+PgDn. Do not type `192,` in the filename field or delete unrelated working plugins. See [INSTALL_RU.txt](INSTALL_RU.txt) and [INSTALL_EN.txt](INSTALL_EN.txt).

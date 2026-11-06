@@ -19,11 +19,31 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  issues: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  diagnostics:
+    name: Analyze GitHub user diagnostic reports before build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test telemetry analyzer and strict category handling
+        run: python3 tests/test_telemetry_analysis.py
+      - name: Analyze recent GitHub Issues with sanitized diagnostics
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/analyze-user-telemetry.py --output user-telemetry-analysis.json --fail-confirmed
+      - name: Archive pre-build error summary
+        uses: actions/upload-artifact@v7
+        with:
+          name: ISO-WCX-Prebuild-Error-Analysis
+          path: user-telemetry-analysis.json
+          if-no-files-found: error
+          retention-days: 14
   windows:
+    needs: diagnostics
     name: VS2026 C++26 Windows ${{ matrix.arch }} WCX
     runs-on: windows-2025
     strategy:
@@ -33,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Configure Visual Studio 2026 with experimental C++26
-        run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26
+        run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_RC_NUMBER=3 -DISO_WCX_BUILD_NUMBER=${{ github.run_number }} -DISO_WCX_BUILD_DEV_TOOLS=ON
       - name: Require VS2026 and C++26 configuration
         shell: pwsh
         run: |
@@ -48,16 +68,23 @@ jobs:
       - name: Verify safe WCX association repair
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
+      - name: Test offline F5 association repair (222/158 to 159)
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_f5_repair.ps1
+      - name: Verify Windows RC version resource and installer identity
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/test_rc_version.ps1 -Arch ${{ matrix.arch }} -ExpectedBuild ${{ github.run_number }} -ExpectedRC 3
       - name: Upload preview binaries
         uses: actions/upload-artifact@v7
         with:
-          name: ISO-WCX-${{ matrix.arch }}-preview
+          name: ISO-WCX-${{ matrix.arch }}-v0.21.1-RC3-B${{ github.run_number }}-preview
           path: |
             build/Release/ISO-WCX.wcx
             build/Release/ISO-WCX.wcx64
           if-no-files-found: error
           retention-days: 14
   linux:
+    needs: diagnostics
     name: Linux core tests
     runs-on: ubuntu-24.04
     steps:
@@ -77,6 +104,7 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
   sanitizer:
+    needs: diagnostics
     name: Linux Clang ASan + UBSan
     runs-on: ubuntu-24.04
     steps:
@@ -116,14 +144,18 @@ jobs:
             echo "Unexpected third-party shared library in ISO-WCX installer" >&2
             exit 1
           fi
-          cp pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
-          (cd package && zip -9 ../ISO-WCX-preview.zip pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX.wcx ISO-WCX.wcx64)
-          unzip -t ISO-WCX-preview.zip
-          unzip -Z1 ISO-WCX-preview.zip | grep -qx 'THIRD_PARTY_NOTICES.txt'
+          # Stable pluginst.inf is immutable; render RC3 metadata only in the preview ZIP.
+          python3 -c 'from pathlib import Path; s=Path("pluginst-preview.inf.in").read_text(); s=s.replace("@ISO_WCX_VERSION_DISPLAY@", "v0.21.1 RC3 (Build ${{ github.run_number }})").replace("@ISO_WCX_VERSION_INI@", "0.21.1"); Path("package/pluginst.inf").write_text(s)'
+          grep -Fxq 'version=0.21.1' package/pluginst.inf
+          cp PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-F5-Repair.ps1 package/
+          (cd package && zip -9 "../ISO-WCX-v0.21.1-RC3-B${{ github.run_number }}.zip" pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-F5-Repair.ps1 ISO-WCX.wcx ISO-WCX.wcx64)
+          unzip -t "ISO-WCX-v0.21.1-RC3-B${{ github.run_number }}.zip"
+          unzip -Z1 "ISO-WCX-v0.21.1-RC3-B${{ github.run_number }}.zip" | grep -qx 'THIRD_PARTY_NOTICES.txt'
+          unzip -Z1 "ISO-WCX-v0.21.1-RC3-B${{ github.run_number }}.zip" | grep -qx 'ISO-WCX-F5-Repair.ps1'
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v7
         with:
-          name: ISO-WCX-Installable-Preview
-          path: ISO-WCX-preview.zip
+          name: ISO-WCX-Installable-v0.21.1-RC3-B${{ github.run_number }}
+          path: ISO-WCX-v0.21.1-RC3-B${{ github.run_number }}.zip
           if-no-files-found: error
           retention-days: 14

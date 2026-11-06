@@ -179,7 +179,8 @@ struct WimArchive::Impl {
     };
 };
 
-WimArchive::WimArchive(const std::filesystem::path& image)
+WimArchive::WimArchive(const std::filesystem::path& image,
+                       std::uint32_t selected_index)
     : api_(std::make_unique<Impl>()) {
     require(std::filesystem::is_regular_file(image) &&
             !std::filesystem::is_symlink(image),
@@ -212,6 +213,8 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     const DWORD count = api_->count(api_->archive);
     require(count > 0 && count <= 256,
             "WIM has no image indexes or too many images");
+    require(selected_index == 0 || selected_index <= count,
+            "selected WIM verification index is not in the archive");
     format_ = "WIM / Windows Imaging API / " + std::to_string(count) +
               " image(s) / " + std::to_string(parts.size()) + " part(s) / read-only";
     constexpr std::size_t max_items = 1'000'000;
@@ -221,6 +224,12 @@ WimArchive::WimArchive(const std::filesystem::path& image)
     // Every WIM image index is represented under a separate top-level folder.
     // Iterate rather than recurse: malformed WIMs cannot exhaust the stack.
     for (DWORD index = 1; index <= count; ++index) {
+        // Keep the index-to-handle mapping stable while skipping the costly
+        // metadata enumeration for indexes untouched by this transaction.
+        if (selected_index && selected_index != index) {
+            api_->images.push_back(nullptr);
+            continue;
+        }
         HANDLE himage = api_->load(api_->archive, index);
         if (!is_valid(himage)) fail_windows("WIMLoadImage failed");
         api_->images.push_back(himage);

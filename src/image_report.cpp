@@ -4,6 +4,12 @@
 // other image formats are described without guessing their raw layout.
 #include "iso_wcx/image_report.hpp"
 #include "iso_wcx/disc.hpp"
+#include "iso_wcx/udf_edit_inspection.hpp"
+#ifdef _WIN32
+#include "iso_wcx/wim_index_report.hpp"
+#include "iso_wcx/wim_parts.hpp"
+#include <sstream>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -15,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace iso_wcx {
 namespace {
@@ -145,7 +152,7 @@ OpticalProbeInfo probe_optical(Report& report,
                      size%sector_size==0?"yes":"no");
     report.append("VOLUME DESCRIPTORS (2048-byte sectors 16..63)");
     bool pvd=false,joliet=false,el_torito=false,nsr02=false,nsr03=false;
-    std::uint32_t boot_catalog=0;
+    std::uint32_t boot_catalog=0,declared_sectors=0;
     for(std::uint64_t lba=first_descriptors;lba<last_descriptors;++lba){
         if(!read_at(input,size,lba*sector_size,block))break;
         const auto udf_id=std::string_view(
@@ -158,7 +165,8 @@ OpticalProbeInfo probe_optical(Report& report,
             pvd=true;
             report.append("LBA "+std::to_string(lba)+" Type=1 Primary Volume Descriptor");
             report.append_kv("PVD Volume ID",pvd_volume_id(block));
-            report.append_kv("PVD volume sectors",std::to_string(le32(block.data()+80)));
+            declared_sectors=le32(block.data()+80);
+            report.append_kv("PVD volume sectors",std::to_string(declared_sectors));
             report.append_kv("PVD logical block bytes",std::to_string(le16(block.data()+128)));
             report.append_kv("PVD sectors match physical ISO",
                              le32(block.data()+80)==size/sector_size?"yes":"no");
@@ -183,12 +191,54 @@ OpticalProbeInfo probe_optical(Report& report,
     report.append_kv("El Torito boot descriptor",el_torito?"yes":"no");
     report.append_kv("UDF VRS NSR02",nsr02?"detected":"not detected");
     report.append_kv("UDF VRS NSR03",nsr03?"detected":"not detected");
+    // This is a read-only preflight hint, not permission to rewrite the ISO.
+    // A common editing failure is a PVD smaller than the physical ISO.
+    const auto physical_sectors=size/sector_size;
+    if(pvd && declared_sectors>=18 && declared_sectors<physical_sectors &&
+       size%sector_size==0) {
+        const auto tail=(physical_sectors-declared_sectors)*sector_size;
+        report.append_kv("Extra sectors beyond declared ISO volume",
+                         std::to_string(physical_sectors-declared_sectors));
+        constexpr std::uint64_t inspect_limit=256ull*1024*1024;
+        if(tail>inspect_limit)
+            report.append("ISO trailer: too large for the bounded writer (over 256 MiB)");
+        else {
+            input.clear();
+            input.seekg(static_cast<std::streamoff>(
+                std::uint64_t(declared_sectors)*sector_size));
+            std::array<char,64*1024> chunk{};
+            std::uint64_t left=tail;
+            bool zero=true,read_ok=true;
+            while(left) {
+                const auto n=static_cast<std::streamsize>(
+                    std::min<std::uint64_t>(left,chunk.size()));
+                input.read(chunk.data(),n);
+                if(!input) {read_ok=false;break;}
+                if(std::any_of(chunk.data(),chunk.data()+n,
+                               [](char ch){return ch!=0;})) {
+                    zero=false;break;
+                }
+                left-=static_cast<std::uint64_t>(n);
+            }
+            report.append_kv("ISO trailer content",
+                             !read_ok?"read error":zero?"all zero (candidate for native rebuild)":
+                                                  "NONZERO (preserve; no plain ISO rebuild)");
+        }
+    }else if(pvd && declared_sectors==physical_sectors &&
+             size%sector_size==0)
+        report.append("ISO trailer: none; PVD matches physical size");
+    else if(pvd)
+        report.append("ISO trailer: unsupported declared/physical size layout");
     bool candidate_anchor=false;
     const std::uint64_t sectors=size/sector_size;
     if(sectors>256) {
-        std::array<std::uint64_t,3> positions={
-            256,sectors-1,sectors-256
-        };
+        std::vector<std::uint64_t> positions{256,sectors-1,sectors-256};
+        if(declared_sectors>256 && declared_sectors<=sectors) {
+            positions.push_back(declared_sectors-1);
+            positions.push_back(declared_sectors-256);
+        }
+        std::sort(positions.begin(),positions.end());
+        positions.erase(std::unique(positions.begin(),positions.end()),positions.end());
         for(const auto lba:positions) {
             if(!read_at(input,size,lba*sector_size,block))continue;
             if(le16(block.data())==2 && le32(block.data()+12)==lba) {
@@ -203,18 +253,36 @@ OpticalProbeInfo probe_optical(Report& report,
         report.append_kv("El Torito catalog validation",
                          boot_catalog_valid(block)?"checksum and signature OK":
                                                    "invalid or non-standard");
+    report.append("ISO-WCX EDIT ROUTE (preflight hint, not a write authorization)");
+    if(!pvd && (nsr02||nsr03||candidate_anchor))
+        report.append("- UDF-only: limited Type-1 native writer may be available after strict validation");
+    else if(!pvd)
+        report.append("- Unsupported optical layout or insufficient ISO9660 metadata for editing");
+    else if(nonzero)
+        report.append("- Protected HYBRID system area: ordinary ISO rebuild refused; use specialized boot-preserving writer");
+    else if(nsr02||nsr03||candidate_anchor)
+        report.append(el_torito?
+            "- Bootable ISO/UDF Bridge: universal guarded UDF Type-1 writer may allow UDF-only F5/F7/Delete/resize if bitmap, FID, FE and complete boot ranges validate":
+            "- ISO/UDF Bridge: guarded UDF Type-1 edits and exact-length payload replacement may work after validation");
+    else
+        report.append(el_torito?
+            "- Plain ISO/Joliet + El Torito: rebuild may work if catalog/boot extents, names and trees validate":
+            "- Plain ISO/Joliet: add/delete/replace via PackFilesW/DeleteFilesW may work after strict validation");
+    report.append("- Final capability is decided by native writer; Rock Ridge/multi-extent or mismatched descriptors may still be refused");
     report.append("WRITE SAFETY (diagnostic only)");
     if(nonzero)report.append("- Nonzero system area: ISO directory rebuilding may be blocked");
     if(el_torito)report.append("- El Torito: boot catalog and boot image locations must be preserved");
     if(nsr02||nsr03||candidate_anchor)
         report.append("- UDF detected: modifying ISO9660 alone may damage UDF metadata");
     if(pvd && (nsr02||nsr03||candidate_anchor)) {
-        report.append("- ISO/UDF Bridge candidate: adding/deleting/resizing "
-                      "can require coordinated changes to both namespaces; "
-                      "the current editor does not support these operations");
+        report.append("- ISO/UDF Bridge: ISO-visible files and paths cannot be "
+                      "added/deleted/resized without synchronized ISO/UDF metadata");
+        report.append("- UDF-only paths: a native Type-1 writer may change UDF "
+                      "metadata if the source bitmap and allocation schema validate");
         if(el_torito)
-            report.append("- Bootable ISO/UDF Bridge: the current editor also "
-                          "rejects equal-size in-place replacement");
+            report.append("- Bootable ISO/UDF Bridge: all El Torito BIOS/UEFI "
+                          "byte ranges and ISO namespace remain immutable; "
+                          "unknown/unbounded ranges reject writes");
     }
     report.append("- This is NOT a write-permission check. Readability does not imply safe deletion");
     return {pvd,joliet,nsr02||nsr03||candidate_anchor,el_torito};
@@ -281,7 +349,53 @@ std::string build_image_structure_report(const std::filesystem::path& image){
     report.append("Image payloads copied: no");
     report.append("Image modified: no");
     report.append("");
+#ifdef _WIN32
+    // DISM /Get-WimInfo style summary for an explicitly exported report.
+    // This is intentionally not called on normal TC directory open:
+    // loading every WIM index merely to render metadata can be expensive.
+    wim_detail::Header wim{};
+    if(wim_detail::read_header(image,wim)) {
+        report.append("WIM IMAGE INDEXES (native Windows Imaging API)");
+        try {
+            const auto summary=build_wim_index_summary(image);
+            std::istringstream lines(summary);
+            std::string line;
+            while(std::getline(lines,line))report.append(line);
+        }catch(const std::exception& ex) {
+            report.append("WIM index summary unavailable: "+
+                          safe_text(ex.what()));
+        }
+        report.append("");
+    }
+#endif
     const auto optical=probe_optical(report,image,bytes);
+    if(disc.format().rfind("UDF",0)==0) {
+        report.append("");
+        report.append("UDF NATIVE EDIT PREFLIGHT (READ ONLY)");
+        const auto capability=inspect_udf_edit(image,optical.iso_primary);
+        report.append_kv("Strict UDF Type-1 writer parser",
+                         capability.parser_compatible?"compatible":"unsupported");
+        if(capability.parser_compatible) {
+            report.append_kv("Validated UDF free-space bitmap",
+                             capability.allocation_bitmap?"present":"absent");
+            report.append(capability.allocation_bitmap?
+                "- New file/F7: allocator available, subject to free space, "
+                "per-path checks and boot/ISO overlap verification":
+                "- New file/F7: disabled without a validated allocation bitmap");
+            report.append("- Delete/replace: may be available after per-file "
+                          "and ISO/El Torito protected-range validation");
+        } else {
+            report.append_kv("UDF Type-1 restriction",
+                             safe_text(capability.reason));
+            report.append("- Native metadata edits remain disabled; "
+                          "payload-only same-size replacement may still be eligible");
+        }
+        if(optical.iso_primary)
+            report.append("- ISO/UDF Bridge: the ISO9660 namespace and "
+                          "El Torito boot regions must pass an independent "
+                          "byte-for-byte staged-image verification");
+        report.append("- This is a diagnostic, NOT permission to modify the image");
+    }
     report.append("");
     report.append("DIRECTORY TREE (selected by Total Commander; metadata only; UTF-8)");
     append_tree(report,disc.items());
