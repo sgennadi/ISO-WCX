@@ -5,6 +5,13 @@
 #include <string>
 #include <string_view>
 
+#ifndef ISO_WCX_RC_NUMBER
+#define ISO_WCX_RC_NUMBER 0
+#endif
+#ifndef ISO_WCX_BUILD_NUMBER
+#define ISO_WCX_BUILD_NUMBER 0
+#endif
+
 namespace iso_wcx::universal_diagnostics {
 
 // The shared core is linked into ISO-WCX.wcx and ISO-WCX.wcx64.
@@ -13,9 +20,12 @@ namespace iso_wcx::universal_diagnostics {
 bool capture_local(Category category, int major, int minor, int patch,
                    std::wstring& status) noexcept {
     try {
-        const auto version = std::to_string(major) + "." +
-                             std::to_string(minor) + "." +
-                             std::to_string(patch);
+        auto version = std::to_string(major) + "." +
+                       std::to_string(minor) + "." +
+                       std::to_string(patch);
+        if(ISO_WCX_RC_NUMBER>0)
+            version+=" RC"+std::to_string(ISO_WCX_RC_NUMBER)+
+                     " B"+std::to_string(ISO_WCX_BUILD_NUMBER);
         const auto saved = ::universal_diagnostics::capture(
             "sgennadi/ISO-WCX", component(category), version,
             "USER_REPORT", "MANUAL",
