@@ -90,6 +90,7 @@ std::string stage_name(std::wstring_view description) {
     if(s.find(L"capture")!=s.npos)return "capture";
     if(s.find(L"verify")!=s.npos||s.find(L"validat")!=s.npos)return "verify";
     if(s.find(L"commit")!=s.npos)return "commit";
+    if(s.find(L"mkdir")!=s.npos||s.find(L"directory")!=s.npos)return "mkdir";
     if(s.find(L"delete")!=s.npos||s.find(L"remove")!=s.npos)return "delete";
     if(s.find(L"open")!=s.npos)return "open";
     if(s.find(L"write")!=s.npos||s.find(L"pack")!=s.npos)return "write";
@@ -252,6 +253,12 @@ Operation::Operation(const char* action,const std::filesystem::path& image,
 }
 Operation::~Operation() noexcept {
     if(!completed_)complete(13,"interrupted");
+}
+void Operation::set_action(const char* action) noexcept {
+    if(!completed_ && action && std::string_view(action)=="mkdir") {
+        action_="mkdir";
+        append(base_json("route",action_,format_,id_)+"}");
+    }
 }
 void Operation::stage(std::wstring_view value,unsigned pct) noexcept {
     try {
