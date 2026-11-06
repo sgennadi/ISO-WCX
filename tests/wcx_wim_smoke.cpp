@@ -343,8 +343,36 @@ int wmain(int argc,wchar_t** argv) {
            !content(L"image1\\HELLO.TXT",data)||data!="replacement"||
            !content(L"image2\\SECOND.TXT",data)||data!="second-image")
             return 36;
-        wchar_t delete_list[]=L"image1\\ADDED.TXT\0\0";
-        if(erase(packed.data(),delete_list)||content(L"image1\\ADDED.TXT",data))return 23;
+        // Real Total Commander passes selected directory entries to
+        // DeleteFilesW with the trailing \\*.* marker. The previous WCX
+        // adapter only stripped \\* and returned WCX error 24.
+        wchar_t delete_list[]=L"image1\\ADDED.TXT\0image1\\NEW_EMPTY_FOLDER\\*.*\0\0";
+        const int deleted_rc=erase(packed.data(),delete_list);
+        if(deleted_rc!=0){
+            std::cerr<<"WIM DeleteFilesW file+directory returned "<<deleted_rc<<"\n";
+            return 23;
+        }
+        if(content(L"image1\\ADDED.TXT",data))return 23;
+        auto entry_exists=[&](std::wstring_view wanted) {
+            OpenW a{};a.ArcName=packed.data();
+            const HANDLE h=open(&a);
+            if(!h)return true; // A failed reopen is not a passed test.
+            for(;;){
+                HeaderExW head{};
+                const int rc=read(h,&head);
+                if(rc==10){close(h);return false;}
+                if(rc){close(h);return true;}
+                if(std::wstring_view(head.FileName)==wanted){close(h);return true;}
+                if(process(h,0,nullptr,nullptr)){close(h);return true;}
+            }
+        };
+        if(entry_exists(L"image1\\NEW_EMPTY_FOLDER"))return 37;
+        // Reject arbitrary patterns; only TC's exact directory marker
+        // is allowed. Failed deletion must not mutate the WIM.
+        wchar_t arbitrary_wildcard[]=L"image1\\*.TXT\0\0";
+        const auto before_wildcard=load(packed);
+        if(erase(packed.data(),arbitrary_wildcard)==0 ||
+           load(packed)!=before_wildcard)return 39;
         // A rejected traversal must not change one byte of the original.
         const auto original_bytes=load(original);wchar_t bad_list[]=L"..\\escape\0\0";
         if(pack(packed.data(),sub.data(),src.data(),bad_list,0)==0||load(original)!=original_bytes)return 24;
