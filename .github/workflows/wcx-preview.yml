@@ -68,6 +68,9 @@ jobs:
       - name: Verify safe WCX association repair
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_repair_wcx.ps1
+      - name: Test offline F5 association repair (222/158 to 159)
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_f5_repair.ps1
       - name: Verify Windows RC version resource and installer identity
         shell: pwsh
         run: pwsh -NoProfile -File tests/test_rc_version.ps1 -Arch ${{ matrix.arch }} -ExpectedBuild ${{ github.run_number }} -ExpectedRC 3
@@ -144,10 +147,11 @@ jobs:
           # Stable pluginst.inf is immutable; render RC3 metadata only in the preview ZIP.
           python3 -c 'from pathlib import Path; s=Path("pluginst-preview.inf.in").read_text(); s=s.replace("@ISO_WCX_VERSION_DISPLAY@", "v0.21.1 RC3 (Build ${{ github.run_number }})").replace("@ISO_WCX_VERSION_INI@", "0.21.1"); Path("package/pluginst.inf").write_text(s)'
           grep -Fxq 'version=0.21.1' package/pluginst.inf
-          cp PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt package/
-          (cd package && zip -9 "../ISO-WCX-v0.21.1-RC3-B${{ github.run_number }}.zip" pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX.wcx ISO-WCX.wcx64)
+          cp PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-F5-Repair.ps1 package/
+          (cd package && zip -9 "../ISO-WCX-v0.21.1-RC3-B${{ github.run_number }}.zip" pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-F5-Repair.ps1 ISO-WCX.wcx ISO-WCX.wcx64)
           unzip -t "ISO-WCX-v0.21.1-RC3-B${{ github.run_number }}.zip"
           unzip -Z1 "ISO-WCX-v0.21.1-RC3-B${{ github.run_number }}.zip" | grep -qx 'THIRD_PARTY_NOTICES.txt'
+          unzip -Z1 "ISO-WCX-v0.21.1-RC3-B${{ github.run_number }}.zip" | grep -qx 'ISO-WCX-F5-Repair.ps1'
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v7
         with:
