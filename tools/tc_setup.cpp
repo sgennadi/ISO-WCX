@@ -371,8 +371,6 @@ std::wstring run(const Options& opts) {
             if (!same_path(fs::path(resolved_old_path(raw, tc_dir)), fs::path(new_path)))
                 reason = L"ISO-WCX path migration";
             else {
-                const bool readonly=std::wstring_view(ext)==L"esd" ||
-                                    std::wstring_view(ext)==L"swm";
                 const unsigned mask=iso_wcx::tc_association::flags(existing);
                 // Verified on a live Total Commander 11.58.1 host:
                 // 159 reaches PackFilesW, while 158 was refused before
@@ -384,8 +382,9 @@ std::wstring run(const Options& opts) {
                                          std::wstring_view(ext)==L"wim";
                 if(host_writable && !iso_wcx::tc_association::host_tested_f5(mask))
                     reason=L"refresh ISO-WCX host F5 cache to 159";
-                else if(!readonly && !iso_wcx::tc_association::can_edit(mask))
-                    reason=L"existing ISO-WCX registration missing MODIFY/DELETE";
+                // Read-only CUE/CCD/NRG/MDS/CSO/ZSO/ESD/SWM registrations
+                // deliberately use mask 192. Never treat their missing
+                // MODIFY/DELETE bits as a defect or rewrite them repeatedly.
             }
         } else if (legacy_name(raw)) {
             const auto legacy = resolved_old_path(raw, tc_dir);
