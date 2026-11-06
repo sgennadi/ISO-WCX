@@ -378,10 +378,37 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
 }
 }
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
-    try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(archive,sub?sub:L"",source,edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
+    try {
+        if(!archive||!source) {
+            // If the TC host enters WCX with incomplete arguments, do not
+            // silently return 24: this must appear in the local operation log.
+            iso_wcx::diagnostics::Operation event(
+                "pack",archive?std::filesystem::path(archive):std::filesystem::path{});
+            event.complete(E_NOT_SUPPORTED,"missing archive or source");
+            return E_NOT_SUPPORTED;
+        }
+        return do_edit(archive,sub?sub:L"",source,edit_list(list),false,flags);
+    }catch(...) {
+        iso_wcx::diagnostics::Operation event(
+            "pack",archive?std::filesystem::path(archive):std::filesystem::path{});
+        event.complete(E_BAD_ARCHIVE,"unparseable WCX pack arguments");
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* list,int flags) {
-    try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),from_bytes(sub,CP_ACP),from_bytes(source,CP_ACP),edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
+    try {
+        if(!archive||!source) {
+            iso_wcx::diagnostics::Operation event("pack",{});
+            event.complete(E_NOT_SUPPORTED,"missing ANSI archive or source");
+            return E_NOT_SUPPORTED;
+        }
+        return do_edit(from_bytes(archive,CP_ACP),from_bytes(sub,CP_ACP),
+                       from_bytes(source,CP_ACP),edit_list(list),false,flags);
+    }catch(...) {
+        iso_wcx::diagnostics::Operation event("pack",{});
+        event.complete(E_BAD_ARCHIVE,"unparseable ANSI pack arguments");
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
     try{if(!archive)return E_NOT_SUPPORTED;return do_edit(archive,L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
