@@ -64,7 +64,8 @@ try {
     Assert-Equal 1 $bak.Count 'Expected one backup'
     Assert-Bytes $original ([IO.File]::ReadAllBytes($bak[0].FullName)) 'Backup did not preserve original bytes'
     & $repair -IniPath $ini -Apply | Out-Null
-    Assert-Equal 1 @(Get-ChildItem -Path $root -Filter '*.iso-wcx-f5-*.bak').Count 'Repeated repair wrote backup'
+    $backupCount = @(Get-ChildItem -Path $root -Filter '*.iso-wcx-f5-*.bak').Count
+    Assert-Equal 1 $backupCount 'Repeated repair wrote backup'
     Assert-Bytes $now ([IO.File]::ReadAllBytes($ini)) 'Repeated repair changed already normalized INI'
     # A different plugin must never be reassigned.
     $other = Join-Path $root 'external.ini'
