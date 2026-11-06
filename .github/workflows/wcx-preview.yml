@@ -53,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Configure Visual Studio 2026 with experimental C++26
-        run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_RC_NUMBER=2 -DISO_WCX_BUILD_NUMBER=${{ github.run_number }}
+        run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_RC_NUMBER=2 -DISO_WCX_BUILD_NUMBER=${{ github.run_number }} -DISO_WCX_BUILD_DEV_TOOLS=ON
       - name: Require VS2026 and C++26 configuration
         shell: pwsh
         run: |
