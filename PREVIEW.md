@@ -12,6 +12,43 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC3 — WIM F5 host dispatch repair (2026-11-06)
+
+The operator confirmed that RC2 `GetPackerCaps=222` and the live
+`wincmd.ini` used `wim=222`, but **F5 did not enter `PackFilesW`**;
+deleting a WIM folder succeeded. This is a TC host-dispatch symptom,
+not proof that WIMGAPI failed. Separate real Total Commander 11.58.1
+tests from PR #68 previously showed `158` rejected before the callback
+and `159` successfully invoked the writer.
+
+**RC3 restores `GetPackerCaps=159`**, specifically for a host-tested
+existing-image F5 path, and deliberately removes `BY_CONTENT=64`.
+This adds the `NEW=1` capability that Total Commander 11.58.1
+used for dispatch, but `PackFilesW` still rejects creating an
+actual new ISO/WIM archive. Real user-host confirmation is pending.
+
+The *already cached* `wim=222` / `iso=222` / `udf=222`
+registrations need to change to `159`, even after replacing the DLL.
+The optional `ISO-WCX-F5-Repair.ps1` in the same ZIP:
+1. Runs in **read-only dry-run mode** by default.
+2. When explicitly run with `-Apply` after closing **all** TC
+   windows, changes only these three ISO-WCX associations, preserves
+   other WCXs and all INI encoding/line endings, creates a backup,
+   and invalidates the derived `[PackerPlugins64]` checksum.
+3. Refuses redirected or ambiguous INI layouts rather than guessing.
+   If TC uses `/I=other.ini`, pass that INI via `-IniPath`.
+4. A restart of Total Commander is required.
+
+The repair is **not executed by pluginst.inf**; Total Commander does not
+provide a safe documented post-install script hook for WCX. No EXE,
+third-party DLL, background service or automatic INI mutation is added.
+For an alternate manual solution, remove/re-add the existing WIM WCX
+association after the updated DLLs are installed and TC is restarted.
+
+Report the result of F5 using a disposable `boot.wim\\image1`,
+then separately repeat for `install.wim` and ISO/UDF.
+No production WIM should be edited until the issue is field-resolved.
+
 ## RC2: investigate F5/Delete regression after installation (2026-11-06)
 
 The installed plugin advertises `GetPackerCaps=222` and the Total
@@ -39,17 +76,17 @@ the original F5 regression is resolved.
 
 The **published Stable release remains v0.21.0**. Every Windows Preview
 artifact produced by `.github/workflows/wcx-preview.yml` now identifies
-itself as **v0.21.1 RC2 (Build N)**, where `N` is the unique GitHub
+itself as **v0.21.1 RC3 (Build N)**, where `N` is the unique GitHub
 Actions workflow run number. The plugin Settings title, installed-version
 label and Windows DLL Version Information share this identity, and the
 auto-installable Total Commander `pluginst.inf` describes the same RC
 and build. Its numeric `version=0.21.1` field preserves standard TC
 installer compatibility. The ZIP is named
-`ISO-WCX-v0.21.1-RC2-B<N>.zip` and includes **only** the two
+`ISO-WCX-v0.21.1-RC3-B<N>.zip` and includes **only** the two
 architecture-specific WCX binaries and the normal installation notes.
 
 CMake defaults to the Stable identity for local/release builds;
-passing `-DISO_WCX_RC_NUMBER=2 -DISO_WCX_BUILD_NUMBER=<N>` produces an
+passing `-DISO_WCX_RC_NUMBER=3 -DISO_WCX_BUILD_NUMBER=<N>` produces an
 RC-labelled build without editing Stable CMake/release metadata. Later
 RCs increment the RC number deliberately, while repeated CI builds
 of the same RC receive a different build number. The updater
