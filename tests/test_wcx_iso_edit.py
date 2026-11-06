@@ -3,6 +3,7 @@
 The test runs on Windows x64 and Win32; Python bitness is irrelevant.
 It creates disposable ISO9660/Joliet fixtures, not boot or customer media.
 """
+import json
 import os
 import pathlib
 import subprocess
@@ -26,7 +27,12 @@ def main(plugin, runner):
 
         def edit(operation, name="EDIT.TXT"):
             command = [runner, plugin, str(image), operation, str(source), name]
-            result = subprocess.run(command, capture_output=True, text=True)
+            # Keep all test diagnostics in the disposable fixture folder.
+            # Production writes to the normal LOCALAPPDATA log directory.
+            environment = dict(os.environ)
+            environment["LOCALAPPDATA"] = str(root)
+            result = subprocess.run(
+                command, capture_output=True, text=True, env=environment)
             assert result.returncode == 0, (
                 "Cannot invoke native WCX test runner",
                 result.returncode, result.stdout, result.stderr)
@@ -35,7 +41,7 @@ def main(plugin, runner):
             except ValueError as error:
                 raise AssertionError(("Invalid WCX result", result.stdout, result.stderr)) from error
             if rc != 0:
-                logfile = pathlib.Path(os.environ.get("LOCALAPPDATA", root)) / "ISO-WCX" / "Logs" / "edit-errors.log"
+                logfile = root / "ISO-WCX" / "Logs" / "edit-errors.log"
                 if logfile.exists():
                     print("Last WCX edit failures:", "\n".join(logfile.read_text(errors="replace").splitlines()[-8:]),
                           file=sys.stderr)
@@ -110,7 +116,29 @@ def main(plugin, runner):
         assert edit("pack", "NEWFILE.TXT") != 0
         assert image.read_bytes() == original
 
-    print("PASS: WCX API ISO add/replace/delete + bootable ISO/UDF bitmap-backed F5/Delete and rollback")
+        # Every invoked WCX edit must generate exactly one start/completion
+        # pair with a result, format, build, and duration. Never send paths.
+        log = root / "ISO-WCX" / "Logs" / "operations.jsonl"
+        assert log.exists(), "Per-operation log missing"
+        events = [json.loads(line) for line in log.read_text(
+            encoding="utf-8").splitlines()]
+        completed = [item for item in events
+                     if item.get("event") == "complete"]
+        assert len(completed) >= 8, f"Missing WCX operation results: {completed}"
+        assert any(item["action"] == "delete" and item["code"] == 0
+                   for item in completed)
+        assert any(item["action"] == "pack" and item["code"] != 0
+                   for item in completed)
+        assert all(item["format"] == "iso" and
+                   item["elapsed_ms"] >= 0 and
+                   item["reason"] and item["build"] for item in completed)
+        text = log.read_text(encoding="utf-8")
+        assert str(image) not in text
+        assert str(source) not in text
+        assert "EDIT.TXT" not in text
+        assert "NEWFILE.TXT" not in text
+
+    print("PASS: WCX add/replace/delete and private per-operation diagnostics")
 
 
 if __name__ == "__main__":
