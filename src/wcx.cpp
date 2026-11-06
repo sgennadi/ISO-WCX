@@ -394,7 +394,7 @@ WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
 }
 WCX_EXPORT int __stdcall GetPackerCaps() {
     iso_wcx::schedule_update_check();
-    return static_cast<int>(iso_wcx::tc_association::reported_caps); // 222; F5 + Delete
+    return static_cast<int>(iso_wcx::tc_association::reported_caps); // 159; real TC host F5 verified
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
     iso_wcx::schedule_update_check();
