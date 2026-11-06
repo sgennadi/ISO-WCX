@@ -10,14 +10,15 @@ spec=importlib.util.spec_from_file_location("iso_wcx_diagnostics",script)
 module=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-def issue(*, count=3, confirmed=False, reason="verification_failed", code=13, title=True):
+def issue(*, count=3, confirmed=False, reason="verification_failed",
+          code=13, title=True, fmt="iso", action="pack"):
     return {
         "title":("ISO-WCX Diagnostics: 0.21.1 RC1" if title else "Unrelated issue"),
         "created_at":datetime.now(timezone.utc).isoformat(),
         "body":("# ISO-WCX Diagnostic Summary\n\n"
                 "| Build | Format | Action | WCX code | Category | Count |\n"
                 "|---|---|---|---:|---|---:|\n"
-                f"| 0.21.1 RC1 B25 | iso | pack | {code} | {reason} | {count} |\n"),
+                f"| 0.21.1 RC1 B25 | {fmt} | {action} | {code} | {reason} | {count} |\n"),
         "labels":([{"name":module.REGRESSION_LABEL}] if confirmed else []),
     }
 
@@ -42,6 +43,22 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(result["critical_confirmed"],[])
         doc=module.markdown(result)
         self.assertNotIn("../../",doc)
+    def test_user_reported_wim_delete_twice_is_visible_but_nonblocking(self):
+        rows=[issue(count=2,code=24,reason="unsupported_layout",
+                    fmt="wim",action="delete")]
+        summary=module.analyze(rows)
+        self.assertEqual(summary["operation_results"],2)
+        self.assertEqual(len(summary["needs_review"]),1)
+        self.assertEqual(summary["critical_confirmed"],[])
+        self.assertIn("WIM Delete issue detected",module.markdown(summary))
+
+    def test_new_wim_categories_are_accepted_and_never_leak_paths(self):
+        rows=[issue(count=3,code=24,reason="wim_last_index",
+                    fmt="wim",action="delete")]
+        result=module.analyze(rows)
+        self.assertEqual(result["groups"][0]["reason"],"wim_last_index")
+        self.assertEqual(result["critical_confirmed"],[])
+
     def test_prs_are_not_considered_issues(self):
         row=issue(confirmed=True)
         row["pull_request"]={"url":"https://github.com/example"}
