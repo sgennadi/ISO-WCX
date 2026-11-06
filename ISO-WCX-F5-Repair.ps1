@@ -115,12 +115,41 @@ if (-not $Apply) {
 $running = @(Get-Process -Name TOTALCMD, TOTALCMD64 -ErrorAction SilentlyContinue)
 if ($running.Count -gt 0) { throw 'Close ALL Total Commander windows before applying this repair.' }
 
+# Invalidate only the derived Total Commander x64 extension cache
+# checksum, never a $checksum$ in an unrelated INI section. Fail closed on
+# a redirected 64-bit section rather than leaving a stale hidden cache.
+$section = ''
+for ($i=0; $i -lt $lines.Count; ++$i) {
+    $body = [string]$lines[$i]
+    $head = [regex]::Match($body.Trim(), '^\[([^\]]+)\]
+$bom = $decoded.Encoding.GetPreamble()
+$bytes = [byte[]]::new($bom.Length + $payload.Length)
+[Array]::Copy($bom, 0, $bytes, 0, $bom.Length)
+[Array]::Copy($payload, 0, $bytes, $bom.Length, $payload.Length)
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+$backup = "$ini.iso-wcx-f5-$stamp-$([guid]::NewGuid().ToString('N').Substring(0,6)).bak"
+$temporary = "$ini.iso-wcx-f5-$([guid]::NewGuid().ToString('N')).tmp"
+try {
+    [IO.File]::WriteAllBytes($temporary, $bytes)
+    # Atomic replacement on the same volume, with original backup bytes.
+    [IO.File]::Replace($temporary, $ini, $backup, $true)
+    Write-Host "SUCCESS: F5 capability associations are now 159."
+    Write-Host "Backup: $backup"
+    Write-Host 'Restart Total Commander to rebuild its x64 WCX cache.'
+} finally {
+    if (Test-Path -LiteralPath $temporary) {
+        Remove-Item -LiteralPath $temporary -Force
+    }
+}
+)
+    if ($head.Success) { $section = $head.Groups[1].Value.Trim().ToLowerInvariant(); continue }
+    if ($section -ne 'packerplugins64') { continue }
+    if ($body -match '^\s*RedirectSection\s*=') {
+        throw 'PackerPlugins64 is redirected: review its cache location first.'
+    }
+    if ($body -match '^\s*\$checksum\$\s*=') { $lines[$i] = '' }
+}
 $updatedText = [string]::Concat($lines)
-# Windows Total Commander uses a derived 64-bit cache checksum. Remove only
-# $checksum$ in the original file to request fresh WCX capability discovery.
-$updatedText = [regex]::Replace($updatedText,
-    '(?im)^(\s*\$checksum\$\s*=\s*[^\r\n]*)(\r\n|\r|\n|$)', '',
-    [Text.RegularExpressions.RegexOptions]::None)
 $payload = $decoded.Encoding.GetBytes($updatedText)
 $bom = $decoded.Encoding.GetPreamble()
 $bytes = [byte[]]::new($bom.Length + $payload.Length)
