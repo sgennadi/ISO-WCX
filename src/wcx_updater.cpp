@@ -704,8 +704,8 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
              L"Сохранить в общую очередь диагностики..."),
              BS_PUSHBUTTON|WS_TABSTOP,id_universal_save,12,211,340,26);
         add_control(dlg,L"BUTTON",tr(state->russian,
-             L"Check WCX associations / F5 (158, 159, 222)...",
-             L"Проверить привязки WCX / F5 (158, 159, 222)..."),
+             L"Check WCX F5 registration (159)...",
+             L"Проверить регистрацию F5 (159)..."),
              BS_PUSHBUTTON|WS_TABSTOP,id_tc_assoc_check,12,247,340,26);
         CheckDlgButton(dlg,id_never,
               state->automatic?BST_UNCHECKED:BST_CHECKED);
