@@ -328,7 +328,16 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
         if(!std::filesystem::exists(image))return finish(E_NOT_SUPPORTED,"archive missing");
         std::vector<iso_wcx::ArchiveChange> changes;
         for(auto name:names){
-            if(remove && (name.ends_with(L"\\*")||name.ends_with(L"/*")))name.resize(name.size()-2);
+            if(remove) {
+                // TC WCX API uses Folder\\*.* for recursive directory
+                // deletion, not only Folder\\*. Strip this transport suffix
+                // before validating the canonical archive entry. Never
+                // interpret arbitrary wildcard patterns as delete requests.
+                if(name.ends_with(L"\\*.*") || name.ends_with(L"/*.*"))
+                    name.resize(name.size()-4);
+                else if(name.ends_with(L"\\*") || name.ends_with(L"/*"))
+                    name.resize(name.size()-2);
+            }
             auto relative=iso_wcx::edit_path(edit_utf8(name));
             iso_wcx::ArchiveChange c;c.path=subpath.empty()?relative:iso_wcx::edit_path(iso_wcx::edit_path(edit_utf8(subpath))+"/"+relative);c.remove=remove;
             if(!remove){c.source=std::filesystem::path(source)/std::filesystem::u8path(relative);auto status=std::filesystem::symlink_status(c.source);
