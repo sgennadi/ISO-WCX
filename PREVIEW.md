@@ -12,26 +12,49 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC2: investigate F5/Delete regression after installation (2026-11-06)
+
+The installed plugin advertises `GetPackerCaps=222` and the Total
+Commander registration can legitimately contain `158`, `159` or
+`222` for supported writable formats. **158 and 159 both allow
+modification and deletion**, whereas the legacy optional test-helper
+was incorrectly writing `192`, which has neither capability.
+The test-only helper now corrects stale `192` registrations even
+when the WCX path already matches, preserving valid `158`/`159`.
+
+The RC2 production plugin has a **read-only Check WCX associations / F5**
+button in Settings. It creates a local report at
+`%LOCALAPPDATA%\\ISO-WCX\\Reports\\ISO-WCX-TC-Associations.txt`,
+covering `wim`, `iso`, `udf`, `esd`, `swm`, effective INI
+redirects, registered 32-bit WCX and companion 64-bit WCX paths, and
+the derived `PackerPlugins64` extension cache. No INI editing occurs
+while Total Commander is open; the installed package remains one ZIP
+containing x86/x64 WCX libraries only.
+
+See [registration diagnosis and exact masks](docs/tc-registration-audit.md).
+A CI build and a real user WIM reproduction are required before claiming
+the original F5 regression is resolved.
+
 ## RC build identity (current PR #69)
 
 The **published Stable release remains v0.21.0**. Every Windows Preview
 artifact produced by `.github/workflows/wcx-preview.yml` now identifies
-itself as **v0.21.1 RC1 (Build N)**, where `N` is the unique GitHub
+itself as **v0.21.1 RC2 (Build N)**, where `N` is the unique GitHub
 Actions workflow run number. The plugin Settings title, installed-version
 label and Windows DLL Version Information share this identity, and the
 auto-installable Total Commander `pluginst.inf` describes the same RC
 and build. Its numeric `version=0.21.1` field preserves standard TC
 installer compatibility. The ZIP is named
-`ISO-WCX-v0.21.1-RC1-B<N>.zip` and includes **only** the two
+`ISO-WCX-v0.21.1-RC2-B<N>.zip` and includes **only** the two
 architecture-specific WCX binaries and the normal installation notes.
 
 CMake defaults to the Stable identity for local/release builds;
-passing `-DISO_WCX_RC_NUMBER=1 -DISO_WCX_BUILD_NUMBER=<N>` produces an
+passing `-DISO_WCX_RC_NUMBER=2 -DISO_WCX_BUILD_NUMBER=<N>` produces an
 RC-labelled build without editing Stable CMake/release metadata. Later
 RCs increment the RC number deliberately, while repeated CI builds
 of the same RC receive a different build number. The updater
 continues checking official published Stable releases and also offers
-Stable v0.21.1 to RC1 users when it is published.
+Stable v0.21.1 to RC2 users when it is published.
 
 ## DISM GUI-derived WIM improvements (integrated into native WCX)
 
