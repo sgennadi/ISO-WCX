@@ -221,6 +221,10 @@ if(BUILD_TESTING)
   add_executable(wim_parts_tests tests/wim_parts.cpp)
   target_include_directories(wim_parts_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME wim_split_parts COMMAND wim_parts_tests)
+  add_executable(tc_association_flags_tests tests/tc_association_flags.cpp)
+  target_include_directories(tc_association_flags_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME tc_association_158_159_192_222
+           COMMAND tc_association_flags_tests)
   # Read-only WIM resource-table prerequisite for future metadata-only edits.
   # This does not enable any new on-disk WIM writer or runtime dependency.
   add_executable(wim_fast_edit_probe_tests tests/wim_fast_edit_probe.cpp)
@@ -410,6 +414,7 @@ if(WIN32)
     # It is never required or packaged with the WCX plugin.
     if(ISO_WCX_BUILD_DEV_TOOLS)
       add_executable(ISO-WCX-Setup WIN32 tools/tc_setup.cpp)
+    target_include_directories(ISO-WCX-Setup PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_compile_features(ISO-WCX-Setup PRIVATE cxx_std_20)
     target_compile_definitions(ISO-WCX-Setup PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(ISO-WCX-Setup PRIVATE shell32 advapi32)
