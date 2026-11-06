@@ -121,15 +121,18 @@ std::filesystem::path destination(const iso_wcx::Item& item,const wchar_t* dest_
 }
 int do_process(State* state,int operation,const wchar_t* dest_path,const wchar_t* dest_name) {
     if(!state || state->cursor>=state->disc.items().size())return E_END_ARCHIVE;
-    const char* action=operation==PK_SKIP?"skip":operation==PK_TEST?"test":
+    // TC issues PK_SKIP for every enumerated directory entry. Logging each
+    // skip would slow down 100k-file install.wim listings and flood the log.
+    // CloseArchive records one summary of the enumerated item count instead.
+    const auto pos=state->cursor++;
+    if(operation==PK_SKIP)return 0;
+    const char* action=operation==PK_TEST?"test":
                        operation==PK_EXTRACT?"extract":"other";
     iso_wcx::diagnostics::Operation diagnostic(action,state->archive_path,1);
     const auto finish=[&](int code,const char* reason=""){
         diagnostic.complete(code,reason);
         return code;
     };
-    auto pos=state->cursor++;
-    if(operation==PK_SKIP)return finish(0);
     if(operation!=PK_TEST && operation!=PK_EXTRACT)return finish(E_BAD_ARCHIVE,"invalid operation");
     const auto& item=state->disc.items()[pos];
     try {
@@ -162,15 +165,18 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
     if(!d->ArcName)return nullptr;
-    iso_wcx::diagnostics::Operation diagnostic("open",std::filesystem::path(d->ArcName));
     try {
-        auto state=std::make_unique<State>(std::filesystem::path(d->ArcName));
-        d->OpenResult=0;
-        diagnostic.complete(0);
-        return reinterpret_cast<HANDLE>(state.release());
-    }catch(const std::exception& e){
-        diagnostic.complete(E_UNKNOWN_FORMAT,e.what());return nullptr;
-    }catch(...){diagnostic.complete(E_UNKNOWN_FORMAT,"unknown exception");return nullptr;}
+        const auto image=std::filesystem::path(d->ArcName);
+        iso_wcx::diagnostics::Operation diagnostic("open",image);
+        try {
+            auto state=std::make_unique<State>(image);
+            d->OpenResult=0;
+            diagnostic.complete(0);
+            return reinterpret_cast<HANDLE>(state.release());
+        }catch(const std::exception& e){
+            diagnostic.complete(E_UNKNOWN_FORMAT,e.what());return nullptr;
+        }catch(...){diagnostic.complete(E_UNKNOWN_FORMAT,"unknown exception");return nullptr;}
+    }catch(...){return nullptr;}
 }
 WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
     iso_wcx::schedule_update_check();
@@ -225,7 +231,9 @@ WCX_EXPORT int __stdcall ProcessFile(HANDLE handle,int operation,char* path,char
 WCX_EXPORT int __stdcall CloseArchive(HANDLE handle) {
     auto* state=reinterpret_cast<State*>(handle);
     if(state){
-        iso_wcx::diagnostics::Operation diagnostic("close",state->archive_path);
+        iso_wcx::diagnostics::Operation diagnostic(
+            "close",state->archive_path,
+            static_cast<unsigned>(std::min<std::size_t>(state->cursor,100000)));
         delete state;
         diagnostic.complete(0);
     }
