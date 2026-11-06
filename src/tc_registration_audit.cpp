@@ -113,9 +113,10 @@ std::filesystem::path export_tc_registration_audit() noexcept {
         std::wofstream out(report,std::ios::trunc);
         if(!out)return {};
         put(out,L"ISO-WCX | Total Commander registration diagnostics (read-only)");
-        put(out,L"Installed WCX reports GetPackerCaps=222; 158 and 159 are also writable.");
-        put(out,L"158 = modify+multiple+delete+options+search; 159 adds NEW.");
-        put(out,L"192 = content+search ONLY: F5 and Delete unavailable by registration.");
+        put(out,L"Current RC3 WCX reports GetPackerCaps=159; host-tested for existing WIM F5.");
+        put(out,L"158/222 contain MODIFY/DELETE but prior TC host testing found 158 F5 refused.");
+        put(out,L"159 adds NEW: used for host F5 dispatch; ISO-WCX cannot create new archives.");
+        put(out,L"192 lacks MODIFY/DELETE, so F5/Delete are unavailable.");
         put(out,L"Nothing is modified; close Total Commander before changing wincmd.ini.");
         put(out,L"WARNING: This private report contains file paths. Review before sharing.");
         auto ini=env(L"COMMANDER_INI");
@@ -165,8 +166,13 @@ std::filesystem::path export_tc_registration_audit() noexcept {
                                 std::wstring_view(extension)!=L"swm";
             if(editable&&!tc_association::can_edit(mask))
                 put(out,L"ERROR: WCX registration DISABLES F5/Delete (MODIFY/DELETE flags missing).");
-            else if(editable)
-                put(out,L"EDIT FLAGS: OK (F5/Delete bits present)");
+            else if(editable) {
+                put(out,L"EDIT FLAGS: MODIFY and DELETE bits are present.");
+                if(!tc_association::host_tested_f5(mask))
+                    put(out,L"WARNING: stale/unverified F5 mask; reinstall WCX to cache 159.");
+                else
+                    put(out,L"HOST F5 MASK: 159 (tested in Total Commander 11.58.1).");
+            }
             else
                 put(out,L"ESD/SWM: read-only; no F5/Delete expected.");
             if(tc_association::can_create(mask))
@@ -197,7 +203,9 @@ std::filesystem::path export_tc_registration_audit() noexcept {
                 put(out,L"WARNING: 64-bit extension cache does not list this type.");
         }
         put(out,L"");
-        put(out,L"Recommended: for writable WIM/ISO/UDF use 158 or 222, NOT 192.");
+        put(out,L"Recommended: reinstall this WCX with 159 for writable WIM/ISO/UDF.");
+        put(out,L"222 and 158 may keep MODIFY/DELETE bits but can prevent TC F5 callback.");
+        put(out,L"Restart TC after reinstall so the 64-bit capability cache is rebuilt.");
         put(out,L"No auto-edit while Total Commander is running; back up wincmd.ini first.");
         out.flush();
         return out?report:fs::path{};
