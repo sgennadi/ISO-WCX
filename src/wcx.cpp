@@ -4,6 +4,7 @@
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/operation_diagnostics.hpp"
+#include "iso_wcx/tc_association_flags.hpp"
 #include <mutex>
 #include <atomic>
 #include <type_traits>
@@ -384,7 +385,7 @@ WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
 }
 WCX_EXPORT int __stdcall GetPackerCaps() {
     iso_wcx::schedule_update_check();
-    return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT|2|4|8|16; // 16=PK_CAPS_OPTIONS
+    return static_cast<int>(iso_wcx::tc_association::reported_caps); // 222; F5 + Delete
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
     iso_wcx::schedule_update_check();
