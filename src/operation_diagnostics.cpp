@@ -10,6 +10,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
+#include <cwctype>
+#include <tuple>
 #include <fstream>
 #include <map>
 #include <mutex>
