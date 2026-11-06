@@ -14,6 +14,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "iso_wcx/tc_association_flags.hpp"
 #include <shellapi.h>
 #include <tlhelp32.h>
 #include <algorithm>
@@ -23,6 +24,7 @@
 #include <cwchar>
 #include <fstream>
 #include <cstdint>
+#include <string_view>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -368,6 +370,17 @@ std::wstring run(const Options& opts) {
         else if (installed_name(raw)) {
             if (!same_path(fs::path(resolved_old_path(raw, tc_dir)), fs::path(new_path)))
                 reason = L"ISO-WCX path migration";
+            else {
+                const bool readonly=std::wstring_view(ext)==L"esd" ||
+                                    std::wstring_view(ext)==L"swm";
+                const unsigned mask=iso_wcx::tc_association::flags(existing);
+                // Fix the already-installed ISO-WCX path as well as old paths.
+                // A stale 192 capability mask advertises no F5 or Delete.
+                // Both 158 and 159 contain the necessary MODIFY/DELETE bits;
+                // preserve them when the user explicitly chose those flags.
+                if (!readonly && !iso_wcx::tc_association::can_edit(mask))
+                    reason=L"existing ISO-WCX registration missing MODIFY/DELETE";
+            }
         } else if (legacy_name(raw)) {
             const auto legacy = resolved_old_path(raw, tc_dir);
             if (!exists_file(legacy)) reason = L"missing legacy iso.wcx";
