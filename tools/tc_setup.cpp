@@ -246,7 +246,8 @@ void validate_unique_plugin_keys(const fs::path& ini) {
     std::vector<std::wstring> seen;
     const auto is_target = [](const std::wstring& name) {
         for (const wchar_t* ext : {L"iso", L"cue", L"ccd", L"nrg",
-                                   L"mds", L"cso", L"zso"})
+                                   L"mds", L"cso", L"zso", L"udf", L"wim",
+                                   L"esd", L"swm"})
             if (name == ext) return true;
         return false;
     };
@@ -356,8 +357,9 @@ std::wstring run(const Options& opts) {
     const std::wstring new_path = (destination / L"ISO-WCX.wcx").wstring();
     std::vector<Change> updates;
     unsigned preserved = 0;
-    for (const auto& ext : std::array<const wchar_t*, 7>{
-         L"iso", L"cue", L"ccd", L"nrg", L"mds", L"cso", L"zso"}) {
+    for (const auto& ext : std::array<const wchar_t*, 11>{
+         L"iso", L"cue", L"ccd", L"nrg", L"mds", L"cso", L"zso",
+         L"udf", L"wim", L"esd", L"swm"}) {
         const std::wstring existing = profile(assoc_ini, L"PackerPlugins", ext);
         const std::wstring raw = old_path(existing);
         std::wstring reason;
@@ -374,7 +376,13 @@ std::wstring run(const Options& opts) {
             ++preserved;
             continue;
         }
-        updates.push_back({ext, L"192," + new_path, reason});
+        // 192 is read-only (BY_CONTENT|SEARCHTEXT) and breaks F5/Delete.
+        // TC must see MODIFY (2) and DELETE (8) for writable WIM/ISO.
+        // Split SWM and ESD are intentionally read-only in this plugin.
+        const bool readonly = std::wstring_view(ext)==L"esd" ||
+                              std::wstring_view(ext)==L"swm";
+        const auto capabilities = readonly?L"192,":L"222,";
+        updates.push_back({ext, std::wstring(capabilities) + new_path, reason});
     }
 
     if (!same_path(binary_source, destination))
