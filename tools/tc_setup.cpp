@@ -374,11 +374,17 @@ std::wstring run(const Options& opts) {
                 const bool readonly=std::wstring_view(ext)==L"esd" ||
                                     std::wstring_view(ext)==L"swm";
                 const unsigned mask=iso_wcx::tc_association::flags(existing);
-                // Fix the already-installed ISO-WCX path as well as old paths.
-                // A stale 192 capability mask advertises no F5 or Delete.
-                // Both 158 and 159 contain the necessary MODIFY/DELETE bits;
-                // preserve them when the user explicitly chose those flags.
-                if (!readonly && !iso_wcx::tc_association::can_edit(mask))
+                // Verified on a live Total Commander 11.58.1 host:
+                // 159 reaches PackFilesW, while 158 was refused before
+                // callback. The observed RC2 222 entry likewise produced
+                // no F5 pack event. Only normalize our own ISO/UDF/WIM
+                // registrations; never rewrite a different WCX handler.
+                const bool host_writable=std::wstring_view(ext)==L"iso" ||
+                                         std::wstring_view(ext)==L"udf" ||
+                                         std::wstring_view(ext)==L"wim";
+                if(host_writable && !iso_wcx::tc_association::host_tested_f5(mask))
+                    reason=L"refresh ISO-WCX host F5 cache to 159";
+                else if(!readonly && !iso_wcx::tc_association::can_edit(mask))
                     reason=L"existing ISO-WCX registration missing MODIFY/DELETE";
             }
         } else if (legacy_name(raw)) {
@@ -389,12 +395,13 @@ std::wstring run(const Options& opts) {
             ++preserved;
             continue;
         }
-        // 192 is read-only (BY_CONTENT|SEARCHTEXT) and breaks F5/Delete.
-        // TC must see MODIFY (2) and DELETE (8) for writable WIM/ISO.
-        // Split SWM and ESD are intentionally read-only in this plugin.
-        const bool readonly = std::wstring_view(ext)==L"esd" ||
-                              std::wstring_view(ext)==L"swm";
-        const auto capabilities = readonly?L"192,":L"222,";
+        // Real-TC validated F5 requires the cached NEW bit for our
+        // *existing* writable containers. Noneditable optical formats and
+        // split SWM/ESD remain read-only; no unrelated TC plugin is touched.
+        const bool writable=std::wstring_view(ext)==L"wim" ||
+                            std::wstring_view(ext)==L"iso" ||
+                            std::wstring_view(ext)==L"udf";
+        const auto capabilities=writable?L"159,":L"192,";
         updates.push_back({ext, std::wstring(capabilities) + new_path, reason});
     }
 
