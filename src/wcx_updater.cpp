@@ -8,6 +8,8 @@
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/image_report.hpp"
 #include "iso_wcx/update_policy.hpp"
+#include "iso_wcx/preview_update_policy.hpp"
+#include "iso_wcx/tc_registration_repair.hpp"
 #include "iso_wcx/operation_diagnostics.hpp"
 #include "iso_wcx/tc_registration_audit.hpp"
 #include "iso_wcx/universal_diagnostics.hpp"
@@ -48,9 +50,14 @@ namespace {
 constexpr wchar_t registry_path[] = L"Software\\ISO-WCX\\Updates";
 constexpr wchar_t github_api[] =
     L"https://api.github.com/repos/sgennadi/ISO-WCX/releases/latest";
+constexpr wchar_t github_preview_api[] =
+    L"https://api.github.com/repos/sgennadi/ISO-WCX/actions/workflows/"
+    L"wcx-preview.yml/runs?status=success&per_page=6";
 constexpr int id_never=4101, id_check=4102, id_install=4103, id_status=4104, id_export=4105;
 constexpr int id_diag_export=4106, id_diag_github=4107;
 constexpr int id_universal_save=4108, id_universal_type=4109, id_tc_assoc_check=4110;
+constexpr int id_channel=4111, id_stable_version=4112, id_preview_version=4113,
+              id_tc_assoc_fix=4114;
 constexpr UINT check_later=WM_APP+191;
 constexpr std::size_t max_response=64u*1024u;
 constexpr std::size_t max_package=64u*1024u*1024u;
@@ -64,8 +71,12 @@ using Internet=std::unique_ptr<std::remove_pointer_t<HINTERNET>,
 struct State {
     bool automatic=true;
     bool russian=false;
+    bool preview_channel=false;
+    bool stable_newer=false;
+    bool preview_newer=false;
+    bool stable_checked=false, preview_checked=false;
     std::wstring latest_tag;
-    bool newer=false;
+    std::optional<preview_update::Build> latest_preview;
 };
 
 void require(bool ok, const char* error) {
@@ -135,6 +146,10 @@ void write_reg(const wchar_t* name, DWORD type, const void* p, DWORD bytes) {
 void save_automatic(bool allow) {
     const DWORD value=allow?1:0;
     write_reg(L"AutoCheck",REG_DWORD,&value,sizeof(value));
+}
+void save_channel(bool preview) {
+    const DWORD channel=preview?1u:0u;
+    write_reg(L"UpdateChannel",REG_DWORD,&channel,sizeof(channel));
 }
 void save_last_check() {
     const auto time=unix_now();
@@ -255,6 +270,30 @@ std::wstring latest_release() {
     require(bool(tag),"GitHub release has no valid stable semantic version");
     return widen(*tag);
 }
+std::optional<preview_update::Build> latest_preview_release() {
+    const auto response=http_get(github_preview_api,max_response);
+    const auto runs=preview_update::runs(as_text(response));
+    // Github Actions is not a published Release: only completed successful
+    // runs with a non-expired combined installer may be selected.
+    // Avoid an unbounded scan or accidentally returning a transient artifact.
+    for(std::size_t i=0;i<std::min<std::size_t>(runs.size(),5);++i) {
+        const auto url=L"https://api.github.com/repos/sgennadi/ISO-WCX/"
+            L"actions/runs/"+std::to_wstring(runs[i].id)+L"/artifacts?per_page=25";
+        const auto data=http_get(url,max_response);
+        if(auto item=preview_update::artifact(as_text(data),runs[i]))
+            return item;
+    }
+    return std::nullopt;
+}
+bool selected_update_available(const State& state) {
+    return state.preview_channel?state.preview_newer:state.stable_newer;
+}
+std::wstring preview_artifact_page(const preview_update::Build& build) {
+    // Numeric IDs only. Never follow an arbitrary URL received from GitHub JSON.
+    return L"https://github.com/sgennadi/ISO-WCX/actions/runs/"+
+           std::to_wstring(build.run_id)+L"/artifacts/"+
+           std::to_wstring(build.artifact_id);
+}
 void write_all(HANDLE handle,const std::vector<std::uint8_t>& data) {
     std::size_t at=0;
     while(at<data.size()) {
@@ -360,68 +399,131 @@ void add_control(HWND dlg,const wchar_t* cls,const wchar_t* name,
     if(child)SendMessageW(child,WM_SETFONT,
                 reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
 }
+void update_channel_button(HWND dlg,const State& state){
+    SetDlgItemTextW(dlg,id_install,tr(state.russian,
+        state.preview_channel?L"Open RC download":L"Download update",
+        state.preview_channel?L"Открыть RC":L"Скачать обновление"));
+    EnableWindow(GetDlgItem(dlg,id_install),selected_update_available(state));
+}
+void update_release_labels(HWND dlg,const State& state) {
+    const std::wstring stable=state.latest_tag.empty()?
+        tr(state.russian,L"Not available / not checked",L"Нет данных / не проверено"):
+        state.latest_tag;
+    SetDlgItemTextW(dlg,id_stable_version,
+        (std::wstring(tr(state.russian,L"Latest Stable: ",L"Последний Stable: "))+stable).c_str());
+    std::wstring preview=tr(state.russian,
+        L"Not available / not checked",L"Нет данных / не проверено");
+    if(state.latest_preview) {
+        const auto& b=*state.latest_preview;
+        preview=L"v"+std::to_wstring(b.version.major)+L"."+
+            std::to_wstring(b.version.minor)+L"."+
+            std::to_wstring(b.version.patch)+L" RC"+
+            std::to_wstring(b.rc)+L" (Build "+std::to_wstring(b.number)+L")";
+    }
+    SetDlgItemTextW(dlg,id_preview_version,
+        (std::wstring(tr(state.russian,L"Latest Preview: ",L"Последний Preview: "))+preview).c_str());
+}
 void check_release(HWND dlg,State& state,bool forced) {
     if(!forced && (!state.automatic || !due_today()))return;
     EnableWindow(GetDlgItem(dlg,id_check),FALSE);
     EnableWindow(GetDlgItem(dlg,id_install),FALSE);
-    put_status(dlg,tr(state.russian,L"Checking GitHub releases...",
-                              L"Проверяем релизы GitHub..."));
+    put_status(dlg,tr(state.russian,L"Checking Stable and Preview/RC...",
+                              L"Проверка Stable и Preview/RC..."));
+    bool reachable=false;
     try {
         state.latest_tag=latest_release();
         const auto parsed=update::parse_version(narrow(state.latest_tag));
-        state.newer=parsed && (update::newer(*parsed,installed) ||
-                          (ISO_WCX_RC_NUMBER>0 && *parsed==installed));
-        save_last_check();
-        if(state.newer) {
-            put_status(dlg,std::wstring(tr(state.russian,
-                L"New verified Stable release: ",L"Доступна новая Stable-версия: "))+
-                state.latest_tag);
-            EnableWindow(GetDlgItem(dlg,id_install),TRUE);
-        } else if(ISO_WCX_RC_NUMBER>0) {
-            put_status(dlg,std::wstring(tr(state.russian,
-                L"Installed RC; no newer published Stable release.",
-                L"Установлен RC; новой Stable-версии нет.")));
-        } else put_status(dlg,tr(state.russian,
-                L"You have the latest Stable version.",
-                L"Установлена последняя Stable-версия."));
-    }catch(const std::exception&) {
-        state.newer=false;
-        put_status(dlg,tr(state.russian,
-               L"Could not check releases. Try again later.",
-               L"Не удалось проверить релизы. Повторите позже."));
+        state.stable_newer=parsed && update::newer(*parsed,installed);
+        state.stable_checked=true;
+        reachable=true;
+    }catch(...) {
+        state.stable_checked=false;
+        state.stable_newer=false;
+        state.latest_tag.clear();
     }
+    try {
+        state.latest_preview=latest_preview_release();
+        state.preview_newer=state.latest_preview &&
+            preview_update::newer(*state.latest_preview,installed,
+                                  ISO_WCX_RC_NUMBER,ISO_WCX_BUILD_NUMBER);
+        state.preview_checked=true;
+        reachable=true;
+    }catch(...) {
+        state.latest_preview.reset();
+        state.preview_newer=false;
+        state.preview_checked=false;
+    }
+    if(reachable)save_last_check();
+    update_release_labels(dlg,state);
+    update_channel_button(dlg,state);
+    if(selected_update_available(state))
+        put_status(dlg,tr(state.russian,
+            state.preview_channel?L"New RC build available (manual GitHub download).":
+                                  L"New verified Stable release available.",
+            state.preview_channel?L"Доступен новый RC (скачивание через GitHub).":
+                                  L"Доступна новая проверенная Stable-версия."));
+    else if(!state.stable_checked && !state.preview_checked)
+        put_status(dlg,tr(state.russian,
+            L"GitHub update checks unavailable. Try again.",
+            L"GitHub недоступен. Повторите проверку."));
+    else put_status(dlg,tr(state.russian,
+            L"No newer update in selected channel.",
+            L"В выбранном канале новых версий нет."));
     EnableWindow(GetDlgItem(dlg,id_check),TRUE);
 }
 void download_and_offer(HWND dlg,State& state) {
-    if(!state.newer || state.latest_tag.empty())return;
+    if(!selected_update_available(state))return;
     EnableWindow(GetDlgItem(dlg,id_install),FALSE);
-    put_status(dlg,tr(state.russian,
-         L"Downloading release and verifying SHA-256...",
-         L"Скачивание релиза и проверка SHA-256..."));
-    try {
-        const auto verified=save_verified_archive(state.latest_tag);
-        const auto instructions=std::wstring(tr(state.russian,
-             L"SHA-256 verified. The ZIP will open in Total Commander.\n"
-             L"Enter the archive and confirm the plugin installer.\n"
-             L"Restart Total Commander afterward; the loaded WCX DLL\n"
-             L"will NOT be overwritten while it is in use.",
-             L"SHA-256 проверен. ZIP откроется в Total Commander.\n"
-             L"Откройте архив и подтвердите установку плагина.\n"
-             L"Затем перезапустите Total Commander. Загруженная WCX\n"
-             L"не заменяется во время работы."));
-        MessageBoxW(dlg,instructions.c_str(),L"ISO-WCX Update",
-                    MB_OK|MB_ICONINFORMATION);
-        open_in_totalcmd(dlg,verified);
+    if(state.preview_channel){
+        if(state.latest_preview){
+            const auto url=preview_artifact_page(*state.latest_preview);
+            const auto message=tr(state.russian,
+                L"The Preview/RC ZIP is a GitHub Actions artifact, not a "
+                L"SHA-256 signed Stable Release. Open the GitHub download page "
+                L"and install the ZIP manually through Total Commander? "
+                L"The running WCX is never overwritten by this dialog.",
+                L"Архив Preview/RC находится в GitHub Actions, а не в "
+                L"Stable Release с SHA-256. Открыть страницу скачивания "
+                L"и вручную установить ZIP через Total Commander?");
+            if(MessageBoxW(dlg,message,L"ISO-WCX Preview/RC",
+                           MB_YESNO|MB_ICONQUESTION)==IDYES){
+                const auto rc=reinterpret_cast<std::intptr_t>(
+                    ShellExecuteW(dlg,L"open",url.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
+                put_status(dlg,rc>32?
+                    tr(state.russian,L"GitHub RC artifact page opened. Install the ZIP manually.",
+                                     L"Страница RC открыта. Установите ZIP вручную."):
+                    tr(state.russian,L"Could not open GitHub RC artifact.",
+                                     L"Не удалось открыть архив RC на GitHub."));
+            }
+        }
+    }else if(!state.latest_tag.empty()){
         put_status(dlg,tr(state.russian,
-             L"Update ZIP downloaded; complete installation in Total Commander.",
-             L"ZIP скачан; завершите установку в Total Commander."));
-    }catch(const std::exception&) {
-        put_status(dlg,tr(state.russian,
-             L"Download or SHA-256 verification failed; nothing was installed.",
-             L"Ошибка загрузки или SHA-256; ничего не установлено."));
+              L"Downloading Stable release and verifying SHA-256...",
+              L"Скачивание Stable и проверка SHA-256..."));
+        try {
+            const auto verified=save_verified_archive(state.latest_tag);
+            const auto instructions=std::wstring(tr(state.russian,
+                 L"SHA-256 verified. The ZIP will open in Total Commander.\n"
+                 L"Enter the archive and confirm the plugin installer.\n"
+                 L"Restart Total Commander afterward.",
+                 L"SHA-256 проверен. ZIP откроется в Total Commander.\n"
+                 L"Откройте архив и подтвердите установку.\n"
+                 L"Затем перезапустите Total Commander."));
+            MessageBoxW(dlg,instructions.c_str(),L"ISO-WCX Update",
+                        MB_OK|MB_ICONINFORMATION);
+            open_in_totalcmd(dlg,verified);
+            put_status(dlg,tr(state.russian,
+                  L"Verified Stable ZIP downloaded. Complete installation in TC.",
+                  L"Stable ZIP проверен. Завершите установку в TC."));
+        }catch(...) {
+            put_status(dlg,tr(state.russian,
+                  L"Stable download or SHA-256 verification failed.",
+                  L"Ошибка скачивания Stable или проверки SHA-256."));
+        }
     }
-    EnableWindow(GetDlgItem(dlg,id_install),TRUE);
+    update_channel_button(dlg,state);
 }
+
 // The WCX host calls GetPackerCaps while loading its packer associations.
 // User-invoked, in-process metadata export. Both dialogs are owned by
 // ConfigurePacker; neither an EXE, service, mount nor helper DLL is needed.
