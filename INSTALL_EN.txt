@@ -1,3 +1,15 @@
+RC4 PREVIEW NOTES
+-----------------
+Configure ISO-WCX provides a Stable / Preview (RC) update channel picker,
+shows both latest versions, and opens the selected installation source.
+Stable uses the verified SHA-256 ZIP; Preview opens a successful GitHub
+Actions artifact page for manual combined x86/x64 ZIP installation.
+Check & Fix WCX Associations previews a repair and requires explicit
+confirmation. Close all Total Commander windows: a native offline worker
+then backs up wincmd.ini and adds missing ISO (159), normalizes owned
+WIM/UDF/ISO (159) and read-only ESD/SWM (192). Other WCX handlers are
+preserved; conflicts are not silently overwritten.
+
 ISO-WCX v0.21.0 Stable: Image Structure, WIM diagnostics, VS2026 C++26 - Total Commander WCX plugin
 ================================================================
 
