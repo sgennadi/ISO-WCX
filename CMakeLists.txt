@@ -443,6 +443,13 @@ if(WIN32)
     target_link_libraries(tc_registration_audit_test PRIVATE advapi32)
     add_test(NAME tc_wcx_registration_readonly_audit
       COMMAND tc_registration_audit_test)
+    add_executable(tc_registration_repair_test
+      tests/tc_registration_repair.cpp src/tc_registration_repair.cpp)
+    target_include_directories(tc_registration_repair_test
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(tc_registration_repair_test PRIVATE advapi32 shell32)
+    add_test(NAME tc_wcx_native_offline_association_fix
+      COMMAND tc_registration_repair_test)
     add_executable(universal_diagnostics_windows_test
       tests/universal_diagnostics_windows.cpp
       src/universal_diagnostics_bridge.cpp
