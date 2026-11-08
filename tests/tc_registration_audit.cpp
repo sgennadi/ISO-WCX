@@ -53,7 +53,7 @@ int wmain() {
            text.find(L"Capabilities: 158")==text.npos ||
            text.find(L"[udf]")==text.npos ||
            text.find(L"Capabilities: 222")==text.npos ||
-           text.find(L"Current RC3 WCX reports GetPackerCaps=159")==text.npos ||
+           text.find(L"Installed WCX GetPackerCaps=159")==text.npos ||
            text.find(L"WARNING: stale/unverified F5 mask")==text.npos ||
            text.find(L"Companion x64 WCX:")==text.npos ||
            text.find(L"ESD/SWM: read-only")==text.npos)
