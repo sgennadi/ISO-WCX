@@ -434,7 +434,8 @@ void check_release(HWND dlg,State& state,bool forced) {
     try {
         state.latest_tag=latest_release();
         const auto parsed=update::parse_version(narrow(state.latest_tag));
-        state.stable_newer=parsed && update::newer(*parsed,installed);
+        state.stable_newer=parsed && (update::newer(*parsed,installed) ||
+                           (ISO_WCX_RC_NUMBER>0 && *parsed==installed));
         state.stable_checked=true;
         reachable=true;
     }catch(...) {
@@ -745,7 +746,8 @@ DWORD WINAPI background_worker(LPVOID argument) {
         }else{
             const auto tag=latest_release();
             const auto parsed=update::parse_version(narrow(tag));
-            if(parsed && update::newer(*parsed,installed) &&
+            if(parsed && (update::newer(*parsed,installed) ||
+                          (ISO_WCX_RC_NUMBER>0 && *parsed==installed)) &&
                !has_notified(tag) && read_dword(L"AutoCheck",1)) {
                 record_notified(tag);
                 const auto message=std::wstring(tr(russian(),
