@@ -69,6 +69,7 @@ using Internet=std::unique_ptr<std::remove_pointer_t<HINTERNET>,
                   decltype(&WinHttpCloseHandle)>;
 
 struct State {
+    HINSTANCE module=nullptr;
     bool automatic=true;
     bool russian=false;
     bool preview_channel=false;
@@ -719,32 +720,48 @@ void record_notified(const std::wstring& tag) {
 DWORD WINAPI background_worker(LPVOID argument) {
     HMODULE module=static_cast<HMODULE>(argument);
     try {
-        const auto tag=latest_release();
-        const auto parsed=update::parse_version(narrow(tag));
-        if(parsed && (update::newer(*parsed,installed) ||
-             (ISO_WCX_RC_NUMBER>0 && *parsed==installed)) &&
-             !has_notified(tag) &&
-           read_dword(L"AutoCheck",1)) {
-            // Notify only once per version, and only after a complete
-            // successful HTTPS check. The dialog is not part of archive I/O.
-            record_notified(tag);
-            const auto ru=russian();
-            const auto prompt=std::wstring(tr(ru,
-                L"A newer Stable version of ISO-WCX is available: ",
-                L"Доступна новая Stable-версия ISO-WCX: ")) + tag +
-                tr(ru,
-                L"\nDownload the official ZIP and verify SHA-256?\n"
-                L"Installation will require confirmation in Total Commander.",
-                L"\nСкачать официальный ZIP с проверкой SHA-256?\n"
-                L"Установка потребует подтверждения в Total Commander.");
-            if(MessageBoxW(nullptr,prompt.c_str(),L"ISO-WCX Update",
-                     MB_YESNO|MB_ICONINFORMATION|MB_SETFOREGROUND)==IDYES) {
-                const auto checked=save_verified_archive(tag);
-                open_in_totalcmd(nullptr,checked);
+        if(read_dword(L"UpdateChannel",0)) {
+            const auto build=latest_preview_release();
+            if(build && preview_update::newer(*build,installed,
+                             ISO_WCX_RC_NUMBER,ISO_WCX_BUILD_NUMBER)) {
+                const std::wstring tag=L"preview-RC"+std::to_wstring(build->rc)+
+                                       L"-B"+std::to_wstring(build->number);
+                if(!has_notified(tag) && read_dword(L"AutoCheck",1)) {
+                    record_notified(tag);
+                    const auto message=std::wstring(tr(russian(),
+                      L"New ISO-WCX Preview/RC: ",L"Новый ISO-WCX Preview/RC: "))+
+                      L"RC"+std::to_wstring(build->rc)+L" Build "+
+                      std::to_wstring(build->number)+
+                      tr(russian(),L"\nOpen the GitHub Actions download page?",
+                                   L"\nОткрыть загрузку на GitHub Actions?");
+                    if(MessageBoxW(nullptr,message.c_str(),L"ISO-WCX Preview/RC",
+                            MB_YESNO|MB_ICONINFORMATION|MB_SETFOREGROUND)==IDYES){
+                        const auto url=preview_artifact_page(*build);
+                        (void)ShellExecuteW(nullptr,L"open",url.c_str(),
+                                            nullptr,nullptr,SW_SHOWNORMAL);
+                    }
+                }
+            }
+        }else{
+            const auto tag=latest_release();
+            const auto parsed=update::parse_version(narrow(tag));
+            if(parsed && update::newer(*parsed,installed) &&
+               !has_notified(tag) && read_dword(L"AutoCheck",1)) {
+                record_notified(tag);
+                const auto message=std::wstring(tr(russian(),
+                  L"New Stable ISO-WCX: ",L"Новый ISO-WCX Stable: "))+tag+
+                  tr(russian(),
+                     L"\nDownload and verify SHA-256? Confirm install in TC.",
+                     L"\nСкачать и проверить SHA-256? Установка через TC.");
+                if(MessageBoxW(nullptr,message.c_str(),L"ISO-WCX Update",
+                          MB_YESNO|MB_ICONINFORMATION|MB_SETFOREGROUND)==IDYES){
+                    const auto verified=save_verified_archive(tag);
+                    open_in_totalcmd(nullptr,verified);
+                }
             }
         }
-    }catch(const std::exception&) {
-        // Never affect file browsing or host startup on a network failure.
+    }catch(const std::exception&){
+        // Network failures or missing/expired RC artifacts must not affect WCX.
     }
     FreeLibraryAndExitThread(module,0);
     return 0;
