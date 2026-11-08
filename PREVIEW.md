@@ -12,6 +12,35 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — WIM scratch folder cleanup (2026-11-08, Issue #73)
+
+Operator telemetry from RC3 Build 1288 confirms a successful WIM F5
+`pack=0` and Delete `delete=0`: Total Commander now calls the WCX writer.
+The new field problem is an orphaned `expanded` working directory after
+a successful WIM edit, not a WCX dispatch failure.
+
+RC4 closes WIMGAPI's loaded and captured image handles **before** cleanup
+and explicitly deletes each `expanded` tree before committing the
+verified WIM. On `ACCESS_DENIED` from applied Windows ACLs it grants
+temporary deletion access to the active imaging identity and SYSTEM
+**only for the isolated workspace entry**, without following reparse
+points; it never changes ACLs of the original WIM or production files.
+If cleanup still fails, the WIM edit does **not** report F5 success.
+Cancel/failure cleanup is best-effort and must never overwrite the
+original WIM. Windows WCX smoke tests assert no orphaned edit workspace
+after PackFilesW, DeleteFilesW and cancellation.
+
+The original WIMGAPI Apply/Capture and byte-by-byte changed-file
+verification remain in place. The optional RC3 offline
+`ISO-WCX-F5-Repair.ps1` is still included, because existing Total
+Commander installations can retain stale WCX association masks.
+No extra installer, runtime service, or helper EXE is needed.
+
+**Verification gate:** Windows VS2026 Win32/x64 CTest, full GitHub
+Actions, and real host testing on a disposable `boot.wim` or
+`install.wim` including `expanded` cleanup. This preview is not
+a Stable release.
+
 ## RC3 — WIM F5 host dispatch repair (2026-11-06)
 
 The operator confirmed that RC2 `GetPackerCaps=222` and the live
@@ -76,17 +105,17 @@ the original F5 regression is resolved.
 
 The **published Stable release remains v0.21.0**. Every Windows Preview
 artifact produced by `.github/workflows/wcx-preview.yml` now identifies
-itself as **v0.21.1 RC3 (Build N)**, where `N` is the unique GitHub
+itself as **v0.21.1 RC4 (Build N)**, where `N` is the unique GitHub
 Actions workflow run number. The plugin Settings title, installed-version
 label and Windows DLL Version Information share this identity, and the
 auto-installable Total Commander `pluginst.inf` describes the same RC
 and build. Its numeric `version=0.21.1` field preserves standard TC
 installer compatibility. The ZIP is named
-`ISO-WCX-v0.21.1-RC3-B<N>.zip` and includes **only** the two
+`ISO-WCX-v0.21.1-RC4-B<N>.zip` and includes **only** the two
 architecture-specific WCX binaries and the normal installation notes.
 
 CMake defaults to the Stable identity for local/release builds;
-passing `-DISO_WCX_RC_NUMBER=3 -DISO_WCX_BUILD_NUMBER=<N>` produces an
+passing `-DISO_WCX_RC_NUMBER=4 -DISO_WCX_BUILD_NUMBER=<N>` produces an
 RC-labelled build without editing Stable CMake/release metadata. Later
 RCs increment the RC number deliberately, while repeated CI builds
 of the same RC receive a different build number. The updater
