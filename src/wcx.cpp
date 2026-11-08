@@ -3,6 +3,7 @@
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/wcx_updater.hpp"
+#include "iso_wcx/tc_registration_repair.hpp"
 #include "iso_wcx/operation_diagnostics.hpp"
 #include "iso_wcx/tc_association_flags.hpp"
 #include <mutex>
@@ -419,6 +420,12 @@ WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
 }
 WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
     try { iso_wcx::configure_updates(parent,module); } catch(...) {}
+}
+// The Windows rundll32 worker is deliberately exported separately from WCX ABI.
+// It performs the approved fix only after all Total Commander windows close.
+WCX_EXPORT void __stdcall IsoWcxAssociationFixWorkerW(HWND, HINSTANCE module,
+                                                      wchar_t* arguments, int) {
+    iso_wcx::run_association_fix_worker(module, arguments?arguments:L"");
 }
 WCX_EXPORT int __stdcall GetPackerCaps() {
     iso_wcx::schedule_update_check();
