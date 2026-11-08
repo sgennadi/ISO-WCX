@@ -108,8 +108,15 @@ if(WIN32)
   include(FetchContent)
   set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
   set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  # GitHub's generated source archive intermittently returns 502/503 to
+  # Windows Actions runners. Use the author's official preserved release
+  # tarball with an independent mirror and verify the pinned upstream SHA-256.
+  # Both URLs serve the identical upstream zlib-1.3.1.tar.gz distribution.
   FetchContent_Declare(iso_wcx_zlib
-      URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz)
+      URL
+        https://zlib.net/fossils/zlib-1.3.1.tar.gz
+        https://gstreamer.freedesktop.org/src/mirror/zlib/zlib-1.3.1.tar.gz
+      URL_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23)
   FetchContent_MakeAvailable(iso_wcx_zlib)
   set(ISO_WCX_ZLIB_TARGET zlibstatic)
 else()
