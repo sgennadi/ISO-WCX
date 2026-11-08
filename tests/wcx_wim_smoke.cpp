@@ -102,6 +102,16 @@ int wmain(int argc,wchar_t** argv) {
         write(first/L"EmptyFile.bin","");
         write(first/L"Nested"/L"folder.bin","nested-data");
         fs::create_directories(first/L"Empty");
+        // Preserve a read-only file in the captured image. It will not be
+        // individually extracted by the reader smoke test, but it MUST be
+        // removed from "expanded" after each WIM Apply/Capture edit.
+        const auto readonly_input=first/L"READONLY.TXT";
+        write(readonly_input,"regression-73-readonly-scratch");
+        const DWORD readonly_attributes=GetFileAttributesW(readonly_input.c_str());
+        if(readonly_attributes==INVALID_FILE_ATTRIBUTES ||
+           !SetFileAttributesW(readonly_input.c_str(),
+                               readonly_attributes|FILE_ATTRIBUTE_READONLY))
+            return 41;
         write(second/L"HELLO.TXT","hello-two");
         write(second/L"SECOND.TXT","second-image");
         write(third/L"HELLO.TXT","hello-three");
@@ -139,6 +149,10 @@ int wmain(int argc,wchar_t** argv) {
             close_wim(image);
         }
         close_wim(archive);
+        // Restore test input permissions only AFTER capture; the WIM must
+        // retain the original read-only entry for scratch cleanup coverage.
+        if(!SetFileAttributesW(readonly_input.c_str(),readonly_attributes))
+            return 42;
         // DISM /Get-WimInfo-equivalent, built into the plugin with no
         // helper EXE or mount. Check all three indexes and the no-mount label.
         const auto summary=iso_wcx::build_wim_index_summary(original);
