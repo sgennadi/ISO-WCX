@@ -777,33 +777,50 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         SetWindowTextW(dlg,title.c_str());
         state->russian=russian();
         state->automatic=read_dword(L"AutoCheck",1);
+        state->preview_channel=read_dword(L"UpdateChannel",0);
         add_control(dlg,L"STATIC",L"",SS_LEFT,id_status,12,10,340,38);
         add_control(dlg,L"BUTTON",tr(state->russian,
              L"Do not check for updates automatically",
              L"Не проверять обновления автоматически"),
              BS_AUTOCHECKBOX|WS_TABSTOP,id_never,12,53,330,18);
-        add_control(dlg,L"BUTTON",tr(state->russian,L"Check now",
-             L"Проверить сейчас"),BS_PUSHBUTTON|WS_TABSTOP,
-             id_check,12,81,105,25);
-        add_control(dlg,L"BUTTON",tr(state->russian,L"Download update",
-             L"Скачать обновление"),BS_PUSHBUTTON|WS_TABSTOP,
-             id_install,125,81,117,25);
-        add_control(dlg,L"BUTTON",tr(state->russian,L"Close",L"Закрыть"),
-             BS_DEFPUSHBUTTON|WS_TABSTOP,IDCANCEL,252,81,100,25);
-        add_control(dlg,L"BUTTON",tr(state->russian,
-             L"Export Image Structure...",L"Экспорт структуры образа..."),
-             BS_PUSHBUTTON|WS_TABSTOP,id_export,12,113,340,26);
-        add_control(dlg,L"BUTTON",tr(state->russian,
-             L"Export diagnostics...",L"Экспорт диагностики..."),
-             BS_PUSHBUTTON|WS_TABSTOP,id_diag_export,12,148,163,26);
-        add_control(dlg,L"BUTTON",tr(state->russian,
-             L"Review on GitHub...",L"Отправить на GitHub..."),
-             BS_PUSHBUTTON|WS_TABSTOP,id_diag_github,181,148,171,26);
         add_control(dlg,L"STATIC",tr(state->russian,
-             L"Failed area:",L"Операция:"),SS_LEFT,0,12,185,88,18);
+             L"Update channel:",L"Канал обновлений:"),
+             SS_LEFT,0,12,81,97,18);
         add_control(dlg,L"COMBOBOX",L"",
              CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,
-             id_universal_type,102,182,250,150);
+             id_channel,114,77,238,130);
+        if(const auto channel=GetDlgItem(dlg,id_channel)){
+            SendMessageW(channel,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(
+                tr(state->russian,L"Stable (verified)",L"Stable (проверенный)")));
+            SendMessageW(channel,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(
+                tr(state->russian,L"Preview / Release Candidate (RC)",
+                                   L"Preview / Release Candidate (RC)")));
+            SendMessageW(channel,CB_SETCURSEL,state->preview_channel?1:0,0);
+        }
+        add_control(dlg,L"STATIC",L"",SS_LEFT,id_stable_version,12,105,340,17);
+        add_control(dlg,L"STATIC",L"",SS_LEFT,id_preview_version,12,125,340,17);
+        add_control(dlg,L"BUTTON",tr(state->russian,L"Check now",
+             L"Проверить сейчас"),BS_PUSHBUTTON|WS_TABSTOP,
+             id_check,12,148,105,25);
+        add_control(dlg,L"BUTTON",tr(state->russian,L"Download update",
+             L"Скачать обновление"),BS_PUSHBUTTON|WS_TABSTOP,
+             id_install,125,148,117,25);
+        add_control(dlg,L"BUTTON",tr(state->russian,L"Close",L"Закрыть"),
+             BS_DEFPUSHBUTTON|WS_TABSTOP,IDCANCEL,252,148,100,25);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Export Image Structure...",L"Экспорт структуры образа..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_export,12,182,340,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Export diagnostics...",L"Экспорт диагностики..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_diag_export,12,215,163,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Review on GitHub...",L"Отправить на GitHub..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_diag_github,181,215,171,26);
+        add_control(dlg,L"STATIC",tr(state->russian,
+             L"Failed area:",L"Операция:"),SS_LEFT,0,12,248,88,18);
+        add_control(dlg,L"COMBOBOX",L"",
+             CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,
+             id_universal_type,102,245,250,140);
         if(const auto types=GetDlgItem(dlg,id_universal_type)) {
             const wchar_t* en[]={
                 L"ISO file copy (F5)",L"WIM file copy (F5)",L"ISO/UDF edit",
@@ -821,14 +838,19 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         add_control(dlg,L"BUTTON",tr(state->russian,
              L"Save in shared diagnostics queue (local)...",
              L"Сохранить в общую очередь диагностики..."),
-             BS_PUSHBUTTON|WS_TABSTOP,id_universal_save,12,211,340,26);
+             BS_PUSHBUTTON|WS_TABSTOP,id_universal_save,12,275,340,26);
         add_control(dlg,L"BUTTON",tr(state->russian,
              L"Check WCX F5 registration (159)...",
              L"Проверить регистрацию F5 (159)..."),
-             BS_PUSHBUTTON|WS_TABSTOP,id_tc_assoc_check,12,247,340,26);
+             BS_PUSHBUTTON|WS_TABSTOP,id_tc_assoc_check,12,308,340,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Check & Fix WCX Associations...",
+             L"Проверить и исправить привязки WCX..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_tc_assoc_fix,12,341,340,26);
         CheckDlgButton(dlg,id_never,
               state->automatic?BST_UNCHECKED:BST_CHECKED);
-        EnableWindow(GetDlgItem(dlg,id_install),FALSE);
+        update_release_labels(dlg,*state);
+        update_channel_button(dlg,*state);
         put_status(dlg,std::wstring(tr(state->russian,
               L"Installed ISO-WCX ",L"Установлен ISO-WCX "))+
               version_name(installed));
@@ -845,6 +867,19 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         if(cmd==id_never && HIWORD(wp)==BN_CLICKED) {
             state->automatic=IsDlgButtonChecked(dlg,id_never)!=BST_CHECKED;
             save_automatic(state->automatic);
+            return TRUE;
+        }
+        if(cmd==id_channel && HIWORD(wp)==CBN_SELCHANGE){
+            const auto index=SendDlgItemMessageW(dlg,id_channel,CB_GETCURSEL,0,0);
+            state->preview_channel=index==1;
+            const DWORD value=state->preview_channel?1u:0u;
+            write_reg(L"UpdateChannel",REG_DWORD,&value,sizeof(value));
+            update_channel_button(dlg,*state);
+            put_status(dlg,tr(state->russian,
+                state->preview_channel?L"Preview/RC selected. Only manual RC installation is offered.":
+                                       L"Stable selected. Downloads are SHA-256 verified.",
+                state->preview_channel?L"Выбран Preview/RC: установка вручную через GitHub.":
+                                       L"Выбран Stable: загрузка с проверкой SHA-256."));
             return TRUE;
         }
         if(cmd==id_check) {check_release(dlg,*state,true);return TRUE;}
@@ -877,6 +912,12 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
                     L"Could not open GitHub. Use Export diagnostics instead.",
                     L"Не удалось открыть GitHub. Используйте экспорт диагностики."),
                     L"ISO-WCX Diagnostics",MB_OK|MB_ICONWARNING);
+            return TRUE;
+        }
+        if(cmd==id_tc_assoc_fix) {
+            std::wstring status;
+            if(offer_association_fix(dlg,state->module,state->russian,status))
+                put_status(dlg,status);
             return TRUE;
         }
         if(cmd==id_tc_assoc_check) {
@@ -966,10 +1007,11 @@ void configure_updates(HWND parent,HINSTANCE instance) {
     const auto store16=[&](std::size_t at,WORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
     store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER);
     store32(4,0);store16(8,0);store16(10,0);store16(12,0);
-    store16(14,367);store16(16,288);store16(18,0);store16(20,0);
+    store16(14,367);store16(16,382);store16(18,0);store16(20,0);
     constexpr wchar_t caption[]=L"ISO-WCX Settings";
     std::memcpy(raw.data()+22,caption,sizeof(caption));
     State state{};
+    state.module=instance;
     (void)DialogBoxIndirectParamW(instance,
         reinterpret_cast<const DLGTEMPLATE*>(raw.data()),
         parent,dialog_proc,reinterpret_cast<LPARAM>(&state));
