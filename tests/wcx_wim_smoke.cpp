@@ -259,6 +259,20 @@ int wmain(int argc,wchar_t** argv) {
         const auto renamed=swm.parent_path()/L"renamed.SWM";
         fs::rename(later,renamed);
         if(!verify(renamed)||!verify(swm.parent_path()/L"RENAMED.swm"))return 19;
+        // Regression #73: a successful Apply/Capture may leave NTFS-protected
+        // "expanded" files inside an otherwise abandoned sibling workspace.
+        // Check success, cancellation and rejected edits for workspace leaks.
+        auto clean_wim_workspaces=[&](){
+            for(const auto& entry:fs::directory_iterator(root)){
+                if(entry.path().filename().wstring().starts_with(L".iso-wcx-edit-")){
+                    std::wcerr<<L"Leaked WIM edit workspace: "
+                              <<entry.path().filename().wstring()<<L"\n";
+                    return false;
+                }
+            }
+            return true;
+        };
+        if(!clean_wim_workspaces())return 40;
         // Transactional WIM changes through the real WCX ABI.
         auto pack=bind<PackFn>(dll,"PackFilesW");auto erase=bind<DeleteFn>(dll,"DeleteFilesW");
         auto set_progress=bind<SetProgressFn>(dll,"SetProcessDataProcW");
@@ -274,6 +288,7 @@ int wmain(int argc,wchar_t** argv) {
         worker.join();
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";return 21;}
+        if(!clean_wim_workspaces())return 40;
         if(!pack_progress_calls.load())return 26;
         // Regression: Total Commander creates an *empty folder* through the
         // same PackFilesW API as a file. Verify the index survives correctly.
@@ -283,6 +298,7 @@ int wmain(int argc,wchar_t** argv) {
         const int folder_rc=pack(packed.data(),sub.data(),src.data(),mkdir_list,0);
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         if(folder_rc!=0)return 27;
+        if(!clean_wim_workspaces())return 40;
         if(wim_percent_calls.load()==0 || wim_stage_calls.load()==0)
             return 32; // Progress must be visible even for empty folders.
         // Cancel during a long apply before replacing the original WIM.
@@ -294,6 +310,7 @@ int wmain(int argc,wchar_t** argv) {
         const int cancel_rc=pack(packed.data(),sub.data(),src.data(),cancel_list,0);
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         cancel_next_wim.store(false);
+        if(!clean_wim_workspaces())return 40;
         if(cancel_rc!=21 || load(original)!=before_cancel)
             return 33; // A cancelled edit must leave WIM byte-identical.
         {
@@ -333,6 +350,7 @@ int wmain(int argc,wchar_t** argv) {
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         const int final_rc=pack(packed.data(),last_sub.data(),src.data(),final_list,0);
         set_progress(INVALID_HANDLE_VALUE,nullptr);
+        if(!clean_wim_workspaces())return 40;
         if(final_rc!=0) {
             std::cerr<<"Final WIM index pack failed: "<<final_rc<<"\n";
             return 34;
@@ -348,6 +366,7 @@ int wmain(int argc,wchar_t** argv) {
         // adapter only stripped \\* and returned WCX error 24.
         wchar_t delete_list[]=L"image1\\ADDED.TXT\0image1\\NEW_EMPTY_FOLDER\\*.*\0\0";
         const int deleted_rc=erase(packed.data(),delete_list);
+        if(!clean_wim_workspaces())return 40;
         if(deleted_rc!=0){
             std::cerr<<"WIM DeleteFilesW file+directory returned "<<deleted_rc<<"\n";
             return 23;
@@ -371,13 +390,19 @@ int wmain(int argc,wchar_t** argv) {
         // is allowed. Failed deletion must not mutate the WIM.
         wchar_t arbitrary_wildcard[]=L"image1\\*.TXT\0\0";
         const auto before_wildcard=load(packed);
-        if(erase(packed.data(),arbitrary_wildcard)==0 ||
+        const int wildcard_rc=erase(packed.data(),arbitrary_wildcard);
+        if(!clean_wim_workspaces())return 40;
+        if(wildcard_rc==0 ||
            load(packed)!=before_wildcard)return 39;
         // A rejected traversal must not change one byte of the original.
         const auto original_bytes=load(original);wchar_t bad_list[]=L"..\\escape\0\0";
-        if(pack(packed.data(),sub.data(),src.data(),bad_list,0)==0||load(original)!=original_bytes)return 24;
+        const int invalid_rc=pack(packed.data(),sub.data(),src.data(),bad_list,0);
+        if(!clean_wim_workspaces())return 40;
+        if(invalid_rc==0 || load(original)!=original_bytes)return 24;
         wchar_t delete_index[]=L"image1\0\0";
-        if(erase(packed.data(),delete_index)||
+        const int index_rc=erase(packed.data(),delete_index);
+        if(!clean_wim_workspaces())return 40;
+        if(index_rc ||
            !content(L"image1\\HELLO.TXT",data)||data!="hello-two"||
            !content(L"image2\\HELLO.TXT",data)||data!="hello-three"||
            content(L"image3\\HELLO.TXT",data))return 25;
