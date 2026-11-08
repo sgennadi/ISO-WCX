@@ -225,15 +225,12 @@ bool has_tc_process(){
     HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
     if(snapshot==INVALID_HANDLE_VALUE)fail("Cannot examine running Total Commander processes");
     PROCESSENTRY32W p{};p.dwSize=sizeof(p);
-    DWORD our_session=0;
-    ProcessIdToSessionId(GetCurrentProcessId(),&our_session);
     bool found=false;
-    if(Process32FirstW(snapshot,&p))do{
+    if(!Process32FirstW(snapshot,&p)){CloseHandle(snapshot);fail("Cannot enumerate Total Commander processes");}
+    do{
         if(_wcsicmp(p.szExeFile,L"TOTALCMD.EXE") &&
            _wcsicmp(p.szExeFile,L"TOTALCMD64.EXE"))continue;
-        DWORD session=0;
-        if(ProcessIdToSessionId(p.th32ProcessID,&session) &&
-           session==our_session){found=true;break;}
+        found=true;break;
     }while(Process32NextW(snapshot,&p));
     CloseHandle(snapshot);
     return found;
@@ -252,7 +249,6 @@ Plan calculate(const fs::path& ini,const fs::path& plugin32){
     unsigned sections=0;
     bool cache_redirect=false;
     bool pack_redirect=false;
-    std::array<bool,5> seen{};
     for(std::size_t i=0;i<lines.size();++i){
         const auto raw=body(lines[i].text);
         if(auto heading=section(raw)){
@@ -268,11 +264,15 @@ Plan calculate(const fs::path& ini,const fs::path& plugin32){
             }
         }
     }
+    if(sections==1 && begin==lines.size() && end==lines.size() && !lines.empty() &&
+       newline(lines.back().text).empty()) {
+        replace_line(plan.doc,lines.size()-1,lines.back().text+plan.doc.eol);
+    }
     if(sections>1)fail("Duplicate [PackerPlugins] sections; manual resolution needed");
     if(pack_redirect || cache_redirect)
         fail("PackerPlugins or PackerPlugins64 is redirected; cannot safely edit multiple INIs");
-    if(begin!=lines.size() && end==lines.size())end=lines.size();
-    if(begin==lines.size()) {
+    if(sections==1 && end==lines.size())end=lines.size();
+    if(sections==0) {
         // Support a valid INI without an existing packer section.
         if(!lines.empty() && newline(lines.back().text).empty())
             replace_line(plan.doc,lines.size()-1,lines.back().text+plan.doc.eol);
