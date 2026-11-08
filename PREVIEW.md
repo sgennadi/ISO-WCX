@@ -12,6 +12,31 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — Configure: associations and Stable/Preview updates (2026-11-08)
+
+**Configure ISO-WCX** includes **Check & Fix WCX Associations...**. It
+previews changes and asks for confirmation. Then close every Total Commander
+window; the plug-in starts a native worker via Windows `rundll32` that
+waits for TC to exit and never modifies a loaded TC configuration.
+The worker creates an atomic INI backup and applies only these safe rules:
+
+- Missing `iso` becomes `159,ISO-WCX.wcx`.
+- Existing ISO-WCX-owned `wim`, `iso` and `udf` use capability `159`.
+- Existing ISO-WCX-owned read-only `esd` and `swm` use `192`.
+- Other WCX plug-ins are preserved. Duplicates, redirects and unexpected
+  INI changes abort safely; the x64 cache checksum is invalidated.
+- The original ANSI/UTF-8/UTF-16 INI encoding and other rows are preserved.
+- No PowerShell script or auxiliary executable is required.
+
+The Update checker now displays **Latest Stable** and **Latest Preview/RC**.
+Users can choose `Stable` (recommended) or `Preview / RC` and opt out of
+automatic checks. Stable downloads use the official GitHub Release ZIP and
+SHA-256 checksum manifest. Preview queries completed successful Actions
+builds with an unexpired combined x86/x64 installer and compares RC and build
+numbers; the button opens GitHub for **manual** Preview ZIP installation.
+Actions artifact download may require login. No unverified background RC
+installation occurs. These are RC4 Preview changes, not Stable 0.21.0.
+
 ## RC4 — WIM scratch folder cleanup (2026-11-08, Issue #73)
 
 Operator telemetry from RC3 Build 1288 confirms a successful WIM F5
