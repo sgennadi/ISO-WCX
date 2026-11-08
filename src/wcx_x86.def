@@ -14,6 +14,7 @@ EXPORTS
     SetChangeVolProcW=_SetChangeVolProcW@8
     GetPackerCaps=_GetPackerCaps@0
     ConfigurePacker=_ConfigurePacker@8
+    IsoWcxAssociationFixWorkerW=_IsoWcxAssociationFixWorkerW@16
     CanYouHandleThisFile=_CanYouHandleThisFile@4
     CanYouHandleThisFileW=_CanYouHandleThisFileW@4
 
