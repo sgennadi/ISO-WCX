@@ -158,7 +158,8 @@ inline std::optional<Build> artifact(std::string_view response,Run run){
         const auto id=member(entry,"id"),name=member(entry,"name");
         const auto expired=member(entry,"expired");
         if(!id || !name || !expired || trim(*expired)!="false")continue;
-        const auto ident=integer(*id),text=ascii(*name);
+        const auto ident=integer(*id);
+        const auto text=ascii(*name);
         if(!ident || !*ident || !text)continue;
         auto candidate=parse_name(*text);
         if(!candidate || candidate->number!=run.number)continue;
