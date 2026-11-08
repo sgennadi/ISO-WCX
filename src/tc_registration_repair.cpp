@@ -67,9 +67,11 @@ std::wstring decode(const Bytes& bytes,Encoding encoding){
         std::wstring result;
         result.reserve(bytes.size()/2);
         for(std::size_t i=0;i<bytes.size();i+=2){
-            unsigned value=encoding==Encoding::utf16le?
-                (bytes[i]|(unsigned(bytes[i+1])<<8)):
-                ((unsigned(bytes[i])<<8)|bytes[i+1];
+            const unsigned value=encoding==Encoding::utf16le?
+                (static_cast<unsigned>(bytes[i])|
+                 (static_cast<unsigned>(bytes[i+1])<<8)):
+                ((static_cast<unsigned>(bytes[i])<<8)|
+                 static_cast<unsigned>(bytes[i+1]));
             if(!value)fail("NUL character in INI");
             result.push_back(static_cast<wchar_t>(value));
         }
@@ -135,8 +137,10 @@ Document parse(const Bytes& bytes) {
     if(wide && (bytes.size()-off)%2)fail("Malformed UTF-16 INI");
     const auto character=[&](std::size_t i)->unsigned {
         if(wide)return doc.encoding==Encoding::utf16le?
-            bytes[i]|(unsigned(bytes[i+1])<<8):
-            (unsigned(bytes[i])<<8)|bytes[i+1]);
+            (static_cast<unsigned>(bytes[i])|
+             (static_cast<unsigned>(bytes[i+1])<<8)):
+            ((static_cast<unsigned>(bytes[i])<<8)|
+             static_cast<unsigned>(bytes[i+1]));
         return bytes[i];
     };
     const std::size_t stride=wide?2u:1u;
