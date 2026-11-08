@@ -69,7 +69,7 @@ std::wstring decode(const Bytes& bytes,Encoding encoding){
         for(std::size_t i=0;i<bytes.size();i+=2){
             unsigned value=encoding==Encoding::utf16le?
                 (bytes[i]|(unsigned(bytes[i+1])<<8)):
-                ((unsigned(bytes[i])<<8)|bytes[i+1]);
+                ((unsigned(bytes[i])<<8)|bytes[i+1];
             if(!value)fail("NUL character in INI");
             result.push_back(static_cast<wchar_t>(value));
         }
