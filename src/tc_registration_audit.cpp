@@ -113,7 +113,7 @@ std::filesystem::path export_tc_registration_audit() noexcept {
         std::wofstream out(report,std::ios::trunc);
         if(!out)return {};
         put(out,L"ISO-WCX | Total Commander registration diagnostics (read-only)");
-        put(out,L"Current RC3 WCX reports GetPackerCaps=159; host-tested for existing WIM F5.");
+        put(out,L"Installed WCX GetPackerCaps=159; Total Commander host-tested for WIM F5.");
         put(out,L"158/222 contain MODIFY/DELETE but prior TC host testing found 158 F5 refused.");
         put(out,L"159 adds NEW: used for host F5 dispatch; ISO-WCX cannot create new archives.");
         put(out,L"192 lacks MODIFY/DELETE, so F5/Delete are unavailable.");
@@ -157,6 +157,7 @@ std::filesystem::path export_tc_registration_audit() noexcept {
             put(out,L"["+std::wstring(extension)+L"]");
             if(value.empty()){
                 put(out,L"STATUS: NOT REGISTERED");
+                put(out,L"FIX: Configure ISO-WCX > Check & Fix WCX Associations.");
                 continue;
             }
             put(out,L"Entry: "+value);
@@ -173,8 +174,11 @@ std::filesystem::path export_tc_registration_audit() noexcept {
                 else
                     put(out,L"HOST F5 MASK: 159 (tested in Total Commander 11.58.1).");
             }
-            else
+            else {
                 put(out,L"ESD/SWM: read-only; no F5/Delete expected.");
+                if(mask!=192)
+                    put(out,L"WARNING: read-only ESD/SWM should use capabilities 192.");
+            }
             if(tc_association::can_create(mask))
                 put(out,L"NOTE: NEW archive bit enabled; ISO-WCX does not create WIMs from scratch.");
             const auto delimiter=value.find(L',');
@@ -203,10 +207,10 @@ std::filesystem::path export_tc_registration_audit() noexcept {
                 put(out,L"WARNING: 64-bit extension cache does not list this type.");
         }
         put(out,L"");
-        put(out,L"Recommended: reinstall this WCX with 159 for writable WIM/ISO/UDF.");
+        put(out,L"Recommended: Configure ISO-WCX > Check & Fix WCX Associations.");
         put(out,L"222 and 158 may keep MODIFY/DELETE bits but can prevent TC F5 callback.");
         put(out,L"Restart TC after reinstall so the 64-bit capability cache is rebuilt.");
-        put(out,L"No auto-edit while Total Commander is running; back up wincmd.ini first.");
+        put(out,L"Association Fix applies after Total Commander exits and backs up wincmd.ini.");
         out.flush();
         return out?report:fs::path{};
     }catch(...){return {};}
