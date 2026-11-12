@@ -63,4 +63,24 @@ int main() {
       candidates[0]));
     CHECK(preview::runs(R"({"workflow_runs":[{"id":"1234",
       "run_number":1,"status":"completed","conclusion":"success"}]})").empty());
+    // Regression: GitHub Actions /runs?per_page=6 returned >64 KiB,
+    // causing the old native updater to discard all Preview/RC versions.
+    // Emulate six verbose REST run objects, not just small synthetic JSON.
+    std::string verbose_runs="{\"total_count\":6,\"workflow_runs\":[";
+    for(unsigned i=0;i<6;++i){
+        if(i)verbose_runs+=',';
+        verbose_runs+="{\"id\":"+std::to_string(42472336574ULL-i)+
+            ",\"run_number\":"+std::to_string(1312-i)+
+            ",\"status\":\"completed\",\"conclusion\":\"success\","+
+            "\"repository\":{\"description\":\""+std::string(12500,'A')+"\"},"
+            "\"head_commit\":{\"message\":\"nested, comma\"}}";
+    }
+    verbose_runs+="]}";
+    CHECK(verbose_runs.size()>64u*1024u);
+    CHECK(verbose_runs.size()<preview::max_runs_response_bytes);
+    const auto rich_candidates=preview::runs(verbose_runs);
+    CHECK(rich_candidates.size()==6);
+    CHECK(rich_candidates.front().number==1312);
+    CHECK(rich_candidates.back().number==1307);
+
 }
