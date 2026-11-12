@@ -113,9 +113,57 @@ int wmain(){
         require(read(path).find("[PackerPlugins]\r\niso=159,")!=std::string::npos ||
                 read(path).find("[PackerPlugins]\r\nwim=159,")!=std::string::npos,
                 "section header and inserted extension were concatenated");
+        // Total Commander installations also use UTF-16 INI files. Preserve
+        // BOM, byte order and unrelated non-ASCII keys when inserting ISO.
+        const auto as_utf16=[](std::wstring_view source,bool big_endian){
+            std::string bytes;
+            bytes.push_back(static_cast<char>(big_endian?0xfe:0xff));
+            bytes.push_back(static_cast<char>(big_endian?0xff:0xfe));
+            for(const wchar_t c:source){
+                const auto word=static_cast<unsigned>(c);
+                bytes.push_back(static_cast<char>(big_endian?word>>8:word));
+                bytes.push_back(static_cast<char>(big_endian?word:word>>8));
+            }
+            return bytes;
+        };
+        for(const bool big_endian:{false,true}){
+            const auto unicode_ini=root/(big_endian?L"utf16be.ini":L"utf16le.ini");
+            const std::wstring untouched=L"[Configuration]\r\nNote=\u05d0\u05d1\r\n";
+            write_text(unicode_ini,as_utf16(untouched+L"[PackerPlugins]\r\n",big_endian));
+            const auto before=read(unicode_ini);
+            const auto unicode_preview=preview_association_fix(unicode_ini,dll);
+            require(unicode_preview.changes==5 && unicode_preview.conflicts==0,
+                    "UTF-16 repair preview missed an absent ISO");
+            require(read(unicode_ini)==before,"UTF-16 preview unexpectedly wrote INI");
+            require(apply_association_fix_offline(unicode_ini,dll,output),
+                    "UTF-16 association repair failed");
+            const auto fixed=read(unicode_ini);
+            const auto marker=as_utf16(L"iso=159,",big_endian);
+            require(fixed.find(marker.substr(2))!=fixed.npos,
+                    "UTF-16 ISO association was not inserted");
+            const auto original_row=as_utf16(untouched,big_endian);
+            require(fixed.find(original_row.substr(2))!=fixed.npos,
+                    "UTF-16 repair changed unrelated Unicode INI rows");
+            require(fixed.substr(0,2)==before.substr(0,2),"UTF-16 BOM changed");
+            require(apply_association_fix_offline(unicode_ini,dll,output),
+                    "UTF-16 idempotent repair failed");
+            require(read(unicode_ini)==fixed,"UTF-16 second fix modified INI");
+        }
+        // A previously unconfigured TC may omit [PackerPlugins] altogether.
+        // It may also have a final row without a trailing newline.
+        const auto no_section=root/L"no-packer-section.ini";
+        write_text(no_section,"[Configuration]\r\nKeep=this");
+        require(apply_association_fix_offline(no_section,dll,output),
+                "missing PackerPlugins section should be created");
+        const auto appended=read(no_section);
+        require(appended.find("Keep=this\r\n[PackerPlugins]\r\n")!=std::string::npos,
+                "repair corrupted no-newline prior section");
+        require(appended.find("iso=159,"+p)!=std::string::npos,
+                "ISO missing from newly created packer section");
+
         fs::remove_all(root);
-        std::cout<<"PASS: native TC association repair, ISO recovery, 159/192 masks, "
-                    "backup, checksum, conflicts, duplicate/redirect safety\n";
+        std::cout<<"PASS: native TC association repair, UTF-8/UTF-16LE/BE and "
+                    "ISO recovery, masks, backup, conflicts and redirects\n";
         return 0;
     }catch(const std::exception& e){
         std::cerr<<"Association fix test failed: "<<e.what()<<"\n";
