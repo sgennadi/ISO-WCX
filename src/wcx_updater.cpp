@@ -458,7 +458,10 @@ void check_release(HWND dlg,State& state,bool forced) {
         state.preview_newer=false;
         state.preview_checked=false;
     }
-    if(reachable)save_last_check();
+    // Do not suppress tomorrow's automatic retry if the SELECTED channel
+    // failed even though its other channel had a successful HTTP response.
+    if(state.preview_channel?state.preview_checked:state.stable_checked)
+        save_last_check();
     update_release_labels(dlg,state);
     update_channel_button(dlg,state);
     if(selected_update_available(state))
@@ -467,10 +470,14 @@ void check_release(HWND dlg,State& state,bool forced) {
                                   L"New verified Stable release available.",
             state.preview_channel?L"Доступен новый RC (скачивание через GitHub).":
                                   L"Доступна новая проверенная Stable-версия."));
-    else if(!state.stable_checked && !state.preview_checked)
+    else if(state.preview_channel && !state.preview_checked)
         put_status(dlg,tr(state.russian,
-            L"GitHub update checks unavailable. Try again.",
-            L"GitHub недоступен. Повторите проверку."));
+            L"Preview/RC check failed. Retry; Stable status may still be valid.",
+            L"Ошибка проверки Preview/RC. Повторите; данные Stable могут быть актуальны."));
+    else if(!state.preview_channel && !state.stable_checked)
+        put_status(dlg,tr(state.russian,
+            L"Stable check failed. Retry; Preview/RC status may still be valid.",
+            L"Ошибка проверки Stable. Повторите; данные Preview/RC могут быть актуальны."));
     else put_status(dlg,tr(state.russian,
             L"No newer update in selected channel.",
             L"В выбранном канале новых версий нет."));
