@@ -433,14 +433,12 @@ void check_release(HWND dlg,State& state,bool forced) {
     EnableWindow(GetDlgItem(dlg,id_install),FALSE);
     put_status(dlg,tr(state.russian,L"Checking Stable and Preview/RC...",
                               L"Проверка Stable и Preview/RC..."));
-    bool reachable=false;
     try {
         state.latest_tag=latest_release();
         const auto parsed=update::parse_version(narrow(state.latest_tag));
         state.stable_newer=parsed && (update::newer(*parsed,installed) ||
                            (ISO_WCX_RC_NUMBER>0 && *parsed==installed));
         state.stable_checked=true;
-        reachable=true;
     }catch(...) {
         state.stable_checked=false;
         state.stable_newer=false;
@@ -452,7 +450,6 @@ void check_release(HWND dlg,State& state,bool forced) {
             preview_update::newer(*state.latest_preview,installed,
                                   ISO_WCX_RC_NUMBER,ISO_WCX_BUILD_NUMBER);
         state.preview_checked=true;
-        reachable=true;
     }catch(...) {
         state.latest_preview.reset();
         state.preview_newer=false;
