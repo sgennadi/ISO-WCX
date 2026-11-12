@@ -112,6 +112,9 @@ def main(plugin, runner):
         assert edit("pack", "hello") != 0, (
             "protective GPT ISO must remain read-only")
         assert image.read_bytes() == hybrid
+        # Keep the pre-existing non-MBR bridge fixture intact for the
+        # original delete/resize refusal tests below.
+        image.write_bytes(result)
 
         # Delete and growing a file require UDF metadata changes and must
         # remain blocked until the dual-namespace writer is available.
