@@ -87,7 +87,7 @@ def main(plugin, runner):
         hybrid = bytearray(descriptor_bridge(
             boot=True, udf_only=True, boot_count=4))
         hybrid[0] = 0xEB              # boot code in system area
-        hybrid[510:512] = b"\\x55\\xaa"  # conventional MBR signature
+        hybrid[510:512] = b"\x55\xaa"  # conventional MBR signature
         hybrid[446] = 0x80             # active MBR partition
         hybrid[450] = 0x17             # ISO/hidden-NTFS style partition type
         struct.pack_into("<II", hybrid, 454, 0, len(hybrid) // 512)
