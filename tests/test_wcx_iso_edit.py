@@ -6,6 +6,7 @@ It creates disposable ISO9660/Joliet fixtures, not boot or customer media.
 import json
 import os
 import pathlib
+import struct
 import subprocess
 import sys
 import tempfile
@@ -79,6 +80,39 @@ def main(plugin, runner):
         assert result[303 * B:303 * B + 5] == b"EARTH"
         assert result[303 * B + 5:] == original[303 * B + 5:]
         assert read_image(image) == {}, "ISO9660 namespace was unexpectedly changed"
+        # Valid MBR-based isohybrid ISO/UDF: preserve the entire MBR,
+        # El Torito catalog and ISO-visible namespace. Only a bounded
+        # equal-length UDF file payload may be changed. Metadata edits still
+        # fail safely; GPT hybrid images remain read-only until parsed fully.
+        hybrid = bytearray(descriptor_bridge(
+            boot=True, udf_only=True, boot_count=4))
+        hybrid[0] = 0xEB              # boot code in system area
+        hybrid[510:512] = b"\\x55\\xaa"  # conventional MBR signature
+        hybrid[446] = 0x80             # active MBR partition
+        hybrid[450] = 0x17             # ISO/hidden-NTFS style partition type
+        struct.pack_into("<II", hybrid, 454, 0, len(hybrid) // 512)
+        image.write_bytes(hybrid)
+        (source / "hello").write_bytes(b"HYBRD")
+        assert edit("pack", "hello") == 0, (
+            "WCX rejected equal-length payload update in MBR hybrid ISO")
+        patched = image.read_bytes()
+        assert patched[:303 * B] == hybrid[:303 * B], (
+            "MBR, El Torito, ISO or UDF metadata changed")
+        assert patched[303 * B:303 * B + 5] == b"HYBRD"
+        assert patched[303 * B + 5:] == hybrid[303 * B + 5:]
+        assert edit("delete", "hello") != 0, (
+            "MBR hybrid unexpectedly allowed UDF metadata deletion")
+        (source / "NEWFILE.TXT").write_bytes(b"DATA")
+        assert edit("pack", "NEWFILE.TXT") != 0, (
+            "MBR hybrid unexpectedly allowed adding a new UDF extent")
+        assert image.read_bytes() == patched, (
+            "rejected MBR hybrid edit modified the original")
+        hybrid[450] = 0xEE           # protective GPT partition
+        image.write_bytes(hybrid)
+        assert edit("pack", "hello") != 0, (
+            "protective GPT ISO must remain read-only")
+        assert image.read_bytes() == hybrid
+
         # Delete and growing a file require UDF metadata changes and must
         # remain blocked until the dual-namespace writer is available.
         original = result
