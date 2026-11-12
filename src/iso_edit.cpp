@@ -119,12 +119,45 @@ public:
     std::unique_ptr<Node> root;
     bool joliet=false;
     bool udf_bridge=false;
+    bool hybrid_system_area=false; // MBR present; only byte-stable payload edits
     std::uint32_t declared_volume_blocks=0;
     std::size_t items=0;
     explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false)
         :file(p,std::ios::binary),size(std::filesystem::file_size(p)) {
         need(file.good()&&size>=18*block&&size%block==0&&size/block<0xffffffffu,"unsupported ISO size/layout");
-        auto system=read(0,16*block);need(std::all_of(system.begin(),system.end(),[](auto c){return c==0;}),"hybrid/system-area ISO editing is not supported");
+        const auto system=read(0,16*block);
+        hybrid_system_area=std::any_of(system.begin(),system.end(),
+                                     [](auto c){return c!=0;});
+        if(hybrid_system_area) {
+            // A conventional isohybrid MBR can coexist with UDF descriptors.
+            // Permit ONLY an unchanged-size UDF file payload replacement:
+            // never move its partitions, boot records or ISO descriptors.
+            // Unknown system areas and protective GPT are strictly excluded.
+            need(system[510]==0x55 && system[511]==0xaa,
+                 "nonzero ISO system area is not a recognized MBR");
+            need(std::memcmp(system.data()+512,"EFI PART",8)!=0,
+                 "hybrid ISO with GPT needs a dedicated partition-aware writer");
+            const auto limit=size/512u;
+            bool has_partition=false;
+            for(std::size_t i=0;i<4;++i) {
+                const auto at=446u+i*16u;
+                const auto type=system[at+4];
+                need(system[at]==0 || system[at]==0x80,
+                     "isohybrid MBR has an invalid boot status");
+                need(type!=0xee,"hybrid ISO with protective GPT cannot be edited");
+                const auto begin=le(system,at+8);
+                const auto length=le(system,at+12);
+                if(type) {
+                    need(length && begin<limit && length<=limit-begin,
+                         "isohybrid MBR partition exceeds the image");
+                    has_partition=true;
+                }else{
+                    need(!begin && !length,
+                         "isohybrid MBR contains an inconsistent empty partition");
+                }
+            }
+            need(has_partition,"nonzero ISO system area has no valid MBR partition");
+        }
         // Detect UDF bridges. General directory rebuilding is still
         // forbidden: only a separately validated equal-length data edit
         // may leave both on-disc ISO and UDF namespaces unchanged.
@@ -199,6 +232,11 @@ public:
             descriptors.emplace_back(lba,std::move(b));
         }
         need(end&&!primary.empty(),"missing ISO primary/terminator");
+        // Even a valid MBR is too risky for the generic ISO9660 rebuilder:
+        // its partition table may reference sectors after the original image.
+        // Hybrid MBR support is restricted to the UDF byte-only path below.
+        need(!hybrid_system_area || udf_bridge,
+             "hybrid MBR ISO requires a UDF bridge for payload-only editing");
         // Detect UDF anchors relative to the logical volume as well as the
         // physical file end. ISO/UDF bridges may have zero padding after the
         // actual ECMA-167 anchor, and cannot use the plain ISO rebuild path.
@@ -733,8 +771,12 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         }
         if(same_size_replace)
             edit_iso_udf_bridge_equal_length(path,image,changes,progress);
-        else
+        else {
+            need(!image.hybrid_system_area,
+                 "hybrid MBR ISO/UDF only supports equal-length file replacement; "
+                 "add/delete/resize requires a partition-aware writer");
             edit_iso_udf_bridge_metadata(path,image,changes,progress);
+        }
         return;
     }
     for(const auto& change:changes){auto p=edit_path(change.path);std::istringstream split(p);std::string name;Node* parent=image.root.get();
