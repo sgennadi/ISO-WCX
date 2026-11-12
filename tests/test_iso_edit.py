@@ -292,7 +292,7 @@ def main(binary, reader=None):
                 # A valid MBR alone never authorizes generic ISO rebuilding:
                 # it may reference boot payloads / partitions outside PVD.
                 b[0]=0xEB
-                b[510:512]=b'\\x55\\xaa'
+                b[510:512]=b'\x55\xaa'
                 b[446]=0x80
                 b[450]=0x17
                 struct.pack_into('<II',b,454,0,len(b)//512)
