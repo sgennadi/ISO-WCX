@@ -112,6 +112,14 @@ def main(plugin, runner):
         assert edit("pack", "hello") != 0, (
             "protective GPT ISO must remain read-only")
         assert image.read_bytes() == hybrid
+        # An additional GPT header at 2048 bytes is also forbidden even if
+        # the MBR entry no longer advertises the conventional 0xEE type.
+        hybrid[450] = 0x17
+        hybrid[B:B + 8] = b"EFI PART"
+        image.write_bytes(hybrid)
+        assert edit("pack", "hello") != 0, (
+            "2048-sector GPT hybrid must remain read-only")
+        assert image.read_bytes() == hybrid
         # Keep the pre-existing non-MBR bridge fixture intact for the
         # original delete/resize refusal tests below.
         image.write_bytes(result)
