@@ -272,7 +272,10 @@ std::wstring latest_release() {
     return widen(*tag);
 }
 std::optional<preview_update::Build> latest_preview_release() {
-    const auto response=http_get(github_preview_api,max_response);
+    // Actions run-list payload is larger than the 64-KiB release metadata cap.
+    // GitHub returns roughly 75 KiB for six runs; keep it bounded separately.
+    const auto response=http_get(
+        github_preview_api,preview_update::max_runs_response_bytes);
     const auto runs=preview_update::runs(as_text(response));
     // Github Actions is not a published Release: only completed successful
     // runs with a non-expired combined installer may be selected.
