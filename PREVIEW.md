@@ -12,6 +12,32 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — Bounded MBR-isohybrid ISO/UDF file replacement (2026-11-12)
+
+The original ISO editor refused **every** nonzero optical system area
+(first 32 KiB), including some MBR-isohybrid WinPE images. RC4 now accepts
+a *validated conventional MBR system area* only for a **single-extent,
+equal-length, UDF-addressed existing-file payload replacement** in an
+ISO/UDF bridge. The edit copies the image to an isolated transaction,
+changes only the validated UDF extent above the protected ISO boot/VRS
+region, independently reopens ISO and UDF, verifies readback, then commits
+atomically. Unchanged MBR/El Torito/ISO metadata are preserved.
+
+Safety limits are intentional:
+- Requires valid 0x55AA MBR signature, at least one bounded partition
+  entry, valid boot flags and all partitions within the image.
+- Protective MBR/GPT (0xEE or an EFI PART header) is **rejected**.
+- Non-MBR/unknown system areas, plain ISO9660 hybrid metadata rebuilding,
+  adding/deleting files, changing file lengths and moving partitions are
+  **rejected**. No GPT, isohybrid remastering or image size change occurs.
+- Real-host behavior and bootability of customer media are **not yet
+  validated**; use disposable copies and confirm BIOS/UEFI boot yourself.
+- Win32/x64 WCX tests cover the allowed F5 payload replacement, MBR and
+  boot region byte preservation, blocked add/delete/GPT, and rollback.
+
+This reduces needless F5 refusals without advertising universal hybrid ISO
+editing. Stable v0.21.0 remains unchanged.
+
 ## RC4 — Configure: associations and Stable/Preview updates (2026-11-08)
 
 **Configure ISO-WCX** includes **Check & Fix WCX Associations...**. It
