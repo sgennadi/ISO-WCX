@@ -4,6 +4,7 @@
 // previews are opened in the browser and are never silently installed.
 #include "iso_wcx/update_policy.hpp"
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -11,6 +12,11 @@
 #include <vector>
 
 namespace iso_wcx::preview_update {
+// GitHub's REST Actions workflow_runs objects include verbose repository,
+// actor and commit metadata. Six successful runs exceeded 74 KiB in the real
+// repository (2026-11-12), so the old generic 64-KiB HTTP ceiling silently
+// hid RC updates. Keep a separate bounded maximum just for this endpoint.
+inline constexpr std::size_t max_runs_response_bytes=256u*1024u;
 struct Run {std::uint64_t id=0;unsigned number=0;};
 struct Build {
     update::Version version{};
