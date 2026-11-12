@@ -730,6 +730,10 @@ DWORD WINAPI background_worker(LPVOID argument) {
     try {
         if(read_dword(L"UpdateChannel",0)) {
             const auto build=latest_preview_release();
+            // Only mark the daily background check after GitHub responded
+            // successfully. An offline/proxy failure must be retried when
+            // Total Commander starts again, not hidden for 24 hours.
+            save_last_check();
             if(build && preview_update::newer(*build,installed,
                              ISO_WCX_RC_NUMBER,ISO_WCX_BUILD_NUMBER)) {
                 const std::wstring tag=L"preview-RC"+std::to_wstring(build->rc)+
@@ -752,6 +756,7 @@ DWORD WINAPI background_worker(LPVOID argument) {
             }
         }else{
             const auto tag=latest_release();
+            save_last_check();
             const auto parsed=update::parse_version(narrow(tag));
             if(parsed && (update::newer(*parsed,installed) ||
                           (ISO_WCX_RC_NUMBER>0 && *parsed==installed)) &&
@@ -999,7 +1004,8 @@ void schedule_update_check() {
     if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
             reinterpret_cast<LPCWSTR>(&background_started),&module))
         return;
-    save_last_check(); // Throttle even failed/offline GitHub checks.
+    // A failed network request must not suppress updates for the next day:
+    // the detached worker records LastCheckUnix only after HTTP succeeds.
     HANDLE thread=CreateThread(nullptr,0,background_worker,module,0,nullptr);
     if(!thread) {
         FreeLibrary(module);
