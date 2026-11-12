@@ -530,7 +530,7 @@ bool offer_association_fix(HWND parent,HINSTANCE plugin,bool russian,
         return false;
     }
 }
-void run_association_fix_worker(HINSTANCE, std::wstring_view arguments) noexcept {
+void run_association_fix_worker(HINSTANCE module, std::wstring_view arguments) noexcept {
     std::wstring status;
     try{
         std::wstring command(arguments);
@@ -541,6 +541,14 @@ void run_association_fix_worker(HINSTANCE, std::wstring_view arguments) noexcept
         LocalFree(argv);
         if(!safe_file(binary) || !safe_file(binary.parent_path()/L"ISO-WCX.wcx64"))
             fail("Installed ISO-WCX plugin was removed before repair");
+        // The worker must come from the exact installed WCX directory that
+        // was approved in Configure. Do not accept an arbitrary user-provided
+        // DLL path or a stale copy unpacked somewhere else. This check works
+        // for both x86 (ISO-WCX.wcx) and x64 (ISO-WCX.wcx64) rundll32 hosts.
+        if(!module || !fs::equivalent(binary,plugin_path(module)))
+            fail("Association worker does not match the active ISO-WCX installation");
+        if(!safe_file(ini) || !fs::equivalent(ini,active_ini()))
+            fail("Total Commander changed its active INI; repair cancelled");
         // TC owns its INI while running. Never mutate until the host has
         // actually exited. Time out without side effects if it stays open.
         for(unsigned elapsed=0;elapsed<600;++elapsed){
