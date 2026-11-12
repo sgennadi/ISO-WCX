@@ -34,6 +34,15 @@ def main(plugin, runner):
             environment["LOCALAPPDATA"] = str(root)
             result = subprocess.run(
                 command, capture_output=True, text=True, env=environment)
+            # Regression: a completed ISO/UDF F5 or Delete must not leave a
+            # sibling transaction behind, including on rejected/cancelled
+            # writes. The WIM expanded-folder leak exposed the same class
+            # of failure, so assert cleanup after *every* ABI operation.
+            leaked = sorted(p.name for p in root.glob(".iso-wcx-edit-*"))
+            assert not leaked, (
+                "ISO/UDF edit leaked temporary transaction directories",
+                leaked, operation, result.returncode, result.stdout,
+                result.stderr)
             assert result.returncode == 0, (
                 "Cannot invoke native WCX test runner",
                 result.returncode, result.stdout, result.stderr)
