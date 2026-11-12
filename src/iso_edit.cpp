@@ -135,8 +135,12 @@ public:
             // Unknown system areas and protective GPT are strictly excluded.
             need(system[510]==0x55 && system[511]==0xaa,
                  "nonzero ISO system area is not a recognized MBR");
-            need(std::memcmp(system.data()+512,"EFI PART",8)!=0,
-                 "hybrid ISO with GPT needs a dedicated partition-aware writer");
+            // GPT headers may be stored at 512-byte, 2048-byte optical
+            // or 4096-byte sector offsets. Never mistake a GPT-bearing
+            // hybrid for a plain MBR image, even if its MBR type is unusual.
+            for(const std::size_t offset:{512u,2048u,4096u})
+                need(std::memcmp(system.data()+offset,"EFI PART",8)!=0,
+                     "hybrid ISO with GPT needs a partition-aware writer");
             const auto limit=size/512u;
             bool has_partition=false;
             for(std::size_t i=0;i<4;++i) {
