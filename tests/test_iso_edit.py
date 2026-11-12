@@ -285,9 +285,17 @@ def main(binary, reader=None):
         anchor[at+4]=sum(anchor[at+i] for i in range(16) if i!=4)&255
         image.write_bytes(anchor)
         run('add','NEW.TXT',False)
-        for mode in ('hybrid','udf','rockridge','bad_extent'):
+        for mode in ('hybrid','isohybrid_mbr','udf','rockridge','bad_extent'):
             b=fixture()
             if mode=='hybrid':b[0]=1
+            elif mode=='isohybrid_mbr':
+                # A valid MBR alone never authorizes generic ISO rebuilding:
+                # it may reference boot payloads / partitions outside PVD.
+                b[0]=0xEB
+                b[510:512]=b'\\x55\\xaa'
+                b[446]=0x80
+                b[450]=0x17
+                struct.pack_into('<II',b,454,0,len(b)//512)
             elif mode=='udf':b[19*B+1:19*B+6]=b'BEA01'
             elif mode=='rockridge':
                 record=iso_record(20,B,2,b'\0')+b'SP\x07\x01\xbe\xef\0';record[0]=len(record)
