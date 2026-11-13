@@ -12,6 +12,18 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — Combined installer ZIP architecture gate (2026-11-13)
+
+CI now validates the **actual** auto-installable ZIP after the x86 and x64
+artifacts are merged, before upload. The CI-only Python verifier checks the
+exact eight-file package layout, Total Commander `pluginst.inf` (including
+ISO, UDF, WIM, ESD and SWM registrations), the requested RC/build, ZIP CRC,
+and the native PE COFF Machine/optional-header architecture for both WCX
+binaries. It also rejects packaged executables, missing files, ambiguous ZIP
+names and swapped x86/x64 plugins; the verifier has a synthetic failure
+self-test. The package remains a **single ZIP** with two WCX binaries.
+No Python or extra runtime files are distributed.
+
 ## RC4 — Independent BIOS/EFI ISO writer regression (2026-11-13)
 
 Linux Preview CI now installs xorriso **only as an external test tool**

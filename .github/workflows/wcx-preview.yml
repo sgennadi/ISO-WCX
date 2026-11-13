@@ -157,6 +157,10 @@ jobs:
           unzip -t "ISO-WCX-v0.21.1-RC4-B${{ github.run_number }}.zip"
           unzip -Z1 "ISO-WCX-v0.21.1-RC4-B${{ github.run_number }}.zip" | grep -qx 'THIRD_PARTY_NOTICES.txt'
           unzip -Z1 "ISO-WCX-v0.21.1-RC4-B${{ github.run_number }}.zip" | grep -qx 'ISO-WCX-F5-Repair.ps1'
+      - name: Verify installer ZIP integrity, bitness and Total Commander INF
+        run: |
+          python3 tests/test_installer_zip.py --selftest
+          python3 tests/test_installer_zip.py "ISO-WCX-v0.21.1-RC4-B${{ github.run_number }}.zip" 0.21.1 4 "${{ github.run_number }}"
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v7
         with:
