@@ -79,6 +79,10 @@ struct State {
     bool stable_checked=false, preview_checked=false;
     std::wstring latest_tag;
     std::optional<preview_update::Build> latest_preview;
+    // Scrolling is only used when DPI or a small monitor reduces the visible
+    // work area. Values are dialog-client pixels, never raw monitor pixels.
+    int content_width=0,content_height=0;
+    int scroll_x=0,scroll_y=0,wheel_remainder=0;
 };
 
 void require(bool ok, const char* error) {
@@ -407,11 +411,107 @@ RECT rect_units(HWND dlg,int x,int y,int w,int h) {
 void add_control(HWND dlg,const wchar_t* cls,const wchar_t* name,
                  DWORD style,int id,int x,int y,int w,int h) {
     const auto r=rect_units(dlg,x,y,w,h);
+    // BS_NOTIFY emits focus events so keyboard navigation can reveal
+    // off-screen controls when the dialog is scrollable at high DPI.
+    if(std::wstring_view(cls)==L"BUTTON")style|=BS_NOTIFY;
     const auto child=CreateWindowExW(0,cls,name,style|WS_CHILD|WS_VISIBLE,
         r.left,r.top,r.right,r.bottom,dlg,reinterpret_cast<HMENU>(
         static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
-    if(child)SendMessageW(child,WM_SETFONT,
-                reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
+    if(child){
+        const auto inherited=SendMessageW(dlg,WM_GETFONT,0,0);
+        SendMessageW(child,WM_SETFONT,
+            inherited?static_cast<WPARAM>(inherited):
+                reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),
+            TRUE);
+    }
+}
+
+// Native scrollbars are a fallback for small work areas or 200% DPI.
+// They never change the relative position or size of normal controls.
+void adjust_settings_viewport(HWND dlg,State& state) {
+    RECT window{};
+    if(!GetWindowRect(dlg,&window))return;
+    MONITORINFO monitor{sizeof(monitor)};
+    if(!GetMonitorInfoW(MonitorFromWindow(dlg,MONITOR_DEFAULTTONEAREST),
+                        &monitor))return;
+    const auto work=monitor.rcWork;
+    const int w=work.right-work.left,h=work.bottom-work.top;
+    const UINT dpi=GetDpiForWindow(dlg);
+    const int margin=std::max(8,MulDiv(12,static_cast<int>(dpi?dpi:96),96));
+    const int wanted_w=window.right-window.left;
+    const int wanted_h=window.bottom-window.top;
+    const int fitted_w=std::min(wanted_w,std::max(1,w-2*margin));
+    const int fitted_h=std::min(wanted_h,std::max(1,h-2*margin));
+    const int left=work.left+(w-fitted_w)/2;
+    const int top=work.top+(h-fitted_h)/2;
+    SetWindowPos(dlg,nullptr,left,top,fitted_w,fitted_h,
+                 SWP_NOZORDER|SWP_NOACTIVATE);
+
+    const auto content=rect_units(dlg,0,0,360,378);
+    state.content_width=content.right;
+    state.content_height=content.bottom;
+    bool need_v=false,need_h=false;
+    RECT client{};
+    for(int pass=0;pass<3;++pass){
+        if(!GetClientRect(dlg,&client))return;
+        const bool next_v=state.content_height>client.bottom;
+        const bool next_h=state.content_width>client.right;
+        if(next_v==need_v && next_h==need_h)break;
+        need_v=next_v;need_h=next_h;
+        const auto current=GetWindowLongPtrW(dlg,GWL_STYLE);
+        const auto desired=(current&~static_cast<LONG_PTR>(WS_VSCROLL|WS_HSCROLL))|
+                           (need_v?WS_VSCROLL:0)|(need_h?WS_HSCROLL:0);
+        if(desired!=current){
+            SetWindowLongPtrW(dlg,GWL_STYLE,desired);
+            SetWindowPos(dlg,nullptr,0,0,0,0,
+                SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|
+                SWP_NOACTIVATE|SWP_FRAMECHANGED);
+        }
+    }
+    if(!GetClientRect(dlg,&client))return;
+    const auto init_scroll=[&](int bar,int content_size,int viewport_size){
+        SCROLLINFO info{};
+        info.cbSize=sizeof(info);
+        info.fMask=SIF_RANGE|SIF_PAGE|SIF_POS;
+        info.nMin=0;
+        info.nMax=std::max(0,content_size-1);
+        info.nPage=static_cast<UINT>(std::max(1,viewport_size));
+        info.nPos=0;
+        SetScrollInfo(dlg,bar,&info,TRUE);
+    };
+    init_scroll(SB_VERT,state.content_height,client.bottom);
+    init_scroll(SB_HORZ,state.content_width,client.right);
+}
+
+void scroll_settings(HWND dlg,State& state,int bar,int delta) {
+    RECT client{};
+    if(!GetClientRect(dlg,&client))return;
+    const bool vertical=bar==SB_VERT;
+    const int limit=std::max(0,(vertical?state.content_height:state.content_width)-
+                              (vertical?client.bottom:client.right));
+    int& current=vertical?state.scroll_y:state.scroll_x;
+    const auto position=std::clamp(current+delta,0,limit);
+    if(position==current)return;
+    const int shift=current-position;
+    ScrollWindowEx(dlg,vertical?0:shift,vertical?shift:0,
+                   nullptr,nullptr,nullptr,nullptr,
+                   SW_SCROLLCHILDREN|SW_INVALIDATE|SW_ERASE);
+    current=position;
+    SetScrollPos(dlg,bar,current,TRUE);
+}
+
+void scroll_control_into_view(HWND dlg,State& state,HWND control) {
+    if(!control||!IsChild(dlg,control))return;
+    RECT bounds{},client{};
+    if(!GetWindowRect(control,&bounds)||!GetClientRect(dlg,&client))return;
+    MapWindowPoints(HWND_DESKTOP,dlg,reinterpret_cast<POINT*>(&bounds),2);
+    const int margin=8;
+    if(bounds.top<margin)scroll_settings(dlg,state,SB_VERT,bounds.top-margin);
+    else if(bounds.bottom>client.bottom-margin)
+        scroll_settings(dlg,state,SB_VERT,bounds.bottom-client.bottom+margin);
+    if(bounds.left<margin)scroll_settings(dlg,state,SB_HORZ,bounds.left-margin);
+    else if(bounds.right>client.right-margin)
+        scroll_settings(dlg,state,SB_HORZ,bounds.right-client.right+margin);
 }
 void update_channel_button(HWND dlg,const State& state){
     SetDlgItemTextW(dlg,id_install,tr(state.russian,
@@ -919,6 +1019,7 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
              L"Check & Fix WCX Associations...",
              L"Проверить и исправить привязки WCX..."),
              BS_PUSHBUTTON|WS_TABSTOP,id_tc_assoc_fix,12,341,340,26);
+        adjust_settings_viewport(dlg,*state);
         CheckDlgButton(dlg,id_never,
               state->automatic?BST_UNCHECKED:BST_CHECKED);
         update_release_labels(dlg,*state);
@@ -933,8 +1034,50 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
     case check_later:
         if(state)check_release(dlg,*state,false);
         return TRUE;
+    case WM_VSCROLL:
+    case WM_HSCROLL: {
+        if(!state || lp)return FALSE;
+        const int bar=msg==WM_VSCROLL?SB_VERT:SB_HORZ;
+        RECT client{};
+        if(!GetClientRect(dlg,&client))return FALSE;
+        const int page=bar==SB_VERT?client.bottom:client.right;
+        const int step=std::max(12,page/16);
+        int delta=0;
+        switch(LOWORD(wp)){
+        case SB_LINEUP: delta=-step;break;
+        case SB_LINEDOWN: delta=step;break;
+        case SB_PAGEUP: delta=-std::max(step,page-step);break;
+        case SB_PAGEDOWN: delta=std::max(step,page-step);break;
+        case SB_THUMBTRACK:
+        case SB_THUMBPOSITION: {
+            SCROLLINFO info{};
+            info.cbSize=sizeof(info);
+            info.fMask=SIF_TRACKPOS;
+            if(GetScrollInfo(dlg,bar,&info))
+                delta=info.nTrackPos-(bar==SB_VERT?state->scroll_y:state->scroll_x);
+            break;
+        }
+        case SB_TOP:
+            delta=-(bar==SB_VERT?state->scroll_y:state->scroll_x);break;
+        case SB_BOTTOM:
+            delta=(bar==SB_VERT?state->content_height:state->content_width);break;
+        default:break;
+        }
+        scroll_settings(dlg,*state,bar,delta);
+        return TRUE;
+    }
+    case WM_MOUSEWHEEL: {
+        if(!state)return FALSE;
+        state->wheel_remainder+=GET_WHEEL_DELTA_WPARAM(wp);
+        const int notches=state->wheel_remainder/WHEEL_DELTA;
+        state->wheel_remainder-=notches*WHEEL_DELTA;
+        if(notches)scroll_settings(dlg,*state,SB_VERT,-notches*40);
+        return TRUE;
+    }
     case WM_COMMAND: {
         if(!state)return FALSE;
+        if(HIWORD(wp)==BN_SETFOCUS || HIWORD(wp)==CBN_SETFOCUS)
+            scroll_control_into_view(dlg,*state,reinterpret_cast<HWND>(lp));
         const int cmd=LOWORD(wp);
         if(cmd==id_never && HIWORD(wp)==BN_CLICKED) {
             state->automatic=IsDlgButtonChecked(dlg,id_never)!=BST_CHECKED;
@@ -1083,11 +1226,18 @@ void configure_updates(HWND parent,HINSTANCE instance) {
     alignas(DWORD) std::array<std::uint8_t,256> raw{};
     const auto store32=[&](std::size_t at,DWORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
     const auto store16=[&](std::size_t at,WORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
-    store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER);
+    // DS_SHELLFONT uses a modern dialog font and consistent DPI-aware dialog
+    // units. Child controls inherit that font instead of overriding it.
+    store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER|DS_SHELLFONT);
     store32(4,0);store16(8,0);store16(10,0);store16(12,0);
     store16(14,367);store16(16,382);store16(18,0);store16(20,0);
     constexpr wchar_t caption[]=L"ISO-WCX Settings";
+    constexpr wchar_t face[]=L"Segoe UI";
     std::memcpy(raw.data()+22,caption,sizeof(caption));
+    constexpr auto font_offset=22+sizeof(caption);
+    static_assert(font_offset+sizeof(WORD)+sizeof(face)<=256);
+    store16(font_offset,9);
+    std::memcpy(raw.data()+font_offset+sizeof(WORD),face,sizeof(face));
     State state{};
     state.module=instance;
     (void)DialogBoxIndirectParamW(instance,

@@ -12,6 +12,19 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — Configure Settings high-DPI viewport (2026-11-13)
+
+The built-in Configure Settings window now uses the standard Windows Segoe UI
+shell dialog font, inherited by every child control. If Windows display scaling
+(especially 200% on small screens), taskbar placement, or a narrow monitor
+would push the settings window outside the available work area, it is resized
+and centered to fit the current monitor and **native scrollbars** expose every
+setting including the lower WCX association controls. Vertical mouse wheel,
+scrollbar dragging and keyboard focus navigation are supported. On a normal
+screen the layout remains unchanged and no scrollbars are shown. Only native
+Windows APIs are used; no webview, EXE or extra DLL is shipped. CI compilation
+does not replace an on-device 200% DPI visual test.
+
 ## RC4 — Stable install opt-in after verified download (2026-11-13)
 
 A successful Stable SHA-256 download now asks **Open installer / Later**
