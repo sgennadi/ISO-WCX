@@ -203,16 +203,15 @@ public:
             }
             return true;
         };
-        udf_bridge=udf_bridge || add_udf_anchor(256) ||
-                   (sectors>256 && add_udf_anchor(sectors-256)) ||
-                   add_udf_anchor(sectors-1);
-        // Always inspect all standard anchor positions; short-circuiting
-        // would silently omit a protected backup descriptor range.
-        if(udf_bridge) {
-            add_udf_anchor(256);
-            if(sectors>256)add_udf_anchor(sectors-256);
-            add_udf_anchor(sectors-1);
-        }
+        // The UDF reader also accepts a valid AVDP at sector 512. Missing
+        // this position would let the ISO writer misclassify a real UDF
+        // bridge as plain ISO9660 and rebuild its metadata destructively.
+        // Inspect every candidate, even if VRS or an earlier anchor matched,
+        // so backup anchor and descriptor extents stay protected too.
+        if(add_udf_anchor(256))udf_bridge=true;
+        if(sectors>512 && add_udf_anchor(512))udf_bridge=true;
+        if(sectors>256 && add_udf_anchor(sectors-256))udf_bridge=true;
+        if(sectors && add_udf_anchor(sectors-1))udf_bridge=true;
         need(allow_udf_bridge || !udf_bridge,
              "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         Bytes primary,supplementary;bool end=false;
@@ -236,11 +235,6 @@ public:
             descriptors.emplace_back(lba,std::move(b));
         }
         need(end&&!primary.empty(),"missing ISO primary/terminator");
-        // Even a valid MBR is too risky for the generic ISO9660 rebuilder:
-        // its partition table may reference sectors after the original image.
-        // Hybrid MBR support is restricted to the UDF byte-only path below.
-        need(!hybrid_system_area || udf_bridge,
-             "hybrid MBR ISO requires a UDF bridge for payload-only editing");
         // Detect UDF anchors relative to the logical volume as well as the
         // physical file end. ISO/UDF bridges may have zero padding after the
         // actual ECMA-167 anchor, and cannot use the plain ISO rebuild path.
@@ -251,6 +245,10 @@ public:
             need(allow_udf_bridge || !udf_bridge,
                  "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         }
+        // Hybrid MBR support is restricted to a UDF byte-only writer.
+        // Check this AFTER even the declared-volume-end AVDP has been probed.
+        need(!hybrid_system_area || udf_bridge,
+             "hybrid MBR ISO requires a UDF bridge for payload-only editing");
         // A non-UDF ISO can have an all-zero sector-aligned trailer. Preserve
         // it during staging, then update the descriptor's volume size when
         // appending changed files/metadata. Never accept hidden nonzero
