@@ -285,6 +285,25 @@ def main(binary, reader=None):
         anchor[at+4]=sum(anchor[at+i] for i in range(16) if i!=4)&255
         image.write_bytes(anchor)
         run('add','NEW.TXT',False)
+
+        # Regression: UDF's independent reader also probes AVDP at logical
+        # sector 512 when ordinary anchors and VRS are absent. A plausible
+        # sector-512 AVDP (even with missing/corrupted VDS) must never allow
+        # ISO9660 metadata writes or an F5 success against an unknown bridge.
+        unusual=bytearray(fixture())
+        unusual.extend(bytes((600-len(unusual)//B)*B))
+        both(unusual,16*B+80,len(unusual)//B)
+        at=512*B
+        struct.pack_into('<H',unusual,at,2)  # valid tag ID: AVDP
+        struct.pack_into('<H',unusual,at+2,2)
+        struct.pack_into('<I',unusual,at+12,512)
+        unusual[at+4]=sum(unusual[at+i] for i in range(16)
+                          if i!=4)&255
+        image.write_bytes(unusual)
+        run('add','NEW.TXT',False)
+        assert image.read_bytes()==unusual, (
+            'ISO writer ignored a UDF AVDP at sector 512')
+
         for mode in ('hybrid','isohybrid_mbr','udf','rockridge','bad_extent'):
             b=fixture()
             if mode=='hybrid':b[0]=1
