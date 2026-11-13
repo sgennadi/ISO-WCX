@@ -1,7 +1,46 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.21.0 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.21.1 LANGUAGES C CXX)
 
-# Retain C++20 as a backward-compatible local default. Stable v0.21.0
+# Stable source metadata is v0.21.1; next RC builds target the following patch.
+# RC builds deliberately advertise the *next patch*, not the published stable.
+# CI passes one monotonically increasing workflow run number per build.
+set(ISO_WCX_RC_NUMBER "0" CACHE STRING "Release candidate number (0=Stable)")
+set(ISO_WCX_BUILD_NUMBER "0" CACHE STRING "Unique preview CI build number")
+foreach(field ISO_WCX_RC_NUMBER ISO_WCX_BUILD_NUMBER)
+  if(NOT "${${field}}" MATCHES "^(0|[1-9][0-9]*)$")
+    message(FATAL_ERROR "${field} must be an integer from 0 to 65535")
+  endif()
+  if(${field} GREATER 65535)
+    message(FATAL_ERROR "${field} exceeds the Windows VERSIONINFO field limit")
+  endif()
+endforeach()
+set(ISO_WCX_EFFECTIVE_PATCH ${PROJECT_VERSION_PATCH})
+if(ISO_WCX_RC_NUMBER GREATER 0)
+  math(EXPR ISO_WCX_EFFECTIVE_PATCH "${PROJECT_VERSION_PATCH} + 1")
+  set(ISO_WCX_VERSION_DISPLAY
+      "v${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${ISO_WCX_EFFECTIVE_PATCH} RC${ISO_WCX_RC_NUMBER} (Build ${ISO_WCX_BUILD_NUMBER})")
+else()
+  set(ISO_WCX_VERSION_DISPLAY "v${PROJECT_VERSION}")
+endif()
+set(ISO_WCX_VERSION_FILE
+    "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${ISO_WCX_EFFECTIVE_PATCH},${ISO_WCX_BUILD_NUMBER}")
+if(ISO_WCX_RC_NUMBER GREATER 0)
+  set(ISO_WCX_VERSION_FLAGS "VS_FF_PRERELEASE")
+  set(ISO_WCX_VERSION_INI
+      "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${ISO_WCX_EFFECTIVE_PATCH}")
+  configure_file(pluginst-preview.inf.in "${CMAKE_CURRENT_BINARY_DIR}/pluginst.inf" @ONLY)
+else()
+  set(ISO_WCX_VERSION_FLAGS "0x0L")
+  configure_file(pluginst.inf "${CMAKE_CURRENT_BINARY_DIR}/pluginst.inf" COPYONLY)
+endif()
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+  set(ISO_WCX_WCX_BINARY_NAME "ISO-WCX.wcx")
+else()
+  set(ISO_WCX_WCX_BINARY_NAME "ISO-WCX.wcx64")
+endif()
+message(STATUS "ISO-WCX identity: ${ISO_WCX_VERSION_DISPLAY}")
+
+# Retain C++20 as a backward-compatible local default. Stable v0.21.1
 # explicitly enables tested Visual Studio 2026 C++26 draft for Win32/x64.
 # Total Commander WCX ABI and package filenames remain unchanged.
 set(ISO_WCX_CXX_STANDARD "20" CACHE STRING "ISO-WCX C++ standard: 20 or experimental 26")
@@ -69,8 +108,15 @@ if(WIN32)
   include(FetchContent)
   set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
   set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  # GitHub's generated source archive intermittently returns 502/503 to
+  # Windows Actions runners. Use the author's official preserved release
+  # tarball with an independent mirror and verify the pinned upstream SHA-256.
+  # Both URLs serve the identical upstream zlib-1.3.1.tar.gz distribution.
   FetchContent_Declare(iso_wcx_zlib
-      URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz)
+      URL
+        https://zlib.net/fossils/zlib-1.3.1.tar.gz
+        https://gstreamer.freedesktop.org/src/mirror/zlib/zlib-1.3.1.tar.gz
+      URL_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23)
   FetchContent_MakeAvailable(iso_wcx_zlib)
   set(ISO_WCX_ZLIB_TARGET zlibstatic)
 else()
@@ -127,6 +173,10 @@ if(BUILD_TESTING)
   add_test(NAME udf_bridge_same_length_edit
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_bridge_edit.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  add_test(NAME universal_iso_udf_boot_preserving_edit
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_bridge_metadata.py"
+      "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  set_tests_properties(universal_iso_udf_boot_preserving_edit PROPERTIES TIMEOUT 180)
   add_test(NAME image_structure_iso_udf_bridge_namespaces
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_image_report_bridge.py"
       "$<TARGET_FILE:disc_inspect>")
@@ -178,6 +228,10 @@ if(BUILD_TESTING)
   add_executable(wim_parts_tests tests/wim_parts.cpp)
   target_include_directories(wim_parts_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME wim_split_parts COMMAND wim_parts_tests)
+  add_executable(tc_association_flags_tests tests/tc_association_flags.cpp)
+  target_include_directories(tc_association_flags_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME tc_association_158_159_192_222
+           COMMAND tc_association_flags_tests)
   # Read-only WIM resource-table prerequisite for future metadata-only edits.
   # This does not enable any new on-disk WIM writer or runtime dependency.
   add_executable(wim_fast_edit_probe_tests tests/wim_fast_edit_probe.cpp)
@@ -199,7 +253,7 @@ find_package(Threads REQUIRED)
 add_library(iso_disc STATIC src/archive_edit.cpp src/floppy_edit.cpp src/dynamic_vhd_edit.cpp src/vhdx_edit.cpp src/fat_mapped_image.cpp src/iso_edit.cpp src/udf_edit.cpp src/disc.cpp src/image_report.cpp src/rock_ridge.cpp src/cue.cpp src/image_tracks.cpp src/ccd.cpp src/subq.cpp src/legacy_formats.cpp src/compressed_image.cpp src/mds_probe.cpp src/mds_v2.cpp src/mds_v2_tracks.cpp src/cd_audio_wav.cpp third_party/tiny_aes/mds_aes.c src/virtual_archive.cpp src/packed_optical.cpp src/chd_stream.cpp)
 target_link_libraries(iso_disc PUBLIC ${ISO_WCX_ZLIB_TARGET} ${ISO_WCX_BZIP2_TARGET} chdr-static Threads::Threads)
 if(WIN32)
-  target_sources(iso_disc PRIVATE src/wim_archive.cpp src/wim_edit.cpp)
+  target_sources(iso_disc PRIVATE src/wim_archive.cpp src/wim_edit.cpp src/wim_index_report.cpp)
   target_link_libraries(iso_disc PUBLIC advapi32 ole32 oleaut32 uuid bcrypt)
 endif()
 target_include_directories(iso_disc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -209,6 +263,10 @@ if(BUILD_TESTING)
   target_link_libraries(image_structure_report_tests PRIVATE iso_disc)
   add_test(NAME image_structure_metadata_export_read_only
            COMMAND image_structure_report_tests)
+  add_executable(optical_edit_guard_tests tests/optical_edit_guard.cpp)
+  target_include_directories(optical_edit_guard_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME universal_optical_protected_region_guard
+           COMMAND optical_edit_guard_tests)
 endif()
 target_compile_features(iso_disc PUBLIC cxx_std_20)
 if(MSVC)
@@ -326,13 +384,33 @@ if(ISO_WCX_BUILD_DEV_TOOLS)
   target_link_libraries(disc_inspect PRIVATE iso_disc)
 endif()
 
+if(BUILD_TESTING)
+  add_executable(universal_diagnostics_contract_tests
+    tests/universal_diagnostics_contract.cpp)
+  target_include_directories(universal_diagnostics_contract_tests
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME universal_diagnostics_contract
+    COMMAND universal_diagnostics_contract_tests)
+endif()
+
 if(WIN32)
-  add_library(ISO-WCX MODULE src/wcx.cpp src/wcx_updater.cpp)
+  enable_language(RC)
+  configure_file(src/version.rc.in
+                 "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc" @ONLY)
+  add_library(ISO-WCX MODULE
+              src/wcx.cpp src/wcx_updater.cpp src/operation_diagnostics.cpp
+              src/modern_dialog.cpp
+              src/tc_registration_audit.cpp src/tc_registration_repair.cpp
+              src/universal_diagnostics_bridge.cpp
+              src/vendor/universal_diagnostics_embedded.cpp
+              "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc")
   target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32)
   target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
     ISO_WCX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     ISO_WCX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
-    ISO_WCX_VERSION_PATCH=${PROJECT_VERSION_PATCH})
+    ISO_WCX_VERSION_PATCH=${ISO_WCX_EFFECTIVE_PATCH}
+    ISO_WCX_RC_NUMBER=${ISO_WCX_RC_NUMBER}
+    ISO_WCX_BUILD_NUMBER=${ISO_WCX_BUILD_NUMBER})
   if(MSVC)
     target_compile_options(ISO-WCX PRIVATE /W4 /EHsc /utf-8)
   else()
@@ -345,6 +423,7 @@ if(WIN32)
     # It is never required or packaged with the WCX plugin.
     if(ISO_WCX_BUILD_DEV_TOOLS)
       add_executable(ISO-WCX-Setup WIN32 tools/tc_setup.cpp)
+    target_include_directories(ISO-WCX-Setup PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_compile_features(ISO-WCX-Setup PRIVATE cxx_std_20)
     target_compile_definitions(ISO-WCX-Setup PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(ISO-WCX-Setup PRIVATE shell32 advapi32)
@@ -365,13 +444,54 @@ if(WIN32)
   endif()
   set_target_properties(ISO-WCX PROPERTIES PREFIX "" SUFFIX "${WCX_SUFFIX}")
   if(BUILD_TESTING)
+    add_executable(tc_registration_audit_test
+      tests/tc_registration_audit.cpp src/tc_registration_audit.cpp)
+    target_include_directories(tc_registration_audit_test
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(tc_registration_audit_test PRIVATE advapi32)
+    add_test(NAME tc_wcx_registration_readonly_audit
+      COMMAND tc_registration_audit_test)
+    add_executable(tc_registration_repair_test
+      tests/tc_registration_repair.cpp src/tc_registration_repair.cpp
+      src/modern_dialog.cpp)
+    target_include_directories(tc_registration_repair_test
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(tc_registration_repair_test PRIVATE advapi32 shell32)
+    add_test(NAME tc_wcx_native_offline_association_fix
+      COMMAND tc_registration_repair_test)
+    add_executable(universal_diagnostics_windows_test
+      tests/universal_diagnostics_windows.cpp
+      src/universal_diagnostics_bridge.cpp
+      src/vendor/universal_diagnostics_embedded.cpp)
+    target_include_directories(universal_diagnostics_windows_test
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include"
+              "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(universal_diagnostics_windows_test PRIVATE bcrypt)
+    add_test(NAME universal_diagnostics_windows_embedded
+      COMMAND universal_diagnostics_windows_test)
+    set_tests_properties(universal_diagnostics_windows_embedded PROPERTIES TIMEOUT 40)
+    add_executable(wcx_host_dispatch_diagnostics_tests
+      tests/wcx_host_dispatch_diagnostics.cpp src/operation_diagnostics.cpp)
+    target_include_directories(wcx_host_dispatch_diagnostics_tests
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(wcx_host_dispatch_diagnostics_tests PRIVATE shell32)
+    target_compile_definitions(wcx_host_dispatch_diagnostics_tests
+      PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME wcx_inprocess_host_f5_dispatch_diagnostics
+      COMMAND wcx_host_dispatch_diagnostics_tests)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
     add_executable(wcx_wim_smoke tests/wcx_wim_smoke.cpp)
+    target_link_libraries(wcx_wim_smoke PRIVATE iso_disc)
+    add_executable(wcx_iso_edit_runner tests/wcx_iso_edit_runner.cpp)
     add_test(NAME wcx_wim_multi_image_lzx_esd
       COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>")
-    set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 240)
+    set_tests_properties(wcx_wim_multi_image_lzx_esd PROPERTIES TIMEOUT 360)
+    add_test(NAME wcx_iso_f5_padded_add_replace_delete
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_iso_edit.py"
+              "$<TARGET_FILE:ISO-WCX>" "$<TARGET_FILE:wcx_iso_edit_runner>")
+    set_tests_properties(wcx_iso_f5_padded_add_replace_delete PROPERTIES TIMEOUT 90)
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()
 endif()
@@ -414,6 +534,18 @@ if(BUILD_TESTING)
       add_test(NAME independent_libarchive_iso
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_independent_iso.py" "$<TARGET_FILE:disc_inspect>")
       set_tests_properties(independent_libarchive_iso PROPERTIES SKIP_RETURN_CODE 77)
+      # Test independently mastered BIOS+EFI El Torito media. xorriso is
+      # used only by CTest; no new runtime tool ships with ISO-WCX.
+      find_program(ISO_WCX_XORRISO_EXECUTABLE NAMES xorriso)
+      if(ISO_WCX_XORRISO_EXECUTABLE)
+        add_test(NAME independent_xorriso_dual_boot_iso_edit
+          COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_xorriso_el_torito_iso.py"
+            "$<TARGET_FILE:archive_edit_fixture>"
+            "${ISO_WCX_XORRISO_EXECUTABLE}")
+        set_tests_properties(independent_xorriso_dual_boot_iso_edit
+          PROPERTIES TIMEOUT 240)
+      endif()
     endif()
     add_test(NAME disc_compatibility_v070
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compat_v070.py" "$<TARGET_FILE:disc_inspect>")

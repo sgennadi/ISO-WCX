@@ -14,6 +14,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "iso_wcx/tc_association_flags.hpp"
 #include <shellapi.h>
 #include <tlhelp32.h>
 #include <algorithm>
@@ -23,6 +24,7 @@
 #include <cwchar>
 #include <fstream>
 #include <cstdint>
+#include <string_view>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -246,7 +248,8 @@ void validate_unique_plugin_keys(const fs::path& ini) {
     std::vector<std::wstring> seen;
     const auto is_target = [](const std::wstring& name) {
         for (const wchar_t* ext : {L"iso", L"cue", L"ccd", L"nrg",
-                                   L"mds", L"cso", L"zso"})
+                                   L"mds", L"cso", L"zso", L"udf", L"wim",
+                                   L"esd", L"swm"})
             if (name == ext) return true;
         return false;
     };
@@ -356,8 +359,9 @@ std::wstring run(const Options& opts) {
     const std::wstring new_path = (destination / L"ISO-WCX.wcx").wstring();
     std::vector<Change> updates;
     unsigned preserved = 0;
-    for (const auto& ext : std::array<const wchar_t*, 7>{
-         L"iso", L"cue", L"ccd", L"nrg", L"mds", L"cso", L"zso"}) {
+    for (const auto& ext : std::array<const wchar_t*, 11>{
+         L"iso", L"cue", L"ccd", L"nrg", L"mds", L"cso", L"zso",
+         L"udf", L"wim", L"esd", L"swm"}) {
         const std::wstring existing = profile(assoc_ini, L"PackerPlugins", ext);
         const std::wstring raw = old_path(existing);
         std::wstring reason;
@@ -366,6 +370,22 @@ std::wstring run(const Options& opts) {
         else if (installed_name(raw)) {
             if (!same_path(fs::path(resolved_old_path(raw, tc_dir)), fs::path(new_path)))
                 reason = L"ISO-WCX path migration";
+            else {
+                const unsigned mask=iso_wcx::tc_association::flags(existing);
+                // Verified on a live Total Commander 11.58.1 host:
+                // 159 reaches PackFilesW, while 158 was refused before
+                // callback. The observed RC2 222 entry likewise produced
+                // no F5 pack event. Only normalize our own ISO/UDF/WIM
+                // registrations; never rewrite a different WCX handler.
+                const bool host_writable=std::wstring_view(ext)==L"iso" ||
+                                         std::wstring_view(ext)==L"udf" ||
+                                         std::wstring_view(ext)==L"wim";
+                if(host_writable && !iso_wcx::tc_association::host_tested_f5(mask))
+                    reason=L"refresh ISO-WCX host F5 cache to 159";
+                // Read-only CUE/CCD/NRG/MDS/CSO/ZSO/ESD/SWM registrations
+                // deliberately use mask 192. Never treat their missing
+                // MODIFY/DELETE bits as a defect or rewrite them repeatedly.
+            }
         } else if (legacy_name(raw)) {
             const auto legacy = resolved_old_path(raw, tc_dir);
             if (!exists_file(legacy)) reason = L"missing legacy iso.wcx";
@@ -374,7 +394,14 @@ std::wstring run(const Options& opts) {
             ++preserved;
             continue;
         }
-        updates.push_back({ext, L"192," + new_path, reason});
+        // Real-TC validated F5 requires the cached NEW bit for our
+        // *existing* writable containers. Noneditable optical formats and
+        // split SWM/ESD remain read-only; no unrelated TC plugin is touched.
+        const bool writable=std::wstring_view(ext)==L"wim" ||
+                            std::wstring_view(ext)==L"iso" ||
+                            std::wstring_view(ext)==L"udf";
+        const auto capabilities=writable?L"159,":L"192,";
+        updates.push_back({ext, std::wstring(capabilities) + new_path, reason});
     }
 
     if (!same_path(binary_source, destination))

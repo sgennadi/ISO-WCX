@@ -143,6 +143,35 @@ def main(binary, reader=None):
             r=subprocess.run(args,capture_output=True,text=True)
             assert (r.returncode==0)==ok,(r.stdout,r.stderr,op,name)
             if not ok:assert image.read_bytes()==before,'original changed on failure'
+        # The physical ISO may contain a sector-aligned zero trailer not
+        # included in the ISO9660 descriptor's Volume Space Size. This is
+        # padding, not an additional partition: edits must work and update
+        # the final descriptor size to the real output length.
+        padded=fixture()+bytes(4*B)
+        image.write_bytes(padded)
+        run('add','PADDED.TXT')
+        assert read_image(image)['PADDED.TXT']==source.read_bytes()
+        edited=image.read_bytes()
+        assert int.from_bytes(edited[16*B+80:16*B+84],'little')==len(edited)//B
+        run('add','PADDED.TXT')  # replacement of the same existing file
+        run('delete','PADDED.TXT')
+        assert 'PADDED.TXT' not in read_image(image)
+        # A nonzero trailer may be appended boot, partition or vendor data,
+        # so it is never silently discarded or overwritten.
+        image.write_bytes(fixture()+bytes(4*B-1)+b'X')
+        run('add','MUST_FAIL.TXT',False)
+        # Truncation and namespace disagreement remain hard failures.
+        truncated=fixture()
+        both(truncated,16*B+80,len(truncated)//B+1)
+        image.write_bytes(truncated)
+        run('add','MUST_FAIL.TXT',False)
+        inconsistent=fixture(joliet=True)
+        both(inconsistent,17*B+80,len(inconsistent)//B-1)
+        image.write_bytes(inconsistent)
+        run('add','MUST_FAIL.TXT',False)
+        # An ISO/UDF bridge can legitimately have a physical file longer
+        # than ISO's declared extent. Its writer must still validate UDF,
+        # sharing and equal-length replacement; this test focuses on ISO.
         image.write_bytes(fixture());run('add','HELLO.TXT');run('add','DOCS/NEW.TXT');run('mkdir','EMPTY');run('mkdir','AAA');run('mkdir','DOCS/Z_CHILD');run('mkdir','DOCS/A_CHILD')
         expected={'HELLO.TXT':source.read_bytes(),'DOCS/':None,'DOCS/NEW.TXT':source.read_bytes(),'EMPTY/':None,'AAA/':None,'DOCS/Z_CHILD/':None,'DOCS/A_CHILD/':None}
         assert read_image(image)==expected
@@ -213,6 +242,37 @@ def main(binary, reader=None):
         run('delete','HELLO.TXT',False)
         run('add','HELLO.TXT',False)
 
+        # Authoring programs may append zero sectors after the ISO9660
+        # declared volume. The writer must accept bounded zero padding,
+        # normalize the descriptor size, and retain the new file on readback.
+        image.write_bytes(fixture() + bytes(12*B))
+        run('add','PADDED.TXT')
+        assert read_image(image)['PADDED.TXT']==source.read_bytes()
+        padded=image.read_bytes()
+        assert int.from_bytes(padded[16*B+80:16*B+84],'little')==len(padded)//B
+        validate_path_tables(image)
+        image.write_bytes(fixture(joliet=True) + bytes(12*B))
+        run('add','PADDED.TXT')
+        assert read_image(image,True)['PADDED.TXT']==source.read_bytes()
+        validate_path_tables(image)
+        # Nonzero bytes beyond the declared volume could be hidden boot or
+        # partition metadata; they must never be overwritten.
+        image.write_bytes(fixture() + b'X' + bytes(B-1))
+        run('add','NEW.TXT',False)
+        # A valid UDF anchor can be located at the declared volume boundary,
+        # rather than at the physical EOF if the disc was padded.
+        hidden=bytearray(fixture())
+        hidden.extend(bytes((600-len(hidden)//B)*B))
+        both(hidden,16*B+80,600)
+        hidden.extend(bytes(40*B))
+        anchor_at=(600-256)*B
+        struct.pack_into('<H',hidden,anchor_at,2)
+        struct.pack_into('<H',hidden,anchor_at+2,2)
+        struct.pack_into('<I',hidden,anchor_at+12,600-256)
+        hidden[anchor_at+4]=sum(hidden[anchor_at+i] for i in range(16) if i!=4)&255
+        image.write_bytes(hidden)
+        run('add','NEW.TXT',False)
+
         # Even without the NSR02/NSR03 VRS sequence, a valid UDF anchor
         # means the editor must NOT update only the ISO namespace.
         anchor=bytearray(fixture())
@@ -225,9 +285,36 @@ def main(binary, reader=None):
         anchor[at+4]=sum(anchor[at+i] for i in range(16) if i!=4)&255
         image.write_bytes(anchor)
         run('add','NEW.TXT',False)
-        for mode in ('hybrid','udf','rockridge','bad_extent'):
+
+        # Regression: UDF's independent reader also probes AVDP at logical
+        # sector 512 when ordinary anchors and VRS are absent. A plausible
+        # sector-512 AVDP (even with missing/corrupted VDS) must never allow
+        # ISO9660 metadata writes or an F5 success against an unknown bridge.
+        unusual=bytearray(fixture())
+        unusual.extend(bytes((600-len(unusual)//B)*B))
+        both(unusual,16*B+80,len(unusual)//B)
+        at=512*B
+        struct.pack_into('<H',unusual,at,2)  # valid tag ID: AVDP
+        struct.pack_into('<H',unusual,at+2,2)
+        struct.pack_into('<I',unusual,at+12,512)
+        unusual[at+4]=sum(unusual[at+i] for i in range(16)
+                          if i!=4)&255
+        image.write_bytes(unusual)
+        run('add','NEW.TXT',False)
+        assert image.read_bytes()==unusual, (
+            'ISO writer ignored a UDF AVDP at sector 512')
+
+        for mode in ('hybrid','isohybrid_mbr','udf','rockridge','bad_extent'):
             b=fixture()
             if mode=='hybrid':b[0]=1
+            elif mode=='isohybrid_mbr':
+                # A valid MBR alone never authorizes generic ISO rebuilding:
+                # it may reference boot payloads / partitions outside PVD.
+                b[0]=0xEB
+                b[510:512]=b'\x55\xaa'
+                b[446]=0x80
+                b[450]=0x17
+                struct.pack_into('<II',b,454,0,len(b)//512)
             elif mode=='udf':b[19*B+1:19*B+6]=b'BEA01'
             elif mode=='rockridge':
                 record=iso_record(20,B,2,b'\0')+b'SP\x07\x01\xbe\xef\0';record[0]=len(record)

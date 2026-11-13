@@ -18,7 +18,10 @@ namespace iso_wcx {
 // redistributable codec DLL, or external helper is required at runtime.
 class WimArchive final {
 public:
-    explicit WimArchive(const std::filesystem::path& image);
+    // selected_index != 0 restricts verification to one image index.
+    // The default continues to enumerate all indexes for Total Commander.
+    explicit WimArchive(const std::filesystem::path& image,
+                        std::uint32_t selected_index = 0);
     ~WimArchive();
     WimArchive(const WimArchive&) = delete;
     WimArchive& operator=(const WimArchive&) = delete;

@@ -8,6 +8,12 @@
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/image_report.hpp"
 #include "iso_wcx/update_policy.hpp"
+#include "iso_wcx/preview_update_policy.hpp"
+#include "iso_wcx/tc_registration_repair.hpp"
+#include "iso_wcx/operation_diagnostics.hpp"
+#include "iso_wcx/tc_registration_audit.hpp"
+#include "iso_wcx/universal_diagnostics.hpp"
+#include "iso_wcx/modern_dialog.hpp"
 
 #include <bcrypt.h>
 #include <commdlg.h>
@@ -33,13 +39,26 @@
 #define ISO_WCX_VERSION_MINOR 18
 #define ISO_WCX_VERSION_PATCH 0
 #endif
+#ifndef ISO_WCX_RC_NUMBER
+#define ISO_WCX_RC_NUMBER 0
+#endif
+#ifndef ISO_WCX_BUILD_NUMBER
+#define ISO_WCX_BUILD_NUMBER 0
+#endif
 
 namespace iso_wcx {
 namespace {
 constexpr wchar_t registry_path[] = L"Software\\ISO-WCX\\Updates";
 constexpr wchar_t github_api[] =
     L"https://api.github.com/repos/sgennadi/ISO-WCX/releases/latest";
+constexpr wchar_t github_preview_api[] =
+    L"https://api.github.com/repos/sgennadi/ISO-WCX/actions/workflows/"
+    L"wcx-preview.yml/runs?status=success&per_page=6";
 constexpr int id_never=4101, id_check=4102, id_install=4103, id_status=4104, id_export=4105;
+constexpr int id_diag_export=4106, id_diag_github=4107;
+constexpr int id_universal_save=4108, id_universal_type=4109, id_tc_assoc_check=4110;
+constexpr int id_channel=4111, id_stable_version=4112, id_preview_version=4113,
+              id_tc_assoc_fix=4114;
 constexpr UINT check_later=WM_APP+191;
 constexpr std::size_t max_response=64u*1024u;
 constexpr std::size_t max_package=64u*1024u*1024u;
@@ -51,10 +70,19 @@ using Internet=std::unique_ptr<std::remove_pointer_t<HINTERNET>,
                   decltype(&WinHttpCloseHandle)>;
 
 struct State {
+    HINSTANCE module=nullptr;
     bool automatic=true;
     bool russian=false;
+    bool preview_channel=false;
+    bool stable_newer=false;
+    bool preview_newer=false;
+    bool stable_checked=false, preview_checked=false;
     std::wstring latest_tag;
-    bool newer=false;
+    std::optional<preview_update::Build> latest_preview;
+    // Scrolling is only used when DPI or a small monitor reduces the visible
+    // work area. Values are dialog-client pixels, never raw monitor pixels.
+    int content_width=0,content_height=0;
+    int scroll_x=0,scroll_y=0,wheel_remainder=0;
 };
 
 void require(bool ok, const char* error) {
@@ -79,8 +107,15 @@ std::string narrow(std::wstring_view value) {
     return out;
 }
 std::wstring version_name(update::Version v) {
-    return L"v"+std::to_wstring(v.major)+L"."+std::to_wstring(v.minor)+
-            L"."+std::to_wstring(v.patch);
+    std::wstring version=L"v"+std::to_wstring(v.major)+L"."+std::to_wstring(v.minor)+
+                         L"."+std::to_wstring(v.patch);
+    // Stable comparisons keep their exact semantic version. Only the
+    // installed preview gets its unique RC/build suffix in the GUI.
+    if(v==installed && ISO_WCX_RC_NUMBER>0) {
+        version+=L" RC"+std::to_wstring(ISO_WCX_RC_NUMBER);
+        version+=L" (Build "+std::to_wstring(ISO_WCX_BUILD_NUMBER)+L")";
+    }
+    return version;
 }
 bool read_dword(const wchar_t* name, DWORD fallback) {
     DWORD v=fallback;
@@ -117,6 +152,10 @@ void write_reg(const wchar_t* name, DWORD type, const void* p, DWORD bytes) {
 void save_automatic(bool allow) {
     const DWORD value=allow?1:0;
     write_reg(L"AutoCheck",REG_DWORD,&value,sizeof(value));
+}
+void save_channel(bool preview) {
+    const DWORD channel=preview?1u:0u;
+    write_reg(L"UpdateChannel",REG_DWORD,&channel,sizeof(channel));
 }
 void save_last_check() {
     const auto time=unix_now();
@@ -237,6 +276,42 @@ std::wstring latest_release() {
     require(bool(tag),"GitHub release has no valid stable semantic version");
     return widen(*tag);
 }
+std::optional<preview_update::Build> latest_preview_release() {
+    // Actions run-list payload is larger than the 64-KiB release metadata cap.
+    // GitHub returns roughly 75 KiB for six runs; keep it bounded separately.
+    const auto response=http_get(
+        github_preview_api,preview_update::max_runs_response_bytes);
+    const auto runs=preview_update::runs(as_text(response));
+    // Github Actions is not a published Release: only completed successful
+    // runs with a non-expired combined installer may be selected.
+    // Avoid an unbounded scan or accidentally returning a transient artifact.
+    std::optional<preview_update::Build> latest;
+    bool responded=false;
+    for(std::size_t i=0;i<std::min<std::size_t>(runs.size(),5);++i) {
+        const auto url=L"https://api.github.com/repos/sgennadi/ISO-WCX/"
+            L"actions/runs/"+std::to_wstring(runs[i].id)+L"/artifacts?per_page=25";
+        try {
+            const auto data=http_get(url,max_response);
+            responded=true;
+            preview_update::consider(latest,
+                preview_update::artifact(as_text(data),runs[i]));
+        }catch(const std::exception&) {
+            // One inaccessible or expired workflow must not mask others.
+        }
+    }
+    if(!runs.empty() && !responded)
+        throw std::runtime_error("All preview artifact requests failed");
+    return latest;
+}
+bool selected_update_available(const State& state) {
+    return state.preview_channel?state.preview_newer:state.stable_newer;
+}
+std::wstring preview_artifact_page(const preview_update::Build& build) {
+    // Numeric IDs only. Never follow an arbitrary URL received from GitHub JSON.
+    return L"https://github.com/sgennadi/ISO-WCX/actions/runs/"+
+           std::to_wstring(build.run_id)+L"/artifacts/"+
+           std::to_wstring(build.artifact_id);
+}
 void write_all(HANDLE handle,const std::vector<std::uint8_t>& data) {
     std::size_t at=0;
     while(at<data.size()) {
@@ -336,69 +411,274 @@ RECT rect_units(HWND dlg,int x,int y,int w,int h) {
 void add_control(HWND dlg,const wchar_t* cls,const wchar_t* name,
                  DWORD style,int id,int x,int y,int w,int h) {
     const auto r=rect_units(dlg,x,y,w,h);
+    // BS_NOTIFY emits focus events so keyboard navigation can reveal
+    // off-screen controls when the dialog is scrollable at high DPI.
+    if(std::wstring_view(cls)==L"BUTTON")style|=BS_NOTIFY;
     const auto child=CreateWindowExW(0,cls,name,style|WS_CHILD|WS_VISIBLE,
         r.left,r.top,r.right,r.bottom,dlg,reinterpret_cast<HMENU>(
         static_cast<INT_PTR>(id)),GetModuleHandleW(nullptr),nullptr);
-    if(child)SendMessageW(child,WM_SETFONT,
-                reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
+    if(child){
+        const auto inherited=SendMessageW(dlg,WM_GETFONT,0,0);
+        SendMessageW(child,WM_SETFONT,
+            inherited?static_cast<WPARAM>(inherited):
+                reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),
+            TRUE);
+    }
+}
+
+// Native scrollbars are a fallback for small work areas or 200% DPI.
+// They never change the relative position or size of normal controls.
+void adjust_settings_viewport(HWND dlg,State& state) {
+    RECT window{};
+    if(!GetWindowRect(dlg,&window))return;
+    MONITORINFO monitor{sizeof(monitor)};
+    if(!GetMonitorInfoW(MonitorFromWindow(dlg,MONITOR_DEFAULTTONEAREST),
+                        &monitor))return;
+    const auto work=monitor.rcWork;
+    const int w=work.right-work.left,h=work.bottom-work.top;
+    const UINT dpi=GetDpiForWindow(dlg);
+    const int margin=std::max(8,MulDiv(12,static_cast<int>(dpi?dpi:96),96));
+    const int wanted_w=window.right-window.left;
+    const int wanted_h=window.bottom-window.top;
+    const int fitted_w=std::min(wanted_w,std::max(1,w-2*margin));
+    const int fitted_h=std::min(wanted_h,std::max(1,h-2*margin));
+    const int left=work.left+(w-fitted_w)/2;
+    const int top=work.top+(h-fitted_h)/2;
+    SetWindowPos(dlg,nullptr,left,top,fitted_w,fitted_h,
+                 SWP_NOZORDER|SWP_NOACTIVATE);
+
+    const auto content=rect_units(dlg,0,0,360,378);
+    state.content_width=content.right;
+    state.content_height=content.bottom;
+    bool need_v=false,need_h=false;
+    RECT client{};
+    for(int pass=0;pass<3;++pass){
+        if(!GetClientRect(dlg,&client))return;
+        const bool next_v=state.content_height>client.bottom;
+        const bool next_h=state.content_width>client.right;
+        if(next_v==need_v && next_h==need_h)break;
+        need_v=next_v;need_h=next_h;
+        const auto current=GetWindowLongPtrW(dlg,GWL_STYLE);
+        const auto desired=(current&~static_cast<LONG_PTR>(WS_VSCROLL|WS_HSCROLL))|
+                           (need_v?WS_VSCROLL:0)|(need_h?WS_HSCROLL:0);
+        if(desired!=current){
+            SetWindowLongPtrW(dlg,GWL_STYLE,desired);
+            SetWindowPos(dlg,nullptr,0,0,0,0,
+                SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|
+                SWP_NOACTIVATE|SWP_FRAMECHANGED);
+        }
+    }
+    if(!GetClientRect(dlg,&client))return;
+    const auto init_scroll=[&](int bar,int content_size,int viewport_size){
+        SCROLLINFO info{};
+        info.cbSize=sizeof(info);
+        info.fMask=SIF_RANGE|SIF_PAGE|SIF_POS;
+        info.nMin=0;
+        info.nMax=std::max(0,content_size-1);
+        info.nPage=static_cast<UINT>(std::max(1,viewport_size));
+        info.nPos=0;
+        SetScrollInfo(dlg,bar,&info,TRUE);
+    };
+    init_scroll(SB_VERT,state.content_height,client.bottom);
+    init_scroll(SB_HORZ,state.content_width,client.right);
+}
+
+void scroll_settings(HWND dlg,State& state,int bar,int delta) {
+    RECT client{};
+    if(!GetClientRect(dlg,&client))return;
+    const bool vertical=bar==SB_VERT;
+    // Win32 RECT coordinates are LONG; MSVC cannot deduce std::max<int>
+    // from a mixed int/LONG expression on Win32 or x64.
+    const int viewport=static_cast<int>(vertical?client.bottom:client.right);
+    const int limit=std::max(0,
+        (vertical?state.content_height:state.content_width)-viewport);
+    int& current=vertical?state.scroll_y:state.scroll_x;
+    const auto position=std::clamp(current+delta,0,limit);
+    if(position==current)return;
+    const int shift=current-position;
+    ScrollWindowEx(dlg,vertical?0:shift,vertical?shift:0,
+                   nullptr,nullptr,nullptr,nullptr,
+                   SW_SCROLLCHILDREN|SW_INVALIDATE|SW_ERASE);
+    current=position;
+    SetScrollPos(dlg,bar,current,TRUE);
+}
+
+void scroll_control_into_view(HWND dlg,State& state,HWND control) {
+    if(!control||!IsChild(dlg,control))return;
+    RECT bounds{},client{};
+    if(!GetWindowRect(control,&bounds)||!GetClientRect(dlg,&client))return;
+    MapWindowPoints(HWND_DESKTOP,dlg,reinterpret_cast<POINT*>(&bounds),2);
+    const int margin=8;
+    if(bounds.top<margin)scroll_settings(dlg,state,SB_VERT,bounds.top-margin);
+    else if(bounds.bottom>client.bottom-margin)
+        scroll_settings(dlg,state,SB_VERT,bounds.bottom-client.bottom+margin);
+    if(bounds.left<margin)scroll_settings(dlg,state,SB_HORZ,bounds.left-margin);
+    else if(bounds.right>client.right-margin)
+        scroll_settings(dlg,state,SB_HORZ,bounds.right-client.right+margin);
+}
+void update_channel_button(HWND dlg,const State& state){
+    SetDlgItemTextW(dlg,id_install,tr(state.russian,
+        state.preview_channel?L"Open RC download":L"Download update",
+        state.preview_channel?L"Открыть RC":L"Скачать обновление"));
+    EnableWindow(GetDlgItem(dlg,id_install),selected_update_available(state));
+}
+void update_release_labels(HWND dlg,const State& state) {
+    const std::wstring stable=state.latest_tag.empty()?
+        tr(state.russian,L"Not available / not checked",L"Нет данных / не проверено"):
+        state.latest_tag;
+    SetDlgItemTextW(dlg,id_stable_version,
+        (std::wstring(tr(state.russian,L"Latest Stable: ",L"Последний Stable: "))+stable).c_str());
+    std::wstring preview=tr(state.russian,
+        L"Not available / not checked",L"Нет данных / не проверено");
+    if(state.latest_preview) {
+        const auto& b=*state.latest_preview;
+        preview=L"v"+std::to_wstring(b.version.major)+L"."+
+            std::to_wstring(b.version.minor)+L"."+
+            std::to_wstring(b.version.patch)+L" RC"+
+            std::to_wstring(b.rc)+L" (Build "+std::to_wstring(b.number)+L")";
+    }
+    SetDlgItemTextW(dlg,id_preview_version,
+        (std::wstring(tr(state.russian,L"Latest Preview: ",L"Последний Preview: "))+preview).c_str());
 }
 void check_release(HWND dlg,State& state,bool forced) {
     if(!forced && (!state.automatic || !due_today()))return;
     EnableWindow(GetDlgItem(dlg,id_check),FALSE);
     EnableWindow(GetDlgItem(dlg,id_install),FALSE);
-    put_status(dlg,tr(state.russian,L"Checking GitHub releases...",
-                              L"Проверяем релизы GitHub..."));
+    put_status(dlg,tr(state.russian,L"Checking Stable and Preview/RC...",
+                              L"Проверка Stable и Preview/RC..."));
     try {
         state.latest_tag=latest_release();
         const auto parsed=update::parse_version(narrow(state.latest_tag));
-        state.newer=parsed && update::newer(*parsed,installed);
-        save_last_check();
-        if(state.newer) {
-            put_status(dlg,std::wstring(tr(state.russian,
-                L"New verified Stable release: ",L"Доступна новая Stable-версия: "))+
-                state.latest_tag);
-            EnableWindow(GetDlgItem(dlg,id_install),TRUE);
-        } else put_status(dlg,tr(state.russian,
-                L"You have the latest Stable version.",
-                L"Установлена последняя Stable-версия."));
-    }catch(const std::exception&) {
-        state.newer=false;
-        put_status(dlg,tr(state.russian,
-               L"Could not check releases. Try again later.",
-               L"Не удалось проверить релизы. Повторите позже."));
+        state.stable_newer=parsed && (update::newer(*parsed,installed) ||
+                           (ISO_WCX_RC_NUMBER>0 && *parsed==installed));
+        state.stable_checked=true;
+    }catch(...) {
+        state.stable_checked=false;
+        state.stable_newer=false;
+        state.latest_tag.clear();
     }
+    try {
+        state.latest_preview=latest_preview_release();
+        state.preview_newer=state.latest_preview &&
+            preview_update::newer(*state.latest_preview,installed,
+                                  ISO_WCX_RC_NUMBER,ISO_WCX_BUILD_NUMBER);
+        state.preview_checked=true;
+    }catch(...) {
+        state.latest_preview.reset();
+        state.preview_newer=false;
+        state.preview_checked=false;
+    }
+    // Do not suppress tomorrow's automatic retry if the SELECTED channel
+    // failed even though its other channel had a successful HTTP response.
+    if(state.preview_channel?state.preview_checked:state.stable_checked)
+        save_last_check();
+    update_release_labels(dlg,state);
+    update_channel_button(dlg,state);
+    if(selected_update_available(state))
+        put_status(dlg,tr(state.russian,
+            state.preview_channel?L"New RC build available (manual GitHub download).":
+                                  L"New verified Stable release available.",
+            state.preview_channel?L"Доступен новый RC (скачивание через GitHub).":
+                                  L"Доступна новая проверенная Stable-версия."));
+    else if(state.preview_channel && !state.preview_checked)
+        put_status(dlg,tr(state.russian,
+            L"Preview/RC check failed. Retry; Stable status may still be valid.",
+            L"Ошибка проверки Preview/RC. Повторите; данные Stable могут быть актуальны."));
+    else if(!state.preview_channel && !state.stable_checked)
+        put_status(dlg,tr(state.russian,
+            L"Stable check failed. Retry; Preview/RC status may still be valid.",
+            L"Ошибка проверки Stable. Повторите; данные Preview/RC могут быть актуальны."));
+    else put_status(dlg,tr(state.russian,
+            L"No newer update in selected channel.",
+            L"В выбранном канале новых версий нет."));
     EnableWindow(GetDlgItem(dlg,id_check),TRUE);
 }
 void download_and_offer(HWND dlg,State& state) {
-    if(!state.newer || state.latest_tag.empty())return;
+    if(!selected_update_available(state))return;
     EnableWindow(GetDlgItem(dlg,id_install),FALSE);
-    put_status(dlg,tr(state.russian,
-         L"Downloading release and verifying SHA-256...",
-         L"Скачивание релиза и проверка SHA-256..."));
-    try {
-        const auto verified=save_verified_archive(state.latest_tag);
-        const auto instructions=std::wstring(tr(state.russian,
-             L"SHA-256 verified. The ZIP will open in Total Commander.\n"
-             L"Enter the archive and confirm the plugin installer.\n"
-             L"Restart Total Commander afterward; the loaded WCX DLL\n"
-             L"will NOT be overwritten while it is in use.",
-             L"SHA-256 проверен. ZIP откроется в Total Commander.\n"
-             L"Откройте архив и подтвердите установку плагина.\n"
-             L"Затем перезапустите Total Commander. Загруженная WCX\n"
-             L"не заменяется во время работы."));
-        MessageBoxW(dlg,instructions.c_str(),L"ISO-WCX Update",
-                    MB_OK|MB_ICONINFORMATION);
-        open_in_totalcmd(dlg,verified);
+    if(state.preview_channel){
+        if(state.latest_preview){
+            const auto url=preview_artifact_page(*state.latest_preview);
+            const auto message=tr(state.russian,
+                L"The Preview/RC ZIP is a GitHub Actions artifact, not a "
+                L"SHA-256 signed Stable Release. Open the GitHub download page "
+                L"and install the ZIP manually through Total Commander? "
+                L"The running WCX is never overwritten by this dialog.",
+                L"Архив Preview/RC находится в GitHub Actions, а не в "
+                L"Stable Release с SHA-256. Открыть страницу скачивания "
+                L"и вручную установить ZIP через Total Commander?");
+            if(modern_dialog::confirm(dlg,modern_dialog::Tone::question,
+                    L"ISO-WCX Preview/RC",
+                    tr(state.russian,L"Preview build available",L"Доступна тестовая версия"),
+                    message,
+                    tr(state.russian,L"Open GitHub Actions",L"Открыть GitHub Actions"),
+                    tr(state.russian,L"Not now",L"Не сейчас"),
+                    tr(state.russian,L"RC ZIP installation is manual.",
+                                     L"RC ZIP устанавливается вручную."))){
+                const auto rc=reinterpret_cast<std::intptr_t>(
+                    ShellExecuteW(dlg,L"open",url.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
+                put_status(dlg,rc>32?
+                    tr(state.russian,L"GitHub RC artifact page opened. Install the ZIP manually.",
+                                     L"Страница RC открыта. Установите ZIP вручную."):
+                    tr(state.russian,L"Could not open GitHub RC artifact.",
+                                     L"Не удалось открыть архив RC на GitHub."));
+            }
+        }
+    }else if(!state.latest_tag.empty()){
         put_status(dlg,tr(state.russian,
-             L"Update ZIP downloaded; complete installation in Total Commander.",
-             L"ZIP скачан; завершите установку в Total Commander."));
-    }catch(const std::exception&) {
-        put_status(dlg,tr(state.russian,
-             L"Download or SHA-256 verification failed; nothing was installed.",
-             L"Ошибка загрузки или SHA-256; ничего не установлено."));
+              L"Downloading Stable release and verifying SHA-256...",
+              L"Скачивание Stable и проверка SHA-256..."));
+        try {
+            const auto verified=save_verified_archive(state.latest_tag);
+            // A verified download is not an installation decision. The user
+            // may dismiss the dialog (including Escape or the window close
+            // button) without opening any executable or installer archive.
+            const bool open_installer=modern_dialog::confirm(
+                dlg,modern_dialog::Tone::success,L"ISO-WCX Update",
+                tr(state.russian,L"Stable update verified",
+                                 L"Обновление Stable проверено"),
+                tr(state.russian,
+                   L"The Stable ZIP was downloaded and its SHA-256 verified. "
+                   L"Open the archive in Total Commander now?",
+                   L"Stable ZIP скачан, контрольная сумма SHA-256 проверена. "
+                   L"Открыть архив в Total Commander сейчас?"),
+                tr(state.russian,L"Open installer",L"Открыть установщик"),
+                tr(state.russian,L"Later",L"Позже"),
+                tr(state.russian,
+                   L"Installation requires a separate confirmation in Total "
+                   L"Commander and a Total Commander restart afterward. "
+                   L"Choosing Later leaves the verified ZIP on disk.",
+                   L"Установка потребует отдельного подтверждения в Total "
+                   L"Commander и последующего перезапуска программы. "
+                   L"Кнопка «Позже» оставляет проверенный ZIP на диске."));
+            if(open_installer){
+                open_in_totalcmd(dlg,verified);
+                put_status(dlg,tr(state.russian,
+                      L"Verified ZIP opened. Confirm installation in TC.",
+                      L"Проверенный ZIP открыт. Подтвердите установку в TC."));
+            }else{
+                put_status(dlg,tr(state.russian,
+                      L"Verified Stable ZIP saved. No installer was opened.",
+                      L"Stable ZIP сохранён. Установщик не запускался."));
+            }
+        }catch(...) {
+            put_status(dlg,tr(state.russian,
+                  L"Stable download or SHA-256 verification failed.",
+                  L"Ошибка скачивания Stable или проверки SHA-256."));
+            modern_dialog::notice(dlg,modern_dialog::Tone::error,
+                L"ISO-WCX Update",
+                tr(state.russian,L"Stable update unavailable",
+                                 L"Не удалось подготовить Stable"),
+                tr(state.russian,
+                   L"The download failed or the SHA-256 checksum was invalid. "
+                   L"The installed plugin was not modified.",
+                   L"Ошибка скачивания или неверная контрольная сумма SHA-256. "
+                   L"Установленный плагин не изменён."));
+        }
     }
-    EnableWindow(GetDlgItem(dlg,id_install),TRUE);
+    update_channel_button(dlg,state);
 }
+
 // The WCX host calls GetPackerCaps while loading its packer associations.
 // User-invoked, in-process metadata export. Both dialogs are owned by
 // ConfigurePacker; neither an EXE, service, mount nor helper DLL is needed.
@@ -552,8 +832,11 @@ void export_structure_dialog(HWND dlg,bool ru) {
             L"Структура сохранена (UTF-8). Образ не изменён:\n"))+
             destination->wstring()+L"\n\n"+
             tr(ru,L"Open report?",L"Открыть отчёт?");
-        if(MessageBoxW(dlg,message.c_str(),L"ISO-WCX Export Image Structure",
-                       MB_ICONINFORMATION|MB_YESNO)==IDYES) {
+        if(modern_dialog::confirm(dlg,modern_dialog::Tone::success,
+                       L"ISO-WCX Export Image Structure",
+                       tr(ru,L"Report exported",L"Отчёт сохранён"),message,
+                       tr(ru,L"Open report",L"Открыть отчёт"),
+                       tr(ru,L"Close",L"Закрыть"))) {
             (void)ShellExecuteW(dlg,L"open",destination->c_str(),nullptr,
                                 nullptr,SW_SHOWNORMAL);
         }
@@ -567,10 +850,10 @@ void export_structure_dialog(HWND dlg,bool ru) {
                  L"Не удалось сохранить структуру образа:\n"))+reason;
         put_status(dlg,tr(ru,L"Structure export failed.",
                             L"Ошибка экспорта структуры."));
-        MessageBoxW(dlg,message.c_str(),L"ISO-WCX",MB_ICONERROR|MB_OK);
+        modern_dialog::show(dlg,message.c_str(),L"ISO-WCX",MB_ICONERROR|MB_OK);
     }catch(...) {
         put_status(dlg,L"Structure export failed.");
-        MessageBoxW(dlg,L"Unexpected error while exporting image structure.",
+        modern_dialog::show(dlg,L"Unexpected error while exporting image structure.",
                     L"ISO-WCX",MB_ICONERROR|MB_OK);
     }
 }
@@ -594,30 +877,85 @@ void record_notified(const std::wstring& tag) {
 DWORD WINAPI background_worker(LPVOID argument) {
     HMODULE module=static_cast<HMODULE>(argument);
     try {
-        const auto tag=latest_release();
-        const auto parsed=update::parse_version(narrow(tag));
-        if(parsed && update::newer(*parsed,installed) && !has_notified(tag) &&
-           read_dword(L"AutoCheck",1)) {
-            // Notify only once per version, and only after a complete
-            // successful HTTPS check. The dialog is not part of archive I/O.
-            record_notified(tag);
-            const auto ru=russian();
-            const auto prompt=std::wstring(tr(ru,
-                L"A newer Stable version of ISO-WCX is available: ",
-                L"Доступна новая Stable-версия ISO-WCX: ")) + tag +
-                tr(ru,
-                L"\nDownload the official ZIP and verify SHA-256?\n"
-                L"Installation will require confirmation in Total Commander.",
-                L"\nСкачать официальный ZIP с проверкой SHA-256?\n"
-                L"Установка потребует подтверждения в Total Commander.");
-            if(MessageBoxW(nullptr,prompt.c_str(),L"ISO-WCX Update",
-                     MB_YESNO|MB_ICONINFORMATION|MB_SETFOREGROUND)==IDYES) {
-                const auto checked=save_verified_archive(tag);
-                open_in_totalcmd(nullptr,checked);
+        if(read_dword(L"UpdateChannel",0)) {
+            const auto build=latest_preview_release();
+            // Only mark the daily background check after GitHub responded
+            // successfully. An offline/proxy failure must be retried when
+            // Total Commander starts again, not hidden for 24 hours.
+            save_last_check();
+            if(build && preview_update::newer(*build,installed,
+                             ISO_WCX_RC_NUMBER,ISO_WCX_BUILD_NUMBER)) {
+                const std::wstring tag=L"preview-RC"+std::to_wstring(build->rc)+
+                                       L"-B"+std::to_wstring(build->number);
+                if(!has_notified(tag) && read_dword(L"AutoCheck",1)) {
+                    record_notified(tag);
+                    const auto message=std::wstring(tr(russian(),
+                      L"New ISO-WCX Preview/RC: ",L"Новый ISO-WCX Preview/RC: "))+
+                      L"RC"+std::to_wstring(build->rc)+L" Build "+
+                      std::to_wstring(build->number)+
+                      tr(russian(),L"\nOpen the GitHub Actions download page?",
+                                   L"\nОткрыть загрузку на GitHub Actions?");
+                    if(modern_dialog::confirm(nullptr,modern_dialog::Tone::information,
+                            L"ISO-WCX Preview/RC",
+                            tr(russian(),L"New Preview/RC build",L"Новая сборка Preview/RC"),
+                            message,
+                            tr(russian(),L"Open download page",L"Открыть загрузку"),
+                            tr(russian(),L"Later",L"Позже"),
+                            tr(russian(),L"No automatic RC installation.",
+                                         L"RC не устанавливается автоматически."))){
+                        const auto url=preview_artifact_page(*build);
+                        (void)ShellExecuteW(nullptr,L"open",url.c_str(),
+                                            nullptr,nullptr,SW_SHOWNORMAL);
+                    }
+                }
+            }
+        }else{
+            const auto tag=latest_release();
+            save_last_check();
+            const auto parsed=update::parse_version(narrow(tag));
+            if(parsed && (update::newer(*parsed,installed) ||
+                          (ISO_WCX_RC_NUMBER>0 && *parsed==installed)) &&
+               !has_notified(tag) && read_dword(L"AutoCheck",1)) {
+                record_notified(tag);
+                const auto message=std::wstring(tr(russian(),
+                  L"New Stable ISO-WCX: ",L"Новый ISO-WCX Stable: "))+tag+
+                  tr(russian(),
+                     L"\nDownload and verify SHA-256? Confirm install in TC.",
+                     L"\nСкачать и проверить SHA-256? Установка через TC.");
+                if(modern_dialog::confirm(nullptr,modern_dialog::Tone::information,
+                          L"ISO-WCX Update",
+                          tr(russian(),L"New Stable release",L"Новая Stable-версия"),
+                          message,
+                          tr(russian(),L"Download and verify",L"Скачать и проверить"),
+                          tr(russian(),L"Later",L"Позже"),
+                          tr(russian(),L"Install through Total Commander with confirmation.",
+                                       L"Установка подтверждается в Total Commander."))){
+                    const auto verified=save_verified_archive(tag);
+                    // A background "Download and verify" consent is not
+                    // consent to open the installer. Escape and Later keep
+                    // the verified ZIP on disk without launching anything.
+                    if(modern_dialog::confirm(nullptr,modern_dialog::Tone::success,
+                            L"ISO-WCX Update",
+                            tr(russian(),L"Stable ZIP verified",
+                                         L"Stable ZIP проверен"),
+                            tr(russian(),
+                               L"The archive was downloaded and verified. "
+                               L"Open it in Total Commander?",
+                               L"Архив скачан и проверен. "
+                               L"Открыть его в Total Commander?"),
+                            tr(russian(),L"Open installer",L"Открыть установщик"),
+                            tr(russian(),L"Later",L"Позже"),
+                            tr(russian(),
+                               L"Installation needs a separate confirmation "
+                               L"inside Total Commander.",
+                               L"Установка требует отдельного подтверждения "
+                               L"в Total Commander.")))
+                        open_in_totalcmd(nullptr,verified);
+                }
             }
         }
-    }catch(const std::exception&) {
-        // Never affect file browsing or host startup on a network failure.
+    }catch(const std::exception&){
+        // Network failures or missing/expired RC artifacts must not affect WCX.
     }
     FreeLibraryAndExitThread(module,0);
     return 0;
@@ -629,27 +967,85 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_INITDIALOG: {
         state=reinterpret_cast<State*>(lp);
         SetWindowLongPtrW(dlg,DWLP_USER,lp);
+        const auto title=L"ISO-WCX "+version_name(installed)+L" - Settings";
+        SetWindowTextW(dlg,title.c_str());
         state->russian=russian();
         state->automatic=read_dword(L"AutoCheck",1);
+        state->preview_channel=read_dword(L"UpdateChannel",0);
         add_control(dlg,L"STATIC",L"",SS_LEFT,id_status,12,10,340,38);
         add_control(dlg,L"BUTTON",tr(state->russian,
              L"Do not check for updates automatically",
              L"Не проверять обновления автоматически"),
              BS_AUTOCHECKBOX|WS_TABSTOP,id_never,12,53,330,18);
+        add_control(dlg,L"STATIC",tr(state->russian,
+             L"Update channel:",L"Канал обновлений:"),
+             SS_LEFT,0,12,81,97,18);
+        add_control(dlg,L"COMBOBOX",L"",
+             CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,
+             id_channel,114,77,238,130);
+        if(const auto channel=GetDlgItem(dlg,id_channel)){
+            SendMessageW(channel,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(
+                tr(state->russian,L"Stable (verified)",L"Stable (проверенный)")));
+            SendMessageW(channel,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(
+                tr(state->russian,L"Preview / Release Candidate (RC)",
+                                   L"Preview / Release Candidate (RC)")));
+            SendMessageW(channel,CB_SETCURSEL,state->preview_channel?1:0,0);
+        }
+        add_control(dlg,L"STATIC",L"",SS_LEFT,id_stable_version,12,105,340,17);
+        add_control(dlg,L"STATIC",L"",SS_LEFT,id_preview_version,12,125,340,17);
         add_control(dlg,L"BUTTON",tr(state->russian,L"Check now",
              L"Проверить сейчас"),BS_PUSHBUTTON|WS_TABSTOP,
-             id_check,12,81,105,25);
+             id_check,12,148,105,25);
         add_control(dlg,L"BUTTON",tr(state->russian,L"Download update",
              L"Скачать обновление"),BS_PUSHBUTTON|WS_TABSTOP,
-             id_install,125,81,117,25);
+             id_install,125,148,117,25);
         add_control(dlg,L"BUTTON",tr(state->russian,L"Close",L"Закрыть"),
-             BS_DEFPUSHBUTTON|WS_TABSTOP,IDCANCEL,252,81,100,25);
+             BS_DEFPUSHBUTTON|WS_TABSTOP,IDCANCEL,252,148,100,25);
         add_control(dlg,L"BUTTON",tr(state->russian,
              L"Export Image Structure...",L"Экспорт структуры образа..."),
-             BS_PUSHBUTTON|WS_TABSTOP,id_export,12,113,340,26);
+             BS_PUSHBUTTON|WS_TABSTOP,id_export,12,182,340,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Export diagnostics...",L"Экспорт диагностики..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_diag_export,12,215,163,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Review on GitHub...",L"Отправить на GitHub..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_diag_github,181,215,171,26);
+        add_control(dlg,L"STATIC",tr(state->russian,
+             L"Failed area:",L"Операция:"),SS_LEFT,0,12,248,88,18);
+        add_control(dlg,L"COMBOBOX",L"",
+             CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,
+             id_universal_type,102,245,250,140);
+        if(const auto types=GetDlgItem(dlg,id_universal_type)) {
+            const wchar_t* en[]={
+                L"ISO file copy (F5)",L"WIM file copy (F5)",L"ISO/UDF edit",
+                L"WIM mount / commit",L"Read / extract",L"Other"
+            };
+            const wchar_t* ru[]={
+                L"ISO копирование (F5)",L"WIM копирование (F5)",L"ISO/UDF изменение",
+                L"WIM mount / commit",L"Чтение / извлечение",L"Другое"
+            };
+            for(unsigned i=0;i<6;++i)
+                SendMessageW(types,CB_ADDSTRING,0,
+                    reinterpret_cast<LPARAM>(state->russian?ru[i]:en[i]));
+            SendMessageW(types,CB_SETCURSEL,0,0);
+        }
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Save in shared diagnostics queue (local)...",
+             L"Сохранить в общую очередь диагностики..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_universal_save,12,275,340,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Check WCX F5 registration (159)...",
+             L"Проверить регистрацию F5 (159)..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_tc_assoc_check,12,308,340,26);
+        add_control(dlg,L"BUTTON",tr(state->russian,
+             L"Check & Fix WCX Associations...",
+             L"Проверить и исправить привязки WCX..."),
+             BS_PUSHBUTTON|WS_TABSTOP,id_tc_assoc_fix,12,341,340,26);
+        adjust_settings_viewport(dlg,*state);
         CheckDlgButton(dlg,id_never,
               state->automatic?BST_UNCHECKED:BST_CHECKED);
-        EnableWindow(GetDlgItem(dlg,id_install),FALSE);
+        update_release_labels(dlg,*state);
+        update_channel_button(dlg,*state);
         put_status(dlg,std::wstring(tr(state->russian,
               L"Installed ISO-WCX ",L"Установлен ISO-WCX "))+
               version_name(installed));
@@ -660,17 +1056,149 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
     case check_later:
         if(state)check_release(dlg,*state,false);
         return TRUE;
+    case WM_VSCROLL:
+    case WM_HSCROLL: {
+        if(!state || lp)return FALSE;
+        const int bar=msg==WM_VSCROLL?SB_VERT:SB_HORZ;
+        RECT client{};
+        if(!GetClientRect(dlg,&client))return FALSE;
+        const int page=bar==SB_VERT?client.bottom:client.right;
+        const int step=std::max(12,page/16);
+        int delta=0;
+        switch(LOWORD(wp)){
+        case SB_LINEUP: delta=-step;break;
+        case SB_LINEDOWN: delta=step;break;
+        case SB_PAGEUP: delta=-std::max(step,page-step);break;
+        case SB_PAGEDOWN: delta=std::max(step,page-step);break;
+        case SB_THUMBTRACK:
+        case SB_THUMBPOSITION: {
+            SCROLLINFO info{};
+            info.cbSize=sizeof(info);
+            info.fMask=SIF_TRACKPOS;
+            if(GetScrollInfo(dlg,bar,&info))
+                delta=info.nTrackPos-(bar==SB_VERT?state->scroll_y:state->scroll_x);
+            break;
+        }
+        case SB_TOP:
+            delta=-(bar==SB_VERT?state->scroll_y:state->scroll_x);break;
+        case SB_BOTTOM:
+            delta=(bar==SB_VERT?state->content_height:state->content_width);break;
+        default:break;
+        }
+        scroll_settings(dlg,*state,bar,delta);
+        return TRUE;
+    }
+    case WM_MOUSEWHEEL: {
+        if(!state)return FALSE;
+        state->wheel_remainder+=GET_WHEEL_DELTA_WPARAM(wp);
+        const int notches=state->wheel_remainder/WHEEL_DELTA;
+        state->wheel_remainder-=notches*WHEEL_DELTA;
+        if(notches)scroll_settings(dlg,*state,SB_VERT,-notches*40);
+        return TRUE;
+    }
     case WM_COMMAND: {
         if(!state)return FALSE;
+        if(HIWORD(wp)==BN_SETFOCUS || HIWORD(wp)==CBN_SETFOCUS)
+            scroll_control_into_view(dlg,*state,reinterpret_cast<HWND>(lp));
         const int cmd=LOWORD(wp);
         if(cmd==id_never && HIWORD(wp)==BN_CLICKED) {
             state->automatic=IsDlgButtonChecked(dlg,id_never)!=BST_CHECKED;
             save_automatic(state->automatic);
             return TRUE;
         }
+        if(cmd==id_channel && HIWORD(wp)==CBN_SELCHANGE){
+            const auto index=SendDlgItemMessageW(dlg,id_channel,CB_GETCURSEL,0,0);
+            state->preview_channel=index==1;
+            const DWORD value=state->preview_channel?1u:0u;
+            write_reg(L"UpdateChannel",REG_DWORD,&value,sizeof(value));
+            update_channel_button(dlg,*state);
+            put_status(dlg,tr(state->russian,
+                state->preview_channel?L"Preview/RC selected. Only manual RC installation is offered.":
+                                       L"Stable selected. Downloads are SHA-256 verified.",
+                state->preview_channel?L"Выбран Preview/RC: установка вручную через GitHub.":
+                                       L"Выбран Stable: загрузка с проверкой SHA-256."));
+            return TRUE;
+        }
         if(cmd==id_check) {check_release(dlg,*state,true);return TRUE;}
         if(cmd==id_install) {download_and_offer(dlg,*state);return TRUE;}
         if(cmd==id_export) {export_structure_dialog(dlg,state->russian);return TRUE;}
+        if(cmd==id_diag_export) {
+            const auto report=diagnostics::export_report();
+            if(report.empty()) {
+                modern_dialog::show(dlg,tr(state->russian,
+                    L"Could not export diagnostics to LOCALAPPDATA.",
+                    L"Не удалось экспортировать диагностику в LOCALAPPDATA."),
+                    L"ISO-WCX Diagnostics",MB_OK|MB_ICONERROR);
+            } else {
+                ShellExecuteW(dlg,L"open",report.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+                put_status(dlg,tr(state->russian,
+                    L"Local diagnostic summary created. Nothing was sent.",
+                    L"Локальный отчёт создан. Данные никуда не отправлялись."));
+            }
+            return TRUE;
+        }
+        if(cmd==id_diag_github) {
+            const auto opened=diagnostics::open_github_issue();
+            if(opened)
+                modern_dialog::show(dlg,tr(state->russian,
+                    L"Review the prefilled, sanitized report in your browser, then submit the GitHub issue yourself. No data was sent by the plugin.",
+                    L"Проверьте обезличенный отчёт в браузере и подтвердите создание Issue самостоятельно. Плагин ничего не отправлял."),
+                    L"ISO-WCX Diagnostics",MB_OK|MB_ICONINFORMATION);
+            else
+                modern_dialog::show(dlg,tr(state->russian,
+                    L"Could not open GitHub. Use Export diagnostics instead.",
+                    L"Не удалось открыть GitHub. Используйте экспорт диагностики."),
+                    L"ISO-WCX Diagnostics",MB_OK|MB_ICONWARNING);
+            return TRUE;
+        }
+        if(cmd==id_tc_assoc_fix) {
+            std::wstring status;
+            if(offer_association_fix(dlg,state->module,state->russian,status))
+                put_status(dlg,status);
+            return TRUE;
+        }
+        if(cmd==id_tc_assoc_check) {
+            const auto report=export_tc_registration_audit();
+            if(report.empty()) {
+                modern_dialog::show(dlg,tr(state->russian,
+                    L"Cannot read Total Commander registrations or write the report.",
+                    L"Не удалось прочитать регистрации Total Commander или записать отчёт."),
+                    L"ISO-WCX WCX Registration",MB_OK|MB_ICONWARNING);
+            } else {
+                ShellExecuteW(dlg,L"open",report.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+                put_status(dlg,tr(state->russian,
+                    L"Read-only WCX registration report created. No settings changed.",
+                    L"Отчёт о привязках WCX создан. Настройки не изменялись."));
+            }
+            return TRUE;
+        }
+        if(cmd==id_universal_save) {
+            const auto control=GetDlgItem(dlg,id_universal_type);
+            const auto index=control?SendMessageW(control,CB_GETCURSEL,0,0):CB_ERR;
+            if(index==CB_ERR || index<0 || index>5)return TRUE;
+            const auto category=static_cast<universal_diagnostics::Category>(index);
+            const auto prompt=tr(state->russian,
+                L"Save a selected operation category to the local "
+                L"UniversalDiagnostics queue? Only fixed sanitized metadata "
+                L"will be stored. Nothing is transmitted.",
+                L"Сохранить категорию операции в локальную очередь "
+                L"UniversalDiagnostics? Только обезличенные технические "
+                L"поля. Передача по сети не выполняется.");
+            if(!modern_dialog::confirm(dlg,modern_dialog::Tone::question,
+                           L"ISO-WCX Diagnostics",
+                           tr(state->russian,L"Save local diagnostic record?",
+                                             L"Сохранить локальную диагностику?"),
+                           prompt,
+                           tr(state->russian,L"Save locally",L"Сохранить"),
+                           tr(state->russian,L"Cancel",L"Отмена")))return TRUE;
+            std::wstring message;
+            const bool success=universal_diagnostics::capture_local(
+                category,installed.major,installed.minor,installed.patch,message);
+            put_status(dlg,message);
+            modern_dialog::show(dlg,message.c_str(),L"ISO-WCX Diagnostics",
+                        MB_OK|(success?MB_ICONINFORMATION:MB_ICONWARNING));
+            return TRUE;
+        }
         if(cmd==IDCANCEL || cmd==IDOK) {EndDialog(dlg,0);return TRUE;}
         break;
     }
@@ -704,7 +1232,8 @@ void schedule_update_check() {
     if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
             reinterpret_cast<LPCWSTR>(&background_started),&module))
         return;
-    save_last_check(); // Throttle even failed/offline GitHub checks.
+    // A failed network request must not suppress updates for the next day:
+    // the detached worker records LastCheckUnix only after HTTP succeeds.
     HANDLE thread=CreateThread(nullptr,0,background_worker,module,0,nullptr);
     if(!thread) {
         FreeLibrary(module);
@@ -719,12 +1248,20 @@ void configure_updates(HWND parent,HINSTANCE instance) {
     alignas(DWORD) std::array<std::uint8_t,256> raw{};
     const auto store32=[&](std::size_t at,DWORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
     const auto store16=[&](std::size_t at,WORD v){std::memcpy(raw.data()+at,&v,sizeof(v));};
-    store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER);
+    // DS_SHELLFONT uses a modern dialog font and consistent DPI-aware dialog
+    // units. Child controls inherit that font instead of overriding it.
+    store32(0,WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME|DS_CENTER|DS_SHELLFONT);
     store32(4,0);store16(8,0);store16(10,0);store16(12,0);
-    store16(14,367);store16(16,152);store16(18,0);store16(20,0);
+    store16(14,367);store16(16,382);store16(18,0);store16(20,0);
     constexpr wchar_t caption[]=L"ISO-WCX Settings";
+    constexpr wchar_t face[]=L"Segoe UI";
     std::memcpy(raw.data()+22,caption,sizeof(caption));
+    constexpr auto font_offset=22+sizeof(caption);
+    static_assert(font_offset+sizeof(WORD)+sizeof(face)<=256);
+    store16(font_offset,9);
+    std::memcpy(raw.data()+font_offset+sizeof(WORD),face,sizeof(face));
     State state{};
+    state.module=instance;
     (void)DialogBoxIndirectParamW(instance,
         reinterpret_cast<const DLGTEMPLATE*>(raw.data()),
         parent,dialog_proc,reinterpret_cast<LPARAM>(&state));

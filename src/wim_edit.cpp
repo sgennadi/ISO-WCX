@@ -4,6 +4,8 @@
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/wim_parts.hpp"
 #include <msxml6.h>
+#include <aclapi.h>
+#include <vector>
 #include <map>
 #include <mutex>
 #include <set>
@@ -127,6 +129,30 @@ struct Callback {
 };
 using Register=DWORD(WINAPI*)(HANDLE,FARPROC,void*);
 using Unregister=BOOL(WINAPI*)(HANDLE,FARPROC);
+// Copy-on-edit keeps all untouched WIM indexes byte-for-byte in the
+// staged archive. Progress and cancellation remain visible in Total Commander.
+struct CopyContext {
+    Callback& callback;
+    unsigned start, span;
+    static DWORD CALLBACK on_progress(LARGE_INTEGER total,LARGE_INTEGER transferred,
+                                      LARGE_INTEGER,LARGE_INTEGER,DWORD,DWORD,
+                                      HANDLE,HANDLE,LPVOID context) noexcept {
+        auto& self=*static_cast<CopyContext*>(context);
+        try {
+            unsigned progress=0;
+            if(total.QuadPart>0) {
+                const auto done=std::clamp<LONGLONG>(transferred.QuadPart,0,total.QuadPart);
+                progress=static_cast<unsigned>(
+                    static_cast<long double>(done)*self.span/total.QuadPart);
+            }
+            std::lock_guard lock(self.callback.mutex);
+            self.callback.notify_locked(self.start+progress);
+        } catch(...) {
+            self.callback.cancelled.store(true);
+        }
+        return self.callback.cancelled.load()?PROGRESS_CANCEL:PROGRESS_CONTINUE;
+    }
+};
 struct Registered {HANDLE h;Unregister unregister;Registered(HMODULE m,HANDLE file,Callback& c):h(file),unregister(api<Unregister>(m,"WIMUnregisterMessageCallback")){
     checked(api<Register>(m,"WIMRegisterMessageCallback")(h,reinterpret_cast<FARPROC>(&Callback::call),&c)!=0xffffffffu,"register WIM progress");}
     ~Registered(){unregister(h,reinterpret_cast<FARPROC>(&Callback::call));}
@@ -165,12 +191,152 @@ std::filesystem::path relative_path(const std::string& text){return std::filesys
 void no_reparse(const std::filesystem::path& root,const std::filesystem::path& relative){
     auto path=root;for(const auto& part:relative){path/=part;DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){auto err=GetLastError();checked(err==ERROR_FILE_NOT_FOUND||err==ERROR_PATH_NOT_FOUND,"cannot inspect WIM edit path");continue;}if(attr&FILE_ATTRIBUTE_REPARSE_POINT)throw EditUnsupported("editing through WIM reparse points is not supported");}
 }
-void remove_tree(const std::filesystem::path& path){
-    DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES)return;
-    if((attr&FILE_ATTRIBUTE_DIRECTORY)&&!(attr&FILE_ATTRIBUTE_REPARSE_POINT))for(const auto& item:std::filesystem::directory_iterator(path))remove_tree(item.path());
-    checked(SetFileAttributesW(path.c_str(),attr&~FILE_ATTRIBUTE_READONLY),"clear temporary read-only flag");
-    checked((attr&FILE_ATTRIBUTE_DIRECTORY)?RemoveDirectoryW(path.c_str()):DeleteFileW(path.c_str()),"remove WIM entry");
+// This is used ONLY for private WIM apply/capture scratch files, never on
+// the original image. Applied Windows images may contain TrustedInstaller or
+// other ACLs that prevent even an elevated user from removing their contents.
+// Grant DELETE access to the current elevated thread user and SYSTEM only,
+// on the individual scratch entry, without following a reparse point.
+void allow_workspace_cleanup(const std::filesystem::path& path){
+    HANDLE raw_token=nullptr;
+    checked(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&raw_token),
+            "open WIM cleanup impersonation token");
+    struct Token {HANDLE h;~Token(){CloseHandle(h);}} token{raw_token};
+    DWORD bytes=0;
+    GetTokenInformation(token.h,TokenUser,nullptr,0,&bytes);
+    checked(bytes>=sizeof(TOKEN_USER) && bytes<65536u &&
+            GetLastError()==ERROR_INSUFFICIENT_BUFFER,
+            "size WIM cleanup user SID");
+    std::vector<std::uint8_t> buffer(bytes);
+    checked(GetTokenInformation(token.h,TokenUser,buffer.data(),bytes,&bytes),
+            "read WIM cleanup user SID");
+    BYTE system_sid[SECURITY_MAX_SID_SIZE]{};
+    DWORD system_sid_bytes=sizeof(system_sid);
+    checked(CreateWellKnownSid(WinLocalSystemSid,nullptr,system_sid,
+                               &system_sid_bytes),"create SYSTEM SID");
+    EXPLICIT_ACCESSW access[2]{};
+    for(auto& entry:access){
+        entry.grfAccessPermissions=FILE_ALL_ACCESS;
+        entry.grfAccessMode=SET_ACCESS;
+        entry.grfInheritance=NO_INHERITANCE;
+        entry.Trustee.TrusteeForm=TRUSTEE_IS_SID;
+        entry.Trustee.TrusteeType=TRUSTEE_IS_USER;
+    }
+    access[0].Trustee.ptstrName=reinterpret_cast<LPWSTR>(
+        reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid);
+    access[1].Trustee.ptstrName=reinterpret_cast<LPWSTR>(system_sid);
+    PACL raw_acl=nullptr;
+    const DWORD acl_result=SetEntriesInAclW(2,access,nullptr,&raw_acl);
+    if(acl_result!=ERROR_SUCCESS)
+        throw std::runtime_error("create WIM scratch cleanup ACL (Win32 "+
+                                 std::to_string(acl_result)+")");
+    struct Acl {PACL p;~Acl(){LocalFree(p);}} acl{raw_acl};
+    HANDLE raw_file=CreateFileW(path.c_str(),WRITE_DAC,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
+        OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    checked(raw_file!=INVALID_HANDLE_VALUE,"open WIM scratch entry for ACL repair");
+    struct File {HANDLE h;~File(){CloseHandle(h);}} file{raw_file};
+    // Protect against inherited DENY_DELETE ACEs in the WIM's original ACL.
+    const DWORD result=SetSecurityInfo(file.h,SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,nullptr,acl.p,nullptr);
+    if(result!=ERROR_SUCCESS)
+        throw std::runtime_error("restore WIM scratch cleanup access (Win32 "+
+                                 std::to_string(result)+")");
 }
+void remove_tree(const std::filesystem::path& path){
+    const DWORD attr=GetFileAttributesW(path.c_str());
+    if(attr==INVALID_FILE_ATTRIBUTES){
+        const DWORD error=GetLastError();
+        if(error==ERROR_FILE_NOT_FOUND || error==ERROR_PATH_NOT_FOUND)return;
+        SetLastError(error);
+        checked(false,"inspect WIM scratch entry before cleanup");
+    }
+    if((attr&FILE_ATTRIBUTE_DIRECTORY) && !(attr&FILE_ATTRIBUTE_REPARSE_POINT)){
+        std::error_code ec;
+        auto it=std::filesystem::directory_iterator(path,ec);
+        if(ec==std::errc::permission_denied){
+            allow_workspace_cleanup(path);
+            ec.clear();
+            it=std::filesystem::directory_iterator(path,ec);
+        }
+        if(ec)throw std::filesystem::filesystem_error("enumerate WIM scratch",path,ec);
+        const auto end=std::filesystem::directory_iterator{};
+        while(it!=end){
+            const auto child=it->path();
+            it.increment(ec);
+            if(ec)throw std::filesystem::filesystem_error(
+                "advance WIM scratch enumeration",path,ec);
+            remove_tree(child);
+        }
+    }
+    const auto clear_readonly=[&](){
+        return !(attr&FILE_ATTRIBUTE_READONLY) ||
+               SetFileAttributesW(path.c_str(),attr&~FILE_ATTRIBUTE_READONLY);
+    };
+    if(!clear_readonly()){
+        const DWORD error=GetLastError();
+        if(error!=ERROR_ACCESS_DENIED){SetLastError(error);checked(false,"clear WIM scratch read-only flag");}
+        allow_workspace_cleanup(path);
+        checked(clear_readonly(),"clear WIM scratch read-only flag after ACL repair");
+    }
+    const auto unlink=[&](){
+        return (attr&FILE_ATTRIBUTE_DIRECTORY)?
+            RemoveDirectoryW(path.c_str()):DeleteFileW(path.c_str());
+    };
+    if(!unlink()){
+        const DWORD error=GetLastError();
+        if(error!=ERROR_ACCESS_DENIED){SetLastError(error);checked(false,"remove WIM scratch entry");}
+        allow_workspace_cleanup(path);
+        checked(unlink(),"remove WIM scratch entry after ACL repair");
+    }
+}
+// WIMGAPI may create extra temporary files directly in its configured
+// workspace, not just in the expanded image tree. Remove all of these
+// AFTER WIMGAPI handles and readback handles are closed, BEFORE commit.
+// The only item allowed to survive into the atomic rename is the verified WIM.
+void remove_wim_residue(const std::filesystem::path& root,
+                        const std::filesystem::path& output,
+                        const EditProgress& progress) {
+    const DWORD root_attr=GetFileAttributesW(root.c_str());
+    if(root_attr==INVALID_FILE_ATTRIBUTES ||
+       !(root_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+       (root_attr&FILE_ATTRIBUTE_REPARSE_POINT))
+        throw EditUnsupported("WIM edit workspace was replaced or removed");
+    std::vector<std::filesystem::path> residue;
+    bool found_output=false;
+    // Enumerate first and remove second. Mutating a directory while a Win32
+    // iterator is running may skip residual WIMGAPI temporary entries.
+    for(const auto& entry:std::filesystem::directory_iterator(root)) {
+        edit_tick(progress);
+        if(entry.path().filename()==output.filename()) {
+            const DWORD attr=GetFileAttributesW(entry.path().c_str());
+            if(attr==INVALID_FILE_ATTRIBUTES ||
+               (attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)))
+                throw EditUnsupported("WIM staging output is not a regular file");
+            found_output=true;
+        }else residue.push_back(entry.path());
+    }
+    if(!found_output)throw EditUnsupported("verified WIM staging output disappeared");
+    for(const auto& path:residue) {
+        edit_tick(progress);
+        remove_tree(path);
+    }
+    // Fail closed if an unexpected temporary file reappeared while cleaning.
+    for(const auto& entry:std::filesystem::directory_iterator(root)) {
+        if(entry.path().filename()!=output.filename())
+            throw EditUnsupported("WIM temporary files still remain before commit");
+    }
+}
+// Rollback must use the same ACL-aware deletion as successful WIM cleanup.
+// Ordinary remove_all can leave TrustedInstaller-protected expanded files
+// behind when cancellation or an Apply/Capture error unwinds the operation.
+struct WimWorkspaceCleanup {
+    std::filesystem::path folder;
+    ~WimWorkspaceCleanup() noexcept {
+        try {remove_tree(folder);}catch(...){}
+    }
+};
 }
 void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,
               const EditProgress& progress,const WimEditStatus& status){
@@ -188,8 +354,21 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         auto digits=top.substr(5);if(digits.empty()||digits.size()>3||digits[0]=='0'||digits.find_first_not_of("0123456789")!=std::string::npos)throw EditUnsupported("invalid WIM index");unsigned index=static_cast<unsigned>(std::stoul(digits));if(!index||index>images)throw EditUnsupported("creating WIM indexes is not supported yet");
         if(slash==std::string::npos){if(!c.remove)throw EditUnsupported("cannot replace an image index");deleted.insert(index);}else{c.path=p.substr(slash+1);edits[index].push_back(std::move(c));}}
     if(deleted.size()==images)throw EditUnsupported("cannot delete the last WIM image");
+    // Existing WIMGAPI exports all untouched indexes into a new WIM.
+    // When only the final index changes, it can instead be replaced inside
+    // an isolated copy, keeping all preceding index records in place.
+    // WIMDeleteImage cannot be used for one-image WIMs or non-final indexes:
+    // the former is rejected by Windows; the latter would renumber indexes.
+    const bool replace_last_only=images>1 && deleted.empty() &&
+                                 edits.size()==1 && edits.contains(images);
+    // For any single-index edit, the native export/capture path already
+    // validates unchanged indexes; avoid a second full directory walk.
+    const unsigned verify_only_index=deleted.empty() && edits.size()==1
+                                         ?edits.begin()->first:0u;
     report(L"Prepare NTFS staging",3);
-    Privileges privileges;Apartment apartment;EditTransaction tx(path);Library library;auto m=library.h;
+    Privileges privileges;Apartment apartment;EditTransaction tx(path);
+    WimWorkspaceCleanup scratch{tx.workspace};
+    Library library;auto m=library.h;
     // Native Windows capture/apply preserve security and alternate streams on NTFS.
     wchar_t volume[MAX_PATH]{},filesystem[MAX_PATH]{};checked(GetVolumePathNameW(tx.workspace.c_str(),volume,MAX_PATH),"find WIM workspace volume");checked(GetVolumeInformationW(volume,nullptr,0,nullptr,nullptr,nullptr,filesystem,MAX_PATH),"inspect WIM workspace filesystem");
     if(_wcsicmp(filesystem,L"NTFS")!=0)throw EditUnsupported("WIM editing requires an NTFS workspace volume");
@@ -199,29 +378,64 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     {
         Handle source(create(path.c_str(),GENERIC_READ,OPEN_EXISTING,2,0,nullptr),close);
         const DWORD flags=wim_detail::u32(header,16);const DWORD compression=(flags&0x40000)?2u:(flags&0x20000)?1u:0u;
-        Handle output(create(tx.output.c_str(),GENERIC_READ|GENERIC_WRITE,CREATE_NEW,2,compression,nullptr),close);
+        if(replace_last_only){
+            // Copy, never mutate, the original. A failure or cancellation
+            // destroys only the private workspace in EditTransaction.
+            callback.begin_stage(L"Copy WIM (preserve unchanged indexes)",6,17);
+            CopyContext copy{callback,6,17};
+            const BOOL copied=CopyFileExW(path.c_str(),tx.output.c_str(),
+                                          &CopyContext::on_progress,&copy,nullptr,0);
+            if(!copied){
+                if(callback.cancelled.load())throw EditCancelled();
+                checked(false,"copy WIM before selected-index edit");
+            }
+        }
+        Handle output(create(tx.output.c_str(),GENERIC_READ|GENERIC_WRITE,
+                             replace_last_only?OPEN_EXISTING:CREATE_NEW,2,
+                             replace_last_only?0u:compression,nullptr),close);
         checked(temp(source.h,tx.workspace.c_str())&&temp(output.h,tx.workspace.c_str()),"set WIM temporary directory");Registered source_callback(m,source.h,callback),output_callback(m,output.h,callback);
-        unsigned out_index=0,new_boot=0;
+        if(replace_last_only){
+            callback.begin_stage(L"Remove old final WIM index",23,0);
+            // No output image handles are open. This is safe only for the
+            // last index in a multi-image, unsplit WIM.
+            checked(api<BOOL(WINAPI*)(HANDLE,DWORD)>(m,"WIMDeleteImage")(output.h,images),
+                    "remove old final WIM index from staged copy");
+        }
+        unsigned out_index=replace_last_only?images-1u:0u;
+        unsigned new_boot=replace_last_only?boot:0u;
         for(unsigned index=1;index<=images;++index){
             callback.tick();
-            const unsigned begin=6u+static_cast<unsigned>(75ull*(index-1u)/images);
-            const unsigned end=6u+static_cast<unsigned>(75ull*index/images);
+            if(replace_last_only && index!=images)continue;
+            const unsigned begin=replace_last_only?25u:
+                6u+static_cast<unsigned>(75ull*(index-1u)/images);
+            const unsigned end=replace_last_only?81u:
+                6u+static_cast<unsigned>(75ull*index/images);
             const std::wstring number=std::to_wstring(index)+L"/"+std::to_wstring(images);
             if(deleted.count(index)){
                 callback.begin_stage(L"Skipping removed WIM image "+number,begin,0);
                 continue;
             }
             ++out_index;if(boot==index)new_boot=out_index;
-            Handle image(load(source.h,index),close);
             if(!edits.count(index)){
+                Handle image(load(source.h,index),close);
                 callback.begin_stage(L"Export unchanged WIM image "+number,begin,end-begin);
                 checked(api<BOOL(WINAPI*)(HANDLE,HANDLE,DWORD)>(m,"WIMExportImage")(image.h,output.h,1),"export unchanged WIM index");
                 callback.tick();
                 continue;
             }
             const auto expanded=tx.workspace/L"expanded";
-            std::filesystem::create_directory(expanded);
-            struct Cleanup {std::filesystem::path path;~Cleanup(){try{remove_tree(path);}catch(...){}}}cleanup{expanded};
+            checked(std::filesystem::create_directory(expanded),
+                    "create fresh WIM staging directory");
+            struct Cleanup {
+                std::filesystem::path path;
+                bool complete=false;
+                ~Cleanup() noexcept {
+                    if(!complete)try{remove_tree(path);}catch(...){}
+                }
+            } cleanup{expanded};
+            // Loaded/captured WIMGAPI handles must close BEFORE scratch deletion.
+            {
+            Handle image(load(source.h,index),close);
             const unsigned apply_end=begin+(end-begin)*55u/100u;
             callback.begin_stage(L"Extract WIM image "+number,begin,apply_end-begin);
             const BOOL applied=api<BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMApplyImage")(image.h,expanded.c_str(),2u|0x100u);
@@ -243,7 +457,15 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             callback.begin_stage(L"Rebuild WIM image "+number,apply_end,end-apply_end);
             HANDLE captured=api<HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMCaptureImage")(output.h,expanded.c_str(),2u|0x100u);
             callback.tick();Handle result(captured,close);preserve_metadata(m,image.h,result.h);
+            }
+            callback.begin_stage(L"Cleanup WIM temporary files "+number,end,0);
+            // Never report F5 success if expanded could not be removed.
+            // The transaction will still roll back the staged WIM on failure.
+            remove_tree(expanded);
+            cleanup.complete=true;
         }
+        checked(api<DWORD(WINAPI*)(HANDLE)>(m,"WIMGetImageCount")(output.h)==out_index,
+                "staged WIM index count changed unexpectedly");
         checked(api<BOOL(WINAPI*)(HANDLE,DWORD)>(m,"WIMSetBootImage")(output.h,new_boot),"preserve WIM boot index");
     }
     // Reopen the rebuilt image, validate all index trees, and independently
@@ -251,7 +473,9 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     // file: this made creating even an empty directory take minutes longer.
     report(L"Verify WIM structure",85);
     {
-        WimArchive verified(tx.output);
+        // For a single-index edit, enumerate only the changed directory
+        // tree. Image count and export status have already been checked.
+        WimArchive verified(tx.output,verify_only_index);
         std::map<std::string,std::size_t> found;
         const auto& items=verified.items();
         for(std::size_t i=0;i<items.size();++i){
@@ -266,6 +490,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         for(unsigned index=1;index<=images;++index){
             if(deleted.count(index))continue;
             ++new_index;
+            if(verify_only_index && new_index!=verify_only_index)continue;
             const auto prefix="image"+std::to_string(new_index);
             if(!found.contains(prefix))throw EditUnsupported("missing output WIM image index");
             if(!edits.contains(index))continue;
@@ -307,6 +532,8 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             }
         }
     }
+    report(L"Cleanup WIM transaction scratch",98);
+    remove_wim_residue(tx.workspace,tx.output,progress);
     report(L"Commit verified WIM",99);
     tx.commit(progress);
     // No cancellation or throwing callbacks after the atomic commit.

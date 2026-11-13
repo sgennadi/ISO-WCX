@@ -1,4 +1,5 @@
 #include "iso_wcx/archive_edit.hpp"
+#include "iso_wcx/udf_edit_inspection.hpp"
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/edit_transaction.hpp"
 #include <algorithm>
@@ -208,7 +209,7 @@ void bitmap_reserve(Bitmap& bitmap,std::uint32_t logical) {
 
 class Type1 {
 public:
-    explicit Type1(const std::filesystem::path& path)
+    explicit Type1(const std::filesystem::path& path,bool allow_bridge=false)
         :file_(path,std::ios::binary),size_(std::filesystem::file_size(path)) {
         need(file_.good() && size_%block==0 && size_>=300*block &&
              size_<max_image,"unsupported UDF image size/sector geometry");
@@ -219,8 +220,8 @@ public:
         bool vrs=false;
         for(std::uint64_t i=16;i<256 && (i+1)*block<=size_;++i) {
             const auto b=read(i*block,8);
-            if(std::equal(b.begin()+1,b.begin()+6,"CD001"))
-                throw EditUnsupported("ISO/UDF Bridge metadata rewriting unsupported");
+            if(std::equal(b.begin()+1,b.begin()+6,"CD001") && !allow_bridge)
+                throw EditUnsupported("ISO/UDF Bridge writes need protected ISO validation");
             if(std::equal(b.begin()+1,b.begin()+6,"NSR02") ||
                std::equal(b.begin()+1,b.begin()+6,"NSR03"))
                 vrs=true;
@@ -1289,7 +1290,8 @@ std::optional<ReusedFid> choose_reused_fid(
 
 void create_udf_type1_batch(const std::filesystem::path& image,Type1& volume,
                             const std::vector<ArchiveChange>& changes,
-                            const EditProgress& progress);
+                            const EditProgress& progress,bool allow_bridge,
+                            const EditStageValidator& validate_stage);
 
 // Allocate one FE and optionally a contiguous ShortAD run for file data.
 // Embedded or external parent directories may grow to a larger contiguous
@@ -1297,7 +1299,8 @@ void create_udf_type1_batch(const std::filesystem::path& image,Type1& volume,
 // for compatibility with independent readers including 7-Zip.
 void create_udf_type1(const std::filesystem::path& image,Type1& volume,
                       const ArchiveChange& change,
-                      const EditProgress& progress) {
+                      const EditProgress& progress,bool allow_bridge,
+                      const EditStageValidator& validate_stage) {
     const auto key=edit_path(change.path);
     need(volume.has_bitmap(),"UDF create requires a validated allocation bitmap");
     need(!volume.files().count(key) &&
@@ -1384,7 +1387,8 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
                              volume.logical_of(parent.at):
                              volume.logical_of(parent.data_at)),
                          encoded_name.size(),std::set<std::size_t>{})) {
-        create_udf_type1_batch(image,volume,{change},progress);
+        create_udf_type1_batch(image,volume,{change},progress,
+                               allow_bridge,validate_stage);
         return;
     }
 
@@ -1552,7 +1556,7 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     // Full strict structural parse plus independent extraction of changed
     // file bytes. Newly allocated FEs must also be discoverable by name.
     {
-        Type1 strict(tx.output);
+        Type1 strict(tx.output,allow_bridge);
         need( (strict.files().count(key)!=0)==(!change.directory),
              "staged UDF file map was not updated");
         need( (strict.directories().count(key)!=0)==change.directory,
@@ -1571,6 +1575,7 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
                  "new UDF file content verification failed");
         }
     }
+    if(validate_stage)validate_stage(tx.output);
     tx.commit(progress);
 }
 
@@ -1691,7 +1696,8 @@ void validate_udf_existing_change(const Type1& volume,
 void create_udf_type1_batch(const std::filesystem::path& image,
                             Type1& volume,
                             const std::vector<ArchiveChange>& changes,
-                            const EditProgress& progress) {
+                            const EditProgress& progress,bool allow_bridge,
+                            const EditStageValidator& validate_stage) {
     need(!changes.empty() && changes.size()<=max_items &&
          volume.has_bitmap(),
          "UDF transaction needs a valid bitmap and changes");
@@ -2195,7 +2201,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     // bitmap/LVID mismatches and parent allocation errors. Read every new
     // file through Disc extents and compare its complete source stream.
     {
-        Type1 strict(tx.output);
+        Type1 strict(tx.output,allow_bridge);
         for(const auto& region:deleted_regions) {
             const auto start=strict.logical_of(region.at);
             for(std::uint64_t i=0;i<region.bytes/block;++i)
@@ -2253,6 +2259,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                      "UDF batch staged file differs from source");
         }
     }
+    if(validate_stage)validate_stage(tx.output);
     tx.commit(progress);
 }
 
@@ -2260,11 +2267,14 @@ void create_udf_type1_batch(const std::filesystem::path& image,
 
 void edit_udf(const std::filesystem::path& image,
               const std::vector<ArchiveChange>& changes,
-              const EditProgress& progress) {
+              const EditProgress& progress,bool allow_bridge,
+              const EditStageValidator& validate_stage) {
     edit_tick(progress);
     const Disc before(image);
     need(before.format()=="UDF","not a plain readable UDF volume");
-    Type1 volume(image);
+    need(!allow_bridge || bool(validate_stage),
+         "ISO/UDF Bridge writes require a staged ISO/boot validator");
+    Type1 volume(image,allow_bridge);
     need(!changes.empty(),"no UDF changes");
     // A mixed creation/replacement/deletion batch shares one allocator and
     // one atomic image commit. Existing-only edits retain their original
@@ -2276,14 +2286,16 @@ void edit_udf(const std::filesystem::path& image,
                    (!volume.files().count(key) &&
                     !volume.directories().count(key));
         })) {
-        create_udf_type1_batch(image,volume,changes,progress);
+        create_udf_type1_batch(image,volume,changes,progress,
+                               allow_bridge,validate_stage);
         return;
     }
     if(changes.size()==1 && !changes[0].remove) {
         const auto path=edit_path(changes[0].path);
         if(!volume.files().count(path) &&
            !volume.directories().count(path)) {
-            create_udf_type1(image,volume,changes[0],progress);
+            create_udf_type1(image,volume,changes[0],progress,
+                             allow_bridge,validate_stage);
             return;
         }
     }
@@ -2353,6 +2365,24 @@ void edit_udf(const std::filesystem::path& image,
                  "UDF staged file differs from replacement source");
         }
     }
+    if(validate_stage)validate_stage(tx.output);
     tx.commit(progress);
+}
+
+// Reuse exactly the same strict parser used before a real write. The report
+// deliberately does not claim that a standalone parse authorizes mutation
+// of shared ISO/El Torito extents or guarantees allocation for a file.
+UdfEditInspection inspect_udf_edit(
+    const std::filesystem::path& image,bool allow_bridge) {
+    UdfEditInspection result;
+    try {
+        Type1 volume(image,allow_bridge);
+        result.parser_compatible=true;
+        result.allocation_bitmap=volume.has_bitmap();
+    }catch(const std::exception& ex) {
+        result.reason=ex.what();
+        if(result.reason.size()>600)result.reason.resize(600);
+    }
+    return result;
 }
 } // namespace iso_wcx

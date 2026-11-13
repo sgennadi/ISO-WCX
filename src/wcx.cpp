@@ -3,6 +3,9 @@
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/wcx_updater.hpp"
+#include "iso_wcx/tc_registration_repair.hpp"
+#include "iso_wcx/operation_diagnostics.hpp"
+#include "iso_wcx/tc_association_flags.hpp"
 #include <mutex>
 #include <atomic>
 #include <type_traits>
@@ -12,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <new>
@@ -41,7 +45,8 @@ std::mutex edit_mutex;
 using ChangeA=int (__stdcall*)(char*,int);
 using ChangeW=int (__stdcall*)(wchar_t*,int);
 struct State {
-    explicit State(std::filesystem::path p):disc(std::move(p)){}
+    explicit State(std::filesystem::path p):archive_path(p),disc(std::move(p)){}
+    std::filesystem::path archive_path;
     iso_wcx::Disc disc;
     std::size_t cursor=0;
     ProgressA progress_a=nullptr;
@@ -118,11 +123,22 @@ std::filesystem::path destination(const iso_wcx::Item& item,const wchar_t* dest_
 }
 int do_process(State* state,int operation,const wchar_t* dest_path,const wchar_t* dest_name) {
     if(!state || state->cursor>=state->disc.items().size())return E_END_ARCHIVE;
-    auto pos=state->cursor++;
+    // TC issues PK_SKIP for every enumerated directory entry. Logging each
+    // skip would slow down 100k-file install.wim listings and flood the log.
+    // CloseArchive records one summary of the enumerated item count instead.
+    const auto pos=state->cursor++;
     if(operation==PK_SKIP)return 0;
-    if(operation!=PK_TEST && operation!=PK_EXTRACT)return E_BAD_ARCHIVE;
+    const char* action=operation==PK_TEST?"test":
+                       operation==PK_EXTRACT?"extract":"other";
+    iso_wcx::diagnostics::Operation diagnostic(action,state->archive_path,1);
+    const auto finish=[&](int code,const char* reason=""){
+        diagnostic.complete(code,reason);
+        return code;
+    };
+    if(operation!=PK_TEST && operation!=PK_EXTRACT)return finish(E_BAD_ARCHIVE,"invalid operation");
     const auto& item=state->disc.items()[pos];
     try {
+        diagnostic.stage(L"copy",0);
         std::wstring wide=item_path(item);
         // Total Commander can register both callbacks. Report to Unicode only
         // when available; otherwise every byte is counted twice in its UI.
@@ -137,10 +153,11 @@ int do_process(State* state,int operation,const wchar_t* dest_path,const wchar_t
         };
         bool test_only=operation==PK_TEST;
         auto output=test_only?std::filesystem::path{}:destination(item,dest_path,dest_name);
-        if(!state->disc.copy(pos,output,callback,test_only))return E_EABORTED;
-        return 0;
-    }catch(const std::filesystem::filesystem_error&){return E_ECREATE;}
-     catch(const std::exception&){return E_BAD_ARCHIVE;}
+        if(!state->disc.copy(pos,output,callback,test_only))return finish(E_EABORTED,"cancelled");
+        return finish(0);
+    }catch(const std::filesystem::filesystem_error& e){return finish(E_ECREATE,e.what());}
+     catch(const std::exception& e){return finish(E_BAD_ARCHIVE,e.what());}
+     catch(...){return finish(E_BAD_ARCHIVE,"unknown exception");}
 }
 }
 
@@ -149,23 +166,41 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
     iso_wcx::schedule_update_check();
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
+    if(!d->ArcName)return nullptr;
     try {
-        if(!d->ArcName)return nullptr;
-        auto state=std::make_unique<State>(std::filesystem::path(d->ArcName));
-        d->OpenResult=0;
-        return reinterpret_cast<HANDLE>(state.release());
+        const auto image=std::filesystem::path(d->ArcName);
+        iso_wcx::diagnostics::Operation diagnostic("open",image);
+        try {
+            auto state=std::make_unique<State>(image);
+            d->OpenResult=0;
+            diagnostic.complete(0);
+            return reinterpret_cast<HANDLE>(state.release());
+        }catch(const std::exception& e){
+            diagnostic.complete(E_UNKNOWN_FORMAT,e.what());return nullptr;
+        }catch(...){diagnostic.complete(E_UNKNOWN_FORMAT,"unknown exception");return nullptr;}
     }catch(...){return nullptr;}
 }
 WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
     iso_wcx::schedule_update_check();
     if(!d)return nullptr;
     d->OpenResult=E_UNKNOWN_FORMAT;
+    if(!d->ArcName)return nullptr;
     try {
-        if(!d->ArcName)return nullptr;
-        auto state=std::make_unique<State>(std::filesystem::path(from_bytes(d->ArcName,CP_ACP)));
-        d->OpenResult=0;
-        return reinterpret_cast<HANDLE>(state.release());
-    }catch(...){return nullptr;}
+        const auto image=std::filesystem::path(from_bytes(d->ArcName,CP_ACP));
+        iso_wcx::diagnostics::Operation diagnostic("open",image);
+        try {
+            auto state=std::make_unique<State>(image);
+            d->OpenResult=0;
+            diagnostic.complete(0);
+            return reinterpret_cast<HANDLE>(state.release());
+        }catch(const std::exception& e) {
+            diagnostic.complete(E_UNKNOWN_FORMAT,e.what());return nullptr;
+        }catch(...){diagnostic.complete(E_UNKNOWN_FORMAT,"unknown exception");return nullptr;}
+    }catch(...){
+        iso_wcx::diagnostics::Operation diagnostic("open",{});
+        diagnostic.complete(E_UNKNOWN_FORMAT,"path conversion");
+        return nullptr;
+    }
 }
 WCX_EXPORT int __stdcall ReadHeaderExW(HANDLE handle,HeaderExW* result) {
     try{return header_w(reinterpret_cast<State*>(handle),result);}catch(...){return E_BAD_ARCHIVE;}
@@ -196,13 +231,25 @@ WCX_EXPORT int __stdcall ProcessFile(HANDLE handle,int operation,char* path,char
     }catch(...){return E_BAD_ARCHIVE;}
 }
 WCX_EXPORT int __stdcall CloseArchive(HANDLE handle) {
-    delete reinterpret_cast<State*>(handle);return 0;
+    auto* state=reinterpret_cast<State*>(handle);
+    if(state){
+        iso_wcx::diagnostics::Operation diagnostic(
+            "close",state->archive_path,
+            static_cast<unsigned>(std::min<std::size_t>(state->cursor,100000)));
+        delete state;
+        diagnostic.complete(0);
+    }
+    return 0;
 }
 WCX_EXPORT void __stdcall SetProcessDataProcW(HANDLE handle,ProgressW proc) {
+    if(proc)iso_wcx::diagnostics::note_host_call(
+        iso_wcx::diagnostics::HostCall::progress_w);
     if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_w.store(proc);return;}
     if(auto* state=reinterpret_cast<State*>(handle))state->progress_w=proc;
 }
 WCX_EXPORT void __stdcall SetProcessDataProc(HANDLE handle,ProgressA proc) {
+    if(proc)iso_wcx::diagnostics::note_host_call(
+        iso_wcx::diagnostics::HostCall::progress_a);
     if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_a.store(proc);return;}
     if(auto* state=reinterpret_cast<State*>(handle))state->progress_a=proc;
 }
@@ -231,32 +278,85 @@ template<class Char> std::vector<std::wstring> edit_list(const Char* list) {
         if constexpr(std::is_same_v<Char,wchar_t>)out.emplace_back(list,n);else out.push_back(from_bytes(list,CP_ACP));list+=n+1;
     }return out;
 }
+// Preserve the underlying ISO edit refusal reason for troubleshooting.
+// WCX can only return an integer error code, so TC cannot display what
+// the native writer rejected. Never log source file contents or credentials.
+void log_edit_failure(const std::wstring& archive,bool remove,const char* reason,int code) noexcept {
+    try {
+        wchar_t local[32768]{};
+        const DWORD n=GetEnvironmentVariableW(L"LOCALAPPDATA",local,32768);
+        if(n==0 || n>=32768)return;
+        const auto directory=std::filesystem::path(local)/L"ISO-WCX"/L"Logs";
+        std::filesystem::create_directories(directory);
+        std::ofstream log(directory/L"edit-errors.log",std::ios::app);
+        if(!log)return;
+        SYSTEMTIME stamp{};
+        GetLocalTime(&stamp);
+        const auto suffix=std::filesystem::path(archive).extension().wstring();
+        const char* kind=(suffix==L".iso" || suffix==L".ISO" || suffix==L".udf" || suffix==L".UDF")
+                             ?"ISO":"IMAGE";
+        log << '[' << stamp.wYear << '-' << stamp.wMonth << '-' << stamp.wDay
+            << ' ' << stamp.wHour << ':' << stamp.wMinute << ':' << stamp.wSecond
+            << "] WCX_EDIT_FAILURE format=" << kind
+            << " action=" << (remove?"delete":"pack")
+            << " code=" << code
+            << " reason=" << (reason?reason:"unknown") << '\n';
+    } catch(...) {
+        // Diagnostics must never change the WCX operation result.
+    }
+}
 int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::wstring& source,
             const std::vector<std::wstring>& names,bool remove,int flags) {
+    unsigned image_index=0;
+    if(subpath.size()>5 && subpath.compare(0,5,L"image")==0){
+        for(std::size_t at=5;at<subpath.size()&&at<8;++at){
+            if(subpath[at]<L'0'||subpath[at]>L'9')break;
+            image_index=image_index*10+unsigned(subpath[at]-L'0');
+        }
+    }
+    iso_wcx::diagnostics::Operation diagnostic(
+        remove?"delete":"pack",std::filesystem::path(archive),
+        static_cast<unsigned>(std::min<std::size_t>(names.size(),100000)),image_index);
+    const auto finish=[&](int code,const char* reason="") {
+        diagnostic.complete(code,reason);
+        return code;
+    };
     try {
         // No move packing: source files are never removed by this plugin.
-        if(flags&1)return E_NOT_SUPPORTED;
+        if(flags&1)return finish(E_NOT_SUPPORTED,"move packing unsupported");
         std::lock_guard lock(edit_mutex);
         std::filesystem::path image(archive);auto ext=image.extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return std::towlower(c);});
         if(ext!=L".iso"&&ext!=L".udf"&&ext!=L".wim"&&
            ext!=L".ima"&&ext!=L".img"&&ext!=L".vfd"&&
            ext!=L".flp"&&ext!=L".bif"&&ext!=L".raw"&&
-           ext!=L".vhd"&&ext!=L".vhdx")return E_NOT_SUPPORTED;
-        if(!std::filesystem::exists(image))return E_NOT_SUPPORTED;
+           ext!=L".vhd"&&ext!=L".vhdx")return finish(E_NOT_SUPPORTED,"unsupported format");
+        if(!std::filesystem::exists(image))return finish(E_NOT_SUPPORTED,"archive missing");
         std::vector<iso_wcx::ArchiveChange> changes;
         for(auto name:names){
-            if(remove && (name.ends_with(L"\\*")||name.ends_with(L"/*")))name.resize(name.size()-2);
+            if(remove) {
+                // TC WCX API uses Folder\\*.* for recursive directory
+                // deletion, not only Folder\\*. Strip this transport suffix
+                // before validating the canonical archive entry. Never
+                // interpret arbitrary wildcard patterns as delete requests.
+                if(name.ends_with(L"\\*.*") || name.ends_with(L"/*.*"))
+                    name.resize(name.size()-4);
+                else if(name.ends_with(L"\\*") || name.ends_with(L"/*"))
+                    name.resize(name.size()-2);
+            }
             auto relative=iso_wcx::edit_path(edit_utf8(name));
             iso_wcx::ArchiveChange c;c.path=subpath.empty()?relative:iso_wcx::edit_path(iso_wcx::edit_path(edit_utf8(subpath))+"/"+relative);c.remove=remove;
             if(!remove){c.source=std::filesystem::path(source)/std::filesystem::u8path(relative);auto status=std::filesystem::symlink_status(c.source);
-                if(!std::filesystem::is_regular_file(status)&&!std::filesystem::is_directory(status))return E_NOT_SUPPORTED;
-                const DWORD attributes=GetFileAttributesW(c.source.c_str());if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))return E_NOT_SUPPORTED;
+                if(!std::filesystem::is_regular_file(status)&&!std::filesystem::is_directory(status))return finish(E_NOT_SUPPORTED,"source missing or unsupported");
+                const DWORD attributes=GetFileAttributesW(c.source.c_str());if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))return finish(E_NOT_SUPPORTED,"reparse point or missing source");
                 c.directory=std::filesystem::is_directory(status);
             }changes.push_back(std::move(c));
         }
-        if(changes.empty())return 0;
+        if(changes.empty())return finish(0);
+        if(!remove && changes.size()==1 && changes.front().directory)
+            diagnostic.set_action("mkdir");
         auto wide=archive;auto ansi=to_ansi(archive);const auto pw=pack_progress_w.load();const auto pa=pack_progress_a.load();
         const auto progress=[&]{if(pw)return pw(wide.data(),0)!=0;if(pa)return pa(ansi.data(),0)!=0;return true;};
+        diagnostic.stage(L"write",0);
         if(ext==L".iso"||ext==L".udf")
              iso_wcx::edit_optical(image,changes,progress);
         else if(ext==L".wim") {
@@ -265,6 +365,7 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
                 // Display the active WIM stage instead of the same archive
                 // filename for five minutes. Unicode first, never both.
                 const int pct=-static_cast<int>(std::clamp(percent,1u,99u));
+                diagnostic.stage(stage,percent);
                 auto label=std::wstring(L"WIM: ")+stage;
                 if(pw)return pw(label.data(),pct)!=0;
                 if(pa){auto narrow=to_ansi(label);return pa(narrow.data(),pct)!=0;}
@@ -273,31 +374,93 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             iso_wcx::edit_wim(image,changes,progress,status);
         }
         else iso_wcx::edit_fat(image,changes,progress);
-        return 0;
-    }catch(const iso_wcx::EditCancelled&){return E_EABORTED;}
-     catch(const iso_wcx::EditUnsupported&){return E_NOT_SUPPORTED;}
-     catch(const std::filesystem::filesystem_error&){return E_ECREATE;}
-     catch(...){return E_BAD_ARCHIVE;}
+        return finish(0);
+    }catch(const iso_wcx::EditCancelled&){return finish(E_EABORTED,"cancelled");}
+     catch(const iso_wcx::EditUnsupported& e){log_edit_failure(archive,remove,e.what(),E_NOT_SUPPORTED);return finish(E_NOT_SUPPORTED,e.what());}
+     catch(const std::filesystem::filesystem_error& e){log_edit_failure(archive,remove,e.what(),E_ECREATE);return finish(E_ECREATE,e.what());}
+     catch(const std::exception& e){log_edit_failure(archive,remove,e.what(),E_BAD_ARCHIVE);return finish(E_BAD_ARCHIVE,e.what());}
+     catch(...){log_edit_failure(archive,remove,"unknown native exception",E_BAD_ARCHIVE);return finish(E_BAD_ARCHIVE,"unknown exception");}
 }
 }
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
-    try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(archive,sub?sub:L"",source,edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
+    iso_wcx::diagnostics::note_host_call(iso_wcx::diagnostics::HostCall::pack_w);
+    try {
+        if(!archive||!source) {
+            // If the TC host enters WCX with incomplete arguments, do not
+            // silently return 24: this must appear in the local operation log.
+            iso_wcx::diagnostics::Operation event(
+                "pack",archive?std::filesystem::path(archive):std::filesystem::path{});
+            event.complete(E_NOT_SUPPORTED,"missing archive or source");
+            return E_NOT_SUPPORTED;
+        }
+        return do_edit(archive,sub?sub:L"",source,edit_list(list),false,flags);
+    }catch(...) {
+        // Do not attempt to dereference an untrusted WCX argument while
+        // already unwinding from a parsing/encoding exception.
+        iso_wcx::diagnostics::Operation event("pack",{});
+        event.complete(E_BAD_ARCHIVE,"unparseable WCX pack arguments");
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* list,int flags) {
-    try{if(!archive||!source)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),from_bytes(sub,CP_ACP),from_bytes(source,CP_ACP),edit_list(list),false,flags);}catch(...){return E_BAD_ARCHIVE;}
+    iso_wcx::diagnostics::note_host_call(iso_wcx::diagnostics::HostCall::pack_a);
+    try {
+        if(!archive||!source) {
+            iso_wcx::diagnostics::Operation event("pack",{});
+            event.complete(E_NOT_SUPPORTED,"missing ANSI archive or source");
+            return E_NOT_SUPPORTED;
+        }
+        return do_edit(from_bytes(archive,CP_ACP),from_bytes(sub,CP_ACP),
+                       from_bytes(source,CP_ACP),edit_list(list),false,flags);
+    }catch(...) {
+        iso_wcx::diagnostics::Operation event("pack",{});
+        event.complete(E_BAD_ARCHIVE,"unparseable ANSI pack arguments");
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
-    try{if(!archive)return E_NOT_SUPPORTED;return do_edit(archive,L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
+    iso_wcx::diagnostics::note_host_call(iso_wcx::diagnostics::HostCall::delete_w);
+    try {
+        if(!archive){
+            iso_wcx::diagnostics::Operation event("delete",{});
+            event.complete(E_NOT_SUPPORTED,"missing archive");
+            return E_NOT_SUPPORTED;
+        }
+        return do_edit(archive,L"",L"",edit_list(list),true,0);
+    }catch(...){
+        iso_wcx::diagnostics::Operation event("delete",{});
+        event.complete(E_BAD_ARCHIVE,"unparseable Unicode delete arguments");
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
-    try{if(!archive)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
+    iso_wcx::diagnostics::note_host_call(iso_wcx::diagnostics::HostCall::delete_a);
+    try {
+        if(!archive){
+            iso_wcx::diagnostics::Operation event("delete",{});
+            event.complete(E_NOT_SUPPORTED,"missing ANSI archive");
+            return E_NOT_SUPPORTED;
+        }
+        return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);
+    }catch(...){
+        iso_wcx::diagnostics::Operation event("delete",{});
+        event.complete(E_BAD_ARCHIVE,"unparseable ANSI delete arguments");
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
     try { iso_wcx::configure_updates(parent,module); } catch(...) {}
 }
+// The Windows rundll32 worker is deliberately exported separately from WCX ABI.
+// It performs the approved fix only after all Total Commander windows close.
+WCX_EXPORT void __stdcall IsoWcxAssociationFixWorkerW(HWND, HINSTANCE module,
+                                                      wchar_t* arguments, int) {
+    iso_wcx::run_association_fix_worker(module, arguments?arguments:L"");
+}
 WCX_EXPORT int __stdcall GetPackerCaps() {
+    iso_wcx::diagnostics::note_host_call(iso_wcx::diagnostics::HostCall::caps);
     iso_wcx::schedule_update_check();
-    return PK_CAPS_BY_CONTENT|PK_CAPS_SEARCHTEXT|2|4|8|16; // 16=PK_CAPS_OPTIONS
+    return static_cast<int>(iso_wcx::tc_association::reported_caps); // 159; real TC host F5 verified
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
     iso_wcx::schedule_update_check();

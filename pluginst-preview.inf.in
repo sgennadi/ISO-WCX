@@ -1,0 +1,7 @@
+[plugininstall]
+description=ISO-WCX @ISO_WCX_VERSION_DISPLAY@: Native WIM and ISO/UDF editing Preview
+version=@ISO_WCX_VERSION_INI@
+type=wcx
+file=ISO-WCX.wcx
+defaultdir=ISO-WCX
+defaultextension=iso,udf,cue,ccd,nrg,mds,mdx,cso,zso,isz,daa,img,raw,vhd,vhdx,wim,esd,swm,ima,vfd,flp,bif,imz

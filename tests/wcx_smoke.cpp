@@ -55,9 +55,12 @@ int main(int argc,char** argv){
     auto set_progress_a=reinterpret_cast<SetProgressA>(GetProcAddress(dll,"SetProcessDataProc"));
     auto caps=reinterpret_cast<PackerCaps>(GetProcAddress(dll,"GetPackerCaps"));
     const auto configure=GetProcAddress(dll,"ConfigurePacker");
+    // Verify the rundll32 worker is exported under the exact undecorated
+    // name on both x86 (.def) and x64. No worker is executed in this smoke.
+    const auto association_fix=GetProcAddress(dll,"IsoWcxAssociationFixWorkerW");
     if(!open||!header||!process||!close||!set_progress_w||!set_progress_a||
-       !caps||!configure||(caps()&16)==0){
-        std::cerr<<"Missing WCX updater ConfigPacker export/options capability\n";
+       !caps||!configure||!association_fix||caps()!=159){
+        std::cerr<<"Missing WCX or association-fix export, or GetPackerCaps is not 159\n";
         return 3;
     }
     constexpr std::size_t block=2048;

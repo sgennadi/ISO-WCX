@@ -1,6 +1,6 @@
 [plugininstall]
-description=ISO-WCX v0.21.0 Stable: Export Image Structure, WIM diagnostics, VS2026 C++26
-version=0.21.0
+description=ISO-WCX v0.21.1 Stable: Guarded ISO/WIM F5, modern Configure, native repair, VS2026 C++26
+version=0.21.1
 type=wcx
 file=ISO-WCX.wcx
 defaultdir=ISO-WCX

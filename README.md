@@ -1,6 +1,6 @@
 # ISO-WCX
 
-**ISO-WCX v0.21.0 Stable Core + Export Image Structure, WIM diagnostics and VS2026 C++26 draft** — a native Total Commander WCX
+**ISO-WCX v0.21.1 Stable Core + guarded ISO/WIM editing, modern Configure and VS2026 C++26 draft** — a native Total Commander WCX
 plugin for optical ISO/UDF, WIM/ESD/SWM and virtual HDD images.
 Core browsing/extraction and packaging are verified in Windows x86/x64 and
 Linux CI. **Advanced readers and write modes explicitly marked experimental
@@ -9,7 +9,7 @@ remain limited; this is not full NTFS/ext4/UDF compatibility.**
 ## Install into Total Commander
 
 1. Open the [latest Stable release](https://github.com/sgennadi/ISO-WCX/releases/latest).
-2. Download **ISO-WCX-v0.21.0.zip** and open it in Total Commander.
+2. Download **ISO-WCX-v0.21.1.zip** and open it in Total Commander.
 3. Let `pluginst.inf` install `ISO-WCX.wcx` (32-bit) and `ISO-WCX.wcx64` (64-bit).
 4. Restart Total Commander and open a supported image with Ctrl+PgDn.
 
@@ -19,15 +19,31 @@ Development builds remain available through the [Preview workflow](https://githu
 service is needed.** Existing native helper CLIs are development/test programs,
 not dependencies of the WCX installation.
 
-If Total Commander still points to a removed old `...\ISO\iso.wcx`,
-fix **Configuration → Options → Packer → Configure packer extension WCXs**:
-remove only the obsolete `iso` association and add a new type pointing to
-the installed `ISO-WCX.wcx`. Restart TC. The plugin itself cannot repair an
-association that prevents its DLL from loading in the first place.
+If Total Commander still points to an old `...\ISO\iso.wcx`, open
+**ISO-WCX → Configure → Check & Fix WCX Associations** through any working
+ISO-WCX extension. The repair first previews its changes, backs up
+`wincmd.ini`, and applies only after all TC windows close. If no supported
+extension loads the new plugin, first change the obsolete ISO mapping
+manually in TC's Packer settings and then run Configure.
 
 For installation see [INSTALL_EN.txt](INSTALL_EN.txt) and
 [INSTALL_RU.txt](INSTALL_RU.txt); [PREVIEW.md](PREVIEW.md) describes
-experimental support. See [v0.21.0 release notes](RELEASE_NOTES.md).
+experimental support. See [v0.21.1 release notes](RELEASE_NOTES.md).
+
+## Stable v0.21.1 highlights
+
+- ISO/WIM F5 diagnostics, guarded optical ISO9660/Joliet edits and improved
+  WIM scratch cleanup on success, failure and cancellation.
+- Native offline WCX registration repair with separate confirmation for a
+  legacy ISO handler; unrelated plug-ins are preserved.
+- Stable/Preview updater selector and modern Windows confirmation dialogs.
+  Even after SHA-256 verification, the user must explicitly choose
+  **Open installer** rather than **Later**.
+- Configure viewport improvements for high-DPI/200% screens. The package
+  still contains a single installable ZIP with both WCX architectures.
+- **Important:** supported write layouts are restricted. Actual bootability
+  of modified real WinPE/Windows ISO media has not been field-certified;
+  test on disposable copies only.
 
 ## Fixed VHDX FAT write (bounded v0.20.0 Preview)
 
@@ -42,7 +58,7 @@ helper executables or mounts. See [VHDX implementation](docs/vhdx-native.md).
 
 ## Modern Windows build toolchain (development Preview)
 
-The **v0.21.0 Stable and development Preview** are compiled with **Visual Studio 2026 (v18),
+The **v0.21.1 Stable and development Preview** are compiled with **Visual Studio 2026 (v18),
 MSVC v145, and experimental C++26 (`/std:c++latest`)** for Win32 and
 x64. Both WCX architectures must pass all CTest and Total Commander ABI
 smoke checks; GitHub also runs a VS2026 C++20 compatibility baseline.

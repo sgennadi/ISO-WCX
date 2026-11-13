@@ -1,14 +1,346 @@
-# ISO-WCX v0.21.0 Stable Core + Export Image Structure and bounded writer Preview
+# ISO-WCX v0.21.1 Stable Core + guarded ISO/WIM/UDF editing and Preview notes
 
 Modern Total Commander WCX plugin with a Stable installation channel and explicitly restricted ISO/WIM/UDF editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2026, MSVC C++26 draft (Windows Win32/x64).
 
-The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.21.0, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
+The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.21.1, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
 
-v0.21.0 includes the read-only in-process **Export Image Structure**
-button and internal WIM metadata validation groundwork. It does **not**
-make creating a folder inside a large WIM instantaneous: WIMGAPI
-Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
-in PR #65 is **not** part of this Stable build.
+v0.21.1 retains **Export Image Structure** and adds restricted,
+boot-metadata-preserving ISO9660/Joliet edits, WIM F5 safeguards and cleanup,
+modern Configure dialogs and native offline WCX association repair.
+Large WIM editing still requires WIMGAPI Apply/Capture. Unsupported
+Rock Ridge, unknown hybrid/boot and nonvalidated layouts fail closed.
+Actual real-machine WinPE bootability after edits is not certified.
+
+For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
+
+## RC4 — Configure Settings high-DPI viewport (2026-11-13)
+
+The built-in Configure Settings window now uses the standard Windows Segoe UI
+shell dialog font, inherited by every child control. If Windows display scaling
+(especially 200% on small screens), taskbar placement, or a narrow monitor
+would push the settings window outside the available work area, it is resized
+and centered to fit the current monitor and **native scrollbars** expose every
+setting including the lower WCX association controls. Vertical mouse wheel,
+scrollbar dragging and keyboard focus navigation are supported. On a normal
+screen the layout remains unchanged and no scrollbars are shown. Only native
+Windows APIs are used; no webview, EXE or extra DLL is shipped. CI compilation
+does not replace an on-device 200% DPI visual test.
+
+## RC4 — Stable install opt-in after verified download (2026-11-13)
+
+A successful Stable SHA-256 download, whether started from Configure or
+from the background update notification, now asks **Open installer / Later**
+using the shared modern Windows Task Dialog, with **Later as the safe
+default**. Esc/close/Cancel leaves the verified ZIP on disk and does not
+open Total Commander, while opening the archive still requires a separate
+TC installer confirmation. A download or hash failure displays a modern
+non-technical error notice and never attempts to open the archive.
+This closes the previous gap where dismissing an informational OK dialog
+could still open the Stable ZIP.
+
+## RC4 — Modern Windows warning and update dialogs (2026-11-13)
+
+Legacy warning/confirmation MessageBoxes in Configure, Update, diagnostics,
+image-structure export and WCX association repair are now routed through the
+native Windows TaskDialogIndirect UI (modern icons, DPI-aware text, structured
+action choices). The familiar MessageBox is only a compatibility fallback
+when task dialogs are unavailable. RC installation stays manual, Stable
+downloads remain SHA-256 verified and Total Commander installation requires
+explicit user action. ISO takeover/association repair remain opt-in with a
+safe Cancel default. Russian/English UI is preserved without extra runtime
+DLLs, EXEs or GUI frameworks.
+
+## RC4 — F5 host dispatch triage (2026-11-13)
+
+**Configure ISO-WCX > Export diagnostics** now includes per-loaded-DLL counters
+for GetPackerCaps, Unicode/ANSI PackFiles and DeleteFiles, and registered
+packing progress callbacks. After attempting F5 within the same Total
+Commander process, zero PackFiles callbacks means the current WCX instance
+did not receive F5 (check association and capability caches). Nonzero means
+the plugin received F5; compare the operation result table for native writer
+errors. A separate TC process or unloaded/reloaded DLL is not observable.
+Counts never persist across reloads, and no paths, filenames or process IDs
+are recorded. No new runtime executable or automatic upload is introduced.
+
+## RC4 — Combined installer ZIP architecture gate (2026-11-13)
+
+CI now validates the **actual** auto-installable ZIP after the x86 and x64
+artifacts are merged, before upload. The CI-only Python verifier checks the
+exact eight-file package layout, Total Commander `pluginst.inf` (including
+ISO, UDF, WIM, ESD and SWM registrations), the requested RC/build, ZIP CRC,
+and the native PE COFF Machine/optional-header architecture for both WCX
+binaries. It also rejects packaged executables, missing files, ambiguous ZIP
+names and swapped x86/x64 plugins; the verifier has a synthetic failure
+self-test. The package remains a **single ZIP** with two WCX binaries.
+No Python or extra runtime files are distributed.
+
+## RC4 — Independent BIOS/EFI ISO writer regression (2026-11-13)
+
+Linux Preview CI now installs xorriso **only as an external test tool**
+to master disposable Joliet ISO images with both BIOS and EFI El Torito
+entries. Because xorriso enables Rock Ridge by default, the regression
+separately asserts a byte-for-byte fail-closed refusal for its standard
+Rock Ridge ISO, then uses xorriso's documented `--norock` fixture option
+to exercise the bounded ISO9660/Joliet writer.
+The test edits the image with the native ISO writer, independently extracts
+files with xorriso, and checks F5 add/replace, Delete, cancellation and
+rejected edits against the protected boot entries. The complete original
+El Torito catalog and both boot-image file contents must remain unchanged;
+no abandoned transaction folder is allowed. This does not prove the test
+image boots or validate an actual customer WinPE ISO; field validation is
+still required before Stable.
+
+## RC4 — Preview updater selection hardening (2026-11-13)
+
+The Preview/RC checker now examines up to five successful workflow runs
+and refuses artifacts from forked or unexpected workflow sources.
+Only runs owned and built by `sgennadi/ISO-WCX` are accepted.
+It prefers the highest validated version, RC and build, **not** the most
+recently rerun workflow. A single inaccessible/expired artifact endpoint
+no longer hides other valid RC artifacts. All five failed requests still
+report an update-check failure instead of silently claiming up-to-date.
+No Preview ZIP is installed automatically; Stable remains SHA-256 verified.
+
+## RC4 — UDF anchor parity with the reader (2026-11-13)
+
+Fixed a namespace-integrity bug in hybrid ISO/UDF editing: the in-process
+UDF reader accepts an independently validated **AVDP at sector 512** as
+a fallback, but the ISO editor previously probed only 256, end-256 and
+end-1 (plus declared-volume-end positions). A valid UDF filesystem without
+an NSR02/NSR03 VRS and with only the sector-512 anchor could therefore be
+mistaken for plain ISO9660 before an F5 edit.
+
+RC4 now probes sector 512, protects its UDF descriptor sequence, and checks
+all other standard and declared-volume-end anchors before permitting an
+MBR-isohybrid payload update. No layout rebuild is allowed on an image
+with an unreadable UDF filesystem.
+
+Regressions independently cover:
+- ISO/UDF with **only** a valid sector-512 anchor, no sector-256 anchor
+  and no VRS, using native Windows WCX PackFilesW; the exact UDF extent
+  changes while ISO, El Torito and MBR metadata remain byte-identical
+- MBR-isohybrid variant of that image
+- A malformed/incomplete UDF with a valid sector-512 AVDP that must
+  **refuse** plain ISO additions without touching the source
+- No orphaned `.iso-wcx-edit-*` temporary directories after F5/refusal
+
+This change is not a stable release and still needs Windows Win32/x64 CI
+and a disposable real-image boot test.
+
+## RC4 — Bounded MBR-isohybrid ISO/UDF file replacement (2026-11-12)
+
+The original ISO editor refused **every** nonzero optical system area
+(first 32 KiB), including some MBR-isohybrid WinPE images. RC4 now accepts
+a *validated conventional MBR system area* only for a **single-extent,
+equal-length, UDF-addressed existing-file payload replacement** in an
+ISO/UDF bridge. The edit copies the image to an isolated transaction,
+changes only the validated UDF extent above the protected ISO boot/VRS
+region, independently reopens ISO and UDF, verifies readback, then commits
+atomically. Unchanged MBR/El Torito/ISO metadata are preserved.
+
+Safety limits are intentional:
+- Requires valid 0x55AA MBR signature, at least one bounded partition
+  entry, valid boot flags and all partitions within the image.
+- Protective MBR/GPT (0xEE or an EFI PART header) is **rejected**.
+- Non-MBR/unknown system areas, plain ISO9660 hybrid metadata rebuilding,
+  adding/deleting files, changing file lengths and moving partitions are
+  **rejected**. No GPT, isohybrid remastering or image size change occurs.
+- Real-host behavior and bootability of customer media are **not yet
+  validated**; use disposable copies and confirm BIOS/UEFI boot yourself.
+- Win32/x64 WCX tests cover the allowed F5 payload replacement, MBR and
+  boot region byte preservation, blocked add/delete/GPT, and rollback.
+
+This reduces needless F5 refusals without advertising universal hybrid ISO
+editing. Stable v0.21.0 remains unchanged.
+
+## RC4 — Configure: associations and Stable/Preview updates (2026-11-08)
+
+**Configure ISO-WCX** includes **Check & Fix WCX Associations...**. It
+previews changes and asks for confirmation. Then close every Total Commander
+window; the plug-in starts a native worker via Windows `rundll32` that
+waits for TC to exit and never modifies a loaded TC configuration.
+The worker creates an atomic INI backup and applies only these safe rules:
+
+- Missing `iso` becomes `159,ISO-WCX.wcx`.
+- Existing ISO-WCX-owned `wim`, `iso` and `udf` use capability `159`.
+- Existing ISO-WCX-owned read-only `esd` and `swm` use `192`.
+- Other WCX plug-ins are preserved. Duplicates, redirects and unexpected
+  INI changes abort safely; the x64 cache checksum is invalidated.
+- The original ANSI/UTF-8/UTF-16 INI encoding and other rows are preserved.
+- If .iso is still assigned to the separate legacy ISO\iso.wcx plugin,
+  Configure offers a **second, explicit Yes/No consent** to replace only
+  that legacy .iso entry. Choosing No keeps it untouched. Arbitrary
+  third-party .iso handlers remain protected even when this option is used.
+- No PowerShell script or auxiliary executable is required.
+
+The Update checker now displays **Latest Stable** and **Latest Preview/RC**.
+Users can choose `Stable` (recommended) or `Preview / RC` and opt out of
+automatic checks. Stable downloads use the official GitHub Release ZIP and
+SHA-256 checksum manifest. Preview queries completed successful Actions
+builds with an unexpired combined x86/x64 installer and compares RC and build
+numbers; the button opens GitHub for **manual** Preview ZIP installation.
+Actions artifact download may require login. No unverified background RC
+installation occurs. These are RC4 Preview changes, not Stable 0.21.0.
+
+## RC4 — WIM scratch rollback hardening (2026-11-13)
+
+The WIM editor now uses its ACL-aware recursive scratch cleaner as an
+operation-scoped rollback guard. After WIMGAPI handles and readback are
+closed, it also removes all unexpected WIMGAPI temporary entries before
+committing the staged archive. Only the verified output WIM is allowed to
+remain. This reduces leftover `.iso-wcx-edit-*` folders on cancellation,
+Apply/Capture failure or successful multi-index operations. Original WIM
+ACLs and paths are never modified. CI includes workspace leak assertions,
+but a real TrustedInstaller-ACL Windows workstation test remains required.
+
+## RC4 — WIM scratch folder cleanup (2026-11-08, Issue #73)
+
+Operator telemetry from RC3 Build 1288 confirms a successful WIM F5
+`pack=0` and Delete `delete=0`: Total Commander now calls the WCX writer.
+The new field problem is an orphaned `expanded` working directory after
+a successful WIM edit, not a WCX dispatch failure.
+
+RC4 closes WIMGAPI's loaded and captured image handles **before** cleanup
+and explicitly deletes each `expanded` tree before committing the
+verified WIM. On `ACCESS_DENIED` from applied Windows ACLs it grants
+temporary deletion access to the active imaging identity and SYSTEM
+**only for the isolated workspace entry**, without following reparse
+points; it never changes ACLs of the original WIM or production files.
+If cleanup still fails, the WIM edit does **not** report F5 success.
+Cancel/failure cleanup is best-effort and must never overwrite the
+original WIM. Windows WCX smoke tests assert no orphaned edit workspace
+after PackFilesW, DeleteFilesW and cancellation.
+
+The original WIMGAPI Apply/Capture and byte-by-byte changed-file
+verification remain in place. The optional RC3 offline
+`ISO-WCX-F5-Repair.ps1` is still included, because existing Total
+Commander installations can retain stale WCX association masks.
+No extra installer, runtime service, or helper EXE is needed.
+
+**Verification gate:** Windows VS2026 Win32/x64 CTest, full GitHub
+Actions, and real host testing on a disposable `boot.wim` or
+`install.wim` including `expanded` cleanup. This preview is not
+a Stable release.
+
+## RC3 — WIM F5 host dispatch repair (2026-11-06)
+
+The operator confirmed that RC2 `GetPackerCaps=222` and the live
+`wincmd.ini` used `wim=222`, but **F5 did not enter `PackFilesW`**;
+deleting a WIM folder succeeded. This is a TC host-dispatch symptom,
+not proof that WIMGAPI failed. Separate real Total Commander 11.58.1
+tests from PR #68 previously showed `158` rejected before the callback
+and `159` successfully invoked the writer.
+
+**RC3 restores `GetPackerCaps=159`**, specifically for a host-tested
+existing-image F5 path, and deliberately removes `BY_CONTENT=64`.
+This adds the `NEW=1` capability that Total Commander 11.58.1
+used for dispatch, but `PackFilesW` still rejects creating an
+actual new ISO/WIM archive. Real user-host confirmation is pending.
+
+The *already cached* `wim=222` / `iso=222` / `udf=222`
+registrations need to change to `159`, even after replacing the DLL.
+The optional `ISO-WCX-F5-Repair.ps1` in the same ZIP:
+1. Runs in **read-only dry-run mode** by default.
+2. When explicitly run with `-Apply` after closing **all** TC
+   windows, changes only these three ISO-WCX associations, preserves
+   other WCXs and all INI encoding/line endings, creates a backup,
+   and invalidates the derived `[PackerPlugins64]` checksum.
+3. Refuses redirected or ambiguous INI layouts rather than guessing.
+   If TC uses `/I=other.ini`, pass that INI via `-IniPath`.
+4. A restart of Total Commander is required.
+
+The repair is **not executed by pluginst.inf**; Total Commander does not
+provide a safe documented post-install script hook for WCX. No EXE,
+third-party DLL, background service or automatic INI mutation is added.
+For an alternate manual solution, remove/re-add the existing WIM WCX
+association after the updated DLLs are installed and TC is restarted.
+
+Report the result of F5 using a disposable `boot.wim\\image1`,
+then separately repeat for `install.wim` and ISO/UDF.
+No production WIM should be edited until the issue is field-resolved.
+
+## RC2: investigate F5/Delete regression after installation (2026-11-06)
+
+The installed plugin advertises `GetPackerCaps=222` and the Total
+Commander registration can legitimately contain `158`, `159` or
+`222` for supported writable formats. **158 and 159 both allow
+modification and deletion**, whereas the legacy optional test-helper
+was incorrectly writing `192`, which has neither capability.
+The test-only helper now corrects stale `192` registrations even
+when the WCX path already matches, preserving valid `158`/`159`.
+
+The RC2 production plugin has a **read-only Check WCX associations / F5**
+button in Settings. It creates a local report at
+`%LOCALAPPDATA%\\ISO-WCX\\Reports\\ISO-WCX-TC-Associations.txt`,
+covering `wim`, `iso`, `udf`, `esd`, `swm`, effective INI
+redirects, registered 32-bit WCX and companion 64-bit WCX paths, and
+the derived `PackerPlugins64` extension cache. No INI editing occurs
+while Total Commander is open; the installed package remains one ZIP
+containing x86/x64 WCX libraries only.
+
+See [registration diagnosis and exact masks](docs/tc-registration-audit.md).
+A CI build and a real user WIM reproduction are required before claiming
+the original F5 regression is resolved.
+
+## Stable v0.21.1 and future Preview identity
+
+The new Stable source identity is **v0.21.1**, without overwriting the
+immutable v0.21.0 release. RC4 Build 1345 was an earlier preview candidate,
+not the tested Stable binary. Future GitHub Actions Preview builds target
+**v0.21.2 RC1 (Build N)** with numeric installer `version=0.21.2` and
+a separately labelled combined `ISO-WCX-v0.21.2-RC1-B<N>.zip`.
+The Preview updater never installs an RC automatically.
+
+CMake defaults to `ISO_WCX_RC_NUMBER=0` for Stable; using
+`-DISO_WCX_RC_NUMBER=1 -DISO_WCX_BUILD_NUMBER=<N>` builds the next
+Preview patch. The Stable updater downloads only the published,
+SHA-256-verified release and opens its installer on explicit consent.
+
+## DISM GUI-derived WIM improvements (integrated into native WCX)
+
+ISO-WCX reuses the **workflow ideas**, not the DISM GUI application or a
+`dism.exe` child process. The plugin remains a self-contained WCX binary.
+
+- **Get-WimInfo-style index summary:** explicit **Export Image Structure**
+  now reads the per-index WIM XML through Windows WIMGAPI/MSXML and displays
+  `imageN`, boot index, edition, description, architecture, Windows version
+  and size metadata when those fields are available.
+- **No surprise mount:** ordinary F5 WIM edits continue using isolated
+  Apply/Edit/Capture stages, with proper cancellation, index-level status,
+  original-file preservation and post-write verification.
+- **One-index optimization:** single-index verification does not enumerate
+  the untouched indexes again. A special staged-copy path avoids exporting
+  other indexes when only the **last** `imageN` changes.
+- No `DISM-GUI.exe`, `dism.exe`, external DLL, mounted WIM folder, or
+  background service is required. Other image indexes remain unaffected
+  unless explicitly selected.
+
+Real multi-index `install.wim` performance and write tests on Windows
+are mandatory before calling this Stable. See
+[ISO editing strategy](docs/iso-edit-strategy.md) for optical write limits.
+
+## Edit-path improvements under test (2026-11-04)
+
+- **WIM (Windows, unsplit only):** when the only changes are within the
+  final `imageN/` of a multi-index WIM, ISO-WCX now stages an exact copy
+  of the original WIM, removes only its last index in that private copy,
+  captures only the changed last index, and verifies its written files.
+  Other indexes remain in place and are not re-exported or fully enumerated.
+  This still requires one Apply/Capture of the changed image and storage
+  for the staged WIM and extracted image. Editing an earlier index, changing
+  several indexes, or deleting an index retains the original safer
+  export-and-capture implementation so index ordering is not altered.
+- **ISO:** images with matching ISO/Joliet volume descriptors and a bounded
+  all-zero sector-aligned trailer may be safely rewritten. Nonzero trailers,
+  hidden UDF anchors, hybrid boot/system areas and Rock Ridge remain blocked
+  unless a separately validated writer handles the layout.
+- **Diagnostics:** Windows edit failures are appended to
+  `%LOCALAPPDATA%\\ISO-WCX\\Logs\\edit-errors.log`. This preserves the
+  native rejection reason, instead of only showing a generic Total Commander
+  error code. No file contents are logged.
+
+These changes are preview-only until Windows/Total Commander tests pass.
+Make a backup of important installation media before testing.
 
 ## If Total Commander says `File iso.wcx not found!`
 
