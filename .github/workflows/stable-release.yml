@@ -30,8 +30,10 @@ permissions:
   issues: read
 
 concurrency:
-  group: iso-wcx-v0.21.1-stable-${{ github.event.pull_request.number || github.ref }}
-  # Superseded PR checks can be cancelled; main release publishing cannot.
+  # PR runs serialize per pull request; separate main commits may build in
+  # parallel, so one stalled Windows runner cannot block a newer release.
+  # Final publishing is serialized by the release job's tag-specific lock.
+  group: iso-wcx-v0.21.1-stable-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -363,6 +365,11 @@ jobs:
     name: Publish Stable v0.21.1 only after all checks succeed
     needs: [package]
     if: github.ref == 'refs/heads/main' && github.repository == 'sgennadi/ISO-WCX'
+    concurrency:
+      # Only one publish job per immutable version. Every main commit must
+      # still pass the complete matrix and package gate before arriving here.
+      group: iso-wcx-publish-v0.21.1
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     permissions:
       contents: write
