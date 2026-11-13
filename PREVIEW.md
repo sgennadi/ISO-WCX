@@ -12,6 +12,15 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — Preview updater selection hardening (2026-11-13)
+
+The Preview/RC checker now examines up to five successful workflow runs
+and prefers the highest validated version, RC and build, **not** the most
+recently rerun workflow. A single inaccessible/expired artifact endpoint
+no longer hides other valid RC artifacts. All five failed requests still
+report an update-check failure instead of silently claiming up-to-date.
+No Preview ZIP is installed automatically; Stable remains SHA-256 verified.
+
 ## RC4 — UDF anchor parity with the reader (2026-11-13)
 
 Fixed a namespace-integrity bug in hybrid ISO/UDF editing: the in-process

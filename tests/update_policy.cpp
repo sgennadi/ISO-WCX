@@ -50,6 +50,32 @@ int main() {
     ]})",candidates[0]);
     CHECK(available && available->rc==4 && available->number==1293);
     CHECK(available->artifact_id==45678 && available->run_id==42448476553ULL);
+    // Version > RC > build, regardless of GitHub Actions rerun order.
+    auto old_rc=*available;
+    old_rc.rc=3;old_rc.number=1400;
+    auto new_rc=*available;
+    new_rc.number=1300;
+    auto new_patch=*available;
+    new_patch.version.patch=2;new_patch.rc=1;new_patch.number=50;
+    CHECK(preview::preferred(*available,old_rc));
+    CHECK(!preview::preferred(old_rc,*available));
+    CHECK(preview::preferred(new_rc,*available));
+    CHECK(preview::preferred(new_patch,*available));
+    CHECK(!preview::preferred(*available,new_patch));
+    std::optional<preview::Build> highest;
+    preview::consider(highest,old_rc);
+    preview::consider(highest,new_rc);
+    preview::consider(highest,*available);
+    CHECK(highest && highest->number==1300 && highest->rc==4);
+    preview::consider(highest,std::nullopt);
+    CHECK(highest && highest->number==1300);
+    preview::consider(highest,new_patch);
+    CHECK(highest && highest->version.patch==2 && highest->rc==1);
+    const auto mixed=preview::artifact(R"({"artifacts":[
+        {"id":11,"name":"ISO-WCX-Installable-v0.21.1-RC3-B1293","expired":false},
+        {"id":12,"name":"ISO-WCX-Installable-v0.21.1-RC4-B1293","expired":false}
+    ]})",candidates[0]);
+    CHECK(mixed && mixed->rc==4 && mixed->artifact_id==12);
     CHECK(preview::newer(*available,iso_wcx::update::Version{0,21,1},3,1288));
     CHECK(preview::newer(*available,iso_wcx::update::Version{0,21,0},0,0));
     CHECK(!preview::newer(*available,iso_wcx::update::Version{0,21,1},4,1293));

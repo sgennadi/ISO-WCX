@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <utility>
 
 namespace iso_wcx::preview_update {
 // GitHub's REST Actions workflow_runs objects include verbose repository,
@@ -156,6 +157,16 @@ inline std::optional<Build> parse_name(std::string_view text) {
     candidate.number=static_cast<unsigned>(*build);
     return candidate;
 }
+// Workflow reruns are not necessarily ordered by version and RC.
+inline bool preferred(const Build& candidate,const Build& current){
+    if(update::newer(candidate.version,current.version))return true;
+    if(candidate.version!=current.version)return false;
+    if(candidate.rc!=current.rc)return candidate.rc>current.rc;
+    return candidate.number>current.number;
+}
+inline void consider(std::optional<Build>& best,std::optional<Build> candidate){
+    if(candidate && (!best || preferred(*candidate,*best)))best=std::move(candidate);
+}
 inline std::optional<Build> artifact(std::string_view response,Run run){
     const auto all=member(response,"artifacts");
     if(!all)return std::nullopt;
@@ -172,9 +183,7 @@ inline std::optional<Build> artifact(std::string_view response,Run run){
         candidate->name=*text;
         candidate->run_id=run.id;
         candidate->artifact_id=*ident;
-        if(!selected || update::newer(candidate->version,selected->version) ||
-           (candidate->version==selected->version &&
-            candidate->rc>selected->rc))selected=std::move(candidate);
+        consider(selected,std::move(candidate));
     }
     return selected;
 }

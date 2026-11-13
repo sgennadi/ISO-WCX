@@ -280,14 +280,23 @@ std::optional<preview_update::Build> latest_preview_release() {
     // Github Actions is not a published Release: only completed successful
     // runs with a non-expired combined installer may be selected.
     // Avoid an unbounded scan or accidentally returning a transient artifact.
+    std::optional<preview_update::Build> latest;
+    bool responded=false;
     for(std::size_t i=0;i<std::min<std::size_t>(runs.size(),5);++i) {
         const auto url=L"https://api.github.com/repos/sgennadi/ISO-WCX/"
             L"actions/runs/"+std::to_wstring(runs[i].id)+L"/artifacts?per_page=25";
-        const auto data=http_get(url,max_response);
-        if(auto item=preview_update::artifact(as_text(data),runs[i]))
-            return item;
+        try {
+            const auto data=http_get(url,max_response);
+            responded=true;
+            preview_update::consider(latest,
+                preview_update::artifact(as_text(data),runs[i]));
+        }catch(const std::exception&) {
+            // One inaccessible or expired workflow must not mask others.
+        }
     }
-    return std::nullopt;
+    if(!runs.empty() && !responded)
+        throw std::runtime_error("All preview artifact requests failed");
+    return latest;
 }
 bool selected_update_available(const State& state) {
     return state.preview_channel?state.preview_newer:state.stable_newer;
