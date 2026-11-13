@@ -13,6 +13,7 @@
 #include "iso_wcx/operation_diagnostics.hpp"
 #include "iso_wcx/tc_registration_audit.hpp"
 #include "iso_wcx/universal_diagnostics.hpp"
+#include "iso_wcx/modern_dialog.hpp"
 
 #include <bcrypt.h>
 #include <commdlg.h>
@@ -503,8 +504,14 @@ void download_and_offer(HWND dlg,State& state) {
                 L"Архив Preview/RC находится в GitHub Actions, а не в "
                 L"Stable Release с SHA-256. Открыть страницу скачивания "
                 L"и вручную установить ZIP через Total Commander?");
-            if(MessageBoxW(dlg,message,L"ISO-WCX Preview/RC",
-                           MB_YESNO|MB_ICONQUESTION)==IDYES){
+            if(modern_dialog::confirm(dlg,modern_dialog::Tone::question,
+                    L"ISO-WCX Preview/RC",
+                    tr(state.russian,L"Preview build available",L"Доступна тестовая версия"),
+                    message,
+                    tr(state.russian,L"Open GitHub Actions",L"Открыть GitHub Actions"),
+                    tr(state.russian,L"Not now",L"Не сейчас"),
+                    tr(state.russian,L"RC ZIP installation is manual.",
+                                     L"RC ZIP устанавливается вручную."))){
                 const auto rc=reinterpret_cast<std::intptr_t>(
                     ShellExecuteW(dlg,L"open",url.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
                 put_status(dlg,rc>32?
@@ -527,8 +534,10 @@ void download_and_offer(HWND dlg,State& state) {
                  L"SHA-256 проверен. ZIP откроется в Total Commander.\n"
                  L"Откройте архив и подтвердите установку.\n"
                  L"Затем перезапустите Total Commander."));
-            MessageBoxW(dlg,instructions.c_str(),L"ISO-WCX Update",
-                        MB_OK|MB_ICONINFORMATION);
+            modern_dialog::notice(dlg,modern_dialog::Tone::success,
+                L"ISO-WCX Update",
+                tr(state.russian,L"Stable update verified",L"Обновление Stable проверено"),
+                instructions);
             open_in_totalcmd(dlg,verified);
             put_status(dlg,tr(state.russian,
                   L"Verified Stable ZIP downloaded. Complete installation in TC.",
@@ -695,8 +704,11 @@ void export_structure_dialog(HWND dlg,bool ru) {
             L"Структура сохранена (UTF-8). Образ не изменён:\n"))+
             destination->wstring()+L"\n\n"+
             tr(ru,L"Open report?",L"Открыть отчёт?");
-        if(MessageBoxW(dlg,message.c_str(),L"ISO-WCX Export Image Structure",
-                       MB_ICONINFORMATION|MB_YESNO)==IDYES) {
+        if(modern_dialog::confirm(dlg,modern_dialog::Tone::success,
+                       L"ISO-WCX Export Image Structure",
+                       tr(ru,L"Report exported",L"Отчёт сохранён"),message,
+                       tr(ru,L"Open report",L"Открыть отчёт"),
+                       tr(ru,L"Close",L"Закрыть"))) {
             (void)ShellExecuteW(dlg,L"open",destination->c_str(),nullptr,
                                 nullptr,SW_SHOWNORMAL);
         }
@@ -710,10 +722,10 @@ void export_structure_dialog(HWND dlg,bool ru) {
                  L"Не удалось сохранить структуру образа:\n"))+reason;
         put_status(dlg,tr(ru,L"Structure export failed.",
                             L"Ошибка экспорта структуры."));
-        MessageBoxW(dlg,message.c_str(),L"ISO-WCX",MB_ICONERROR|MB_OK);
+        modern_dialog::show(dlg,message.c_str(),L"ISO-WCX",MB_ICONERROR|MB_OK);
     }catch(...) {
         put_status(dlg,L"Structure export failed.");
-        MessageBoxW(dlg,L"Unexpected error while exporting image structure.",
+        modern_dialog::show(dlg,L"Unexpected error while exporting image structure.",
                     L"ISO-WCX",MB_ICONERROR|MB_OK);
     }
 }
@@ -755,8 +767,14 @@ DWORD WINAPI background_worker(LPVOID argument) {
                       std::to_wstring(build->number)+
                       tr(russian(),L"\nOpen the GitHub Actions download page?",
                                    L"\nОткрыть загрузку на GitHub Actions?");
-                    if(MessageBoxW(nullptr,message.c_str(),L"ISO-WCX Preview/RC",
-                            MB_YESNO|MB_ICONINFORMATION|MB_SETFOREGROUND)==IDYES){
+                    if(modern_dialog::confirm(nullptr,modern_dialog::Tone::information,
+                            L"ISO-WCX Preview/RC",
+                            tr(russian(),L"New Preview/RC build",L"Новая сборка Preview/RC"),
+                            message,
+                            tr(russian(),L"Open download page",L"Открыть загрузку"),
+                            tr(russian(),L"Later",L"Позже"),
+                            tr(russian(),L"No automatic RC installation.",
+                                         L"RC не устанавливается автоматически."))){
                         const auto url=preview_artifact_page(*build);
                         (void)ShellExecuteW(nullptr,L"open",url.c_str(),
                                             nullptr,nullptr,SW_SHOWNORMAL);
@@ -776,8 +794,14 @@ DWORD WINAPI background_worker(LPVOID argument) {
                   tr(russian(),
                      L"\nDownload and verify SHA-256? Confirm install in TC.",
                      L"\nСкачать и проверить SHA-256? Установка через TC.");
-                if(MessageBoxW(nullptr,message.c_str(),L"ISO-WCX Update",
-                          MB_YESNO|MB_ICONINFORMATION|MB_SETFOREGROUND)==IDYES){
+                if(modern_dialog::confirm(nullptr,modern_dialog::Tone::information,
+                          L"ISO-WCX Update",
+                          tr(russian(),L"New Stable release",L"Новая Stable-версия"),
+                          message,
+                          tr(russian(),L"Download and verify",L"Скачать и проверить"),
+                          tr(russian(),L"Later",L"Позже"),
+                          tr(russian(),L"Install through Total Commander with confirmation.",
+                                       L"Установка подтверждается в Total Commander."))){
                     const auto verified=save_verified_archive(tag);
                     open_in_totalcmd(nullptr,verified);
                 }
@@ -911,7 +935,7 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         if(cmd==id_diag_export) {
             const auto report=diagnostics::export_report();
             if(report.empty()) {
-                MessageBoxW(dlg,tr(state->russian,
+                modern_dialog::show(dlg,tr(state->russian,
                     L"Could not export diagnostics to LOCALAPPDATA.",
                     L"Не удалось экспортировать диагностику в LOCALAPPDATA."),
                     L"ISO-WCX Diagnostics",MB_OK|MB_ICONERROR);
@@ -926,12 +950,12 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         if(cmd==id_diag_github) {
             const auto opened=diagnostics::open_github_issue();
             if(opened)
-                MessageBoxW(dlg,tr(state->russian,
+                modern_dialog::show(dlg,tr(state->russian,
                     L"Review the prefilled, sanitized report in your browser, then submit the GitHub issue yourself. No data was sent by the plugin.",
                     L"Проверьте обезличенный отчёт в браузере и подтвердите создание Issue самостоятельно. Плагин ничего не отправлял."),
                     L"ISO-WCX Diagnostics",MB_OK|MB_ICONINFORMATION);
             else
-                MessageBoxW(dlg,tr(state->russian,
+                modern_dialog::show(dlg,tr(state->russian,
                     L"Could not open GitHub. Use Export diagnostics instead.",
                     L"Не удалось открыть GitHub. Используйте экспорт диагностики."),
                     L"ISO-WCX Diagnostics",MB_OK|MB_ICONWARNING);
@@ -946,7 +970,7 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         if(cmd==id_tc_assoc_check) {
             const auto report=export_tc_registration_audit();
             if(report.empty()) {
-                MessageBoxW(dlg,tr(state->russian,
+                modern_dialog::show(dlg,tr(state->russian,
                     L"Cannot read Total Commander registrations or write the report.",
                     L"Не удалось прочитать регистрации Total Commander или записать отчёт."),
                     L"ISO-WCX WCX Registration",MB_OK|MB_ICONWARNING);
@@ -970,13 +994,18 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
                 L"Сохранить категорию операции в локальную очередь "
                 L"UniversalDiagnostics? Только обезличенные технические "
                 L"поля. Передача по сети не выполняется.");
-            if(MessageBoxW(dlg,prompt,L"ISO-WCX Diagnostics",
-                           MB_YESNO|MB_ICONQUESTION)!=IDYES)return TRUE;
+            if(!modern_dialog::confirm(dlg,modern_dialog::Tone::question,
+                           L"ISO-WCX Diagnostics",
+                           tr(state->russian,L"Save local diagnostic record?",
+                                             L"Сохранить локальную диагностику?"),
+                           prompt,
+                           tr(state->russian,L"Save locally",L"Сохранить"),
+                           tr(state->russian,L"Cancel",L"Отмена")))return TRUE;
             std::wstring message;
             const bool success=universal_diagnostics::capture_local(
                 category,installed.major,installed.minor,installed.patch,message);
             put_status(dlg,message);
-            MessageBoxW(dlg,message.c_str(),L"ISO-WCX Diagnostics",
+            modern_dialog::show(dlg,message.c_str(),L"ISO-WCX Diagnostics",
                         MB_OK|(success?MB_ICONINFORMATION:MB_ICONWARNING));
             return TRUE;
         }

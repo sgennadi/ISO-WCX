@@ -399,6 +399,7 @@ if(WIN32)
                  "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc" @ONLY)
   add_library(ISO-WCX MODULE
               src/wcx.cpp src/wcx_updater.cpp src/operation_diagnostics.cpp
+              src/modern_dialog.cpp
               src/tc_registration_audit.cpp src/tc_registration_repair.cpp
               src/universal_diagnostics_bridge.cpp
               src/vendor/universal_diagnostics_embedded.cpp
@@ -451,7 +452,8 @@ if(WIN32)
     add_test(NAME tc_wcx_registration_readonly_audit
       COMMAND tc_registration_audit_test)
     add_executable(tc_registration_repair_test
-      tests/tc_registration_repair.cpp src/tc_registration_repair.cpp)
+      tests/tc_registration_repair.cpp src/tc_registration_repair.cpp
+      src/modern_dialog.cpp)
     target_include_directories(tc_registration_repair_test
       PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_link_libraries(tc_registration_repair_test PRIVATE advapi32 shell32)

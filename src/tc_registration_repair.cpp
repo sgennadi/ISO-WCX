@@ -6,6 +6,7 @@
 #define NOMINMAX
 #endif
 #include "iso_wcx/tc_registration_repair.hpp"
+#include "iso_wcx/modern_dialog.hpp"
 #include <windows.h>
 #include <tlhelp32.h>
 #include <shellapi.h>
@@ -460,7 +461,7 @@ void report_worker(std::wstring status){
             if(out)out<<status;
         }catch(...){}
     }
-    MessageBoxW(nullptr,status.c_str(),L"ISO-WCX - Association Fix",MB_OK|
+    modern_dialog::show(nullptr,status.c_str(),L"ISO-WCX - Association Fix",MB_OK|
                 (status.starts_with(L"SUCCESS")?MB_ICONINFORMATION:MB_ICONWARNING));
 }
 } // namespace
@@ -511,15 +512,20 @@ bool offer_association_fix(HWND parent,HINSTANCE plugin,bool russian,
                 L".iso is assigned to the older ISO\\iso.wcx plugin.\n"
                 L"Replace ONLY this .iso association with ISO-WCX?\n"
                 L"Other plugins will remain unchanged.";
-            replace_legacy_iso=MessageBoxW(parent,question,
+            replace_legacy_iso=modern_dialog::confirm(parent,modern_dialog::Tone::warning,
                 L"ISO-WCX - Legacy ISO Association",
-                MB_YESNO|MB_ICONQUESTION)==IDYES;
+                russian?L"Заменить старую привязку ISO?":L"Replace legacy ISO association?",
+                question,
+                russian?L"Заменить только ISO":L"Replace ISO only",
+                russian?L"Оставить старую":L"Keep existing",
+                russian?L"Остальные плагины не изменяются.":
+                        L"Other WCX plugins remain unchanged.");
         }
         const auto plan=calculate(ini,binary,replace_legacy_iso).visible;
         if(!plan.changes){
             status=plan.conflicts?L"No safe automatic changes; see conflicts.":
                                    L"All ISO-WCX associations are already correct.";
-            MessageBoxW(parent,(plan.summary+L"\n"+status).c_str(),
+            modern_dialog::show(parent,(plan.summary+L"\n"+status).c_str(),
                         L"ISO-WCX - Associations",MB_OK|MB_ICONINFORMATION);
             return false;
         }
@@ -528,8 +534,14 @@ bool offer_association_fix(HWND parent,HINSTANCE plugin,bool russian,
                      L"Будет создана резервная копия wincmd.ini.":
                      L"\nApply these changes after ALL Total Commander windows close?\n"
                      L"A backup of wincmd.ini will be created.");
-        if(MessageBoxW(parent,prompt.c_str(),L"ISO-WCX - Fix Associations",
-            MB_YESNO|MB_ICONQUESTION)!=IDYES){
+        if(!modern_dialog::confirm(parent,modern_dialog::Tone::question,
+            L"ISO-WCX - Fix Associations",
+            russian?L"Применить исправления WCX?":L"Apply WCX association repair?",
+            prompt,
+            russian?L"Запланировать исправление":L"Schedule repair",
+            russian?L"Отмена":L"Cancel",
+            russian?L"После закрытия TC, с резервной копией INI.":
+                    L"After TC exits, with an INI backup.")){
             status=L"Association fix cancelled.";return false;
         }
         const auto source=module_path(plugin);
@@ -557,7 +569,7 @@ bool offer_association_fix(HWND parent,HINSTANCE plugin,bool russian,
         status=L"Association fix unavailable: ";
         const char* p=e.what();
         while(*p)status.push_back(static_cast<unsigned char>(*p++));
-        MessageBoxW(parent,status.c_str(),L"ISO-WCX - Associations",MB_OK|MB_ICONWARNING);
+        modern_dialog::show(parent,status.c_str(),L"ISO-WCX - Associations",MB_OK|MB_ICONWARNING);
         return false;
     }
 }

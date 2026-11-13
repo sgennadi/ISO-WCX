@@ -12,6 +12,18 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — Modern Windows warning and update dialogs (2026-11-13)
+
+Legacy warning/confirmation MessageBoxes in Configure, Update, diagnostics,
+image-structure export and WCX association repair are now routed through the
+native Windows TaskDialogIndirect UI (modern icons, DPI-aware text, structured
+action choices). The familiar MessageBox is only a compatibility fallback
+when task dialogs are unavailable. RC installation stays manual, Stable
+downloads remain SHA-256 verified and Total Commander installation requires
+explicit user action. ISO takeover/association repair remain opt-in with a
+safe Cancel default. Russian/English UI is preserved without extra runtime
+DLLs, EXEs or GUI frameworks.
+
 ## RC4 — F5 host dispatch triage (2026-11-13)
 
 **Configure ISO-WCX > Export diagnostics** now includes per-loaded-DLL counters
