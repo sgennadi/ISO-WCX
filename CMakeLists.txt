@@ -523,6 +523,18 @@ if(BUILD_TESTING)
       add_test(NAME independent_libarchive_iso
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_independent_iso.py" "$<TARGET_FILE:disc_inspect>")
       set_tests_properties(independent_libarchive_iso PROPERTIES SKIP_RETURN_CODE 77)
+      # Test independently mastered BIOS+EFI El Torito media. xorriso is
+      # used only by CTest; no new runtime tool ships with ISO-WCX.
+      find_program(ISO_WCX_XORRISO_EXECUTABLE NAMES xorriso)
+      if(ISO_WCX_XORRISO_EXECUTABLE)
+        add_test(NAME independent_xorriso_dual_boot_iso_edit
+          COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_xorriso_el_torito_iso.py"
+            "$<TARGET_FILE:archive_edit_fixture>"
+            "${ISO_WCX_XORRISO_EXECUTABLE}")
+        set_tests_properties(independent_xorriso_dual_boot_iso_edit
+          PROPERTIES TIMEOUT 240)
+      endif()
     endif()
     add_test(NAME disc_compatibility_v070
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compat_v070.py" "$<TARGET_FILE:disc_inspect>")

@@ -12,6 +12,18 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — Independent BIOS/EFI ISO writer regression (2026-11-13)
+
+Linux Preview CI now installs xorriso **only as an external test tool**
+to master a disposable Joliet ISO with both BIOS and EFI El Torito entries.
+The test edits the image with the native ISO writer, independently extracts
+files with xorriso, and checks F5 add/replace, Delete, cancellation and
+rejected edits against the protected boot entries. The complete original
+El Torito catalog and both boot-image file contents must remain unchanged;
+no abandoned transaction folder is allowed. This does not prove the test
+image boots or validate an actual customer WinPE ISO; field validation is
+still required before Stable.
+
 ## RC4 — Preview updater selection hardening (2026-11-13)
 
 The Preview/RC checker now examines up to five successful workflow runs

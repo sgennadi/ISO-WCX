@@ -15,7 +15,8 @@ USB/CD metadata.
 | Standalone UDF Type-1 2048-byte images | Limited native writer Preview, gated by UDF format validations | Limited native writer Preview |
 | ISO/UDF Bridge without boot catalog | Not supported | Preview: single contiguous existing UDF or shared ISO/UDF file, exactly same length; both namespaces validated |
 | Bootable ISO/UDF Bridge | **Preview:** UDF-only F5 add, delete, F7 and bounded resize when strict native Type-1 bitmap/FE/FID/LVID validation passes and the ISO namespace is immutable | Existing contiguous UDF-only or shared-extent equal-size payload replacement; embedded/complex replacements route to the protected UDF writer |
-| Hybrid MBR/GPT or nonzero system area | Not supported | Currently blocked; never discard boot/partition metadata |
+| Validated conventional MBR-isohybrid ISO/UDF Bridge | Metadata edits, adds, deletes and resize blocked | Preview: same-size replacement of a contiguous existing UDF-only file, after protected-region validation |
+| GPT-hybrid or unknown nonzero system area | Not supported | Not supported; preserve boot/partition metadata |
 | Rock Ridge, multi-extent and unrecognized variants | Not supported | Currently blocked if parser cannot guarantee all metadata is preserved |
 
 These are *capability preconditions*, not blanket promises for any disc.
@@ -85,8 +86,9 @@ but the module never regenerates RRIP or edits an ISO-visible file.
 This is a constrained capability, not blanket rewrite support.
 ISO-visible additions/deletions, modifications of ISO-shared names,
 unsupported UDF allocation maps (VAT/Sparable/Metadata), a missing or
-inconsistent writable bitmap, unbounded boot-image extents, and hybrid
-MBR/GPT remain **read-only**.
+inconsistent writable bitmap, unbounded boot-image extents, and GPT/unknown hybrid layouts remain
+**read-only**. A conventional validated MBR-isohybrid Bridge has the strictly
+bounded existing UDF-only equal-length payload exception described above.
 
 The synthetic dual-namespace test `universal_iso_udf_boot_preserving_edit`
 and the format-agnostic guard test run on CI. A boot test on a
@@ -110,6 +112,17 @@ a Stable release.
    structures and boot signatures before atomic commit.
 6. Report progress/cancellation through WCX. Keep the original unchanged on
    unsupported inputs, cancellation and verification failure.
+
+## Independently mastered El Torito regression
+
+The Linux Preview CI now uses a **test-only** xorriso binary to create a
+disposable ISO9660/Joliet image with separate BIOS and EFI El Torito entries.
+`independent_xorriso_dual_boot_iso_edit` verifies native F5 add/replace,
+Delete, cancellation and rejection of boot-file edits. It compares the
+raw El Torito catalog, BIOS and EFI payloads before/after each operation,
+and independently reads edited files through xorriso. This cannot establish
+BIOS or UEFI bootability of customer WinPE media; that still needs a real
+disposable-machine test.
 
 ## Remaining work for full bootable ISO/UDF editing
 
