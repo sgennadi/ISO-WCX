@@ -117,6 +117,9 @@ a Stable release.
 
 The Linux Preview CI now uses a **test-only** xorriso binary to create a
 disposable ISO9660/Joliet image with separate BIOS and EFI El Torito entries.
+The default Rock Ridge/SUSP variant must refuse editing without modifying
+the original; xorriso's documented `--norock` fixture produces the separately
+supported ISO/Joliet variant. This does not enable Rock Ridge editing.
 `independent_xorriso_dual_boot_iso_edit` verifies native F5 add/replace,
 Delete, cancellation and rejection of boot-file edits. It compares the
 raw El Torito catalog, BIOS and EFI payloads before/after each operation,

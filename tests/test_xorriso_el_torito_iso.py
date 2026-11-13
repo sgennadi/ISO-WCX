@@ -74,15 +74,41 @@ def main(editor: str, xorriso: str) -> None:
         (source / "BOOT" / "BIOS.IMG").write_bytes(bios)
         (source / "BOOT" / "EFI.IMG").write_bytes(efi)
         (source / "ORIGINAL.TXT").write_bytes(b"original payload")
+        def master(target: pathlib.Path, *, disable_rock_ridge: bool) -> None:
+            command = [
+                xorriso, "-as", "mkisofs", "-J", "-iso-level", "3",
+                "-V", "ISO_WCX_DUAL_BOOT", "-o", str(target),
+            ]
+            if disable_rock_ridge:
+                # xorriso enables Rock Ridge/SUSP by default; this test
+                # exercises the separately supported ISO9660/Joliet layout.
+                command.append("--norock")
+            command.extend([
+                "-b", "BOOT/BIOS.IMG", "-c", "BOOT/CATALOG.BIN",
+                "-no-emul-boot", "-boot-load-size", "4",
+                "-eltorito-alt-boot", "-e", "BOOT/EFI.IMG", "-no-emul-boot",
+                str(source),
+            ])
+            execute(*command)
+
+        # Never weaken the ISO editor to make its positive test pass.
+        # Default xorriso uses Rock Ridge; this layout must be refused
+        # without modifying any byte or leaving a transaction directory.
+        rock_ridge_image = root / "rockridge-dual-boot.iso"
+        master(rock_ridge_image, disable_rock_ridge=False)
+        rr_bytes = rock_ridge_image.read_bytes()
+        rr_payload = root / "rr-incoming.bin"
+        rr_payload.write_bytes(b"not permitted in Rock Ridge")
+        execute(editor, rock_ridge_image, "add", "REJECTED.TXT", rr_payload,
+                expect_success=False)
+        assert rock_ridge_image.read_bytes() == rr_bytes, (
+            "Rock Ridge ISO changed despite refusing metadata rewrite")
+        no_workspace_leak(root)
+
+        # Independently master a non-RR dual-boot ISO; safe bounded edits
+        # must work while preserving its BIOS and EFI El Torito data.
         image = root / "dual-boot.iso"
-        execute(
-            xorriso, "-as", "mkisofs", "-J", "-iso-level", "3",
-            "-V", "ISO_WCX_DUAL_BOOT", "-o", str(image),
-            "-b", "BOOT/BIOS.IMG", "-c", "BOOT/CATALOG.BIN",
-            "-no-emul-boot", "-boot-load-size", "4",
-            "-eltorito-alt-boot", "-e", "BOOT/EFI.IMG", "-no-emul-boot",
-            str(source),
-        )
+        master(image, disable_rock_ridge=True)
         catalog_lba, catalog = boot_catalog(image)
         assert extract(xorriso, image, "BOOT/BIOS.IMG", root) == bios
         assert extract(xorriso, image, "BOOT/EFI.IMG", root) == efi

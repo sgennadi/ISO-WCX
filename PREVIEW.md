@@ -15,7 +15,11 @@ For the full format-by-format safety matrix and next steps for bootable ISO/UDF 
 ## RC4 — Independent BIOS/EFI ISO writer regression (2026-11-13)
 
 Linux Preview CI now installs xorriso **only as an external test tool**
-to master a disposable Joliet ISO with both BIOS and EFI El Torito entries.
+to master disposable Joliet ISO images with both BIOS and EFI El Torito
+entries. Because xorriso enables Rock Ridge by default, the regression
+separately asserts a byte-for-byte fail-closed refusal for its standard
+Rock Ridge ISO, then uses xorriso's documented `--norock` fixture option
+to exercise the bounded ISO9660/Joliet writer.
 The test edits the image with the native ISO writer, independently extracts
 files with xorriso, and checks F5 add/replace, Delete, cancellation and
 rejected edits against the protected boot entries. The complete original
