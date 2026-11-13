@@ -89,6 +89,40 @@ def main(plugin, runner):
         assert result[303 * B:303 * B + 5] == b"EARTH"
         assert result[303 * B + 5:] == original[303 * B + 5:]
         assert read_image(image) == {}, "ISO9660 namespace was unexpectedly changed"
+        # Regression: the native UDF reader accepts a real AVDP at sector
+        # 512 even when the VRS and ordinary sector-256 anchor are absent.
+        # ISO's writer must detect the SAME UDF namespace, never rebuild
+        # ISO9660 metadata as if this were an ordinary optical image.
+        for is_mbr_hybrid in (False, True):
+            backup_only = bytearray(descriptor_bridge(
+                boot=True, udf_only=True, boot_count=4))
+            avdp = bytearray(backup_only[256 * B:257 * B])
+            struct.pack_into("<I", avdp, 12, 512)
+            avdp[4] = sum(avdp[i] for i in range(16) if i != 4) & 255
+            backup_only[512 * B:513 * B] = avdp
+            backup_only[256 * B:257 * B] = bytes(B)
+            backup_only[19 * B + 1:19 * B + 6] = bytes(5)
+            if is_mbr_hybrid:
+                backup_only[0] = 0xEB
+                backup_only[510:512] = b"\x55\xaa"
+                backup_only[446] = 0x80
+                backup_only[450] = 0x17
+                struct.pack_into("<II", backup_only, 454,
+                                 0, len(backup_only) // 512)
+            image.write_bytes(backup_only)
+            (source / "hello").write_bytes(b"ANCHR")
+            assert edit("pack", "hello") == 0, (
+                "WCX rejected existing UDF file with only sector-512 anchor",
+                is_mbr_hybrid)
+            changed = image.read_bytes()
+            assert len(changed) == len(backup_only)
+            assert changed[:303 * B] == backup_only[:303 * B]
+            assert changed[303 * B:303 * B + 5] == b"ANCHR"
+            assert changed[303 * B + 5:] == backup_only[303 * B + 5:], (
+                "ISO/UDF anchor or boot metadata changed on F5",
+                is_mbr_hybrid)
+            assert read_image(image) == {}, (
+                "UDF-only file was mistakenly added to ISO9660 namespace")
         # Valid MBR-based isohybrid ISO/UDF: preserve the entire MBR,
         # El Torito catalog and ISO-visible namespace. Only a bounded
         # equal-length UDF file payload may be changed. Metadata edits still
