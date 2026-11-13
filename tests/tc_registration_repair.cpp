@@ -93,6 +93,31 @@ int wmain(){
                 "conflict should be preserved, not fail");
         require(read(path).find("iso=192,C:\\Other\\ISO.wcx")!=std::string::npos,
                 "foreign ISO WCX was overwritten");
+        // Old ISO.wcx is a separate plugin. Opt-in may take over only this
+        // specific legacy .iso registration, never an arbitrary plugin.
+        const std::string legacy_iso="C:\\TotalCmd\\plugins\\wcx\\ISO\\iso.wcx";
+        write_text(path,"[PackerPlugins]\r\niso=192,"+legacy_iso+"\r\n"
+                        "wim=159,"+p+"\r\n"
+                        "rar=192,C:\\Other\\RAR.wcx\r\n");
+        const auto legacy_before=read(path);
+        const auto legacy_dry=preview_association_fix(path,dll);
+        require(legacy_dry.legacy_iso_available && legacy_dry.conflicts==1,
+                "legacy ISO must require an explicit opt-in");
+        require(read(path)==legacy_before,"legacy ISO preview modified the INI");
+        const auto opt_in=preview_association_fix(path,dll,true);
+        require(opt_in.legacy_iso_available && opt_in.conflicts==0,
+                "opt-in did not resolve the recognized legacy ISO conflict");
+        require(apply_association_fix_offline(path,dll,output,true),
+                "opt-in legacy ISO association repair failed");
+        require(read(path).find("iso=159,"+p)!=std::string::npos,
+                "opt-in did not replace the old ISO association");
+        require(read(path).find("rar=192,C:\\Other\\RAR.wcx")!=std::string::npos,
+                "legacy ISO opt-in modified an unrelated registration");
+        write_text(path,"[PackerPlugins]\r\niso=192,C:\\Other\\ISO.wcx\r\n");
+        require(apply_association_fix_offline(path,dll,output,true),
+                "foreign ISO registration must be ignored even in opt-in mode");
+        require(read(path).find("iso=192,C:\\Other\\ISO.wcx")!=std::string::npos,
+                "opt-in incorrectly took over a foreign ISO plugin");
         write_text(path,"[PackerPlugins]\r\niso=192,"+p+
                         "\r\niso=159,"+p+"\r\n");
         const auto dup=read(path);

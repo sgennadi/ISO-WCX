@@ -78,6 +78,10 @@ The worker creates an atomic INI backup and applies only these safe rules:
 - Other WCX plug-ins are preserved. Duplicates, redirects and unexpected
   INI changes abort safely; the x64 cache checksum is invalidated.
 - The original ANSI/UTF-8/UTF-16 INI encoding and other rows are preserved.
+- If .iso is still assigned to the separate legacy ISO\iso.wcx plugin,
+  Configure offers a **second, explicit Yes/No consent** to replace only
+  that legacy .iso entry. Choosing No keeps it untouched. Arbitrary
+  third-party .iso handlers remain protected even when this option is used.
 - No PowerShell script or auxiliary executable is required.
 
 The Update checker now displays **Latest Stable** and **Latest Preview/RC**.

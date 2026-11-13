@@ -225,6 +225,16 @@ bool own_entry(std::wstring_view value,const fs::path& installed){
     return same(path.filename().wstring(),L"ISO-WCX.wcx") &&
            same(path.parent_path().filename().wstring(),L"ISO-WCX");
 }
+bool legacy_iso_entry(std::wstring_view value){
+    const auto comma=value.find(L',');
+    if(comma==value.npos)return false;
+    const auto path=fs::path(expand(trim(value.substr(comma+1))));
+    // A different product must never be claimed merely because it handles ISO.
+    // Only the familiar legacy ISO\iso.wcx plugin is eligible, and only
+    // after a second, explicit operator confirmation in Configure.
+    return !path.empty() && same(path.filename().wstring(),L"iso.wcx") &&
+           same(path.parent_path().filename().wstring(),L"iso");
+}
 bool has_tc_process(){
     HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
     if(snapshot==INVALID_HANDLE_VALUE)fail("Cannot examine running Total Commander processes");
@@ -239,7 +249,8 @@ bool has_tc_process(){
     CloseHandle(snapshot);
     return found;
 }
-Plan calculate(const fs::path& ini,const fs::path& plugin32){
+Plan calculate(const fs::path& ini,const fs::path& plugin32,
+               bool replace_legacy_iso=false){
     if(!safe_file(plugin32))fail("Installed ISO-WCX.wcx was not found");
     if(!safe_file(plugin32.parent_path()/L"ISO-WCX.wcx64"))
         fail("Companion ISO-WCX.wcx64 was not found");
@@ -309,7 +320,10 @@ Plan calculate(const fs::path& ini,const fs::path& plugin32){
             ++plan.visible.changes;
             continue;
         }
-        if(!own_entry(found[j].value,plugin32)) {
+        const bool owned=own_entry(found[j].value,plugin32);
+        const bool legacy_iso=name==L"iso" && legacy_iso_entry(found[j].value);
+        if(legacy_iso)plan.visible.legacy_iso_available=true;
+        if(!owned && !(replace_legacy_iso && legacy_iso)) {
             ++plan.visible.conflicts;
             plan.visible.summary+=L"SKIP "+name+L": currently assigned to another plugin\n";
             continue;
@@ -323,7 +337,8 @@ Plan calculate(const fs::path& ini,const fs::path& plugin32){
         const auto prefix=raw.substr(0,eq+1);
         const auto eol=newline(lines[found[j].index].text);
         replace_line(plan.doc,found[j].index,prefix+desired+eol);
-        plan.visible.summary+=L"FIX "+name+L" -> "+std::to_wstring(targets[j].caps)+L"\n";
+        plan.visible.summary+=(legacy_iso && !owned ? L"REPLACE legacy " : L"FIX ")+
+            name+L" -> "+std::to_wstring(targets[j].caps)+L"\n";
         ++plan.visible.changes;
     }
     if(!additions.empty()) {
@@ -451,8 +466,9 @@ void report_worker(std::wstring status){
 } // namespace
 
 AssociationFixPlan preview_association_fix(
-        const fs::path& ini,const fs::path& plugin32){
-    try {return calculate(ini,plugin32).visible;}
+        const fs::path& ini,const fs::path& plugin32,
+        bool replace_legacy_iso){
+    try {return calculate(ini,plugin32,replace_legacy_iso).visible;}
     catch(const std::exception& e){
         AssociationFixPlan plan;plan.ini=ini;
         std::wstring message;
@@ -465,10 +481,10 @@ AssociationFixPlan preview_association_fix(
 }
 bool apply_association_fix_offline(
         const fs::path& ini,const fs::path& plugin32,
-        std::wstring& summary){
+        std::wstring& summary,bool replace_legacy_iso){
     try{
         if(has_tc_process())fail("Close all Total Commander windows first");
-        const auto plan=calculate(ini,plugin32);
+        const auto plan=calculate(ini,plugin32,replace_legacy_iso);
         summary=plan.visible.summary;
         if(plan.visible.changes)commit(plan);
         summary=L"SUCCESS: association repair completed.\n"+summary+
@@ -485,7 +501,21 @@ bool offer_association_fix(HWND parent,HINSTANCE plugin,bool russian,
     try{
         const auto ini=active_ini();
         const auto binary=plugin_path(plugin);
-        const auto plan=calculate(ini,binary).visible;
+        const auto initial=calculate(ini,binary).visible;
+        bool replace_legacy_iso=false;
+        if(initial.legacy_iso_available){
+            const auto question=russian?
+                L".iso уже связано со старым ISO\\iso.wcx.\n"
+                L"Заменить ТОЛЬКО эту привязку на ISO-WCX?\n"
+                L"Остальные плагины не изменятся.":
+                L".iso is assigned to the older ISO\\iso.wcx plugin.\n"
+                L"Replace ONLY this .iso association with ISO-WCX?\n"
+                L"Other plugins will remain unchanged.";
+            replace_legacy_iso=MessageBoxW(parent,question,
+                L"ISO-WCX - Legacy ISO Association",
+                MB_YESNO|MB_ICONQUESTION)==IDYES;
+        }
+        const auto plan=calculate(ini,binary,replace_legacy_iso).visible;
         if(!plan.changes){
             status=plan.conflicts?L"No safe automatic changes; see conflicts.":
                                    L"All ISO-WCX associations are already correct.";
@@ -511,7 +541,8 @@ bool offer_association_fix(HWND parent,HINSTANCE plugin,bool russian,
         // rundll32 process will load the 32-bit WCX, x64 the 64-bit WCX.
         const std::wstring command=L"\""+runner.wstring()+L"\" \""+
             source.wstring()+L"\",IsoWcxAssociationFixWorkerW \""+
-            ini.wstring()+L"\" \""+binary.wstring()+L"\"";
+            ini.wstring()+L"\" \""+binary.wstring()+L"\""+
+            (replace_legacy_iso?L" --legacy-iso":L"");
         std::vector<wchar_t> cmd(command.begin(),command.end());cmd.push_back(0);
         STARTUPINFOW si{};si.cb=sizeof(si);
         PROCESS_INFORMATION pi{};
@@ -536,7 +567,12 @@ void run_association_fix_worker(HINSTANCE module, std::wstring_view arguments) n
         std::wstring command(arguments);
         int argc=0;
         LPWSTR* argv=CommandLineToArgvW(command.c_str(),&argc);
-        if(!argv || argc!=2){if(argv)LocalFree(argv);fail("Invalid association worker arguments");}
+        if(!argv || (argc!=2 && argc!=3) ||
+           (argc==3 && std::wstring_view(argv[2])!=L"--legacy-iso")){
+            if(argv)LocalFree(argv);
+            fail("Invalid association worker arguments");
+        }
+        const bool replace_legacy_iso=argc==3;
         const fs::path ini(argv[0]),binary(argv[1]);
         LocalFree(argv);
         if(!safe_file(binary) || !safe_file(binary.parent_path()/L"ISO-WCX.wcx64"))
@@ -556,7 +592,7 @@ void run_association_fix_worker(HINSTANCE module, std::wstring_view arguments) n
             Sleep(1000);
         }
         if(has_tc_process())fail("Total Commander remained open; fix was not applied");
-        if(!apply_association_fix_offline(ini,binary,status))
+        if(!apply_association_fix_offline(ini,binary,status,replace_legacy_iso))
             report_worker(status);
         else
             report_worker(status);
