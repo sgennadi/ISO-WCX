@@ -12,6 +12,32 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — UDF anchor parity with the reader (2026-11-13)
+
+Fixed a namespace-integrity bug in hybrid ISO/UDF editing: the in-process
+UDF reader accepts an independently validated **AVDP at sector 512** as
+a fallback, but the ISO editor previously probed only 256, end-256 and
+end-1 (plus declared-volume-end positions). A valid UDF filesystem without
+an NSR02/NSR03 VRS and with only the sector-512 anchor could therefore be
+mistaken for plain ISO9660 before an F5 edit.
+
+RC4 now probes sector 512, protects its UDF descriptor sequence, and checks
+all other standard and declared-volume-end anchors before permitting an
+MBR-isohybrid payload update. No layout rebuild is allowed on an image
+with an unreadable UDF filesystem.
+
+Regressions independently cover:
+- ISO/UDF with **only** a valid sector-512 anchor, no sector-256 anchor
+  and no VRS, using native Windows WCX PackFilesW; the exact UDF extent
+  changes while ISO, El Torito and MBR metadata remain byte-identical
+- MBR-isohybrid variant of that image
+- A malformed/incomplete UDF with a valid sector-512 AVDP that must
+  **refuse** plain ISO additions without touching the source
+- No orphaned `.iso-wcx-edit-*` temporary directories after F5/refusal
+
+This change is not a stable release and still needs Windows Win32/x64 CI
+and a disposable real-image boot test.
+
 ## RC4 — Bounded MBR-isohybrid ISO/UDF file replacement (2026-11-12)
 
 The original ISO editor refused **every** nonzero optical system area
