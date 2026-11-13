@@ -287,6 +287,9 @@ int wmain(int argc,wchar_t** argv) {
             return true;
         };
         if(!clean_wim_workspaces())return 40;
+        // Failed and cancelled edits must not leave a partially extracted
+        // workspace. The WIM editor now has a separate ACL-aware RAII
+        // cleanup guard to cover WIMGAPI errors as well as successful F5.
         // Transactional WIM changes through the real WCX ABI.
         auto pack=bind<PackFn>(dll,"PackFilesW");auto erase=bind<DeleteFn>(dll,"DeleteFilesW");
         auto set_progress=bind<SetProgressFn>(dll,"SetProcessDataProcW");
@@ -354,6 +357,12 @@ int wmain(int argc,wchar_t** argv) {
         if(!content(L"image1\\HELLO.TXT",data)||data!="replacement"||
            !content(L"image1\\ADDED.TXT",data)||data!="new-file"||
            !content(L"image2\\HELLO.TXT",data)||data!="hello-two")return 22;
+        // Verify the protected test entry survived Apply/Capture unchanged.
+        // The ACL-aware scratch cleaner may ONLY touch the private workspace,
+        // never original source files or unchanged payloads in the WIM.
+        if(!content(L"image1\\READONLY.TXT",data)||
+           data!="regression-73-readonly-scratch")return 43;
+        if(load(readonly_input)!="regression-73-readonly-scratch")return 44;
         // A three-index WIM reproduces the field-reported delay. Editing
         // only the last index must not export image1 or image2 again.
         write(incoming/L"THIRD_NEW.TXT","fast-final-index");

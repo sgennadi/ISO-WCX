@@ -104,6 +104,17 @@ numbers; the button opens GitHub for **manual** Preview ZIP installation.
 Actions artifact download may require login. No unverified background RC
 installation occurs. These are RC4 Preview changes, not Stable 0.21.0.
 
+## RC4 — WIM scratch rollback hardening (2026-11-13)
+
+The WIM editor now uses its ACL-aware recursive scratch cleaner as an
+operation-scoped rollback guard. After WIMGAPI handles and readback are
+closed, it also removes all unexpected WIMGAPI temporary entries before
+committing the staged archive. Only the verified output WIM is allowed to
+remain. This reduces leftover `.iso-wcx-edit-*` folders on cancellation,
+Apply/Capture failure or successful multi-index operations. Original WIM
+ACLs and paths are never modified. CI includes workspace leak assertions,
+but a real TrustedInstaller-ACL Windows workstation test remains required.
+
 ## RC4 — WIM scratch folder cleanup (2026-11-08, Issue #73)
 
 Operator telemetry from RC3 Build 1288 confirms a successful WIM F5

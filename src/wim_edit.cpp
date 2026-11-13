@@ -291,6 +291,52 @@ void remove_tree(const std::filesystem::path& path){
         checked(unlink(),"remove WIM scratch entry after ACL repair");
     }
 }
+// WIMGAPI may create extra temporary files directly in its configured
+// workspace, not just in the expanded image tree. Remove all of these
+// AFTER WIMGAPI handles and readback handles are closed, BEFORE commit.
+// The only item allowed to survive into the atomic rename is the verified WIM.
+void remove_wim_residue(const std::filesystem::path& root,
+                        const std::filesystem::path& output,
+                        const EditProgress& progress) {
+    const DWORD root_attr=GetFileAttributesW(root.c_str());
+    if(root_attr==INVALID_FILE_ATTRIBUTES ||
+       !(root_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+       (root_attr&FILE_ATTRIBUTE_REPARSE_POINT))
+        throw EditUnsupported("WIM edit workspace was replaced or removed");
+    std::vector<std::filesystem::path> residue;
+    bool found_output=false;
+    // Enumerate first and remove second. Mutating a directory while a Win32
+    // iterator is running may skip residual WIMGAPI temporary entries.
+    for(const auto& entry:std::filesystem::directory_iterator(root)) {
+        edit_tick(progress);
+        if(entry.path().filename()==output.filename()) {
+            const DWORD attr=GetFileAttributesW(entry.path().c_str());
+            if(attr==INVALID_FILE_ATTRIBUTES ||
+               (attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)))
+                throw EditUnsupported("WIM staging output is not a regular file");
+            found_output=true;
+        }else residue.push_back(entry.path());
+    }
+    if(!found_output)throw EditUnsupported("verified WIM staging output disappeared");
+    for(const auto& path:residue) {
+        edit_tick(progress);
+        remove_tree(path);
+    }
+    // Fail closed if an unexpected temporary file reappeared while cleaning.
+    for(const auto& entry:std::filesystem::directory_iterator(root)) {
+        if(entry.path().filename()!=output.filename())
+            throw EditUnsupported("WIM temporary files still remain before commit");
+    }
+}
+// Rollback must use the same ACL-aware deletion as successful WIM cleanup.
+// Ordinary remove_all can leave TrustedInstaller-protected expanded files
+// behind when cancellation or an Apply/Capture error unwinds the operation.
+struct WimWorkspaceCleanup {
+    std::filesystem::path folder;
+    ~WimWorkspaceCleanup() noexcept {
+        try {remove_tree(folder);}catch(...){}
+    }
+};
 }
 void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,
               const EditProgress& progress,const WimEditStatus& status){
@@ -320,7 +366,9 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     const unsigned verify_only_index=deleted.empty() && edits.size()==1
                                          ?edits.begin()->first:0u;
     report(L"Prepare NTFS staging",3);
-    Privileges privileges;Apartment apartment;EditTransaction tx(path);Library library;auto m=library.h;
+    Privileges privileges;Apartment apartment;EditTransaction tx(path);
+    WimWorkspaceCleanup scratch{tx.workspace};
+    Library library;auto m=library.h;
     // Native Windows capture/apply preserve security and alternate streams on NTFS.
     wchar_t volume[MAX_PATH]{},filesystem[MAX_PATH]{};checked(GetVolumePathNameW(tx.workspace.c_str(),volume,MAX_PATH),"find WIM workspace volume");checked(GetVolumeInformationW(volume,nullptr,0,nullptr,nullptr,nullptr,filesystem,MAX_PATH),"inspect WIM workspace filesystem");
     if(_wcsicmp(filesystem,L"NTFS")!=0)throw EditUnsupported("WIM editing requires an NTFS workspace volume");
@@ -484,6 +532,8 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             }
         }
     }
+    report(L"Cleanup WIM transaction scratch",98);
+    remove_wim_residue(tx.workspace,tx.output,progress);
     report(L"Commit verified WIM",99);
     tx.commit(progress);
     // No cancellation or throwing callbacks after the atomic commit.
