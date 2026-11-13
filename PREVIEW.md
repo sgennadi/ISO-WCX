@@ -12,6 +12,17 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — Stable install opt-in after verified download (2026-11-13)
+
+A successful Stable SHA-256 download now asks **Open installer / Later**
+using the shared modern Windows Task Dialog, with **Later as the safe
+default**. Esc/close/Cancel leaves the verified ZIP on disk and does not
+open Total Commander, while opening the archive still requires a separate
+TC installer confirmation. A download or hash failure displays a modern
+non-technical error notice and never attempts to open the archive.
+This closes the previous gap where dismissing an informational OK dialog
+could still open the Stable ZIP.
+
 ## RC4 — Modern Windows warning and update dialogs (2026-11-13)
 
 Legacy warning/confirmation MessageBoxes in Configure, Update, diagnostics,

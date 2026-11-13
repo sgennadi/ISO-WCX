@@ -527,25 +527,50 @@ void download_and_offer(HWND dlg,State& state) {
               L"Скачивание Stable и проверка SHA-256..."));
         try {
             const auto verified=save_verified_archive(state.latest_tag);
-            const auto instructions=std::wstring(tr(state.russian,
-                 L"SHA-256 verified. The ZIP will open in Total Commander.\n"
-                 L"Enter the archive and confirm the plugin installer.\n"
-                 L"Restart Total Commander afterward.",
-                 L"SHA-256 проверен. ZIP откроется в Total Commander.\n"
-                 L"Откройте архив и подтвердите установку.\n"
-                 L"Затем перезапустите Total Commander."));
-            modern_dialog::notice(dlg,modern_dialog::Tone::success,
-                L"ISO-WCX Update",
-                tr(state.russian,L"Stable update verified",L"Обновление Stable проверено"),
-                instructions);
-            open_in_totalcmd(dlg,verified);
-            put_status(dlg,tr(state.russian,
-                  L"Verified Stable ZIP downloaded. Complete installation in TC.",
-                  L"Stable ZIP проверен. Завершите установку в TC."));
+            // A verified download is not an installation decision. The user
+            // may dismiss the dialog (including Escape or the window close
+            // button) without opening any executable or installer archive.
+            const bool open_installer=modern_dialog::confirm(
+                dlg,modern_dialog::Tone::success,L"ISO-WCX Update",
+                tr(state.russian,L"Stable update verified",
+                                 L"Обновление Stable проверено"),
+                tr(state.russian,
+                   L"The Stable ZIP was downloaded and its SHA-256 verified. "
+                   L"Open the archive in Total Commander now?",
+                   L"Stable ZIP скачан, контрольная сумма SHA-256 проверена. "
+                   L"Открыть архив в Total Commander сейчас?"),
+                tr(state.russian,L"Open installer",L"Открыть установщик"),
+                tr(state.russian,L"Later",L"Позже"),
+                tr(state.russian,
+                   L"Installation requires a separate confirmation in Total "
+                   L"Commander and a Total Commander restart afterward. "
+                   L"Choosing Later leaves the verified ZIP on disk.",
+                   L"Установка потребует отдельного подтверждения в Total "
+                   L"Commander и последующего перезапуска программы. "
+                   L"Кнопка «Позже» оставляет проверенный ZIP на диске."));
+            if(open_installer){
+                open_in_totalcmd(dlg,verified);
+                put_status(dlg,tr(state.russian,
+                      L"Verified ZIP opened. Confirm installation in TC.",
+                      L"Проверенный ZIP открыт. Подтвердите установку в TC."));
+            }else{
+                put_status(dlg,tr(state.russian,
+                      L"Verified Stable ZIP saved. No installer was opened.",
+                      L"Stable ZIP сохранён. Установщик не запускался."));
+            }
         }catch(...) {
             put_status(dlg,tr(state.russian,
                   L"Stable download or SHA-256 verification failed.",
                   L"Ошибка скачивания Stable или проверки SHA-256."));
+            modern_dialog::notice(dlg,modern_dialog::Tone::error,
+                L"ISO-WCX Update",
+                tr(state.russian,L"Stable update unavailable",
+                                 L"Не удалось подготовить Stable"),
+                tr(state.russian,
+                   L"The download failed or the SHA-256 checksum was invalid. "
+                   L"The installed plugin was not modified.",
+                   L"Ошибка скачивания или неверная контрольная сумма SHA-256. "
+                   L"Установленный плагин не изменён."));
         }
     }
     update_channel_button(dlg,state);
