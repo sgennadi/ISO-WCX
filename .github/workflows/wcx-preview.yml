@@ -73,7 +73,7 @@ jobs:
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test_f5_repair.ps1
       - name: Verify Windows RC version resource and installer identity
         shell: pwsh
-        run: pwsh -NoProfile -File tests/test_rc_version.ps1 -Arch ${{ matrix.arch }} -ExpectedBuild ${{ github.run_number }} -ExpectedRC 4
+        run: pwsh -NoProfile -File tests/test_rc_version.ps1 -Arch ${{ matrix.arch }} -ExpectedBuild ${{ github.run_number }} -ExpectedRC 1
       - name: Upload preview binaries
         uses: actions/upload-artifact@v7
         with:

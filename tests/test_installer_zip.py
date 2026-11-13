@@ -105,7 +105,7 @@ def fake_pe(machine: int, magic: int) -> bytes:
 
 
 def selftest() -> None:
-    version, rc, build = "0.21.1", 4, 123
+    version, rc, build = "0.21.2", 1, 123
     inf = (
         "[plugininstall]\n"
         f"description=ISO-WCX v{version} RC{rc} (Build {build})\n"

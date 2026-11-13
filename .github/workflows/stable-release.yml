@@ -30,8 +30,10 @@ permissions:
   issues: read
 
 concurrency:
-  group: iso-wcx-v0.21.1-stable-${{ github.event.pull_request.number || github.ref }}
-  # Superseded PR checks can be cancelled; main release publishing cannot.
+  # PR runs serialize per pull request; separate main commits may build in
+  # parallel, so one stalled Windows runner cannot block a newer release.
+  # Final publishing is serialized by the release job's tag-specific lock.
+  group: iso-wcx-v0.21.1-stable-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -105,8 +107,45 @@ jobs:
         arch: [Win32, x64]
     steps:
       - uses: actions/checkout@v7
-      - name: Configure compatibility build
-        run: cmake -S . -B build-compat -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=20
+      - name: Configure compatibility build (bounded retry)
+        shell: pwsh
+        run: |
+          # A stalled FetchContent/Git request must not block Stable publishing
+          # indefinitely. C++20 Win32 and x64 remain mandatory and unchanged.
+          $ErrorActionPreference = 'Stop'
+          $arguments = "-S . -B build-compat -G `"Visual Studio 18 2026`" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=20"
+          for ($attempt = 1; $attempt -le 2; $attempt++) {
+            $stdout = Join-Path $env:RUNNER_TEMP "iso-wcx-cxx20-configure-$attempt.out"
+            $stderr = Join-Path $env:RUNNER_TEMP "iso-wcx-cxx20-configure-$attempt.err"
+            Write-Host "C++20 configure attempt $attempt/2 for ${{ matrix.arch }} (8-minute timeout)"
+            $process = Start-Process -FilePath 'cmake.exe' -ArgumentList $arguments `
+                -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $finished = $process.WaitForExit(480000)
+            if (-not $finished) {
+              Write-Warning "CMake configuration stalled; terminating its process tree"
+              & taskkill.exe /PID $process.Id /T /F | Out-Host
+              [void]$process.WaitForExit(15000)
+            }
+            $process.Refresh()
+            if (Test-Path $stdout) { Get-Content -LiteralPath $stdout }
+            if (Test-Path $stderr) { Get-Content -LiteralPath $stderr }
+            if ($finished -and $process.ExitCode -eq 0 -and
+                (Test-Path 'build-compat/CMakeCache.txt')) {
+              $cache = Get-Content 'build-compat/CMakeCache.txt'
+              if ($cache -notcontains 'CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026' -or
+                  $cache -notcontains 'ISO_WCX_CXX_STANDARD:STRING=20') {
+                throw 'C++20 compatibility configuration is invalid'
+              }
+              Write-Host "PASS: VS2026 C++20 configure ${{ matrix.arch }}"
+              exit 0
+            }
+            if ($attempt -lt 2) {
+              Write-Warning 'Retrying the CMake configuration with a clean build tree'
+              Remove-Item -LiteralPath build-compat -Recurse -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 3
+            }
+          }
+          throw 'C++20 configure failed twice; Stable release remains blocked'
       - name: Compile all native tools and WCX DLL
         run: cmake --build build-compat --config Release --parallel 2
       - name: Run full backward-compatibility suite
@@ -326,6 +365,11 @@ jobs:
     name: Publish Stable v0.21.1 only after all checks succeed
     needs: [package]
     if: github.ref == 'refs/heads/main' && github.repository == 'sgennadi/ISO-WCX'
+    concurrency:
+      # Only one publish job per immutable version. Every main commit must
+      # still pass the complete matrix and package gate before arriving here.
+      group: iso-wcx-publish-v0.21.1
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     permissions:
       contents: write
