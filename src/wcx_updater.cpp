@@ -487,8 +487,11 @@ void scroll_settings(HWND dlg,State& state,int bar,int delta) {
     RECT client{};
     if(!GetClientRect(dlg,&client))return;
     const bool vertical=bar==SB_VERT;
-    const int limit=std::max(0,(vertical?state.content_height:state.content_width)-
-                              (vertical?client.bottom:client.right));
+    // Win32 RECT coordinates are LONG; MSVC cannot deduce std::max<int>
+    // from a mixed int/LONG expression on Win32 or x64.
+    const int viewport=static_cast<int>(vertical?client.bottom:client.right);
+    const int limit=std::max(0,
+        (vertical?state.content_height:state.content_width)-viewport);
     int& current=vertical?state.scroll_y:state.scroll_x;
     const auto position=std::clamp(current+delta,0,limit);
     if(position==current)return;
