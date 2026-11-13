@@ -928,7 +928,26 @@ DWORD WINAPI background_worker(LPVOID argument) {
                           tr(russian(),L"Install through Total Commander with confirmation.",
                                        L"Установка подтверждается в Total Commander."))){
                     const auto verified=save_verified_archive(tag);
-                    open_in_totalcmd(nullptr,verified);
+                    // A background "Download and verify" consent is not
+                    // consent to open the installer. Escape and Later keep
+                    // the verified ZIP on disk without launching anything.
+                    if(modern_dialog::confirm(nullptr,modern_dialog::Tone::success,
+                            L"ISO-WCX Update",
+                            tr(russian(),L"Stable ZIP verified",
+                                         L"Stable ZIP проверен"),
+                            tr(russian(),
+                               L"The archive was downloaded and verified. "
+                               L"Open it in Total Commander?",
+                               L"Архив скачан и проверен. "
+                               L"Открыть его в Total Commander?"),
+                            tr(russian(),L"Open installer",L"Открыть установщик"),
+                            tr(russian(),L"Later",L"Позже"),
+                            tr(russian(),
+                               L"Installation needs a separate confirmation "
+                               L"inside Total Commander.",
+                               L"Установка требует отдельного подтверждения "
+                               L"в Total Commander.")))
+                        open_in_totalcmd(nullptr,verified);
                 }
             }
         }

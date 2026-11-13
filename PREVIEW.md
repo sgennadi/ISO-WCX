@@ -27,7 +27,8 @@ does not replace an on-device 200% DPI visual test.
 
 ## RC4 — Stable install opt-in after verified download (2026-11-13)
 
-A successful Stable SHA-256 download now asks **Open installer / Later**
+A successful Stable SHA-256 download, whether started from Configure or
+from the background update notification, now asks **Open installer / Later**
 using the shared modern Windows Task Dialog, with **Later as the safe
 default**. Esc/close/Cancel leaves the verified ZIP on disk and does not
 open Total Commander, while opening the archive still requires a separate
