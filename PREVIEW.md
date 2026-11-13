@@ -15,7 +15,9 @@ For the full format-by-format safety matrix and next steps for bootable ISO/UDF 
 ## RC4 — Preview updater selection hardening (2026-11-13)
 
 The Preview/RC checker now examines up to five successful workflow runs
-and prefers the highest validated version, RC and build, **not** the most
+and refuses artifacts from forked or unexpected workflow sources.
+Only runs owned and built by `sgennadi/ISO-WCX` are accepted.
+It prefers the highest validated version, RC and build, **not** the most
 recently rerun workflow. A single inaccessible/expired artifact endpoint
 no longer hides other valid RC artifacts. All five failed requests still
 report an update-check failure instead of silently claiming up-to-date.

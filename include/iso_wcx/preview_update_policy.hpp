@@ -118,6 +118,8 @@ inline std::vector<std::string_view> array(std::string_view v) {
     }
     return out;
 }
+// Fork pull-request runs may be present in the workflow API response.
+// An untrusted fork artifact must never be offered for a Preview download.
 inline std::vector<Run> runs(std::string_view response) {
     std::vector<Run> out;
     const auto all=member(response,"workflow_runs");
@@ -125,7 +127,19 @@ inline std::vector<Run> runs(std::string_view response) {
     for(auto entry:array(*all)){
         const auto id=member(entry,"id"),n=member(entry,"run_number");
         const auto status=member(entry,"status"),result=member(entry,"conclusion");
-        if(!id || !n || !status || !result)continue;
+        const auto source=member(entry,"repository");
+        const auto head=member(entry,"head_repository");
+        const auto event=member(entry,"event");
+        if(!id || !n || !status || !result || !source || !head || !event)continue;
+        const auto source_name=member(*source,"full_name");
+        const auto head_name=member(*head,"full_name");
+        if(!source_name || !head_name ||
+           ascii(*source_name)!=std::optional<std::string>("sgennadi/ISO-WCX") ||
+           ascii(*head_name)!=std::optional<std::string>("sgennadi/ISO-WCX"))continue;
+        const auto event_name=ascii(*event);
+        if(event_name!=std::optional<std::string>("pull_request") &&
+           event_name!=std::optional<std::string>("workflow_dispatch") &&
+           event_name!=std::optional<std::string>("push"))continue;
         const auto parsed_id=integer(*id),parsed_number=integer(*n);
         if(!parsed_id || !parsed_number || !*parsed_id ||
            !*parsed_number || *parsed_number>65535u)continue;

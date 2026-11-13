@@ -37,11 +37,34 @@ int main() {
     namespace preview=iso_wcx::preview_update;
     const auto candidates=preview::runs(R"({"total_count":3,"workflow_runs":[
       {"id":42448476553,"run_number":1293,"status":"completed","conclusion":"success",
+       "repository":{"full_name":"sgennadi/ISO-WCX"},
+       "head_repository":{"full_name":"sgennadi/ISO-WCX"},"event":"pull_request",
        "head_commit":{"message":"nested quoted comma, preserved"},"other":[1,2]},
-      {"id":42448476552,"run_number":1293,"status":"completed","conclusion":"failure"},
-      {"id":42448476001,"run_number":1292,"status":"in_progress","conclusion":null}]})");
+      {"id":42448476552,"run_number":1293,"status":"completed","conclusion":"failure",
+       "repository":{"full_name":"sgennadi/ISO-WCX"},
+       "head_repository":{"full_name":"sgennadi/ISO-WCX"},"event":"pull_request"},
+      {"id":42448476001,"run_number":1292,"status":"in_progress","conclusion":null,
+       "repository":{"full_name":"sgennadi/ISO-WCX"},
+       "head_repository":{"full_name":"sgennadi/ISO-WCX"},"event":"pull_request"}]})");
     CHECK(candidates.size()==1 && candidates[0].number==1293);
     CHECK(candidates[0].id==42448476553ULL);
+    // Successful fork PRs, removed origins and unknown event types are unsafe.
+    const auto untrusted=preview::runs(R"({"workflow_runs":[
+      {"id":888,"run_number":1400,"status":"completed","conclusion":"success",
+       "event":"pull_request","repository":{"full_name":"sgennadi/ISO-WCX"},
+       "head_repository":{"full_name":"outside/ISO-WCX"}},
+      {"id":889,"run_number":1401,"status":"completed","conclusion":"success",
+       "event":"pull_request","repository":{"full_name":"sgennadi/ISO-WCX"},
+       "head_repository":null},
+      {"id":890,"run_number":1402,"status":"completed","conclusion":"success",
+       "event":"unexpected","repository":{"full_name":"sgennadi/ISO-WCX"},
+       "head_repository":{"full_name":"sgennadi/ISO-WCX"}}]})");
+    CHECK(untrusted.empty());
+    const auto manual=preview::runs(R"({"workflow_runs":[
+      {"id":891,"run_number":1403,"status":"completed","conclusion":"success",
+       "event":"workflow_dispatch","repository":{"full_name":"sgennadi/ISO-WCX"},
+       "head_repository":{"full_name":"sgennadi/ISO-WCX"}}]})");
+    CHECK(manual.size()==1 && manual[0].id==891);
     const auto available=preview::artifact(R"({"total_count":3,"artifacts":[
        {"id":12345,"name":"ISO-WCX-Win32-v0.21.1-RC4-B1293-preview","expired":false},
        {"id":45678,"name":"ISO-WCX-Installable-v0.21.1-RC4-B1293",
@@ -98,7 +121,10 @@ int main() {
         verbose_runs+="{\"id\":"+std::to_string(42472336574ULL-i)+
             ",\"run_number\":"+std::to_string(1312-i)+
             ",\"status\":\"completed\",\"conclusion\":\"success\","+
-            "\"repository\":{\"description\":\""+std::string(12500,'A')+"\"},"
+            "\"event\":\"pull_request\","+
+            "\"repository\":{\"full_name\":\"sgennadi/ISO-WCX\",\"description\":\""+
+                std::string(12500,'A')+"\"},"+
+            "\"head_repository\":{\"full_name\":\"sgennadi/ISO-WCX\"},"+
             "\"head_commit\":{\"message\":\"nested, comma\"}}";
     }
     verbose_runs+="]}";
