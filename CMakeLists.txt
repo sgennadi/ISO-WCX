@@ -468,6 +468,15 @@ if(WIN32)
     add_test(NAME universal_diagnostics_windows_embedded
       COMMAND universal_diagnostics_windows_test)
     set_tests_properties(universal_diagnostics_windows_embedded PROPERTIES TIMEOUT 40)
+    add_executable(wcx_host_dispatch_diagnostics_tests
+      tests/wcx_host_dispatch_diagnostics.cpp src/operation_diagnostics.cpp)
+    target_include_directories(wcx_host_dispatch_diagnostics_tests
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(wcx_host_dispatch_diagnostics_tests PRIVATE shell32)
+    target_compile_definitions(wcx_host_dispatch_diagnostics_tests
+      PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME wcx_inprocess_host_f5_dispatch_diagnostics
+      COMMAND wcx_host_dispatch_diagnostics_tests)
     add_executable(wcx_smoke tests/wcx_smoke.cpp)
     add_executable(wcx_virtual_fat_smoke tests/wcx_virtual_fat_smoke.cpp)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)

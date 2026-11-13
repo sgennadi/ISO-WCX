@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
@@ -32,6 +33,8 @@ namespace iso_wcx::diagnostics {
 namespace {
 std::mutex journal_mutex;
 std::atomic<std::uint64_t> next_id{1};
+std::array<std::atomic<std::uint64_t>,
+    static_cast<unsigned>(HostCall::count)> host_dispatch{};
 constexpr std::uintmax_t max_log_size=4u*1024u*1024u;
 constexpr std::size_t max_read_lines=200000;
 
@@ -238,6 +241,7 @@ std::string report_text() {
           <<"Generated UTC: "<<timestamp()<<"\n"
           <<"Local operation records are summarized without paths or filenames.\n"
           <<"No image contents, user credentials, usernames or device IDs are included.\n\n"
+          <<host_session_summary()
           <<"| Build | Format | Action | WCX code | Category | Count |\n"
           <<"|---|---|---|---:|---|---:|\n";
     unsigned rows=0;
@@ -250,6 +254,45 @@ std::string report_text() {
     return stream.str();
 }
 } // namespace
+
+void note_host_call(HostCall call) noexcept {
+    const auto index=static_cast<unsigned>(call);
+    if(index<host_dispatch.size())
+        host_dispatch[index].fetch_add(1,std::memory_order_relaxed);
+}
+
+std::string host_session_summary() noexcept {
+    try {
+        auto count=[](HostCall call) {
+            return host_dispatch[static_cast<unsigned>(call)].load(
+                std::memory_order_relaxed);
+        };
+        const auto caps=count(HostCall::caps);
+        const auto pw=count(HostCall::pack_w),pa=count(HostCall::pack_a);
+        const auto dw=count(HostCall::delete_w),da=count(HostCall::delete_a);
+        const auto progress_w=count(HostCall::progress_w);
+        const auto progress_a=count(HostCall::progress_a);
+        std::ostringstream report;
+        report<<"## F5 / Delete host dispatch (current WCX instance)\n\n"
+              <<"GetPackerCaps: "<<caps<<" (advertised mask: 159)\n\n"
+              <<"PackFilesW: "<<pw<<"; PackFiles ANSI: "<<pa
+              <<"; DeleteFilesW: "<<dw<<"; DeleteFiles ANSI: "<<da
+              <<"\n\nPacking progress registration W: "<<progress_w
+              <<"; ANSI: "<<progress_a<<"\n\n";
+        if(pw+pa==0)
+            report<<"F5 dispatch: **NOT OBSERVED in this DLL instance**. "
+                     "If F5 was attempted in this Total Commander process, "
+                     "check WCX association/cached capabilities before "
+                     "debugging the ISO/WIM writer.\n\n";
+        else
+            report<<"F5 dispatch: **OBSERVED**. If copying failed, use the "
+                     "operation result table below for the error category.\n\n";
+        report<<"These counters reset when this DLL unloads. They cannot "
+                 "prove what another Total Commander process did. "
+                 "No paths or filenames are collected.\n\n";
+        return report.str();
+    }catch(...) {return "Host dispatch counters unavailable.\n\n";}
+}
 
 Operation::Operation(const char* action,const std::filesystem::path& image,
                      unsigned file_count,unsigned image_index) noexcept {

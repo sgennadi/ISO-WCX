@@ -242,10 +242,14 @@ WCX_EXPORT int __stdcall CloseArchive(HANDLE handle) {
     return 0;
 }
 WCX_EXPORT void __stdcall SetProcessDataProcW(HANDLE handle,ProgressW proc) {
+    if(proc)iso_wcx::diagnostics::note_host_call(
+        iso_wcx::diagnostics::HostCall::progress_w);
     if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_w.store(proc);return;}
     if(auto* state=reinterpret_cast<State*>(handle))state->progress_w=proc;
 }
 WCX_EXPORT void __stdcall SetProcessDataProc(HANDLE handle,ProgressA proc) {
+    if(proc)iso_wcx::diagnostics::note_host_call(
+        iso_wcx::diagnostics::HostCall::progress_a);
     if(handle==INVALID_HANDLE_VALUE||!handle){pack_progress_a.store(proc);return;}
     if(auto* state=reinterpret_cast<State*>(handle))state->progress_a=proc;
 }
@@ -379,6 +383,7 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
 }
 }
 WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* source,wchar_t* list,int flags) {
+    iso_wcx::diagnostics::note_host_call(iso_wcx::diagnostics::HostCall::pack_w);
     try {
         if(!archive||!source) {
             // If the TC host enters WCX with incomplete arguments, do not
@@ -398,6 +403,7 @@ WCX_EXPORT int __stdcall PackFilesW(wchar_t* archive,wchar_t* sub,wchar_t* sourc
     }
 }
 WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* list,int flags) {
+    iso_wcx::diagnostics::note_host_call(iso_wcx::diagnostics::HostCall::pack_a);
     try {
         if(!archive||!source) {
             iso_wcx::diagnostics::Operation event("pack",{});
@@ -413,10 +419,34 @@ WCX_EXPORT int __stdcall PackFiles(char* archive,char* sub,char* source,char* li
     }
 }
 WCX_EXPORT int __stdcall DeleteFilesW(wchar_t* archive,wchar_t* list) {
-    try{if(!archive)return E_NOT_SUPPORTED;return do_edit(archive,L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
+    iso_wcx::diagnostics::note_host_call(iso_wcx::diagnostics::HostCall::delete_w);
+    try {
+        if(!archive){
+            iso_wcx::diagnostics::Operation event("delete",{});
+            event.complete(E_NOT_SUPPORTED,"missing archive");
+            return E_NOT_SUPPORTED;
+        }
+        return do_edit(archive,L"",L"",edit_list(list),true,0);
+    }catch(...){
+        iso_wcx::diagnostics::Operation event("delete",{});
+        event.complete(E_BAD_ARCHIVE,"unparseable Unicode delete arguments");
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT int __stdcall DeleteFiles(char* archive,char* list) {
-    try{if(!archive)return E_NOT_SUPPORTED;return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);}catch(...){return E_BAD_ARCHIVE;}
+    iso_wcx::diagnostics::note_host_call(iso_wcx::diagnostics::HostCall::delete_a);
+    try {
+        if(!archive){
+            iso_wcx::diagnostics::Operation event("delete",{});
+            event.complete(E_NOT_SUPPORTED,"missing ANSI archive");
+            return E_NOT_SUPPORTED;
+        }
+        return do_edit(from_bytes(archive,CP_ACP),L"",L"",edit_list(list),true,0);
+    }catch(...){
+        iso_wcx::diagnostics::Operation event("delete",{});
+        event.complete(E_BAD_ARCHIVE,"unparseable ANSI delete arguments");
+        return E_BAD_ARCHIVE;
+    }
 }
 WCX_EXPORT void __stdcall ConfigurePacker(HWND parent,HINSTANCE module) {
     try { iso_wcx::configure_updates(parent,module); } catch(...) {}
@@ -428,6 +458,7 @@ WCX_EXPORT void __stdcall IsoWcxAssociationFixWorkerW(HWND, HINSTANCE module,
     iso_wcx::run_association_fix_worker(module, arguments?arguments:L"");
 }
 WCX_EXPORT int __stdcall GetPackerCaps() {
+    iso_wcx::diagnostics::note_host_call(iso_wcx::diagnostics::HostCall::caps);
     iso_wcx::schedule_update_check();
     return static_cast<int>(iso_wcx::tc_association::reported_caps); // 159; real TC host F5 verified
 }

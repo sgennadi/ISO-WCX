@@ -8,6 +8,13 @@
 #include <string_view>
 
 namespace iso_wcx::diagnostics {
+// Counters exist only in the currently loaded WCX instance. They never
+// include source names, paths, process IDs or private host arguments.
+enum class HostCall : unsigned {
+    caps, pack_w, pack_a, delete_w, delete_a, progress_w, progress_a, count
+};
+void note_host_call(HostCall call) noexcept;
+[[nodiscard]] std::string host_session_summary() noexcept;
 class Operation final {
 public:
     Operation(const char* action, const std::filesystem::path& image,

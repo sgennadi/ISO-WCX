@@ -12,6 +12,18 @@ in PR #65 is **not** part of this Stable build.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## RC4 — F5 host dispatch triage (2026-11-13)
+
+**Configure ISO-WCX > Export diagnostics** now includes per-loaded-DLL counters
+for GetPackerCaps, Unicode/ANSI PackFiles and DeleteFiles, and registered
+packing progress callbacks. After attempting F5 within the same Total
+Commander process, zero PackFiles callbacks means the current WCX instance
+did not receive F5 (check association and capability caches). Nonzero means
+the plugin received F5; compare the operation result table for native writer
+errors. A separate TC process or unloaded/reloaded DLL is not observable.
+Counts never persist across reloads, and no paths, filenames or process IDs
+are recorded. No new runtime executable or automatic upload is introduced.
+
 ## RC4 — Combined installer ZIP architecture gate (2026-11-13)
 
 CI now validates the **actual** auto-installable ZIP after the x86 and x64
