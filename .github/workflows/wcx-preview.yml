@@ -53,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Configure Visual Studio 2026 with experimental C++26
-        run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_RC_NUMBER=4 -DISO_WCX_BUILD_NUMBER=${{ github.run_number }} -DISO_WCX_BUILD_DEV_TOOLS=ON
+        run: cmake -S . -B build -G "Visual Studio 18 2026" -A ${{ matrix.arch }} -DISO_WCX_CXX_STANDARD=26 -DISO_WCX_RC_NUMBER=1 -DISO_WCX_BUILD_NUMBER=${{ github.run_number }} -DISO_WCX_BUILD_DEV_TOOLS=ON
       - name: Require VS2026 and C++26 configuration
         shell: pwsh
         run: |
@@ -77,7 +77,7 @@ jobs:
       - name: Upload preview binaries
         uses: actions/upload-artifact@v7
         with:
-          name: ISO-WCX-${{ matrix.arch }}-v0.21.1-RC4-B${{ github.run_number }}-preview
+          name: ISO-WCX-${{ matrix.arch }}-v0.21.2-RC1-B${{ github.run_number }}-preview
           path: |
             build/Release/ISO-WCX.wcx
             build/Release/ISO-WCX.wcx64
@@ -149,22 +149,22 @@ jobs:
             echo "Unexpected third-party shared library in ISO-WCX installer" >&2
             exit 1
           fi
-          # Stable pluginst.inf is immutable; render RC4 metadata only in the preview ZIP.
-          python3 -c 'from pathlib import Path; s=Path("pluginst-preview.inf.in").read_text(); s=s.replace("@ISO_WCX_VERSION_DISPLAY@", "v0.21.1 RC4 (Build ${{ github.run_number }})").replace("@ISO_WCX_VERSION_INI@", "0.21.1"); Path("package/pluginst.inf").write_text(s)'
-          grep -Fxq 'version=0.21.1' package/pluginst.inf
+          # Keep Stable pluginst.inf separate; render RC1 metadata only in the Preview ZIP.
+          python3 -c 'from pathlib import Path; s=Path("pluginst-preview.inf.in").read_text(); s=s.replace("@ISO_WCX_VERSION_DISPLAY@", "v0.21.2 RC1 (Build ${{ github.run_number }})").replace("@ISO_WCX_VERSION_INI@", "0.21.2"); Path("package/pluginst.inf").write_text(s)'
+          grep -Fxq 'version=0.21.2' package/pluginst.inf
           cp PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-F5-Repair.ps1 package/
-          (cd package && zip -9 "../ISO-WCX-v0.21.1-RC4-B${{ github.run_number }}.zip" pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-F5-Repair.ps1 ISO-WCX.wcx ISO-WCX.wcx64)
-          unzip -t "ISO-WCX-v0.21.1-RC4-B${{ github.run_number }}.zip"
-          unzip -Z1 "ISO-WCX-v0.21.1-RC4-B${{ github.run_number }}.zip" | grep -qx 'THIRD_PARTY_NOTICES.txt'
-          unzip -Z1 "ISO-WCX-v0.21.1-RC4-B${{ github.run_number }}.zip" | grep -qx 'ISO-WCX-F5-Repair.ps1'
+          (cd package && zip -9 "../ISO-WCX-v0.21.2-RC1-B${{ github.run_number }}.zip" pluginst.inf PREVIEW.md INSTALL_RU.txt INSTALL_EN.txt THIRD_PARTY_NOTICES.txt ISO-WCX-F5-Repair.ps1 ISO-WCX.wcx ISO-WCX.wcx64)
+          unzip -t "ISO-WCX-v0.21.2-RC1-B${{ github.run_number }}.zip"
+          unzip -Z1 "ISO-WCX-v0.21.2-RC1-B${{ github.run_number }}.zip" | grep -qx 'THIRD_PARTY_NOTICES.txt'
+          unzip -Z1 "ISO-WCX-v0.21.2-RC1-B${{ github.run_number }}.zip" | grep -qx 'ISO-WCX-F5-Repair.ps1'
       - name: Verify installer ZIP integrity, bitness and Total Commander INF
         run: |
           python3 tests/test_installer_zip.py --selftest
-          python3 tests/test_installer_zip.py "ISO-WCX-v0.21.1-RC4-B${{ github.run_number }}.zip" 0.21.1 4 "${{ github.run_number }}"
+          python3 tests/test_installer_zip.py "ISO-WCX-v0.21.2-RC1-B${{ github.run_number }}.zip" 0.21.2 1 "${{ github.run_number }}"
       - name: Upload combined preview installer
         uses: actions/upload-artifact@v7
         with:
-          name: ISO-WCX-Installable-v0.21.1-RC4-B${{ github.run_number }}
-          path: ISO-WCX-v0.21.1-RC4-B${{ github.run_number }}.zip
+          name: ISO-WCX-Installable-v0.21.2-RC1-B${{ github.run_number }}
+          path: ISO-WCX-v0.21.2-RC1-B${{ github.run_number }}.zip
           if-no-files-found: error
           retention-days: 14

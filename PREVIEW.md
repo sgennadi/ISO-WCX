@@ -1,14 +1,15 @@
-# ISO-WCX v0.21.0 Stable Core + Export Image Structure and bounded writer Preview
+# ISO-WCX v0.21.1 Stable Core + guarded ISO/WIM/UDF editing and Preview notes
 
 Modern Total Commander WCX plugin with a Stable installation channel and explicitly restricted ISO/WIM/UDF editing. The codebase is clean-room and does not republish the legacy ISO.WCX 1.7.6 sources. Built with CMake and Visual Studio 2026, MSVC C++26 draft (Windows Win32/x64).
 
-The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.21.0, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
+The UDF Type-1 transactional writer was introduced in v0.17.0 and remains **experimental** in v0.21.1, with strict format preconditions and atomic rollback. Stable Core refers to verified package installation and bounded core capabilities, not universal filesystem writing.
 
-v0.21.0 includes the read-only in-process **Export Image Structure**
-button and internal WIM metadata validation groundwork. It does **not**
-make creating a folder inside a large WIM instantaneous: WIMGAPI
-Apply/Capture is still used. The hybrid-boot ISO/Joliet unlink experiment
-in PR #65 is **not** part of this Stable build.
+v0.21.1 retains **Export Image Structure** and adds restricted,
+boot-metadata-preserving ISO9660/Joliet edits, WIM F5 safeguards and cleanup,
+modern Configure dialogs and native offline WCX association repair.
+Large WIM editing still requires WIMGAPI Apply/Capture. Unsupported
+Rock Ridge, unknown hybrid/boot and nonvalidated layouts fail closed.
+Actual real-machine WinPE bootability after edits is not certified.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
@@ -281,26 +282,19 @@ See [registration diagnosis and exact masks](docs/tc-registration-audit.md).
 A CI build and a real user WIM reproduction are required before claiming
 the original F5 regression is resolved.
 
-## RC build identity (current PR #69)
+## Stable v0.21.1 and future Preview identity
 
-The **published Stable release remains v0.21.0**. Every Windows Preview
-artifact produced by `.github/workflows/wcx-preview.yml` now identifies
-itself as **v0.21.1 RC4 (Build N)**, where `N` is the unique GitHub
-Actions workflow run number. The plugin Settings title, installed-version
-label and Windows DLL Version Information share this identity, and the
-auto-installable Total Commander `pluginst.inf` describes the same RC
-and build. Its numeric `version=0.21.1` field preserves standard TC
-installer compatibility. The ZIP is named
-`ISO-WCX-v0.21.1-RC4-B<N>.zip` and includes **only** the two
-architecture-specific WCX binaries and the normal installation notes.
+The new Stable source identity is **v0.21.1**, without overwriting the
+immutable v0.21.0 release. RC4 Build 1345 was an earlier preview candidate,
+not the tested Stable binary. Future GitHub Actions Preview builds target
+**v0.21.2 RC1 (Build N)** with numeric installer `version=0.21.2` and
+a separately labelled combined `ISO-WCX-v0.21.2-RC1-B<N>.zip`.
+The Preview updater never installs an RC automatically.
 
-CMake defaults to the Stable identity for local/release builds;
-passing `-DISO_WCX_RC_NUMBER=4 -DISO_WCX_BUILD_NUMBER=<N>` produces an
-RC-labelled build without editing Stable CMake/release metadata. Later
-RCs increment the RC number deliberately, while repeated CI builds
-of the same RC receive a different build number. The updater
-continues checking official published Stable releases and also offers
-Stable v0.21.1 to RC2 users when it is published.
+CMake defaults to `ISO_WCX_RC_NUMBER=0` for Stable; using
+`-DISO_WCX_RC_NUMBER=1 -DISO_WCX_BUILD_NUMBER=<N>` builds the next
+Preview patch. The Stable updater downloads only the published,
+SHA-256-verified release and opens its installer on explicit consent.
 
 ## DISM GUI-derived WIM improvements (integrated into native WCX)
 

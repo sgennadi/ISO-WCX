@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
-project(ISO_WCX VERSION 0.21.0 LANGUAGES C CXX)
+project(ISO_WCX VERSION 0.21.1 LANGUAGES C CXX)
 
-# Stable source metadata stays at 0.21.0 until a separately validated release.
+# Stable source metadata is v0.21.1; next RC builds target the following patch.
 # RC builds deliberately advertise the *next patch*, not the published stable.
 # CI passes one monotonically increasing workflow run number per build.
 set(ISO_WCX_RC_NUMBER "0" CACHE STRING "Release candidate number (0=Stable)")
@@ -40,7 +40,7 @@ else()
 endif()
 message(STATUS "ISO-WCX identity: ${ISO_WCX_VERSION_DISPLAY}")
 
-# Retain C++20 as a backward-compatible local default. Stable v0.21.0
+# Retain C++20 as a backward-compatible local default. Stable v0.21.1
 # explicitly enables tested Visual Studio 2026 C++26 draft for Win32/x64.
 # Total Commander WCX ABI and package filenames remain unchanged.
 set(ISO_WCX_CXX_STANDARD "20" CACHE STRING "ISO-WCX C++ standard: 20 or experimental 26")

@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.21.1 — 2026-11-13 — guarded ISO/WIM F5, native repair and modern updater
+
+- Guard ISO9660/Joliet F5/Delete writes with preserved boot metadata
+  and independent El Torito test fixtures; unsupported layouts refuse writes.
+- Improve multi-index WIM Apply/Capture diagnostics and ACL-aware
+  temporary workspace cleanup without changing the original on failure.
+- Integrate Total Commander WCX association audit and offline repair
+  with backup, explicit consent and protected third-party mappings.
+- Modernize Windows warning/update dialogs; add separate installation consent,
+  Stable/Preview channel selection and high-DPI Configure scrolling.
+- Add privacy-preserving in-process F5 dispatch diagnostics and verify
+  packaging of both Win32 and x64 WCX in one ZIP.
+- Real edited WinPE bootability requires further hardware/VM validation;
+  v0.21.0 assets/tags remain immutable.
+
 ## v0.21.0 — 2026-10-25 — in-process image structure export and read-only WIM metadata checks
 
 - Add the built-in **Export Image Structure** button under Total Commander
