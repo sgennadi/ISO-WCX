@@ -6,6 +6,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <sddl.h>
 #include "iso_wcx/wim_index_report.hpp"
 #include "iso_wcx/image_report.hpp"
 // WIMGAPI is resolved dynamically; the optional Windows ADK header is not needed.
@@ -60,16 +61,48 @@ static std::atomic<bool> cancel_next_wim{false};
 // just before ACL-aware scratch cleanup. Previously that caused Win32 1008.
 static std::atomic<bool> drop_impersonation_at_cleanup{false};
 static std::atomic<bool> dropped_impersonation_at_cleanup{false};
+static std::atomic<bool> protect_scratch_acl_at_cleanup{false};
+static std::atomic<bool> protected_scratch_acl_at_cleanup{false};
+static fs::path private_test_root;
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
     if(size<0){
         ++wim_percent_calls;
         if(stage && std::wstring_view(stage).starts_with(L"WIM: ")) {
             if(std::wstring_view(stage).find(
-                       L"Cleanup WIM temporary files")!=std::wstring_view::npos &&
-               drop_impersonation_at_cleanup.exchange(false)){
-                const BOOL reverted=SetThreadToken(nullptr,nullptr);
-                dropped_impersonation_at_cleanup.store(reverted!=FALSE);
+                       L"Cleanup WIM temporary files")!=std::wstring_view::npos) {
+                if(protect_scratch_acl_at_cleanup.exchange(false)){
+                    // Inject a protected DELETE-denying DACL on a private,
+                    // freshly applied scratch file, not the source WIM.
+                    // This reproduces the user's ACL error with a synthetic
+                    // WIM, without changing any real Windows files.
+                    bool protected_entry=false;
+                    try {
+                        for(const auto& entry:fs::directory_iterator(private_test_root)){
+                            if(!entry.is_directory() ||
+                               !entry.path().filename().wstring().starts_with(
+                                   L".iso-wcx-edit-"))continue;
+                            const auto candidate=entry.path()/L"expanded"/L"HELLO.TXT";
+                            if(!fs::is_regular_file(candidate))continue;
+                            PSECURITY_DESCRIPTOR raw=nullptr;
+                            if(ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                                L"D:P(D;;SD;;;WD)(A;;FA;;;BA)(A;;FA;;;SY)",
+                                SDDL_REVISION_1,&raw,nullptr)){
+                                protected_entry=SetFileSecurityW(candidate.c_str(),
+                                    DACL_SECURITY_INFORMATION|
+                                        PROTECTED_DACL_SECURITY_INFORMATION,
+                                    raw)!=FALSE;
+                                LocalFree(raw);
+                            }
+                            break;
+                        }
+                    }catch(...){protected_entry=false;}
+                    protected_scratch_acl_at_cleanup.store(protected_entry);
+                }
+                if(drop_impersonation_at_cleanup.exchange(false)){
+                    const BOOL reverted=SetThreadToken(nullptr,nullptr);
+                    dropped_impersonation_at_cleanup.store(reverted!=FALSE);
+                }
             }
             ++wim_stage_calls;
             if(std::wstring_view(stage).find(L"Copy WIM")!=std::wstring_view::npos)
@@ -343,12 +376,20 @@ int wmain(int argc,wchar_t** argv) {
         // caller's impersonation disappears immediately before the private
         // WIM expanded directory is removed. This is the host-reported
         // failure on v0.21.2 RC1 B1360 (Win32 ERROR_NO_TOKEN/1008).
+        private_test_root=root;
+        protect_scratch_acl_at_cleanup.store(true);
+        protected_scratch_acl_at_cleanup.store(false);
         drop_impersonation_at_cleanup.store(true);
         dropped_impersonation_at_cleanup.store(false);
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         const int folder_rc=pack(packed.data(),sub.data(),src.data(),mkdir_list,0);
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         drop_impersonation_at_cleanup.store(false);
+        protect_scratch_acl_at_cleanup.store(false);
+        if(!protected_scratch_acl_at_cleanup.load()){
+            std::cerr<<"WIM scratch ACL-deny regression did not run\n";
+            return 47;
+        }
         if(!dropped_impersonation_at_cleanup.load()){
             std::cerr<<"WIM cleanup lost-token regression did not run\n";
             return 45;
