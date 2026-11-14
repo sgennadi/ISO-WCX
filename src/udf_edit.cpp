@@ -1841,7 +1841,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         const auto key=edit_path(change.path);
         need(changed_names.insert(fold(key)).second,
              "UDF batch contains duplicate or case-colliding changes");
-        if(volume.files().count(key)) {
+        if(volume.files().count(key) || volume.directory_links().count(key)) {
             validate_udf_existing_change(volume,change);
             existing_changes.push_back(change);
             continue;
@@ -1875,6 +1875,15 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                  "UDF batch file exceeds image capacity");
         }
         prepared.push_back(std::move(p));
+    }
+    // An empty directory cannot be removed and simultaneously populated.
+    for(const auto& change:existing_changes) {
+        const auto key=edit_path(change.path);
+        if(!change.remove || !volume.directory_links().count(key))continue;
+        const auto prefix=key+"/";
+        for(const auto& p:prepared)
+            need(!p.key.starts_with(prefix),
+                 "UDF cannot add a child beneath a deleted directory");
     }
     // Depth ordering lets callers submit children before the mkdir entry,
     // without ever accepting an unresolved parent or file-as-parent.
@@ -2046,7 +2055,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         if(!change.remove)continue;
         edit_tick(progress);
         const auto key=edit_path(change.path);
-        const auto& existing=volume.files().at(key);
+        const auto file_it=volume.files().find(key);
+        const auto& existing=file_it!=volume.files().end()?
+            file_it->second:volume.directory_links().at(key);
         const auto slash=key.rfind('/');
         const auto parent_key=slash==std::string::npos?
                               std::string{}:key.substr(0,slash);
@@ -2221,12 +2232,15 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     }
     std::vector<Location> deleted_regions;
     std::uint64_t deleted_blocks=0;
-    std::uint32_t deleted_files=0;
+    std::uint32_t deleted_files=0,deleted_dirs=0;
     for(const auto& change:existing_changes) {
         if(!change.remove)continue;
         edit_tick(progress);
-        const auto& file=volume.files().at(edit_path(change.path));
-        const auto regions=volume.reclaim_file_blocks(file);
+        const auto key=edit_path(change.path);
+        const bool is_directory=volume.directory_links().count(key)!=0;
+        const auto& entry=is_directory?
+            volume.directory_links().at(key):volume.files().at(key);
+        const auto regions=volume.reclaim_entry_blocks(entry,is_directory);
         for(const auto& region:regions) {
             need(region.bytes%block==0 &&
                  region.bytes/block<=
@@ -2235,9 +2249,10 @@ void create_udf_type1_batch(const std::filesystem::path& image,
             deleted_blocks+=region.bytes/block;
             deleted_regions.push_back(region);
         }
-        need(deleted_files<std::numeric_limits<std::uint32_t>::max(),
-             "UDF deleted file count overflow");
-        ++deleted_files;
+        auto& deleted_count=is_directory?deleted_dirs:deleted_files;
+        need(deleted_count<std::numeric_limits<std::uint32_t>::max(),
+             "UDF deleted entry count overflow");
+        ++deleted_count;
     }
     need(released<=std::numeric_limits<std::uint32_t>::max()-
          deleted_blocks,
@@ -2299,7 +2314,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     const auto [bitmap_at,bitmap_bytes]=volume.updated_bitmap();
     staged_write(out,bitmap_at,bitmap_bytes);
     const auto [lvid_at,lvid_bytes]=volume.updated_integrity_delta(
-        files_added,dirs_added,deleted_files,allocated,released);
+        files_added,dirs_added,deleted_files,deleted_dirs,allocated,released);
     staged_write(out,lvid_at,lvid_bytes);
     out.flush();
     need(bool(out),"cannot flush staged UDF batch image");
@@ -2324,7 +2339,11 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         }
         for(const auto& change:existing_changes) {
             const auto key=edit_path(change.path);
-            need((strict.files().count(key)!=0)==!change.remove,
+            const bool is_directory=volume.directory_links().count(key)!=0;
+            const bool visible=is_directory?
+                strict.directories().count(key)!=0:
+                strict.files().count(key)!=0;
+            need(visible==!change.remove,
                  "UDF mixed batch deletion/replacement namespace mismatch");
         }
         strict.close();
@@ -2388,6 +2407,10 @@ void edit_udf(const std::filesystem::path& image,
          "ISO/UDF Bridge metadata writes need protected ISO ranges");
     volume.protect_external_ranges(protected_ranges);
     need(!changes.empty(),"no UDF changes");
+    for(const auto& change:changes)
+        if(change.remove && volume.directory_links().count(edit_path(change.path)))
+            need(volume.has_bitmap(),
+                 "UDF directory deletion requires valid bitmap and LVID");
     // A mixed creation/replacement/deletion batch shares one allocator and
     // one atomic image commit. Existing-only edits retain their original
     // bounded, non-allocating transaction path.
