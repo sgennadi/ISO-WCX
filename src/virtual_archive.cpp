@@ -80,6 +80,8 @@ const char* disk_name(VirtualDiskFormat type) {
     case VirtualDiskFormat::fixed_vhd: return "Fixed VHD";
     case VirtualDiskFormat::dynamic_vhd: return "Dynamic VHD";
     case VirtualDiskFormat::vhdx: return "VHDX";
+    case VirtualDiskFormat::anex86_fdi_hdi: return "Anex86 FDI/HDI";
+    case VirtualDiskFormat::t98_next_nhd: return "T98-Next NHD";
     }
     return "Virtual HDD";
 }
@@ -99,9 +101,13 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
     }
     constexpr std::size_t max_items = 100000;
     if (partitions.empty()) {
+        const bool anex_floppy =
+            disk_.format() == VirtualDiskFormat::anex86_fdi_hdi &&
+            image.extension() == ".fdi";
         require(disk_.format() == VirtualDiskFormat::raw_image ||
-                disk_.format() == VirtualDiskFormat::compressed_floppy,
-                "virtual disk has no valid partition table");
+                disk_.format() == VirtualDiskFormat::compressed_floppy ||
+                anex_floppy,
+                "virtual disk has no validated MBR/GPT partition table");
         auto volume = std::make_unique<FatVolume>(disk_, 0, disk_.size());
         auto files = volume->list();
         require(files.size() <= max_items,
@@ -119,7 +125,7 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
             files_.push_back({0, file.path});
         }
         const auto prefix = disk_.format() == VirtualDiskFormat::compressed_floppy ?
-                                    "IMZ / " : "Raw ";
+                                    "IMZ / " : (anex_floppy ? "Anex86 FDI / " : "Raw ");
         format_ = std::string(prefix) +
                   (volume->kind() == FatKind::fat12 ? "FAT12 floppy" :
                    volume->kind() == FatKind::fat16 ? "FAT16 superfloppy" :
