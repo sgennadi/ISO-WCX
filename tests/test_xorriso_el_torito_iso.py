@@ -64,6 +64,67 @@ def no_workspace_leak(root: pathlib.Path) -> None:
     assert not leaks, "Abandoned ISO editor workspace: " + repr(leaks)
 
 
+def independently_mastered_emulation(editor: str, xorriso: str, root: pathlib.Path) -> None:
+    """Confirm real xorriso El Torito floppy/HDD catalogs and immutable boot payloads.
+
+    Unlike the handcrafted ISO fixture, this checks another mastering tool's
+    media-type selection and ISO-visible full disk extents. These image payloads
+    are deliberately inert; this is NOT a hardware boot test.
+    """
+    import struct
+
+    for media, size in ((1, 1200*1024), (2, 1440*1024),
+                        (3, 2880*1024), (4, 1024*1024)):
+        source = root / f"emulation-master-{media}"
+        boot_folder = source / "BOOT"
+        boot_folder.mkdir(parents=True)
+        disk = bytearray(size)
+        disk[0] = 0xeb
+        disk[1] = 0x3c
+        disk[2] = 0x90
+        disk[512:528] = bytes(range(16))
+        if media == 4:
+            # One bounded, active MBR partition; no extended or GPT entries.
+            disk[:512] = bytes(512)
+            disk[446] = 0x80
+            disk[450] = 0x06
+            struct.pack_into("<II", disk, 454, 1, size//512-1)
+        disk[510:512] = b"\\x55\\xaa"
+        (boot_folder / "DISK.IMG").write_bytes(disk)
+        (source / "OTHER.TXT").write_bytes(b"unchanged")
+        image = root / f"independent-emulated-{media}.iso"
+        command = [
+            xorriso, "-as", "mkisofs", "-J", "--norock",
+            "-iso-level", "3", "-V", f"ELTORITO_TEST_{media}",
+            "-o", str(image), "-b", "BOOT/DISK.IMG",
+            "-c", "BOOT/CATALOG.BIN", "-boot-load-size", "1",
+        ]
+        if media == 4:
+            command.append("-hard-disk-boot")
+        command.append(str(source))
+        execute(*command)
+        initial_lba, initial_catalog = boot_catalog(image)
+        assert initial_catalog[33] == media, (
+            "Independent mastering tool returned unexpected El Torito type",
+            media, initial_catalog[33],
+        )
+        assert extract(xorriso, image, "BOOT/DISK.IMG", root) == bytes(disk)
+        added = root / f"new-{media}.bin"
+        added.write_bytes(b"unrelated ISO payload")
+        execute(editor, image, "add", "ADDED.TXT", added)
+        assert extract(xorriso, image, "ADDED.TXT", root) == added.read_bytes()
+        assert boot_catalog(image) == (initial_lba, initial_catalog), (
+            "Emulated El Torito catalog relocated or modified", media)
+        assert extract(xorriso, image, "BOOT/DISK.IMG", root) == bytes(disk), (
+            "Emulated disk changed during unrelated F5", media)
+        no_workspace_leak(root)
+        unchanged = image.read_bytes()
+        execute(editor, image, "delete", "BOOT/DISK.IMG", expect_success=False)
+        assert image.read_bytes() == unchanged, (
+            "Editor deleted an emulated El Torito disk image", media)
+        no_workspace_leak(root)
+
+
 def main(editor: str, xorriso: str) -> None:
     with tempfile.TemporaryDirectory(prefix="iso-wcx-xorriso-el-torito-") as temporary:
         root = pathlib.Path(temporary)
@@ -148,6 +209,7 @@ def main(editor: str, xorriso: str) -> None:
         edit("delete", "BOOT/BIOS.IMG", success=False)
         edit("delete", "BOOT/EFI.IMG", success=False)
         edit("add", "BOOT/EFI.IMG", b"unsafe EFI replacement", success=False)
+        independently_mastered_emulation(editor, xorriso, root)
 
     print("PASS: xorriso-mastered dual El Torito F5/replace/Delete/cancel, "
           "boot catalog+BIOS/EFI unchanged and rollback clean")
