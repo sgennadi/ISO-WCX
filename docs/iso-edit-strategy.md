@@ -13,9 +13,9 @@ USB/CD metadata.
 | Validated nonhybrid ISO9660 / Joliet, optional no-emulation El Torito | Native transactional rebuild, subject to boot-extent and name checks | Native transactional rebuild |
 | Nonhybrid ISO9660 / Joliet + El Torito floppy/HDD emulation | **Preview:** add/delete/replace unrelated files only, with full boot-disk extent and MBR safety checks | Same limits; boot image files themselves immutable |
 | Same layout with a bounded **all-zero** trailing pad | Preview native rebuild; PVD/Joliet sizes are synchronized | Preview native rebuild |
-| Standalone UDF Type-1 2048-byte images | Limited native writer Preview, gated by UDF format validations | Limited native writer Preview |
+| Standalone UDF Type-1 2048-byte images | Preview F5, F7, Delete files and **empty directories**, gated by strict bitmap/FE/FID/LVID validation | Limited native writer Preview |
 | ISO/UDF Bridge without boot catalog | Not supported | Preview: single contiguous existing UDF or shared ISO/UDF file, exactly same length; both namespaces validated |
-| Bootable ISO/UDF Bridge | **Preview:** UDF-only F5 add, delete, F7 and bounded resize when strict native Type-1 bitmap/FE/FID/LVID validation passes and the ISO namespace is immutable | Existing contiguous UDF-only or shared-extent equal-size payload replacement; embedded/complex replacements route to the protected UDF writer |
+| Bootable ISO/UDF Bridge | **Preview:** UDF-only F5 add, Delete files/**empty UDF directories**, F7 and bounded resize when strict Type-1 bitmap/FE/FID/LVID validation passes and ISO/El Torito remain immutable | Existing contiguous UDF-only or shared-extent equal-size payload replacement; embedded/complex replacements route to the protected UDF writer |
 | Validated conventional MBR-isohybrid ISO/UDF Bridge | Metadata edits, adds, deletes and resize blocked | Preview: same-size replacement of a contiguous existing UDF-only file, after protected-region validation |
 | GPT-hybrid or unknown nonzero system area | Not supported | Not supported; preserve boot/partition metadata |
 | Rock Ridge, multi-extent and unrecognized variants | Not supported | Currently blocked if parser cannot guarantee all metadata is preserved |
@@ -51,6 +51,25 @@ Tests include independently generated emulation catalogs from xorriso,
 the native ISO editor's transactional rollback and Win32/x64 WCX runs.
 **This is still a Draft Preview**: preserving byte-identical boot data
 cannot certify bootability of a modified real machine image.
+
+## Empty UDF directory Delete (v0.21.2 Preview)
+
+Total Commander Delete can now remove a **UDF-only, already empty**
+directory. The native Type-1 writer preserves the original parent FID
+record length and marks it deleted, clears its obsolete ICB pointer,
+checks the directory has no live file/subdirectory descendants, and
+reclaims its uniquely owned FE and ShortAD blocks in the Space Bitmap.
+The LVID free-block and (where recorded) directory counts are updated
+atomically. Freed sectors are securely zeroed **only in the staged
+image** and are not reused during the same transaction; independent
+UDF/ISO readback and the immutable El Torito guard run before commit.
+
+Nonempty directories, the UDF root, a directory with ambiguous ICB
+ownership, an unavailable bitmap/LVID, and an ISO-visible boot directory
+remain read-only. Recursive deletion is **not** enabled. Refused and
+cancelled operations must leave the input byte-identical and create
+no persistent workspace. Regression tests cover nested and external
+parents, mixed F5+Delete, and bootable ISO/UDF Bridge.
 
 ## ISO/UDF Bridge protected allocator (v0.21.2 Preview)
 
