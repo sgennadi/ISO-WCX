@@ -163,7 +163,19 @@ int wmain(){
             op.complete(13,
                 "WIM scratch directory remained non-empty after bounded cleanup (Win32 145)");
         }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-ISO-UDF-SECTOR.iso",1);
+            op.stage(L"write",0);
+            op.complete(24,
+                "UDF Bridge has no safe contiguous run outside immutable ISO/boot extents");
+        }
         const auto extended=read(iso_wcx::diagnostics::export_report());
+        require(contains(extended,
+                "| iso | pack | 24 | iso_udf_bridge_allocator_protected | write | 1 |"),
+                "UDF Bridge protected allocator reason/category missing");
+        require(!contains(extended,"PRIVATE-ISO-UDF-SECTOR"),
+                "ISO/UDF private file name leaked into shared diagnostics");
         require(contains(extended,
                 "| wim | pack | 13 | wim_scratch_not_empty | cleanup | 1 |"),
                 "WIM scratch Win32 145 classification/stage is missing");
