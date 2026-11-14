@@ -1,5 +1,7 @@
 #pragma once
+#include <cstdint>
 #include <filesystem>
+#include <utility>
 #include <functional>
 #include <string>
 #include <vector>
@@ -18,11 +20,18 @@ void edit_iso(const std::filesystem::path&, const std::vector<ArchiveChange>&, c
 // Optional staged-image validator. It runs after UDF readback verification,
 // before the original image is atomically replaced, for ISO/UDF bridges.
 using EditStageValidator = std::function<void(const std::filesystem::path&)>;
+// Immutable physical [start,length] spans owned by ISO9660/El Torito.
+// For Bridge writes, keep these sectors unavailable to the UDF bitmap
+// allocator, even if the UDF bitmap advertises them as free. The staged
+// image validator remains mandatory independently of this preflight.
+using EditProtectedRanges =
+    std::vector<std::pair<std::uint64_t,std::uint64_t>>;
 // UDF Type-1 Preview: plain-UDF writes by default. Bridge writes are opt-in
 // and MUST supply an ISO/El Torito protection validator.
 void edit_udf(const std::filesystem::path&, const std::vector<ArchiveChange>&,
               const EditProgress& = {}, bool allow_bridge = false,
-              const EditStageValidator& = {});
+              const EditStageValidator& = {},
+              const EditProtectedRanges& = {});
 // Transactional native FAT12/16/32 editor: exact raw/fixed VHD filesystems.
 void edit_dynamic_vhd(const std::filesystem::path&,
                       const std::vector<ArchiveChange>&,

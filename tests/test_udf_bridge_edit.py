@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 from test_images import iso_image, iso_record, udf_image, B
-from test_udf_allocator import bitmap_image, INTEGRITY_LBA
+from test_udf_allocator import bitmap_image, INTEGRITY_LBA, update_tag, BITMAP_LOGICAL, PARTITION
 from test_iso_edit import both, read_image
 
 def descriptor_bridge(boot=False,shared=True,udf_only=False,boot_count=None,
@@ -168,16 +168,47 @@ def main(editor,inspector):
         assert not (target/'new.bin').exists()
         assert (target/'folder'/'data.txt').read_bytes()==b'NESTED'*600
 
-        # Guard regression: ISO-visible data at the first free UDF block.
-        # The allocation bitmap alone does not know that ISO9660 also owns
-        # the sector. A staged metadata edit must roll back atomically.
+        # Guard regression: the UDF bitmap says logical block 3 (physical
+        # sector 303) is free, but the ISO namespace owns it as hello;1.
+        # The native allocator should now skip that ISO-owned block and
+        # write the new UDF-only file into another available free block.
         image.write_bytes(descriptor_bridge(
             boot=True, udf_only=False, boot_count=4, writable=True))
         before=image.read_bytes()
-        source.write_bytes(b'ISO SECTOR COLLISION')
-        run([editor,str(image),'add','added.bin',str(source)],expected=1)
-        assert image.read_bytes()==before, (
-            'new UDF file overwrote ISO-visible data; rollback failed')
+        iso_before=read_image(image)
+        source.write_bytes(b'ISO SECTOR COLLISION' * 200)  # ShortAD path
+        run([editor,str(image),'add','added.bin',str(source)])
+        current=image.read_bytes()
+        assert_boot_preserved(before,current)
+        assert read_image(image)==iso_before, (
+            'UDF Bridge allocator changed the ISO-visible file')
+        assert current[303*B:304*B]==before[303*B:304*B], (
+            'UDF allocator overwrote the ISO-owned free bitmap block')
+        target=root/'bridge-skipped-iso-block'
+        run([inspector,str(image),'--extract',str(target)])
+        assert (target/'added.bin').read_bytes()==source.read_bytes()
+        assert (target/'hello').read_bytes()==b'world'
+        assert not list(root.glob('.iso-wcx-edit-*')), (
+            'Bridge F5 left a temporary transaction directory')
+
+        # When ONLY ISO-owned blocks are free, fail before staging instead
+        # of overwriting ISO metadata or silently using a reserved extent.
+        full=descriptor_bridge(
+            boot=True, udf_only=False, boot_count=4, writable=True)
+        bitmap_at=(PARTITION+BITMAP_LOGICAL)*B
+        bitmap_bytes=struct.unpack_from('<I',full,bitmap_at+20)[0]
+        full[bitmap_at+24:bitmap_at+24+bitmap_bytes]=bytes(bitmap_bytes)
+        full[bitmap_at+24]|=1<<3  # ISO file at physical LBA 303
+        update_tag(full,bitmap_at,24+bitmap_bytes,BITMAP_LOGICAL)
+        struct.pack_into('<I',full,INTEGRITY_LBA*B+80,1)
+        update_tag(full,INTEGRITY_LBA*B,88,INTEGRITY_LBA)
+        image.write_bytes(full)
+        source.write_bytes(b'CANNOT ALLOCATE')
+        run([editor,str(image),'add','no-space.bin',str(source)],expected=1)
+        assert image.read_bytes()==full, (
+            'Bridge modified the ISO with no truly available UDF blocks')
+        assert not list(root.glob('.iso-wcx-edit-*')), (
+            'Bridge rejected allocation left a staging directory')
 
         # Zero sector count without an independently mapped ISO boot image
         # is ambiguous: the native writer must never guess its full length.

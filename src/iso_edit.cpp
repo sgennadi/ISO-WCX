@@ -812,7 +812,28 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
         [&path,&image,&progress](const std::filesystem::path& staged) {
             protect_iso_udf_stage(path,staged,image,progress);
         };
-    edit_udf(path,changes,progress,true,validate);
+    // UDF may advertise free blocks that ISO9660 owns exclusively, e.g.
+    // boot.catalog, BIOS/EFI image extents or a shared old ISO filename.
+    // Exclude them *before* UDF's allocation scan so a new file uses a
+    // genuinely unshared bitmap run rather than failing after a full copy.
+    // All spans still go through the mandatory byte-exact staged guard.
+    EditProtectedRanges immutable;
+    immutable.emplace_back(0,256ull*block);
+    immutable.insert(immutable.end(),image.boot_regions.begin(),
+                     image.boot_regions.end());
+    immutable.insert(immutable.end(),image.udf_metadata_regions.begin(),
+                     image.udf_metadata_regions.end());
+    std::vector<const Node*> nodes{image.root.get()};
+    for(std::size_t at=0;at<nodes.size();++at) {
+        const auto* node=nodes[at];
+        if(node->size)
+            immutable.emplace_back(std::uint64_t(node->lba)*block,
+                                   node->size);
+        for(const auto& child:node->children)
+            nodes.push_back(child.get());
+        need(nodes.size()<=200000,"ISO/UDF immutable namespace exceeds limit");
+    }
+    edit_udf(path,changes,progress,true,validate,immutable);
 }
 }
 void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {

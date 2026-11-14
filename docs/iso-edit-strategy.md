@@ -52,6 +52,35 @@ the native ISO editor's transactional rollback and Win32/x64 WCX runs.
 **This is still a Draft Preview**: preserving byte-identical boot data
 cannot certify bootability of a modified real machine image.
 
+## ISO/UDF Bridge protected allocator (v0.21.2 Preview)
+
+The UDF Type-1 bitmap can legitimately list a sector as free **for UDF**
+while an ISO9660 file, Boot Catalog, BIOS/EFI image, path table or directory
+still occupies those same physical bytes. Previously a new UDF-only file
+could pick such a sector, copy and edit the full image, then fail the final
+optical guard because ISO metadata changed.
+
+For Bridge F5/F7 and safe UDF-only changes, the ISO parser now feeds the
+Type-1 allocator immutable physical ranges (system area, descriptors,
+complete ISO-visible file/directory extents, El Torito catalog/boot spans,
+and UDF anchor/VDS ranges). The allocator maps them to partition blocks,
+sorts and merges the intervals and skips those blocks for *both* contiguous
+FE/directory allocation and fragmented multi-ShortAD file allocation.
+
+This is an **in-memory exclusion only**: no ISO/UDF namespace, original UDF
+free-space bitmap or LVID count is rewritten to claim those blocks as used.
+Only genuinely allocated UDF blocks are subtracted from free counts.
+An existing UDF-only file whose FE or data extent overlaps an ISO-protected
+range is rejected before writing, even if the UDF path has a different name.
+The original byte-for-byte staged ISO/El Torito verifier remains mandatory.
+
+The allocator now supports a reproducible synthetic bridge where the first
+UDF-free sector belongs to ISO; it skips that sector and successfully adds
+a UDF-only file elsewhere. A second fixture with *only* ISO-owned free
+sectors must fail without a staged edit or source modification. This does
+**not** enable ISO-visible metadata updates, real-world WinPE boot
+certification, unsupported bitmap structures or GPT/isohybrid remastering.
+
 ## AOMEI Partition Assistant 10.12.2 WinPE field-report profile (2026-11-04)
 
 The user's **read-only Export Image Structure** report describes a
