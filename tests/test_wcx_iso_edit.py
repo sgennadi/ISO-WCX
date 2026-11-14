@@ -214,6 +214,25 @@ def main(plugin, runner):
         assert deleted[:256 * B] == bridge[:256 * B]
         assert len(deleted) == len(bridge)
 
+        # Real WCX F7 -> DeleteFilesW for an empty UDF-only folder.
+        # Total Commander invokes PackFilesW with an actual source
+        # directory, then DeleteFilesW with the canonical folder name.
+        (source / "EMPTYDIR").mkdir()
+        assert edit("pack", "EMPTYDIR") == 0, (
+            "WCX F7 failed to create empty folder in bootable ISO/UDF Bridge")
+        with_folder = image.read_bytes()
+        assert with_folder[:256 * B] == bridge[:256 * B]
+        assert edit("delete", "EMPTYDIR") == 0, (
+            "WCX DeleteFilesW failed to remove empty UDF-only folder")
+        without_folder = image.read_bytes()
+        assert without_folder[:256 * B] == bridge[:256 * B], (
+            "WCX empty-folder Delete changed El Torito or ISO descriptors")
+        assert len(without_folder) == len(bridge)
+        assert without_folder != with_folder
+        assert edit("delete", "EMPTYDIR") != 0, (
+            "WCX allowed deleting already deleted UDF folder")
+        assert image.read_bytes() == without_folder
+
         # Reject an unbounded EFI/BIOS image rather than guessing protected
         # sector counts. No half-written or leaked staging files.
         image.write_bytes(descriptor_bridge(

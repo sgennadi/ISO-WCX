@@ -404,6 +404,10 @@ public:
     [[nodiscard]] const std::map<std::string,Fe>& directories() const noexcept {
         return directory_files_;
     }
+    // Root has no parent link and is never deletable.
+    [[nodiscard]] const std::map<std::string,File>& directory_links() const noexcept {
+        return directory_links_;
+    }
     [[nodiscard]] Bytes directory_payload(const Fe& directory) {
         return directory_data(directory);
     }
@@ -613,16 +617,17 @@ public:
                        interval.range.bytes==target.bytes;
             }),reserved_.end());
     }
-    // Release only a regular file's exclusively owned FE and recorded
-    // ShortAD sectors. All destination allocations are already planned:
-    // these freed sectors cannot be reused until a later transaction.
-    [[nodiscard]] std::vector<Location> reclaim_file_blocks(const File& file) {
+    // Reclaim a uniquely owned regular file or EMPTY directory. Its parent
+    // FID must first be tombstoned. Blocks stay unavailable in this batch.
+    [[nodiscard]] std::vector<Location> reclaim_entry_blocks(
+            const File& file,bool directory) {
         need(bitmap_ && integrity_,"UDF reclamation needs a closed bitmap/LVID");
         const auto owner=file.fe.at;
         const auto found=references_.find(owner);
-        need(file.fe.type==5 && found!=references_.end() &&
-             found->second==1 && !deleted_icbs_.count(owner),
-             "UDF file has aliases or dangling deleted FID references");
+        need(file.fe.type==(directory?4u:5u) &&
+             found!=references_.end() && found->second==1 &&
+             !deleted_icbs_.count(owner),
+             "UDF entry has aliases or dangling deleted FID references");
         std::vector<Location> reclaimed{{owner,block}};
         for(const auto& run:file.fe.runs) {
             need(run.blocks && run.recorded &&
@@ -689,6 +694,7 @@ public:
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
     updated_integrity_delta(std::uint32_t files,std::uint32_t dirs,
                             std::uint32_t deleted_files,
+                            std::uint32_t deleted_dirs,
                             std::uint64_t allocated,
                             std::uint64_t reclaimed) const {
         need(integrity_.has_value(),"UDF LVID is absent");
@@ -712,11 +718,12 @@ public:
             need(deleted_files<=old_files &&
                  std::uint64_t(old_files-deleted_files)+files<=
                      std::numeric_limits<std::uint32_t>::max() &&
-                 std::uint64_t(old_dirs)+dirs<=
+                 deleted_dirs<=old_dirs &&
+                 std::uint64_t(old_dirs-deleted_dirs)+dirs<=
                      std::numeric_limits<std::uint32_t>::max(),
                  "UDF LVID file/directory count would overflow or underflow");
             put32(b,120,old_files-deleted_files+files);
-            put32(b,124,old_dirs+dirs);
+            put32(b,124,old_dirs-deleted_dirs+dirs);
         }
         tag_update(b,0,88u+integrity_->impl_bytes);
         return {integrity_->at,std::move(b)};
@@ -724,7 +731,7 @@ public:
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
     updated_integrity_batch(std::uint32_t files,std::uint32_t dirs,
                             std::uint32_t allocated_blocks) const {
-        return updated_integrity_delta(files,dirs,0u,allocated_blocks,0u);
+        return updated_integrity_delta(files,dirs,0u,0u,allocated_blocks,0u);
     }
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
     updated_integrity(bool directory,std::uint32_t reserved_blocks=1) const {
@@ -755,6 +762,7 @@ private:
     std::uint32_t partition_{},partition_blocks_{};
     std::map<std::string,File> files_;
     std::map<std::string,Fe> directory_files_;
+    std::map<std::string,File> directory_links_;
     std::optional<Bitmap> bitmap_;
     std::optional<Integrity> integrity_;
     // Sorted, merged half-open Type-1 partition sectors owned by ISO.
@@ -910,7 +918,16 @@ private:
                 need(references_[child.at]==1,
                      "hard-linked/multiple referenced UDF entries read-only");
                 if(child.type==4) {
-                    reserved_.push_back({{child.at,block},child.at});
+                    // Recursive walk owns the FE and all ShortAD sectors.
+                    // A duplicate parent reservation would reject safe reclaim.
+                    File link;
+                    link.fe=std::move(child);
+                    link.fid_at=directory.data_at+p;
+                    link.fid_bytes=len;
+                    link.parent_at=directory.at;
+                    link.parent_embedded=directory.storage==3;
+                    need(directory_links_.emplace(path,std::move(link)).second,
+                         "duplicate UDF directory parent link");
                     walk(child_lba,child_map,path,depth+1);
                 } else {
                     reserved_.push_back({{child.at,block},child.at});
@@ -1714,12 +1731,31 @@ void write_udf_existing_replacement(std::fstream& out,const File& target,
 void validate_udf_existing_change(const Type1& volume,
                                   const ArchiveChange& change) {
         const auto name=edit_path(change.path);
-        need(!change.directory,"UDF directory creation/deletion not yet supported");
-        const auto it=volume.files().find(name);
-        need(it!=volume.files().end(),"UDF only supports existing files");
-        const auto& target=it->second;
-        need(target.fe.type==5,
-             "UDF deletion or replacement of a directory is unsupported");
+        const auto file_it=volume.files().find(name);
+        const auto dir_it=volume.directory_links().find(name);
+        const bool directory=dir_it!=volume.directory_links().end();
+        need(file_it!=volume.files().end() || directory,
+             "UDF existing edit target does not exist");
+        need(directory?change.remove:!change.directory,
+             "UDF only supports removing empty directories, not replacing them");
+        const auto& target=directory?dir_it->second:file_it->second;
+        need(target.fe.type==(directory?4u:5u),
+             "UDF existing entry type does not match namespace");
+        if(directory) {
+            need(volume.has_bitmap(),
+                 "UDF empty directory deletion needs bitmap/LVID");
+            const auto prefix=name+"/";
+            for(const auto& [key,entry]:volume.files()) {
+                (void)entry;
+                need(!key.starts_with(prefix),
+                     "UDF directory is not empty (contains a file)");
+            }
+            for(const auto& [key,entry]:volume.directories()) {
+                (void)entry;
+                need(!key.starts_with(prefix),
+                     "UDF directory is not empty (contains a subdirectory)");
+            }
+        }
         // A differently named UDF alias can point at an ISO-owned file.
         // Refuse changes and reclamation before the expensive staged copy.
         need(!volume.overlaps_external(target.fe.at,block),
@@ -1805,7 +1841,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         const auto key=edit_path(change.path);
         need(changed_names.insert(fold(key)).second,
              "UDF batch contains duplicate or case-colliding changes");
-        if(volume.files().count(key)) {
+        if(volume.files().count(key) || volume.directory_links().count(key)) {
             validate_udf_existing_change(volume,change);
             existing_changes.push_back(change);
             continue;
@@ -1839,6 +1875,15 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                  "UDF batch file exceeds image capacity");
         }
         prepared.push_back(std::move(p));
+    }
+    // An empty directory cannot be removed and simultaneously populated.
+    for(const auto& change:existing_changes) {
+        const auto key=edit_path(change.path);
+        if(!change.remove || !volume.directory_links().count(key))continue;
+        const auto prefix=key+"/";
+        for(const auto& p:prepared)
+            need(!p.key.starts_with(prefix),
+                 "UDF cannot add a child beneath a deleted directory");
     }
     // Depth ordering lets callers submit children before the mkdir entry,
     // without ever accepting an unresolved parent or file-as-parent.
@@ -2010,7 +2055,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         if(!change.remove)continue;
         edit_tick(progress);
         const auto key=edit_path(change.path);
-        const auto& existing=volume.files().at(key);
+        const auto file_it=volume.files().find(key);
+        const auto& existing=file_it!=volume.files().end()?
+            file_it->second:volume.directory_links().at(key);
         const auto slash=key.rfind('/');
         const auto parent_key=slash==std::string::npos?
                               std::string{}:key.substr(0,slash);
@@ -2185,12 +2232,15 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     }
     std::vector<Location> deleted_regions;
     std::uint64_t deleted_blocks=0;
-    std::uint32_t deleted_files=0;
+    std::uint32_t deleted_files=0,deleted_dirs=0;
     for(const auto& change:existing_changes) {
         if(!change.remove)continue;
         edit_tick(progress);
-        const auto& file=volume.files().at(edit_path(change.path));
-        const auto regions=volume.reclaim_file_blocks(file);
+        const auto key=edit_path(change.path);
+        const bool is_directory=volume.directory_links().count(key)!=0;
+        const auto& entry=is_directory?
+            volume.directory_links().at(key):volume.files().at(key);
+        const auto regions=volume.reclaim_entry_blocks(entry,is_directory);
         for(const auto& region:regions) {
             need(region.bytes%block==0 &&
                  region.bytes/block<=
@@ -2199,9 +2249,10 @@ void create_udf_type1_batch(const std::filesystem::path& image,
             deleted_blocks+=region.bytes/block;
             deleted_regions.push_back(region);
         }
-        need(deleted_files<std::numeric_limits<std::uint32_t>::max(),
-             "UDF deleted file count overflow");
-        ++deleted_files;
+        auto& deleted_count=is_directory?deleted_dirs:deleted_files;
+        need(deleted_count<std::numeric_limits<std::uint32_t>::max(),
+             "UDF deleted entry count overflow");
+        ++deleted_count;
     }
     need(released<=std::numeric_limits<std::uint32_t>::max()-
          deleted_blocks,
@@ -2263,7 +2314,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     const auto [bitmap_at,bitmap_bytes]=volume.updated_bitmap();
     staged_write(out,bitmap_at,bitmap_bytes);
     const auto [lvid_at,lvid_bytes]=volume.updated_integrity_delta(
-        files_added,dirs_added,deleted_files,allocated,released);
+        files_added,dirs_added,deleted_files,deleted_dirs,allocated,released);
     staged_write(out,lvid_at,lvid_bytes);
     out.flush();
     need(bool(out),"cannot flush staged UDF batch image");
@@ -2288,7 +2339,11 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         }
         for(const auto& change:existing_changes) {
             const auto key=edit_path(change.path);
-            need((strict.files().count(key)!=0)==!change.remove,
+            const bool is_directory=volume.directory_links().count(key)!=0;
+            const bool visible=is_directory?
+                strict.directories().count(key)!=0:
+                strict.files().count(key)!=0;
+            need(visible==!change.remove,
                  "UDF mixed batch deletion/replacement namespace mismatch");
         }
         strict.close();
@@ -2352,6 +2407,10 @@ void edit_udf(const std::filesystem::path& image,
          "ISO/UDF Bridge metadata writes need protected ISO ranges");
     volume.protect_external_ranges(protected_ranges);
     need(!changes.empty(),"no UDF changes");
+    for(const auto& change:changes)
+        if(change.remove && volume.directory_links().count(edit_path(change.path)))
+            need(volume.has_bitmap(),
+                 "UDF directory deletion requires valid bitmap and LVID");
     // A mixed creation/replacement/deletion batch shares one allocator and
     // one atomic image commit. Existing-only edits retain their original
     // bounded, non-allocating transaction path.

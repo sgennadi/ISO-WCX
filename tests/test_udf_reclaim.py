@@ -252,6 +252,99 @@ def check_nested_and_no_bitmap(editor, inspector, root):
           "logical-only delete", flush=True)
 
 
+def check_empty_directory_reclaim(editor, inspector, root):
+    """Only empty, exclusively owned directories can be deleted atomically."""
+    image = root / "empty-directory-delete.udf"
+    image.write_bytes(bitmap_image())
+    run(editor, image, "mkdir", "EMPTYDIR")
+    before = image.read_bytes()
+    old_free = get32(before, LVID + 80)
+    regions = file_regions(before, "EMPTYDIR")
+    assert len(regions) == 1  # newly created embedded empty directory
+    run(editor, image, "delete", "EMPTYDIR")
+    after = image.read_bytes()
+    assert get32(after, LVID + 80) == old_free + 1
+    verify_scrub(after, regions)
+    at, length, lba, state = fid(after, "EMPTYDIR")
+    assert state & 4 and lba == 0
+    assert after[at + 20:at + 36] == bytes(16)
+    out = root / "empty-dir-output"
+    run(inspector, image, "--extract", out)
+    assert not (out / "EMPTYDIR").exists()
+    assert (out / "hello").read_bytes() == b"world"
+    no_temp(root)
+
+    # A mixed Delete+F5 must never allocate a just-freed FE in the same batch.
+    run(editor, image, "mkdir", "MIXED-DIR")
+    previous = image.read_bytes()
+    old_sectors = all_sectors(file_regions(previous, "MIXED-DIR"))
+    added = root / "after-delete.bin"
+    added.write_bytes(b"ADDED IN SAME TRANSACTION")
+    run(editor, image, "batch", "delete", "MIXED-DIR",
+        "add", "NEW.BIN", added)
+    current = image.read_bytes()
+    assert not old_sectors.intersection(
+        all_sectors(file_regions(current, "NEW.BIN")))
+    verify_scrub(current, file_regions(previous, "MIXED-DIR"))
+    out = root / "mixed-directory-output"
+    run(inspector, image, "--extract", out)
+    assert not (out / "MIXED-DIR").exists()
+    assert (out / "NEW.BIN").read_bytes() == added.read_bytes()
+    no_temp(root)
+
+    # Reject deleting a directory with live children, without staging.
+    image.write_bytes(bitmap_image(nested=True))
+    snapshot = image.read_bytes()
+    run(editor, image, "delete", "docs", success=False)
+    assert image.read_bytes() == snapshot
+    no_temp(root)
+    run(editor, image, "delete", "docs/inner")
+    before_empty = image.read_bytes()
+    docs_blocks = file_regions(before_empty, "docs")
+    run(editor, image, "delete", "docs")
+    after_empty = image.read_bytes()
+    verify_scrub(after_empty, docs_blocks)
+    out = root / "nested-empty-output"
+    run(inspector, image, "--extract", out)
+    assert not (out / "docs").exists()
+    assert (out / "hello").read_bytes() == b"world"
+    no_temp(root)
+    run(editor, image, "delete", "docs", success=False)
+    no_temp(root)
+
+    # A large FID directory spills into a ShortAD block. The old parent
+    # extent must remain valid while the child folder's own FE is released.
+    image.write_bytes(bitmap_image())
+    names = [f"E{i:02d}-" + "x" * 65 + ".dir" for i in range(18)]
+    for name in names:
+        run(editor, image, "mkdir", name)
+    external = image.read_bytes()
+    assert (struct.unpack_from("<H", external, ROOT + 34)[0] & 7) == 0, (
+        "root did not spill to ShortAD")
+    victim = names[-1]
+    external_regions = file_regions(external, victim)
+    old_parent_lba = get32(external, ROOT + 180)
+    old_free = get32(external, LVID + 80)
+    run(editor, image, "delete", victim)
+    new = image.read_bytes()
+    assert (struct.unpack_from("<H", new, ROOT + 34)[0] & 7) == 0
+    assert get32(new, ROOT + 180) == old_parent_lba
+    assert get32(new, LVID + 80) == old_free + len(
+        all_sectors(external_regions))
+    verify_scrub(new, external_regions)
+    _, _, lba, flags = fid(new, victim)
+    assert flags & 4 and lba == 0
+    out = root / "external-dir-output"
+    run(inspector, image, "--extract", out)
+    assert not (out / victim).exists()
+    assert (out / names[0]).is_dir()
+    assert (out / "hello").read_bytes() == b"world"
+    no_temp(root)
+    print("PASS empty-directory Delete: tombstone, unique FE reclaim, "
+          "LVID, mixed batch, nonempty refusal, nested + ShortAD parent readback",
+          flush=True)
+
+
 def main(editor, inspector):
     with tempfile.TemporaryDirectory(prefix="iso-wcx-udf-reclaim-") as t:
         root = pathlib.Path(t)
@@ -260,6 +353,7 @@ def main(editor, inspector):
         check_no_same_batch_reuse(editor, inspector, root)
         check_stale_deleted_alias(editor, root)
         check_nested_and_no_bitmap(editor, inspector, root)
+        check_empty_directory_reclaim(editor, inspector, root)
 
 
 if __name__ == "__main__":
