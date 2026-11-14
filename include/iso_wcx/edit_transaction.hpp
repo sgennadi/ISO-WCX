@@ -67,8 +67,11 @@ public:
         if(f==INVALID_HANDLE_VALUE)throw std::runtime_error("cannot flush edited archive");
         const BOOL flushed=FlushFileBuffers(f);CloseHandle(f);
         if(!flushed)throw std::runtime_error("cannot flush edited archive");
-        if(!MoveFileExW(output.c_str(),image_.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
-            throw std::runtime_error("cannot replace archive (close other users of the image)");
+        if(!MoveFileExW(output.c_str(),image_.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+            const DWORD failure=GetLastError();
+            throw std::runtime_error("cannot replace archive (close other users of the image; Win32 "+
+                                     std::to_string(failure)+")");
+        }
 #else
         std::filesystem::rename(output,image_);
 #endif

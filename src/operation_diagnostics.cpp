@@ -69,6 +69,17 @@ std::string classify(std::string_view reason, int code) {
     for(char c:reason.substr(0,500))
         lower.push_back(char(std::tolower(static_cast<unsigned char>(c))));
     auto has=[&](const char* token){return lower.find(token)!=std::string::npos;};
+    // Shareable fixed categories only: native exception text and paths stay
+    // in the local log. Preflight lock and atomic-commit lock have one cause.
+    if(has("wim archive is open without delete sharing") ||
+       (has("cannot replace archive") &&
+        (has("win32 32")||has("win32 33"))))
+        return "archive_replace_locked";
+    if(has("cannot replace archive"))return "archive_replace_failed";
+    if(has("administrator backup/restore")||
+       has("cannot create imaging token")||
+       has("cannot activate imaging token"))
+        return "wim_privileges_unavailable";
     if(has("checksum")||has("hash mismatch")||has("crc")||has("corrupt"))
         return "integrity_failed";
     if(has("verify")||has("validation failed")||has("readback"))
@@ -87,7 +98,7 @@ std::string classify(std::string_view reason, int code) {
     if(has("split, solid/esd")||has("read-only wim editing")||
        has("invalid wim header"))
         return "wim_variant_unsupported";
-    if(has("ntfs workspace")||has("administrator backup/restore"))
+    if(has("ntfs workspace"))
         return "wim_workspace";
     if(has("wim reparse points"))
         return "wim_reparse";
@@ -128,8 +139,9 @@ std::string stage_name(std::wstring_view description) {
     if(s.find(L"apply")!=s.npos||s.find(L"extract")!=s.npos)return "apply";
     if(s.find(L"capture")!=s.npos||s.find(L"rebuild")!=s.npos)return "capture";
     if(s.find(L"cleanup")!=s.npos||s.find(L"scratch")!=s.npos)return "cleanup";
-    if(s.find(L"verify")!=s.npos||s.find(L"validat")!=s.npos)return "verify";
+    // "Commit verified WIM" must remain the commit stage, not verify.
     if(s.find(L"commit")!=s.npos)return "commit";
+    if(s.find(L"verify")!=s.npos||s.find(L"validat")!=s.npos)return "verify";
     if(s.find(L"prepar")!=s.npos)return "prepare";
     if(s.find(L"mkdir")!=s.npos||s.find(L"directory")!=s.npos)return "mkdir";
     if(s.find(L"delete")!=s.npos||s.find(L"remove")!=s.npos)return "delete";

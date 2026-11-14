@@ -13,6 +13,25 @@ Actual real-machine WinPE bootability after edits is not certified.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## v0.21.2 Preview — early WIM lock detection (2026-11-14)
+
+When Total Commander or an external process holds a WIM without Windows
+delete sharing, a long Apply/Capture would finish only to fail at the final
+atomic replacement. The WIM writer now probes an unambiguous sharing lock
+**before** creating the workspace or applying the image. It fails closed,
+leaves the original untouched, and returns a distinct
+`archive_replace_locked` category, stage `prepare`. If a race occurs after
+preflight, final MoveFileExW failures retain the native Win32 error only in
+the local edit-errors log. Missing imaging privileges have their own
+`wim_privileges_unavailable` category. The final `Commit verified WIM`
+stage is correctly normalized to `commit`, not `verify`.
+
+Windows WCX smoke tests simulate a reader without FILE_SHARE_DELETE and
+verify fast refusal, identical original bytes and zero scratch remnants.
+This is failure avoidance and diagnosis, not automatic process elevation.
+Do not mark F5 universally fixed or promote to Stable before a real
+Total Commander host retest.
+
 ## RC4 — Configure Settings high-DPI viewport (2026-11-13)
 
 The built-in Configure Settings window now uses the standard Windows Segoe UI

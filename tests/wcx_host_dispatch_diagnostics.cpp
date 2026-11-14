@@ -126,6 +126,28 @@ int wmain(){
             op.complete(24,
                 "Rock Ridge/system-use ISO editing requires a protected UDF bridge");
         }
+        // Replacement lock and imaging privilege failures should never
+        // be conflated with a corrupt WIM or send sensitive file paths.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-LOCKED.wim",1,1);
+            op.stage(L"Prepare NTFS staging",3);
+            op.complete(24,"WIM archive is open without delete sharing (Win32 32)");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-REPLACE.wim",1,1);
+            op.stage(L"Commit verified WIM",99);
+            op.complete(13,
+                "cannot replace archive (close other users of the image; Win32 32)");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-TOKEN.wim",1,1);
+            op.stage(L"Prepare NTFS staging",3);
+            op.complete(13,
+                "WIM editing requires administrator backup/restore/security privileges (Win32 1300)");
+        }
         const auto extended=read(iso_wcx::diagnostics::export_report());
         require(contains(extended,
                 "| wim | pack | 13 | wim_api_capture | capture | 1 |"),
@@ -136,6 +158,18 @@ int wmain(){
         require(contains(extended,
                 "| iso | pack | 24 | iso_rock_ridge_protected | unreported | 1 |"),
                 "protected Rock Ridge category missing");
+        require(contains(extended,
+                "| wim | pack | 24 | archive_replace_locked | prepare | 1 |") &&
+                contains(extended,
+                "| wim | pack | 13 | archive_replace_locked | commit | 1 |"),
+                "locked WIM was not distinguished from Apply/Capture errors");
+        require(contains(extended,
+                "| wim | pack | 13 | wim_privileges_unavailable | prepare | 1 |"),
+                "missing WIM imaging privileges lacked a distinct category");
+        require(!contains(extended,"PRIVATE-LOCKED") &&
+                !contains(extended,"PRIVATE-REPLACE") &&
+                !contains(extended,"PRIVATE-TOKEN"),
+                "private WIM test paths leaked into diagnostic export");
         require(!contains(extended,"SECRET-WIM-INDEX") &&
                 !contains(extended,"PRIVATE-HYBRID-BOOT") &&
                 !contains(extended,"PRIVATE-ROCK-RIDGE"),
