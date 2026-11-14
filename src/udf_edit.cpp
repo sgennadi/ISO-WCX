@@ -500,7 +500,9 @@ public:
             }
             start+=run+1;
         }
-        throw EditUnsupported("UDF bitmap has no sufficiently long free run");
+        throw EditUnsupported(external_blocks_.empty()?
+            "UDF bitmap has no sufficiently long free run":
+            "UDF Bridge has no safe contiguous run outside immutable ISO/boot extents");
     }
     [[nodiscard]] std::uint32_t allocate_block() {
         return allocate_blocks(1);
@@ -561,7 +563,9 @@ public:
             if(!remaining_blocks)break;
         }
         need(remaining_blocks==0 && remaining_bytes==0,
-             "UDF file cannot fit in the free bitmap/ShortAD slots");
+             external_blocks_.empty()?
+             "UDF file cannot fit in the free bitmap/ShortAD slots":
+             "UDF Bridge fragmented file cannot fit outside immutable ISO/boot extents");
         for(const auto& run:planned) {
             const Location target{run.at,std::uint64_t(run.blocks)*block};
             for(const auto& occupied:reserved_)
