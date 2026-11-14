@@ -14,7 +14,10 @@ class DynamicVhdReader;
 
 // Native read-only virtual HDD byte stream. Optical CD sector parsing
 // remains separate. No external disk libraries or runtime plugin DLLs.
-enum class VirtualDiskFormat : std::uint8_t { raw_image, compressed_floppy, fixed_vhd, dynamic_vhd, vhdx };
+enum class VirtualDiskFormat : std::uint8_t {
+    raw_image, compressed_floppy, fixed_vhd, dynamic_vhd, vhdx,
+    anex86_fdi_hdi, t98_next_nhd
+};
 
 class VirtualDiskReader {
 public:
@@ -46,6 +49,10 @@ private:
     std::unique_ptr<VhdxReader> vhdx_;
     std::unique_ptr<DynamicVhdReader> dynamic_vhd_;
     std::uint64_t capacity_ = 0;
+    // Read-only legacy disk containers prepend metadata before sector zero.
+    // Never include this prefix when exposing FAT/partition offsets.
+    std::uint64_t data_offset_ = 0;
+    std::uint32_t sector_size_ = 512;
     VirtualDiskFormat format_ = VirtualDiskFormat::raw_image;
 };
 

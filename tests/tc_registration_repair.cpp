@@ -41,6 +41,8 @@ int wmain(){
         const auto dll=folder/L"ISO-WCX.wcx";
         write_text(dll,"test");write_text(folder/L"ISO-WCX.wcx64","test");
         const auto path=root/L"wincmd.ini";
+        constexpr bool preview_disks=ISO_WCX_RC_NUMBER>0;
+        constexpr unsigned extra=preview_disks?3u:0u;
         const auto wide=dll.wstring();
         std::string p(wide.begin(),wide.end());
         const auto initial=std::string("\xef\xbb\xbf",3)+
@@ -96,8 +98,8 @@ int wmain(){
                 must_reject(quoted+L" --legacy-iso extra"),
                 "malformed rundll32 arguments were accepted");
         auto preview=preview_association_fix(path,dll);
-        require(preview.changes==4 && preview.conflicts==0,
-                "missing ISO and stale masks must be detected");
+        require(preview.changes==4+extra && preview.conflicts==0,
+                "missing ISO, read-only Preview disks or stale masks");
         require(read(path)==original,"read-only preview modified wincmd.ini");
         std::wstring output;
         require(apply_association_fix_offline(path,dll,output),
@@ -112,6 +114,16 @@ int wmain(){
                 "read-only ESD capability incorrect");
         require(edited.find("swm=192,"+p)!=edited.npos,
                 "read-only SWM capability incorrect");
+        if(preview_disks) {
+            for(const auto extension:{"fdi","hdi","nhd"})
+                require(edited.find(std::string(extension)+"=192,"+p)!=edited.npos,
+                        "Preview-only read-only disk association missing");
+        } else {
+            require(edited.find("fdi=")==edited.npos &&
+                    edited.find("hdi=")==edited.npos &&
+                    edited.find("nhd=")==edited.npos,
+                    "Stable unexpectedly registered Preview disk formats");
+        }
         require(edited.find("rar=192,C:\\Other\\RAR.wcx")!=edited.npos,
                 "unrelated WCX association modified");
         require(edited.find("exts=rar*wim*udf*esd*swm*")!=edited.npos,
@@ -122,6 +134,18 @@ int wmain(){
         require(apply_association_fix_offline(path,dll,output),"idempotent fix failed");
         require(read(path)==edited && count_backups(root)==1,
                 "idempotent fix made another edit or backup");
+        if(preview_disks) {
+            write_text(path,"[PackerPlugins]\r\nfdi=192,C:\\Other\\ForeignFDI.wcx\r\n");
+            const auto before=read(path);
+            const auto foreign=preview_association_fix(path,dll);
+            require(foreign.conflicts==1 && foreign.changes>0,
+                    "Preview must preserve a foreign FDI handler");
+            require(read(path)==before,"Preview modified foreign FDI on inspection");
+            require(apply_association_fix_offline(path,dll,output),
+                    "Preview FDI conflict should not block safe repairs");
+            require(read(path).find("fdi=192,C:\\Other\\ForeignFDI.wcx")!=std::string::npos,
+                    "Preview stole another plugin's FDI registration");
+        }
         write_text(path,"[PackerPlugins]\r\niso=192,C:\\Other\\ISO.wcx\r\n"
                         "wim=159,"+p+"\r\n");
         auto conflict=preview_association_fix(path,dll);
@@ -162,6 +186,15 @@ int wmain(){
         require(!apply_association_fix_offline(path,dll,output),
                 "duplicate extension key must refuse repair");
         require(read(path)==dup,"duplicate refusal damaged INI");
+        if(preview_disks) {
+            write_text(path,"[PackerPlugins]\r\nfdi=192,"+p+
+                            "\r\nfdi=192,"+p+"\r\n");
+            const auto duplicate=read(path);
+            require(!apply_association_fix_offline(path,dll,output),
+                    "duplicate Preview FDI key must be refused");
+            require(read(path)==duplicate,
+                    "duplicate Preview FDI refusal damaged INI");
+        }
         write_text(path,"[PackerPlugins]\r\nRedirectSection=other.ini\r\n"
                         "wim=192,"+p+"\r\n");
         const auto redirect=read(path);
@@ -195,8 +228,9 @@ int wmain(){
             write_text(unicode_ini,as_utf16(untouched+L"[PackerPlugins]\r\n",big_endian));
             const auto before=read(unicode_ini);
             const auto unicode_preview=preview_association_fix(unicode_ini,dll);
-            require(unicode_preview.changes==5 && unicode_preview.conflicts==0,
-                    "UTF-16 repair preview missed an absent ISO");
+            require(unicode_preview.changes==5+extra &&
+                    unicode_preview.conflicts==0,
+                    "UTF-16 repair preview missed ISO or Preview disk formats");
             require(read(unicode_ini)==before,"UTF-16 preview unexpectedly wrote INI");
             require(apply_association_fix_offline(unicode_ini,dll,output),
                     "UTF-16 association repair failed");

@@ -27,7 +27,8 @@ FILES = frozenset({
 })
 MACHINES = {"ISO-WCX.wcx": (0x014C, 0x010B),
             "ISO-WCX.wcx64": (0x8664, 0x020B)}
-REQUIRED_EXTENSIONS = frozenset({"iso", "udf", "wim", "esd", "swm"})
+REQUIRED_EXTENSIONS = frozenset({"iso", "udf", "wim", "esd", "swm",
+                                 "fdi", "hdi", "nhd"})
 
 
 def check_pe(blob: bytes, name: str) -> None:
@@ -65,7 +66,7 @@ def check_inf(payload: bytes, version: str, rc: int, build: int) -> None:
     assert all(extensions) and len(set(extensions)) == len(extensions), (
         "Missing/duplicate default extensions")
     assert REQUIRED_EXTENSIONS.issubset(extensions), (
-        "ISO/WIM/UDF/ESD/SWM registrations are missing")
+        "Required ISO/WIM and legacy Preview associations are missing")
 
 
 def verify(path: pathlib.Path, version: str, rc: int, build: int) -> str:
@@ -111,7 +112,7 @@ def selftest() -> None:
         f"description=ISO-WCX v{version} RC{rc} (Build {build})\n"
         f"version={version}\ntype=wcx\nfile=ISO-WCX.wcx\n"
         "defaultdir=ISO-WCX\n"
-        "defaultextension=iso,udf,wim,esd,swm\n"
+        "defaultextension=iso,udf,wim,esd,swm,fdi,hdi,nhd\n"
     ).encode()
     with tempfile.TemporaryDirectory(prefix="iso-wcx-package-check-") as folder:
         good = pathlib.Path(folder) / "valid.zip"

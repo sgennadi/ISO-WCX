@@ -296,12 +296,21 @@ Plan calculate(const fs::path& ini,const fs::path& plugin32,
         begin=lines.size();end=lines.size();
     }
     struct Target {const wchar_t* key;unsigned caps;};
+    // Stable retains its original five targets. Preview additionally offers
+    // the supported legacy disk formats as strictly read-only associations.
+#if defined(ISO_WCX_RC_NUMBER) && ISO_WCX_RC_NUMBER > 0
+    constexpr std::array<Target,8> targets{{
+        {L"wim",159},{L"iso",159},{L"udf",159},{L"esd",192},{L"swm",192},
+        {L"fdi",192},{L"hdi",192},{L"nhd",192}
+    }};
+#else
     constexpr std::array<Target,5> targets{{
         {L"wim",159},{L"iso",159},{L"udf",159},{L"esd",192},{L"swm",192}
     }};
+#endif
     // Read all original rows and reject duplicate keys before any mutation.
     struct Found {bool present=false;std::size_t index=0;std::wstring value;};
-    std::array<Found,5> found{};
+    std::array<Found,targets.size()> found{};
     for(std::size_t i=begin;i<end;++i){
         const auto kv=key_value(body(lines[i].text));
         if(!kv)continue;

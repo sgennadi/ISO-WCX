@@ -366,6 +366,11 @@ if(BUILD_TESTING)
   add_test(NAME fat12_fat16_fat32_virtual_disk_filesystems
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_virtual_fat.py"
             "$<TARGET_FILE:virtual_fat_inspect>")
+  add_test(NAME anex86_fdi_hdi_t98_next_nhd_readonly
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_totalimage_legacy_containers.py"
+      "$<TARGET_FILE:disc_inspect>" "$<TARGET_FILE:virtual_partition_inspect>")
+  set_tests_properties(anex86_fdi_hdi_t98_next_nhd_readonly PROPERTIES TIMEOUT 150)
   add_test(NAME exfat_native_volume_read_and_corruption
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_exfat.py"
             "$<TARGET_FILE:exfat_inspect>")
@@ -456,6 +461,9 @@ if(WIN32)
       src/modern_dialog.cpp)
     target_include_directories(tc_registration_repair_test
       PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    # Match the WCX binary channel when testing association repair.
+    target_compile_definitions(tc_registration_repair_test PRIVATE
+      ISO_WCX_RC_NUMBER=${ISO_WCX_RC_NUMBER})
     target_link_libraries(tc_registration_repair_test PRIVATE advapi32 shell32)
     add_test(NAME tc_wcx_native_offline_association_fix
       COMMAND tc_registration_repair_test)
