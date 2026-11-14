@@ -253,6 +253,28 @@ int wmain(int argc,wchar_t** argv) {
         const auto process=bind<ProcessFn>(dll,"ProcessFileW");
         const auto close=bind<CloseFn>(dll,"CloseArchive");
         if(!open||!read||!process||!close)return 8;
+        // Keep the same WCX OpenArchiveW handle Total Commander holds
+        // while the WIM is visible in the opposite panel during F5.
+        // A retained WIMGAPI read handle must not prevent DELETE sharing,
+        // otherwise MoveFileExW cannot atomically commit a staged WIM.
+        {
+            std::wstring selected=original.wstring();
+            OpenW browse{};browse.ArcName=selected.data();
+            const HANDLE listing=open(&browse);
+            if(!listing || browse.OpenResult!=0)return 52;
+            const HANDLE probe=CreateFileW(original.c_str(),DELETE,
+                FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
+                OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+            const DWORD error=probe==INVALID_HANDLE_VALUE?
+                GetLastError():ERROR_SUCCESS;
+            if(probe!=INVALID_HANDLE_VALUE)CloseHandle(probe);
+            close(listing);
+            if(error!=ERROR_SUCCESS) {
+                std::cerr<<"WCX browsing handle prevents staged WIM replacement "
+                         <<"(Win32 "<<error<<")\n";
+                return 53;
+            }
+        }
         auto verify=[&](const fs::path& file) {
             fs::remove_all(root/L"extracted");
             std::wstring path=file.wstring();
