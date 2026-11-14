@@ -148,7 +148,20 @@ int wmain(){
             op.complete(13,
                 "WIM editing requires administrator backup/restore/security privileges (Win32 1300)");
         }
+        // Distinguish protected WIM scratch ACL failure from unrelated
+        // access errors without including private paths in shared reports.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-SCRATCH-ACL.wim",1,1);
+            op.stage(L"WIM: Cleanup WIM temporary files 1/1",91);
+            op.complete(13,"restore WIM scratch cleanup access (Win32 5)");
+        }
         const auto extended=read(iso_wcx::diagnostics::export_report());
+        require(contains(extended,
+                "| wim | pack | 13 | wim_scratch_acl_denied | cleanup | 1 |"),
+                "protected WIM scratch ACL failure category missing");
+        require(!contains(extended,"PRIVATE-SCRATCH-ACL"),
+                "protected WIM scratch name leaked into report");
         require(contains(extended,
                 "| wim | pack | 13 | wim_api_capture | capture | 1 |"),
                 "WIM API failure stage or category missing");

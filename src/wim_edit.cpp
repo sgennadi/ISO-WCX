@@ -16,7 +16,6 @@
 #include <fstream>
 #include <string>
 #include <utility>
-#include <optional>
 #include <cstdint>
 
 namespace iso_wcx { namespace {
@@ -198,27 +197,13 @@ void no_reparse(const std::filesystem::path& root,const std::filesystem::path& r
 // Grant DELETE access to the current elevated thread user and SYSTEM only,
 // on the individual scratch entry, without following a reparse point.
 void allow_workspace_cleanup(const std::filesystem::path& path){
+    // WIMGAPI can end impersonation or disable privileges while applying
+    // an image. Rebuild a scoped privileged identity even if a thread
+    // token is still present, and restore the caller identity on exit.
+    Privileges cleanup_identity;
     HANDLE raw_token=nullptr;
-    // WIMGAPI or a host callback can end thread impersonation between
-    // Apply/Capture and cleanup. ERROR_NO_TOKEN (1008) does not mean that
-    // the elevated process has no security identity. Recover a short-lived
-    // copy of its process token, enable the same backup/restore privileges
-    // as at WIM edit startup, and revert to the prior thread context after
-    // restoring access to THIS PRIVATE scratch entry only.
-    //
-    // Never fall back for ACCESS_DENIED or other unexpected token errors,
-    // and never modify the original WIM or a directory outside staging.
-    std::optional<Privileges> cleanup_identity;
-    if(!OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&raw_token)){
-        const DWORD error=GetLastError();
-        if(error!=ERROR_NO_TOKEN){
-            SetLastError(error);
-            checked(false,"open WIM cleanup impersonation token");
-        }
-        cleanup_identity.emplace();
-        checked(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&raw_token),
-                "reopen WIM cleanup impersonation token");
-    }
+    checked(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&raw_token),
+            "open WIM cleanup impersonation token");
     struct Token {HANDLE h;~Token(){CloseHandle(h);}} token{raw_token};
     DWORD bytes=0;
     GetTokenInformation(token.h,TokenUser,nullptr,0,&bytes);
@@ -249,16 +234,39 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
         throw std::runtime_error("create WIM scratch cleanup ACL (Win32 "+
                                  std::to_string(acl_result)+")");
     struct Acl {PACL p;~Acl(){LocalFree(p);}} acl{raw_acl};
-    HANDLE raw_file=CreateFileW(path.c_str(),WRITE_DAC,
+    HANDLE raw_file=CreateFileW(path.c_str(),WRITE_DAC|WRITE_OWNER,
         FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
         OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
     checked(raw_file!=INVALID_HANDLE_VALUE,"open WIM scratch entry for ACL repair");
     struct File {HANDLE h;~File(){CloseHandle(h);}} file{raw_file};
-    // Protect against inherited DENY_DELETE ACEs in the WIM's original ACL.
-    const DWORD result=SetSecurityInfo(file.h,SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
-        nullptr,nullptr,acl.p,nullptr);
+    // An ACL/owner update on a hard-linked inode affects every link.
+    // Delete-by-privilege is tried first; fail closed rather than
+    // changing security metadata for multiply linked scratch entries.
+    BY_HANDLE_FILE_INFORMATION information{};
+    checked(GetFileInformationByHandle(file.h,&information),
+            "inspect WIM scratch links before ACL repair");
+    if(information.nNumberOfLinks>1)
+        throw EditUnsupported("WIM scratch ACL repair refused on a hard-linked entry");
+    const auto set_scratch_dacl=[&]{
+        return SetSecurityInfo(file.h,SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
+            nullptr,nullptr,acl.p,nullptr);
+    };
+    DWORD result=set_scratch_dacl();
+    if(result==ERROR_ACCESS_DENIED){
+        // The applied scratch entry may still be TrustedInstaller-owned.
+        // With SeRestorePrivilege enabled, restore ownership only for
+        // this one disposable scratch inode, then retry its DACL.
+        const DWORD owner_result=SetSecurityInfo(file.h,SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid,
+            nullptr,nullptr,nullptr);
+        if(owner_result!=ERROR_SUCCESS)
+            throw std::runtime_error("restore WIM scratch entry ownership (Win32 "+
+                                     std::to_string(owner_result)+")");
+        result=set_scratch_dacl();
+    }
     if(result!=ERROR_SUCCESS)
         throw std::runtime_error("restore WIM scratch cleanup access (Win32 "+
                                  std::to_string(result)+")");
@@ -289,15 +297,36 @@ void remove_tree(const std::filesystem::path& path){
             remove_tree(child);
         }
     }
+    // Prefer temporary SeRestorePrivilege for deletion before modifying
+    // NTFS security descriptors inherited from the WIM source.
+    const auto retry_privileged=[&](auto&& operation,const char* failure){
+        DWORD error=ERROR_SUCCESS;
+        {
+            Privileges identity;
+            if(operation())return true;
+            error=GetLastError();
+        }
+        if(error!=ERROR_ACCESS_DENIED){
+            SetLastError(error);
+            checked(false,failure);
+        }
+        return false;
+    };
     const auto clear_readonly=[&](){
         return !(attr&FILE_ATTRIBUTE_READONLY) ||
                SetFileAttributesW(path.c_str(),attr&~FILE_ATTRIBUTE_READONLY);
     };
     if(!clear_readonly()){
         const DWORD error=GetLastError();
-        if(error!=ERROR_ACCESS_DENIED){SetLastError(error);checked(false,"clear WIM scratch read-only flag");}
-        allow_workspace_cleanup(path);
-        checked(clear_readonly(),"clear WIM scratch read-only flag after ACL repair");
+        if(error!=ERROR_ACCESS_DENIED){
+            SetLastError(error);
+            checked(false,"clear WIM scratch read-only flag");
+        }
+        if(!retry_privileged(clear_readonly,
+                             "clear WIM scratch attributes with restore privilege")){
+            allow_workspace_cleanup(path);
+            checked(clear_readonly(),"clear WIM scratch read-only flag after ACL repair");
+        }
     }
     const auto unlink=[&](){
         return (attr&FILE_ATTRIBUTE_DIRECTORY)?
@@ -305,9 +334,15 @@ void remove_tree(const std::filesystem::path& path){
     };
     if(!unlink()){
         const DWORD error=GetLastError();
-        if(error!=ERROR_ACCESS_DENIED){SetLastError(error);checked(false,"remove WIM scratch entry");}
-        allow_workspace_cleanup(path);
-        checked(unlink(),"remove WIM scratch entry after ACL repair");
+        if(error!=ERROR_ACCESS_DENIED){
+            SetLastError(error);
+            checked(false,"remove WIM scratch entry");
+        }
+        if(!retry_privileged(unlink,
+                             "remove WIM scratch entry with restore privilege")){
+            allow_workspace_cleanup(path);
+            checked(unlink(),"remove WIM scratch entry after ACL repair");
+        }
     }
 }
 // WIMGAPI may create extra temporary files directly in its configured

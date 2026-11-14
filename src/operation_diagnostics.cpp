@@ -80,6 +80,13 @@ std::string classify(std::string_view reason, int code) {
        has("cannot create imaging token")||
        has("cannot activate imaging token"))
         return "wim_privileges_unavailable";
+    if(has("restore wim scratch cleanup access")||
+       has("restore wim scratch entry ownership")||
+       has("open wim scratch entry for acl repair"))
+        return "wim_scratch_acl_denied";
+    if(has("remove wim scratch entry with restore privilege")||
+       has("remove wim scratch entry after acl repair"))
+        return "wim_scratch_delete_denied";
     if(has("checksum")||has("hash mismatch")||has("crc")||has("corrupt"))
         return "integrity_failed";
     if(has("verify")||has("validation failed")||has("readback"))
