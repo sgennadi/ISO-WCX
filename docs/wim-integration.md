@@ -52,6 +52,16 @@ The original image is only replaced after the checks and flush succeed.
 A cancelled or rejected edit does not modify the original WIM; temporary
 disk usage can be substantial. This is still a Preview implementation.
 
+## Conflicting F5/Delete batch preflight (v0.21.2 Preview)
+
+A WCX multi-string can contain the same WIM child more than once or select
+both an entire `imageN` and a child of that image for deletion. Those requests
+are now rejected before creating the NTFS staging folder or calling WIMGAPI,
+rather than silently ignoring one operation. The preflight also rejects
+case-colliding child paths and adding a child beneath a directory removed by
+the same batch. No source WIM is changed on refusal, and WCX x86/x64 tests
+assert the original archive remains byte-identical and no scratch remains.
+
 ## Windows 2025 WIMGAPI output compatibility
 
 Native x86 and x64 interop checks on Windows Server 2025 detected a

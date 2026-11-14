@@ -838,6 +838,23 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
 }
 void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
     edit_tick(progress);Image image(path,true);
+    // Duplicate WCX entries can otherwise shadow each other in the rebuilt
+    // ISO tree. Detect them before selecting either the ISO or UDF writer.
+    // No source or staging bytes have been touched at this point.
+    std::set<std::string> targets;
+    for(const auto& change:changes) {
+        const auto key=upper(edit_path(change.path));
+        need(targets.insert(key).second,
+             "ISO edit batch contains duplicate or case-colliding paths");
+    }
+    for(const auto& change:changes) {
+        if(!change.remove)continue;
+        const auto folder=upper(edit_path(change.path))+"/";
+        for(const auto& other:changes)
+            if(!other.remove)
+                need(!upper(edit_path(other.path)).starts_with(folder),
+                     "ISO edit batch adds into a deleted directory");
+    }
     if(image.udf_bridge) {
         // Prefer the non-metadata equal-length replacement for a pre-existing
         // single-extent file (including UDF-only paths).
@@ -961,6 +978,58 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
              verified.boot_regions==image.boot_regions &&
              verified.boot_regions_bounded==image.boot_regions_bounded,
              "El Torito boot references changed in staged ISO");
+        // Parsing both ISO9660 and Joliet metadata is not enough to prove F5
+        // wrote the user's bytes. Independently locate every requested path
+        // in the rebuilt ISO tree, then compare the complete staged file
+        // extent with the original source in bounded chunks.
+        for(const auto& change:changes) {
+            edit_tick(progress);
+            Node* entry=verified.root.get();
+            std::istringstream parts(edit_path(change.path));
+            std::string component;
+            while(entry && std::getline(parts,component,'/')) {
+                const auto it=std::find_if(
+                    entry->children.begin(),entry->children.end(),
+                    [&](const auto& child){
+                        return upper(child->logical)==upper(component);
+                    });
+                entry=it==entry->children.end()?nullptr:it->get();
+            }
+            if(change.remove) {
+                need(!entry,"deleted ISO entry remains visible after rebuild");
+                continue;
+            }
+            need(entry && entry->directory==change.directory,
+                 "added ISO path is missing or has the wrong type");
+            if(change.directory)continue;
+            const auto expected=std::filesystem::file_size(change.source);
+            need(expected==entry->size,
+                 "staged ISO file length differs from F5 source");
+            const auto at=std::uint64_t(entry->lba)*block;
+            need(at<=verified.size && expected<=verified.size-at,
+                 "staged ISO file extent is outside image");
+            std::ifstream input(change.source,std::ios::binary);
+            std::ifstream output(tx.output,std::ios::binary);
+            need(bool(input) && bool(output),
+                 "cannot open ISO file for independent F5 verification");
+            output.seekg(static_cast<std::streamoff>(at));
+            need(bool(output),"cannot locate ISO file during verification");
+            std::array<char,64*1024> source_chunk{},stage_chunk{};
+            for(std::uint64_t left=expected;left;) {
+                edit_tick(progress);
+                const auto n=static_cast<std::streamsize>(
+                    std::min<std::uint64_t>(left,source_chunk.size()));
+                input.read(source_chunk.data(),n);
+                output.read(stage_chunk.data(),n);
+                need(input.gcount()==n && output.gcount()==n &&
+                     std::memcmp(source_chunk.data(),stage_chunk.data(),
+                                 static_cast<std::size_t>(n))==0,
+                     "staged ISO F5 data differs from original source");
+                left-=static_cast<std::uint64_t>(n);
+            }
+            need(input.peek()==std::char_traits<char>::eof(),
+                 "ISO F5 source grew during staging");
+        }
     }
     // The ordinary ISO writer appends data and regenerates PVD/Joliet trees.
     // It must never alter *any* original system-area, boot descriptor,

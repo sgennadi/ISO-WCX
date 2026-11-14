@@ -470,6 +470,58 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     for(auto c:changes){auto p=edit_path(c.path);auto slash=p.find('/');auto top=p.substr(0,slash);if(!top.starts_with("image")||top.size()<6)throw EditUnsupported("select an imageN folder inside the WIM");
         auto digits=top.substr(5);if(digits.empty()||digits.size()>3||digits[0]=='0'||digits.find_first_not_of("0123456789")!=std::string::npos)throw EditUnsupported("invalid WIM index");unsigned index=static_cast<unsigned>(std::stoul(digits));if(!index||index>images)throw EditUnsupported("creating WIM indexes is not supported yet");
         if(slash==std::string::npos){if(!c.remove)throw EditUnsupported("cannot replace an image index");deleted.insert(index);}else{c.path=p.substr(slash+1);edits[index].push_back(std::move(c));}}
+    // Validate the entire WCX batch before creating the expensive NTFS
+    // workspace. In particular, deleting imageN while also editing one of
+    // its children must never report success for the ignored changes.
+    for(const auto& [index,entries]:edits) {
+        if(deleted.contains(index))
+            throw EditUnsupported(
+                "WIM batch cannot delete and modify the same image index");
+        // Windows' NTFS path comparisons use Unicode case folding. A
+        // bytewise ASCII transform misses e.g. Latin/Cyrillic case aliases
+        // and can let two WCX source names overwrite the same staged target.
+        const auto native=[](const std::string& utf8) {
+            auto path=relative_path(utf8).wstring();
+            for(auto& c:path)if(c==L'/')c=L'\\';
+            return path;
+        };
+        const auto compare=[](const std::wstring& a,
+                              const std::wstring& b) {
+            const auto rc=CompareStringOrdinal(
+                a.c_str(),static_cast<int>(a.size()),
+                b.c_str(),static_cast<int>(b.size()),TRUE);
+            if(!rc)throw EditUnsupported("invalid Unicode WIM batch path");
+            return rc;
+        };
+        struct WinLess {
+            bool operator()(const std::wstring& a,const std::wstring& b)
+                const {
+                const auto result=CompareStringOrdinal(
+                    a.c_str(),static_cast<int>(a.size()),
+                    b.c_str(),static_cast<int>(b.size()),TRUE);
+                if(!result)
+                    throw EditUnsupported("cannot compare Unicode WIM paths");
+                return result==CSTR_LESS_THAN;
+            }
+        };
+        std::set<std::wstring,WinLess> seen;
+        for(const auto& entry:entries)
+            if(!seen.insert(native(entry.path)).second)
+                throw EditUnsupported("WIM batch contains duplicate target paths");
+        for(const auto& removal:entries) {
+            if(!removal.remove)continue;
+            auto parent=native(removal.path);
+            parent+=L'\\';
+            for(const auto& added:entries) {
+                if(added.remove)continue;
+                const auto child=native(added.path);
+                if(child.size()>=parent.size() &&
+                   compare(child.substr(0,parent.size()),parent)==CSTR_EQUAL)
+                    throw EditUnsupported(
+                        "WIM batch cannot create inside a removed directory");
+            }
+        }
+    }
     if(deleted.size()==images)throw EditUnsupported("cannot delete the last WIM image");
     // Existing WIMGAPI exports all untouched indexes into a new WIM.
     // When only the final index changes, it can instead be replaced inside

@@ -24,6 +24,20 @@ These are *capability preconditions*, not blanket promises for any disc.
 For individual archive failures, the WCX adapter records the native refusal
 reason in `%LOCALAPPDATA%\ISO-WCX\Logs\edit-errors.log`.
 
+## ISO/Joliet full F5 data verification (v0.21.2 Preview)
+
+A staged plain ISO edit is checked not only for valid ISO/Joliet directory
+metadata, but also against **every requested F5 source file**. The writer
+resolves each requested filename from the independently parsed staged tree,
+verifies its type/length, and compares the full on-disc file extent in
+bounded 64 KiB chunks against the source. Missing files, changed source
+lengths, wrong bytes, duplicate/case-colliding targets and a
+delete-and-recreate-under-removed-directory batch fail before atomic commit.
+Deletion and directory creation are also checked against the staged tree.
+These checks are additive to the byte-for-byte El Torito and system-area
+guards. The ISO/UDF Type-1 writer keeps its existing independent staged
+UDF payload readback and boot-extent verifier.
+
 ## El Torito floppy and hard-disk emulation (v0.21.2 Preview)
 
 The plain ISO9660/Joliet writer no longer rejects **El Torito media types
