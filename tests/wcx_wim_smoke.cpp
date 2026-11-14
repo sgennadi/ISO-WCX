@@ -56,11 +56,21 @@ static std::atomic<unsigned> wim_stage_calls{0};
 static std::atomic<unsigned> wim_copy_stage_calls{0};
 static std::atomic<unsigned> wim_export_stage_calls{0};
 static std::atomic<bool> cancel_next_wim{false};
+// Simulate WIMGAPI/host restoring the thread to the process security context
+// just before ACL-aware scratch cleanup. Previously that caused Win32 1008.
+static std::atomic<bool> drop_impersonation_at_cleanup{false};
+static std::atomic<bool> dropped_impersonation_at_cleanup{false};
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
     if(size<0){
         ++wim_percent_calls;
         if(stage && std::wstring_view(stage).starts_with(L"WIM: ")) {
+            if(std::wstring_view(stage).find(
+                       L"Cleanup WIM temporary files")!=std::wstring_view::npos &&
+               drop_impersonation_at_cleanup.exchange(false)){
+                const BOOL reverted=SetThreadToken(nullptr,nullptr);
+                dropped_impersonation_at_cleanup.store(reverted!=FALSE);
+            }
             ++wim_stage_calls;
             if(std::wstring_view(stage).find(L"Copy WIM")!=std::wstring_view::npos)
                 ++wim_copy_stage_calls;
@@ -329,10 +339,24 @@ int wmain(int argc,wchar_t** argv) {
         // same PackFilesW API as a file. Verify the index survives correctly.
         fs::create_directories(incoming/L"NEW_EMPTY_FOLDER");
         wchar_t mkdir_list[]=L"NEW_EMPTY_FOLDER\0\0";
+        // The actual PackFilesW path must remain successful if the WIMGAPI
+        // caller's impersonation disappears immediately before the private
+        // WIM expanded directory is removed. This is the host-reported
+        // failure on v0.21.2 RC1 B1360 (Win32 ERROR_NO_TOKEN/1008).
+        drop_impersonation_at_cleanup.store(true);
+        dropped_impersonation_at_cleanup.store(false);
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         const int folder_rc=pack(packed.data(),sub.data(),src.data(),mkdir_list,0);
         set_progress(INVALID_HANDLE_VALUE,nullptr);
-        if(folder_rc!=0)return 27;
+        drop_impersonation_at_cleanup.store(false);
+        if(!dropped_impersonation_at_cleanup.load()){
+            std::cerr<<"WIM cleanup lost-token regression did not run\n";
+            return 45;
+        }
+        if(folder_rc!=0){
+            std::cerr<<"WIM cleanup lost-token F5 returned "<<folder_rc<<"\n";
+            return 46;
+        }
         if(!clean_wim_workspaces())return 40;
         if(wim_percent_calls.load()==0 || wim_stage_calls.load()==0)
             return 32; // Progress must be visible even for empty folders.

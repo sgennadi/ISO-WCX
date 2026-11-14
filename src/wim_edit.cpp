@@ -16,6 +16,7 @@
 #include <fstream>
 #include <string>
 #include <utility>
+#include <optional>
 #include <cstdint>
 
 namespace iso_wcx { namespace {
@@ -198,8 +199,26 @@ void no_reparse(const std::filesystem::path& root,const std::filesystem::path& r
 // on the individual scratch entry, without following a reparse point.
 void allow_workspace_cleanup(const std::filesystem::path& path){
     HANDLE raw_token=nullptr;
-    checked(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&raw_token),
-            "open WIM cleanup impersonation token");
+    // WIMGAPI or a host callback can end thread impersonation between
+    // Apply/Capture and cleanup. ERROR_NO_TOKEN (1008) does not mean that
+    // the elevated process has no security identity. Recover a short-lived
+    // copy of its process token, enable the same backup/restore privileges
+    // as at WIM edit startup, and revert to the prior thread context after
+    // restoring access to THIS PRIVATE scratch entry only.
+    //
+    // Never fall back for ACCESS_DENIED or other unexpected token errors,
+    // and never modify the original WIM or a directory outside staging.
+    std::optional<Privileges> cleanup_identity;
+    if(!OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&raw_token)){
+        const DWORD error=GetLastError();
+        if(error!=ERROR_NO_TOKEN){
+            SetLastError(error);
+            checked(false,"open WIM cleanup impersonation token");
+        }
+        cleanup_identity.emplace();
+        checked(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&raw_token),
+                "reopen WIM cleanup impersonation token");
+    }
     struct Token {HANDLE h;~Token(){CloseHandle(h);}} token{raw_token};
     DWORD bytes=0;
     GetTokenInformation(token.h,TokenUser,nullptr,0,&bytes);
