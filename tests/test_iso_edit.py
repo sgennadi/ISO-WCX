@@ -176,6 +176,35 @@ def main(binary, reader=None):
             r=subprocess.run(args,capture_output=True,text=True)
             assert (r.returncode==0)==ok,(r.stdout,r.stderr,op,name)
             if not ok:assert image.read_bytes()==before,'original changed on failure'
+        # Native multi-change API must reject duplicate/case-colliding
+        # operations and a delete+create under the deleted parent BEFORE
+        # allocating a workspace. A multi-file F5 must preserve every byte.
+        def batch(*arguments, ok=True):
+            baseline=image.read_bytes()
+            result=subprocess.run(
+                [binary,str(image),'batch',*(str(x) for x in arguments)],
+                capture_output=True,text=True,timeout=90)
+            assert (result.returncode==0)==ok, (
+                "ISO batch failed", arguments, result.stdout,result.stderr)
+            if not ok:
+                assert image.read_bytes()==baseline, (
+                    "rejected ISO batch changed the source image")
+            assert not list(root.glob('.iso-wcx-edit-*')), (
+                "ISO batch left a temporary workspace")
+        image.write_bytes(fixture())
+        batch('add','DOCS/ONE.TXT',source,
+              'add','DOCS/TWO.TXT',source)
+        contents=read_image(image)
+        assert contents['DOCS/ONE.TXT']==source.read_bytes()
+        assert contents['DOCS/TWO.TXT']==source.read_bytes()
+        validate_path_tables(image)
+        batch('add','DUP.TXT',source,
+              'add','dup.txt',source,ok=False)
+        batch('delete','DOCS',
+              'add','DOCS/RECREATED.TXT',source,ok=False)
+        batch('delete','DOCS/ONE.TXT',
+              'add','DOCS/ONE.TXT',source,ok=False)
+
         # The physical ISO may contain a sector-aligned zero trailer not
         # included in the ISO9660 descriptor's Volume Space Size. This is
         # padding, not an additional partition: edits must work and update
