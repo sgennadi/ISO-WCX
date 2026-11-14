@@ -52,6 +52,7 @@ private:
     // Read-only legacy disk containers prepend metadata before sector zero.
     // Never include this prefix when exposing FAT/partition offsets.
     std::uint64_t data_offset_ = 0;
+    std::uint32_t sector_size_ = 512;
     VirtualDiskFormat format_ = VirtualDiskFormat::raw_image;
 };
 
