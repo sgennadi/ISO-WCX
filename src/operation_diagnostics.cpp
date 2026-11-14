@@ -114,6 +114,10 @@ std::string classify(std::string_view reason, int code) {
         return "wim_reparse";
     // Publish precise *fixed category labels*, not image paths or the
     // native exception message itself.
+    if(has("immutable iso/boot") ||
+       has("udf bridge has no safe contiguous run") ||
+       has("udf bridge fragmented file cannot fit"))
+        return "iso_udf_bridge_allocator_protected";
     if(has("rock ridge")||has("system-use"))
         return "iso_rock_ridge_protected";
     if(has("hybrid")&&has("gpt"))
