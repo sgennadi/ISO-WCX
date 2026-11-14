@@ -368,6 +368,22 @@ int wmain(int argc,wchar_t** argv) {
         write(incoming/L"HELLO.TXT","replacement");write(incoming/L"ADDED.TXT","new-file");
         std::wstring packed=original.wstring(),src=incoming.wstring(),sub=L"image1";
         wchar_t add_list[]=L"HELLO.TXT\0ADDED.TXT\0\0";
+        // Ambiguous multi-string requests from Total Commander must fail
+        // before WIMGAPI Apply/Capture, preserving the original WIM exactly.
+        const auto before_invalid_batch=load(original);
+        wchar_t repeated[]=L"HELLO.TXT\0hello.txt\0\0";
+        const int repeated_rc=pack(packed.data(),sub.data(),src.data(),repeated,0);
+        if(repeated_rc!=24 || load(original)!=before_invalid_batch)
+            return 49;
+        if(!clean_wim_workspaces())return 40;
+        // This can happen when TC selects imageN and a child together for
+        // Delete. Silently deleting the index while ignoring its child edit
+        // is not an acceptable completed transaction.
+        wchar_t contradictory[]=L"image1\0image1\\HELLO.TXT\0\0";
+        const int contradictory_rc=erase(packed.data(),contradictory);
+        if(contradictory_rc!=24 || load(original)!=before_invalid_batch)
+            return 50;
+        if(!clean_wim_workspaces())return 40;
         // Reproduce a WCX host (or scanner) with a read handle that omits
         // FILE_SHARE_DELETE. Must refuse BEFORE WIMGAPI Apply/Capture.
         {
