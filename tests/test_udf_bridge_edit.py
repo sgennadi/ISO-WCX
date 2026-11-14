@@ -168,6 +168,26 @@ def main(editor,inspector):
         assert not (target/'new.bin').exists()
         assert (target/'folder'/'data.txt').read_bytes()==b'NESTED'*600
 
+        # Delete on a nonempty UDF-only WinPE directory must roll back.
+        before=image.read_bytes()
+        run([editor,str(image),'delete','folder'],expected=1)
+        assert image.read_bytes()==before, (
+            'nonempty UDF Bridge directory was removed')
+        assert not list(root.glob('.iso-wcx-edit-*'))
+        run([editor,str(image),'delete','folder/data.txt'])
+        deleted_child=image.read_bytes()
+        assert_boot_preserved(before,deleted_child)
+        run([editor,str(image),'delete','folder'])
+        deleted_folder=image.read_bytes()
+        assert_boot_preserved(deleted_child,deleted_folder)
+        target=root/'bridge-removed-folder'
+        run([inspector,str(image),'--extract',str(target)])
+        assert not (target/'folder').exists()
+        assert (target/'hello').read_bytes()==b'REPLACED WITH LONGER PAYLOAD'*30
+        assert read_image(image)=={}, (
+            'deleting UDF-only folder changed ISO boot-only namespace')
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
         # Guard regression: the UDF bitmap says logical block 3 (physical
         # sector 303) is free, but the ISO namespace owns it as hello;1.
         # The native allocator should now skip that ISO-owned block and
