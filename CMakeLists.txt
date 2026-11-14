@@ -461,6 +461,9 @@ if(WIN32)
       src/modern_dialog.cpp)
     target_include_directories(tc_registration_repair_test
       PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    # Match the WCX binary channel when testing association repair.
+    target_compile_definitions(tc_registration_repair_test PRIVATE
+      ISO_WCX_RC_NUMBER=${ISO_WCX_RC_NUMBER})
     target_link_libraries(tc_registration_repair_test PRIVATE advapi32 shell32)
     add_test(NAME tc_wcx_native_offline_association_fix
       COMMAND tc_registration_repair_test)

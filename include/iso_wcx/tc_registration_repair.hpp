@@ -17,8 +17,9 @@ struct AssociationFixPlan {
     bool legacy_iso_available=false;
 };
 
-// Read-only preview of the five primary image associations. Uses the same
-// standalone core as the offline worker and unit tests.
+// Read-only preview of primary image associations. Preview builds additionally
+// include read-only FDI/HDI/NHD without adding them to Stable registrations.
+// Uses the same standalone core as the offline worker and unit tests.
 AssociationFixPlan preview_association_fix(
     const std::filesystem::path& ini, const std::filesystem::path& plugin32,
     bool replace_legacy_iso=false);
