@@ -470,6 +470,39 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     for(auto c:changes){auto p=edit_path(c.path);auto slash=p.find('/');auto top=p.substr(0,slash);if(!top.starts_with("image")||top.size()<6)throw EditUnsupported("select an imageN folder inside the WIM");
         auto digits=top.substr(5);if(digits.empty()||digits.size()>3||digits[0]=='0'||digits.find_first_not_of("0123456789")!=std::string::npos)throw EditUnsupported("invalid WIM index");unsigned index=static_cast<unsigned>(std::stoul(digits));if(!index||index>images)throw EditUnsupported("creating WIM indexes is not supported yet");
         if(slash==std::string::npos){if(!c.remove)throw EditUnsupported("cannot replace an image index");deleted.insert(index);}else{c.path=p.substr(slash+1);edits[index].push_back(std::move(c));}}
+    // Validate the entire WCX batch before creating the expensive NTFS
+    // workspace. In particular, deleting imageN while also editing one of
+    // its children must never report success for the ignored changes.
+    for(const auto& [index,entries]:edits) {
+        if(deleted.contains(index))
+            throw EditUnsupported(
+                "WIM batch cannot delete and modify the same image index");
+        std::set<std::string> seen;
+        for(const auto& entry:entries) {
+            const auto raw=edit_path(entry.path);
+            auto folded=raw;
+            for(char& c:folded)
+                if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
+            if(!seen.insert(folded).second)
+                throw EditUnsupported("WIM batch contains duplicate target paths");
+        }
+        for(const auto& removal:entries) {
+            if(!removal.remove)continue;
+            auto parent=edit_path(removal.path);
+            for(char& c:parent)
+                if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
+            parent+='/';
+            for(const auto& added:entries) {
+                if(added.remove)continue;
+                auto child=edit_path(added.path);
+                for(char& c:child)
+                    if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
+                if(child.starts_with(parent))
+                    throw EditUnsupported(
+                        "WIM batch cannot create inside a removed directory");
+            }
+        }
+    }
     if(deleted.size()==images)throw EditUnsupported("cannot delete the last WIM image");
     // Existing WIMGAPI exports all untouched indexes into a new WIM.
     // When only the final index changes, it can instead be replaced inside
