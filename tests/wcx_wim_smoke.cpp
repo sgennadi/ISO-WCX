@@ -63,14 +63,41 @@ static std::atomic<bool> drop_impersonation_at_cleanup{false};
 static std::atomic<bool> dropped_impersonation_at_cleanup{false};
 static std::atomic<bool> protect_scratch_acl_at_cleanup{false};
 static std::atomic<bool> protected_scratch_acl_at_cleanup{false};
+// Inject a late file AFTER the cleaner snapshots expanded/. The first
+// RemoveDirectoryW must encounter ERROR_DIR_NOT_EMPTY (145), rescan, and
+// then clear the late file without touching the original WIM.
+static std::atomic<bool> inject_late_file_at_cleanup{false};
+static std::atomic<bool> late_file_armed{false};
+static std::atomic<bool> late_file_created{false};
 static fs::path private_test_root;
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
+    if(size==0 && late_file_armed.exchange(false)) {
+        bool created=false;
+        try {
+            for(const auto& entry:fs::directory_iterator(private_test_root)){
+                if(!entry.is_directory() ||
+                   !entry.path().filename().wstring().starts_with(
+                       L".iso-wcx-edit-"))continue;
+                const auto expanded=entry.path()/L"expanded";
+                if(!fs::is_directory(expanded))continue;
+                std::ofstream file(expanded/L"ISO_WCX_AFTER_ENUM.tmp",
+                                   std::ios::binary|std::ios::trunc);
+                file<<"created after cleanup directory snapshot";
+                file.flush();
+                created=bool(file);
+                break;
+            }
+        }catch(...){created=false;}
+        late_file_created.store(created);
+    }
     if(size<0){
         ++wim_percent_calls;
         if(stage && std::wstring_view(stage).starts_with(L"WIM: ")) {
             if(std::wstring_view(stage).find(
                        L"Cleanup WIM temporary files")!=std::wstring_view::npos) {
+                if(inject_late_file_at_cleanup.exchange(false))
+                    late_file_armed.store(true);
                 if(protect_scratch_acl_at_cleanup.exchange(false)){
                     // Inject a protected DELETE-denying DACL on a private,
                     // freshly applied scratch file, not the source WIM.
@@ -377,6 +404,9 @@ int wmain(int argc,wchar_t** argv) {
         // WIM expanded directory is removed. This is the host-reported
         // failure on v0.21.2 RC1 B1360 (Win32 ERROR_NO_TOKEN/1008).
         private_test_root=root;
+        inject_late_file_at_cleanup.store(true);
+        late_file_armed.store(false);
+        late_file_created.store(false);
         protect_scratch_acl_at_cleanup.store(true);
         protected_scratch_acl_at_cleanup.store(false);
         drop_impersonation_at_cleanup.store(true);
@@ -386,6 +416,12 @@ int wmain(int argc,wchar_t** argv) {
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         drop_impersonation_at_cleanup.store(false);
         protect_scratch_acl_at_cleanup.store(false);
+        inject_late_file_at_cleanup.store(false);
+        late_file_armed.store(false);
+        if(!late_file_created.load()){
+            std::cerr<<"WIM late scratch-file race regression did not run\n";
+            return 48;
+        }
         if(!protected_scratch_acl_at_cleanup.load()){
             std::cerr<<"WIM scratch ACL-deny regression did not run\n";
             return 47;
