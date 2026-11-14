@@ -477,27 +477,46 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
         if(deleted.contains(index))
             throw EditUnsupported(
                 "WIM batch cannot delete and modify the same image index");
-        std::set<std::string> seen;
-        for(const auto& entry:entries) {
-            const auto raw=edit_path(entry.path);
-            auto folded=raw;
-            for(char& c:folded)
-                if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
-            if(!seen.insert(folded).second)
+        // Windows' NTFS path comparisons use Unicode case folding. A
+        // bytewise ASCII transform misses e.g. Latin/Cyrillic case aliases
+        // and can let two WCX source names overwrite the same staged target.
+        const auto native=[](const std::string& utf8) {
+            auto path=relative_path(utf8).wstring();
+            for(auto& c:path)if(c==L'/')c=L'\\';
+            return path;
+        };
+        const auto compare=[](const std::wstring& a,
+                              const std::wstring& b) {
+            const auto rc=CompareStringOrdinal(
+                a.c_str(),static_cast<int>(a.size()),
+                b.c_str(),static_cast<int>(b.size()),TRUE);
+            if(!rc)throw EditUnsupported("invalid Unicode WIM batch path");
+            return rc;
+        };
+        struct WinLess {
+            bool operator()(const std::wstring& a,const std::wstring& b)
+                const {
+                const auto result=CompareStringOrdinal(
+                    a.c_str(),static_cast<int>(a.size()),
+                    b.c_str(),static_cast<int>(b.size()),TRUE);
+                if(!result)
+                    throw EditUnsupported("cannot compare Unicode WIM paths");
+                return result==CSTR_LESS_THAN;
+            }
+        };
+        std::set<std::wstring,WinLess> seen;
+        for(const auto& entry:entries)
+            if(!seen.insert(native(entry.path)).second)
                 throw EditUnsupported("WIM batch contains duplicate target paths");
-        }
         for(const auto& removal:entries) {
             if(!removal.remove)continue;
-            auto parent=edit_path(removal.path);
-            for(char& c:parent)
-                if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
-            parent+='/';
+            auto parent=native(removal.path);
+            parent+=L'\\';
             for(const auto& added:entries) {
                 if(added.remove)continue;
-                auto child=edit_path(added.path);
-                for(char& c:child)
-                    if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
-                if(child.starts_with(parent))
+                const auto child=native(added.path);
+                if(child.size()>=parent.size() &&
+                   compare(child.substr(0,parent.size()),parent)==CSTR_EQUAL)
                     throw EditUnsupported(
                         "WIM batch cannot create inside a removed directory");
             }
