@@ -470,6 +470,13 @@ if(WIN32)
     add_test(NAME universal_diagnostics_windows_embedded
       COMMAND universal_diagnostics_windows_test)
     set_tests_properties(universal_diagnostics_windows_embedded PROPERTIES TIMEOUT 40)
+    # The Configure window uses BS_NOTIFY for high-DPI keyboard focus.
+    # A focus event must never trigger Check/Export/Fix action buttons.
+    add_executable(wcx_settings_command_tests tests/settings_command_dispatch.cpp)
+    target_include_directories(wcx_settings_command_tests
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    add_test(NAME wcx_settings_focus_does_not_click
+      COMMAND wcx_settings_command_tests)
     add_executable(wcx_host_dispatch_diagnostics_tests
       tests/wcx_host_dispatch_diagnostics.cpp src/operation_diagnostics.cpp)
     target_include_directories(wcx_host_dispatch_diagnostics_tests

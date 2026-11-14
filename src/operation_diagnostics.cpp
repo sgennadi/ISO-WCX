@@ -91,6 +91,28 @@ std::string classify(std::string_view reason, int code) {
         return "wim_workspace";
     if(has("wim reparse points"))
         return "wim_reparse";
+    // Publish precise *fixed category labels*, not image paths or the
+    // native exception message itself.
+    if(has("rock ridge")||has("system-use"))
+        return "iso_rock_ridge_protected";
+    if(has("hybrid")&&has("gpt"))
+        return "iso_gpt_protected";
+    if(has("hybrid mbr")||has("isohybrid"))
+        return "iso_hybrid_restricted";
+    if(has("iso/udf")||has("iso-visible")||has("synchronized udf"))
+        return "iso_udf_bridge_restricted";
+    if(has("wimgapi open/load")||has("wimgapi unavailable"))
+        return "wim_api_open";
+    if(has("register wim progress"))return "wim_api_callback";
+    if(has("export unchanged wim index"))return "wim_api_export";
+    if(has("apply wim index"))return "wim_api_apply";
+    if(has("remove old final wim index"))return "wim_api_delete_index";
+    if(has("capture wim")||has("wimcaptureimage"))return "wim_api_capture";
+    if(has("preserve wim boot index")||has("wimsetbootimage"))
+        return "wim_api_boot_index";
+    if(has("wim xml"))return "wim_xml_metadata";
+    if(has("wim scratch")||has("wim temporary"))
+        return "wim_workspace_cleanup";
     if(has("boot")||has("protected")||has("el torito"))
         return "protected_layout";
     if(has("missing")||has("not found"))return "missing_input";
@@ -103,14 +125,17 @@ std::string stage_name(std::wstring_view description) {
     std::transform(s.begin(),s.end(),s.begin(),[](wchar_t c){return wchar_t(towlower(c));});
     if(s.find(L"copy")!=s.npos)return "copy";
     if(s.find(L"export")!=s.npos)return "export";
-    if(s.find(L"apply")!=s.npos)return "apply";
-    if(s.find(L"capture")!=s.npos)return "capture";
+    if(s.find(L"apply")!=s.npos||s.find(L"extract")!=s.npos)return "apply";
+    if(s.find(L"capture")!=s.npos||s.find(L"rebuild")!=s.npos)return "capture";
+    if(s.find(L"cleanup")!=s.npos||s.find(L"scratch")!=s.npos)return "cleanup";
     if(s.find(L"verify")!=s.npos||s.find(L"validat")!=s.npos)return "verify";
     if(s.find(L"commit")!=s.npos)return "commit";
+    if(s.find(L"prepar")!=s.npos)return "prepare";
     if(s.find(L"mkdir")!=s.npos||s.find(L"directory")!=s.npos)return "mkdir";
     if(s.find(L"delete")!=s.npos||s.find(L"remove")!=s.npos)return "delete";
     if(s.find(L"open")!=s.npos)return "open";
-    if(s.find(L"write")!=s.npos||s.find(L"pack")!=s.npos)return "write";
+    if(s.find(L"write")!=s.npos||s.find(L"pack")!=s.npos||
+       s.find(L"edit")!=s.npos)return "write";
     return "processing";
 }
 std::string timestamp() {
@@ -172,11 +197,11 @@ std::string url_escape(std::string_view s) {
     return out;
 }
 struct Group {
-    std::string build,format,action,reason;
+    std::string build,format,action,reason,stage;
     int code=0;
     bool operator<(const Group& rhs) const {
-        return std::tie(build,format,action,code,reason)<
-               std::tie(rhs.build,rhs.format,rhs.action,rhs.code,rhs.reason);
+        return std::tie(build,format,action,code,reason,stage)<
+               std::tie(rhs.build,rhs.format,rhs.action,rhs.code,rhs.reason,rhs.stage);
     }
 };
 bool field(std::string_view line,std::string_view field_name,std::string& result) {
@@ -218,6 +243,8 @@ std::map<Group,std::uint64_t> summary() {
                !field(line,"action",key.action)||
                !field(line,"reason",key.reason)||
                !number(line,"code",key.code))continue;
+            // Include old RC/Stable journal entries that predate stages.
+            if(!field(line,"stage",key.stage))key.stage="legacy";
             // All fields are controlled by our journal, but apply
             // strict allowlists before creating a public report.
             auto allowed=[](const std::string& s) {
@@ -228,7 +255,7 @@ std::map<Group,std::uint64_t> summary() {
                 return true;
             };
             if(allowed(key.build)&&allowed(key.format)&&allowed(key.action)&&
-               allowed(key.reason))++counts[key];
+               allowed(key.reason)&&allowed(key.stage))++counts[key];
         }
     }
     return counts;
@@ -242,13 +269,13 @@ std::string report_text() {
           <<"Local operation records are summarized without paths or filenames.\n"
           <<"No image contents, user credentials, usernames or device IDs are included.\n\n"
           <<host_session_summary()
-          <<"| Build | Format | Action | WCX code | Category | Count |\n"
-          <<"|---|---|---|---:|---|---:|\n";
+          <<"| Build | Format | Action | WCX code | Category | Stage | Count |\n"
+          <<"|---|---|---|---:|---|---|---:|\n";
     unsigned rows=0;
     for(const auto& [group,count]:groups) {
         if(rows++>=80)break;
         stream<<"| "<<group.build<<" | "<<group.format<<" | "<<group.action
-              <<" | "<<group.code<<" | "<<group.reason<<" | "<<count<<" |\n";
+              <<" | "<<group.code<<" | "<<group.reason<<" | "<<group.stage<<" | "<<count<<" |\n";
     }
     if(groups.empty())stream<<"\nNo operations have been logged yet.\n";
     return stream.str();
@@ -335,6 +362,7 @@ void Operation::complete(int code,std::string_view reason) noexcept {
         append(base_json("complete",action_,format_,id_)+
                ",\"code\":"+std::to_string(code)+
                ",\"reason\":\""+classify(reason,code)+"\""+
+               ",\"stage\":\""+(stage_.empty()?"unreported":stage_)+"\""+
                ",\"file_count\":"+std::to_string(count_)+
                ",\"image_index\":"+std::to_string(image_index_)+
                ",\"elapsed_ms\":"+std::to_string(GetTickCount64()-start_)+"}");

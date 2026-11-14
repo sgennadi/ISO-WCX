@@ -334,7 +334,14 @@ void remove_wim_residue(const std::filesystem::path& root,
 struct WimWorkspaceCleanup {
     std::filesystem::path folder;
     ~WimWorkspaceCleanup() noexcept {
-        try {remove_tree(folder);}catch(...){}
+        // WIMGAPI or filesystem filters may still be releasing files
+        // during exception unwinding. Retain the impersonated imaging
+        // token and retry ACL-aware cleanup of this one private workspace.
+        // Never delete unrelated/older .iso-wcx-edit-* directories.
+        for(unsigned attempt=0;attempt<4;++attempt) {
+            try {remove_tree(folder);return;}catch(...){}
+            if(attempt<3)Sleep(150u*(attempt+1u));
+        }
     }
 };
 }

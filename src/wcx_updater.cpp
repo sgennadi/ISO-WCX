@@ -14,6 +14,7 @@
 #include "iso_wcx/tc_registration_audit.hpp"
 #include "iso_wcx/universal_diagnostics.hpp"
 #include "iso_wcx/modern_dialog.hpp"
+#include "iso_wcx/settings_command.hpp"
 
 #include <bcrypt.h>
 #include <commdlg.h>
@@ -1101,6 +1102,24 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
         if(HIWORD(wp)==BN_SETFOCUS || HIWORD(wp)==CBN_SETFOCUS)
             scroll_control_into_view(dlg,*state,reinterpret_cast<HWND>(lp));
         const int cmd=LOWORD(wp);
+        // High-DPI focus scrolling uses BS_NOTIFY; that causes BN_SETFOCUS
+        // and BN_KILLFOCUS WM_COMMAND events for every button.  These events
+        // are NOT button clicks. Treating them as clicks repeatedly opened
+        // ISO-WCX-TC-Associations.txt each time Notepad lost focus, and could
+        // also re-schedule the association repair after a dialog closed.
+        //
+        // Only a genuine BN_CLICKED from our own direct child action button
+        // can start downloads, exports, repairs or any other side effects.
+        const bool action_button=
+            cmd==id_check || cmd==id_install || cmd==id_export ||
+            cmd==id_diag_export || cmd==id_diag_github ||
+            cmd==id_tc_assoc_check || cmd==id_tc_assoc_fix ||
+            cmd==id_universal_save;
+        if(action_button &&
+           !settings_command::is_button_click(
+               HIWORD(wp),
+               lp!=0 && reinterpret_cast<HWND>(lp)==GetDlgItem(dlg,cmd)))
+            return TRUE;
         if(cmd==id_never && HIWORD(wp)==BN_CLICKED) {
             state->automatic=IsDlgButtonChecked(dlg,id_never)!=BST_CHECKED;
             save_automatic(state->automatic);
@@ -1199,6 +1218,14 @@ INT_PTR CALLBACK dialog_proc(HWND dlg,UINT msg,WPARAM wp,LPARAM lp) {
                         MB_OK|(success?MB_ICONINFORMATION:MB_ICONWARNING));
             return TRUE;
         }
+        // Esc/Enter can arrive without a child HWND and must keep working.
+        // Focus notifications from the native Close pushbutton, however,
+        // must not dismiss Configure merely because BS_NOTIFY is enabled.
+        if((cmd==IDCANCEL || cmd==IDOK) && lp!=0 &&
+           !settings_command::is_button_click(
+               HIWORD(wp),
+               reinterpret_cast<HWND>(lp)==GetDlgItem(dlg,cmd)))
+            return TRUE;
         if(cmd==IDCANCEL || cmd==IDOK) {EndDialog(dlg,0);return TRUE;}
         break;
     }

@@ -97,7 +97,7 @@ int wmain(){
                 "report omitted in-process host dispatch triage");
         require(contains(report,"PackFilesW: 1; PackFiles ANSI: 1"),
                 "report omitted WCX entry point counters");
-        require(contains(report,"| iso | pack | 24 | unsupported_layout | 1 |"),
+        require(contains(report,"| iso | pack | 24 | unsupported_layout | write | 1 |"),
                 "existing aggregate operation results missing");
         require(!contains(report,"SECRET-USER-F5") &&
                 report.find(fixture.folder.string())==std::string::npos,
@@ -105,6 +105,41 @@ int wmain(){
         require(!contains(read(fixture.folder/L"ISO-WCX"/L"Logs"/L"operations.jsonl"),
                           "SECRET-USER-F5"),
                 "operation journal leaked a private image name");
+        // Normalized WIM stage + ISO guard subtype make failures
+        // actionable while private input paths remain invisible.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"SECRET-WIM-INDEX.wim",1,1);
+            op.stage(L"WIM: Rebuild WIM image 1/2",65);
+            op.complete(13,"WIMCaptureImage failed (Win32 5)");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-HYBRID-BOOT.iso",1);
+            op.stage(L"write",0);
+            op.complete(24,
+                "hybrid MBR ISO/UDF only supports equal-length file replacement");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-ROCK-RIDGE.iso",1);
+            op.complete(24,
+                "Rock Ridge/system-use ISO editing requires a protected UDF bridge");
+        }
+        const auto extended=read(iso_wcx::diagnostics::export_report());
+        require(contains(extended,
+                "| wim | pack | 13 | wim_api_capture | capture | 1 |"),
+                "WIM API failure stage or category missing");
+        require(contains(extended,
+                "| iso | pack | 24 | iso_hybrid_restricted | write | 1 |"),
+                "hybrid ISO protection category missing");
+        require(contains(extended,
+                "| iso | pack | 24 | iso_rock_ridge_protected | unreported | 1 |"),
+                "protected Rock Ridge category missing");
+        require(!contains(extended,"SECRET-WIM-INDEX") &&
+                !contains(extended,"PRIVATE-HYBRID-BOOT") &&
+                !contains(extended,"PRIVATE-ROCK-RIDGE"),
+                "private image names leaked into diagnostic summary");
         std::cout<<"PASS: F5 dispatch counters, ANSI/Unicode attribution, "
                     "zero vs observed host triage, private report and journal\n";
         return 0;
