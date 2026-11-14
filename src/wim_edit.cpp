@@ -627,6 +627,9 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             callback.begin_stage(L"Extract WIM image "+number,begin,apply_end-begin);
             const BOOL applied=api<BOOL(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMApplyImage")(image.h,expanded.c_str(),2u|0x100u);
             callback.tick();checked(applied,"apply WIM index");
+            // A multi-GB Apply may take many minutes. Do not recapture over
+            // a source WIM whose file ID or NTFS ChangeTime has changed.
+            tx.assert_source_unchanged();
             callback.begin_stage(L"Edit WIM image "+number,apply_end,0);
             for(const auto& c:edits[index]){
                 callback.tick();

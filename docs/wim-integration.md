@@ -52,6 +52,20 @@ The original image is only replaced after the checks and flush succeed.
 A cancelled or rejected edit does not modify the original WIM; temporary
 disk usage can be substantial. This is still a Preview implementation.
 
+## Source identity and concurrent-modification check (Preview)
+
+Before replacing an ISO/WIM archive, the shared transaction checks the
+original Windows volume/file ID and NTFS `ChangeTime` as well as size and
+LastWriteTime. WIM also rechecks immediately after the potentially slow
+WIMGAPI Apply, before changing/capturing the index. If an antivirus,
+backup utility or another editor replaces or rewrites the archive during
+the operation, the staged output is discarded and the original writer's
+changes take priority. Failures are reported as
+`archive_source_changed` without the archive filename in shared
+diagnostics. This protects against common same-size, restored-mtime
+changes but is not a strict exclusive file lock; a malicious last-moment
+race remains outside its guarantee.
+
 ## Conflicting F5/Delete batch preflight (v0.21.2 Preview)
 
 A WCX multi-string can contain the same WIM child more than once or select

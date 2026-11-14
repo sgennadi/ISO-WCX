@@ -76,6 +76,8 @@ std::string classify(std::string_view reason, int code) {
         (has("win32 32")||has("win32 33"))))
         return "archive_replace_locked";
     if(has("cannot replace archive"))return "archive_replace_failed";
+    if(has("archive changed during edit"))
+        return "archive_source_changed";
     if(has("administrator backup/restore")||
        has("cannot create imaging token")||
        has("cannot activate imaging token"))

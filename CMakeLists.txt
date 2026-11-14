@@ -491,6 +491,16 @@ if(WIN32)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
     add_executable(wcx_wim_smoke tests/wcx_wim_smoke.cpp)
     target_link_libraries(wcx_wim_smoke PRIVATE iso_disc advapi32)
+    # Shared transaction safety for both ISO and WIM, including archived
+    # path swaps or same-size external writes with a restored timestamp.
+    add_executable(edit_transaction_source_identity_tests
+      tests/edit_transaction_source_identity.cpp)
+    target_include_directories(edit_transaction_source_identity_tests PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    add_test(NAME iso_wim_source_ntfs_identity_and_mutation_guard
+      COMMAND edit_transaction_source_identity_tests)
+    set_tests_properties(iso_wim_source_ntfs_identity_and_mutation_guard
+      PROPERTIES TIMEOUT 60)
     add_executable(wcx_iso_edit_runner tests/wcx_iso_edit_runner.cpp)
     add_test(NAME wcx_wim_multi_image_lzx_esd
       COMMAND wcx_wim_smoke "$<TARGET_FILE:ISO-WCX>")
