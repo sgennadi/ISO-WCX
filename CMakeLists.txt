@@ -453,6 +453,9 @@ if(WIN32)
       tests/tc_registration_audit.cpp src/tc_registration_audit.cpp)
     target_include_directories(tc_registration_audit_test
       PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    # Exercise the same Stable/Preview extension list as the actual WCX DLL.
+    target_compile_definitions(tc_registration_audit_test PRIVATE
+      ISO_WCX_RC_NUMBER=${ISO_WCX_RC_NUMBER})
     target_link_libraries(tc_registration_audit_test PRIVATE advapi32)
     add_test(NAME tc_wcx_registration_readonly_audit
       COMMAND tc_registration_audit_test)
