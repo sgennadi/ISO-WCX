@@ -113,6 +113,36 @@ a Stable release.
 6. Report progress/cancellation through WCX. Keep the original unchanged on
    unsupported inputs, cancellation and verification failure.
 
+## El Torito floppy and hard-disk emulation (experimental Preview)
+
+The plain ISO9660/Joliet native rebuild now recognizes boot catalog media types
+1 (1.2 MiB floppy), 2 (1.44 MiB floppy), 3 (2.88 MiB floppy), and 4
+(hard-disk emulation), in addition to no-emulation type 0. Previously F5 was
+immediately refused on any emulated boot entry.
+
+An emulated boot LBA **must** be the first sector of a regular ISO9660 file
+extent; a hidden, ambiguous or partially mapped disk is not writable. Floppy
+file size must precisely match the declared media type. Hard-disk images must
+be 512-byte aligned, carry a valid MBR signature and have bounded, consistent
+MBR primary partition entries; protective GPT and malformed partitions are
+not accepted. The boot catalog's 512-byte SectorCount records initial loader
+sectors only, **never** the full floppy/HDD disk length.
+
+Only edits to unrelated ISO files and directories are permitted. Boot image
+replacement, deletion, or edits to a containing directory are still refused.
+The append-only writer compares the original system area, boot descriptors,
+boot catalog, **entire emulated boot image file extents** and initial loader
+ranges byte-for-byte before commit. This works with an ISO9660/Joliet image
+only; ISO/UDF Bridge, Rock Ridge and hybrid system areas keep their existing
+stricter constraints. Reparse and boundedness failures leave the original
+image unchanged.
+
+Synthetic regressions cover positive unrelated-file F5 for all four media
+types and negative tests for unlisted boot images, wrong floppy size, missing
+HDD MBR, out-of-bounds MBR partitions, and attempts to modify boot images.
+These prove guarded byte preservation, not real BIOS/UEFI bootability. The
+feature must remain Preview pending CI and disposable-machine boot testing.
+
 ## Independently mastered El Torito regression
 
 The Linux Preview CI now uses a **test-only** xorriso binary to create a
