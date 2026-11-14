@@ -18,6 +18,13 @@ namespace {
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
+std::uint16_t le16(const std::uint8_t* p) noexcept {
+    return static_cast<std::uint16_t>(p[0] | (std::uint16_t(p[1])<<8));
+}
+std::uint32_t le32(const std::uint8_t* p) noexcept {
+    return std::uint32_t(p[0]) | (std::uint32_t(p[1])<<8) |
+           (std::uint32_t(p[2])<<16) | (std::uint32_t(p[3])<<24);
+}
 std::uint32_t be32(const std::uint8_t* p) noexcept {
     return (std::uint32_t(p[0]) << 24) | (std::uint32_t(p[1]) << 16) |
            (std::uint32_t(p[2]) << 8) | std::uint32_t(p[3]);
@@ -33,6 +40,36 @@ struct VhdFooter {
     std::uint32_t disk_type{};
     std::uint64_t logical_size{};
 };
+struct HeaderedDisk {
+    std::uint64_t offset{},bytes{};
+    std::uint32_t sector_size{};
+};
+HeaderedDisk validate_headered_disk(
+        std::uint64_t physical_length,std::uint64_t header_bytes,
+        std::uint64_t advertised_data,std::uint64_t sector,
+        std::uint64_t sectors_per_track,std::uint64_t heads,
+        std::uint64_t cylinders) {
+    require(header_bytes>=32 && header_bytes<=1024u*1024u &&
+            header_bytes<=physical_length,
+            "legacy disk has invalid header length");
+    require(sector==512 || sector==1024 || sector==2048 || sector==4096,
+            "legacy disk sector size is not supported by FAT reader");
+    require(sectors_per_track>=1 && sectors_per_track<=255 &&
+            heads>=1 && heads<=255 && cylinders>=1 &&
+            cylinders<=65535,
+            "legacy disk has invalid CHS geometry");
+    std::uint64_t computed=sector;
+    for(const auto n:{sectors_per_track,heads,cylinders}) {
+        require(computed<=UINT64_MAX/n,"legacy disk geometry overflows");
+        computed*=n;
+    }
+    require(computed==advertised_data &&
+            computed==physical_length-header_bytes &&
+            computed<=static_cast<std::uint64_t>(
+                std::numeric_limits<std::streamoff>::max()),
+            "legacy disk geometry or data length disagrees with image");
+    return {header_bytes,computed,static_cast<std::uint32_t>(sector)};
+}
 
 // VHD v1: footer is 512 bytes at EOF. Checksum is one's complement of the
 // sum of every footer byte except its stored four-byte checksum field.
@@ -99,6 +136,55 @@ VirtualDiskReader::VirtualDiskReader(const std::filesystem::path& image) {
         input_.close();
         return;
     }
+    if(suffix==L".fdi" || suffix==L".hdi") {
+        // Anex86 FDI/HDI: 32-byte little-endian metadata followed by a
+        // variable-size header and contiguous CHS-ordered sector data.
+        // FDI has no unique magic: require reserved zero, bounded header,
+        // complete CHS geometry and exact physical payload size.
+        require(physical_length>=32,"Anex86 FDI/HDI header is truncated");
+        std::array<std::uint8_t,32> header{};
+        input_.seekg(0);
+        input_.read(reinterpret_cast<char*>(header.data()),32);
+        require(bool(input_),"cannot read Anex86 FDI/HDI header");
+        require(le32(header.data())==0,"invalid Anex86 reserved header");
+        const auto heads=le32(header.data()+24);
+        const auto geometry=validate_headered_disk(
+            physical_length,le32(header.data()+8),le32(header.data()+12),
+            le32(header.data()+16),le32(header.data()+20),heads,
+            le32(header.data()+28));
+        if(suffix==L".fdi")
+            require(heads<=2,"Anex86 FDI claims HDD geometry");
+        data_offset_=geometry.offset;
+        capacity_=geometry.bytes;
+        sector_size_=geometry.sector_size;
+        format_=VirtualDiskFormat::anex86_fdi_hdi;
+        return;
+    }
+    if(suffix==L".nhd") {
+        // T98-Next NHD v0: 512-byte header with an ASCIIz signature and
+        // CHS geometry. No PC-98-specific partition scheme is guessed.
+        require(physical_length>=512,"T98-Next NHD header is truncated");
+        std::array<std::uint8_t,512> header{};
+        input_.seekg(0);
+        input_.read(reinterpret_cast<char*>(header.data()),512);
+        require(bool(input_),"cannot read T98-Next NHD header");
+        require(std::string_view(
+                    reinterpret_cast<const char*>(header.data()),15)==
+                    std::string_view("T98HDDIMAGE.R0",15) &&
+                header[15]==0,
+                "invalid T98-Next NHD signature");
+        const auto header_size=le32(header.data()+272);
+        const auto geometry=validate_headered_disk(
+            physical_length,header_size,physical_length>=header_size?
+            physical_length-header_size:0u,
+            le16(header.data()+284),le16(header.data()+282),
+            le16(header.data()+280),le32(header.data()+276));
+        data_offset_=geometry.offset;
+        capacity_=geometry.bytes;
+        sector_size_=geometry.sector_size;
+        format_=VirtualDiskFormat::t98_next_nhd;
+        return;
+    }
     if(suffix==L".vhdx") {
         require(is_vhdx,".vhdx extension has invalid VHDX file identifier");
         vhdx_=std::make_unique<VhdxReader>(image);
@@ -136,7 +222,7 @@ VirtualDiskReader::VirtualDiskReader(const std::filesystem::path& image) {
 VirtualDiskReader::~VirtualDiskReader() noexcept = default;
 
 std::uint32_t VirtualDiskReader::logical_sector_size() const noexcept {
-    return vhdx_ ? vhdx_->logical_sector_size() : 512u;
+    return vhdx_ ? vhdx_->logical_sector_size() : sector_size_;
 }
 
 std::vector<std::uint8_t> VirtualDiskReader::read(
@@ -156,7 +242,13 @@ std::vector<std::uint8_t> VirtualDiskReader::read(
         return output;
     }
     input_.clear();
-    input_.seekg(static_cast<std::streamoff>(offset),std::ios::beg);
+    require(data_offset_<=UINT64_MAX-offset &&
+            offset+data_offset_<=
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<std::streamoff>::max()),
+            "legacy disk physical offset exceeds supported seek range");
+    input_.seekg(static_cast<std::streamoff>(offset+data_offset_),
+                 std::ios::beg);
     require(bool(input_),"cannot seek in virtual disk");
     input_.read(reinterpret_cast<char*>(output.data()),
                 static_cast<std::streamsize>(length));
