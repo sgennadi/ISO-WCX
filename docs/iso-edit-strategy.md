@@ -24,6 +24,24 @@ These are *capability preconditions*, not blanket promises for any disc.
 For individual archive failures, the WCX adapter records the native refusal
 reason in `%LOCALAPPDATA%\ISO-WCX\Logs\edit-errors.log`.
 
+## Shared source-mutation guard for ISO/WIM (Preview)
+
+Atomic staging now snapshots the original Windows file's volume serial,
+file ID and NTFS `ChangeTime` in addition to its size and ordinary
+`LastWriteTime`. These fields are rechecked immediately before replacing
+the original. This detects common same-size external rewrites with restored
+timestamps, and a different archive substituted under the same filename.
+On unsupported/non-NTFS volumes the identity query may safely refuse an
+edit; it does not silently disable this check.
+
+The guard does **not** promise immunity from a malicious writer changing
+the file during the last two system calls: this is not an exclusive file
+lock, full multi-GB SHA-256 or TxF transaction. An unchanged-image test,
+cancelled edit, in-place mutation, same-timestamp path swap and private
+workspace cleanup are covered on Windows x86/x64, without mounting real
+WIMs. Diagnostics use the fixed category `archive_source_changed` without
+sharing private image names.
+
 ## ISO/Joliet full F5 data verification (v0.21.2 Preview)
 
 A staged plain ISO edit is checked not only for valid ISO/Joliet directory
