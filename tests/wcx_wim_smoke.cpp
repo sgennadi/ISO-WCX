@@ -298,6 +298,24 @@ int wmain(int argc,wchar_t** argv) {
         write(incoming/L"HELLO.TXT","replacement");write(incoming/L"ADDED.TXT","new-file");
         std::wstring packed=original.wstring(),src=incoming.wstring(),sub=L"image1";
         wchar_t add_list[]=L"HELLO.TXT\0ADDED.TXT\0\0";
+        // Reproduce a WCX host (or scanner) with a read handle that omits
+        // FILE_SHARE_DELETE. Must refuse BEFORE WIMGAPI Apply/Capture.
+        {
+            HANDLE reader=CreateFileW(original.c_str(),GENERIC_READ,
+                FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,
+                nullptr);
+            if(reader==INVALID_HANDLE_VALUE)return 43;
+            const auto unchanged=load(original);
+            const auto start=GetTickCount64();
+            const int locked_rc=pack(packed.data(),sub.data(),src.data(),add_list,0);
+            const auto elapsed=GetTickCount64()-start;
+            CloseHandle(reader);
+            if(locked_rc!=24 || elapsed>15000u || load(original)!=unchanged) {
+                std::cerr<<"WIM lock preflight failed: "<<locked_rc<<"\n";
+                return 44;
+            }
+            if(!clean_wim_workspaces())return 40;
+        }
         // WCX callback registration may happen on another thread than packing.
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         int packed_result=-1;

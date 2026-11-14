@@ -373,6 +373,24 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     const unsigned verify_only_index=deleted.empty() && edits.size()==1
                                          ?edits.begin()->first:0u;
     report(L"Prepare NTFS staging",3);
+    // A WCX host/antivirus can keep the source open without FILE_SHARE_DELETE.
+    // The final MoveFileExW replacement would then fail only AFTER the costly
+    // Apply/Capture. Detect an unequivocal sharing conflict before staging.
+    // Other DELETE access failures are intentionally non-fatal here: ACLs on
+    // the parent directory can still permit a final atomic replacement.
+    {
+        HANDLE probe=CreateFileW(path.c_str(),DELETE,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+            nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(probe==INVALID_HANDLE_VALUE) {
+            const DWORD failure=GetLastError();
+            if(failure==ERROR_SHARING_VIOLATION ||
+               failure==ERROR_LOCK_VIOLATION)
+                throw EditUnsupported(
+                    "WIM archive is open without delete sharing (Win32 "+
+                    std::to_string(failure)+")");
+        } else CloseHandle(probe);
+    }
     Privileges privileges;Apartment apartment;EditTransaction tx(path);
     WimWorkspaceCleanup scratch{tx.workspace};
     Library library;auto m=library.h;
