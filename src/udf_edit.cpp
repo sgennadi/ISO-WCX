@@ -694,6 +694,7 @@ public:
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
     updated_integrity_delta(std::uint32_t files,std::uint32_t dirs,
                             std::uint32_t deleted_files,
+                            std::uint32_t deleted_dirs,
                             std::uint64_t allocated,
                             std::uint64_t reclaimed) const {
         need(integrity_.has_value(),"UDF LVID is absent");
@@ -717,11 +718,12 @@ public:
             need(deleted_files<=old_files &&
                  std::uint64_t(old_files-deleted_files)+files<=
                      std::numeric_limits<std::uint32_t>::max() &&
-                 std::uint64_t(old_dirs)+dirs<=
+                 deleted_dirs<=old_dirs &&
+                 std::uint64_t(old_dirs-deleted_dirs)+dirs<=
                      std::numeric_limits<std::uint32_t>::max(),
                  "UDF LVID file/directory count would overflow or underflow");
             put32(b,120,old_files-deleted_files+files);
-            put32(b,124,old_dirs+dirs);
+            put32(b,124,old_dirs-deleted_dirs+dirs);
         }
         tag_update(b,0,88u+integrity_->impl_bytes);
         return {integrity_->at,std::move(b)};
@@ -729,7 +731,7 @@ public:
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
     updated_integrity_batch(std::uint32_t files,std::uint32_t dirs,
                             std::uint32_t allocated_blocks) const {
-        return updated_integrity_delta(files,dirs,0u,allocated_blocks,0u);
+        return updated_integrity_delta(files,dirs,0u,0u,allocated_blocks,0u);
     }
     [[nodiscard]] std::pair<std::uint64_t,Bytes>
     updated_integrity(bool directory,std::uint32_t reserved_blocks=1) const {
@@ -1729,12 +1731,31 @@ void write_udf_existing_replacement(std::fstream& out,const File& target,
 void validate_udf_existing_change(const Type1& volume,
                                   const ArchiveChange& change) {
         const auto name=edit_path(change.path);
-        need(!change.directory,"UDF directory creation/deletion not yet supported");
-        const auto it=volume.files().find(name);
-        need(it!=volume.files().end(),"UDF only supports existing files");
-        const auto& target=it->second;
-        need(target.fe.type==5,
-             "UDF deletion or replacement of a directory is unsupported");
+        const auto file_it=volume.files().find(name);
+        const auto dir_it=volume.directory_links().find(name);
+        const bool directory=dir_it!=volume.directory_links().end();
+        need(file_it!=volume.files().end() || directory,
+             "UDF existing edit target does not exist");
+        need(directory?change.remove:!change.directory,
+             "UDF only supports removing empty directories, not replacing them");
+        const auto& target=directory?dir_it->second:file_it->second;
+        need(target.fe.type==(directory?4u:5u),
+             "UDF existing entry type does not match namespace");
+        if(directory) {
+            need(volume.has_bitmap(),
+                 "UDF empty directory deletion needs bitmap/LVID");
+            const auto prefix=name+"/";
+            for(const auto& [key,entry]:volume.files()) {
+                (void)entry;
+                need(!key.starts_with(prefix),
+                     "UDF directory is not empty (contains a file)");
+            }
+            for(const auto& [key,entry]:volume.directories()) {
+                (void)entry;
+                need(!key.starts_with(prefix),
+                     "UDF directory is not empty (contains a subdirectory)");
+            }
+        }
         // A differently named UDF alias can point at an ISO-owned file.
         // Refuse changes and reclamation before the expensive staged copy.
         need(!volume.overlaps_external(target.fe.at,block),
