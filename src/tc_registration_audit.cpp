@@ -151,7 +151,16 @@ std::filesystem::path export_tc_registration_audit() noexcept {
               profile(cache,L"PackerPlugins64",L"exts"):L"";
         put(out,std::wstring(L"Derived 64-bit [PackerPlugins64] exts: ")+
                 (exts.empty()?L"not found":L"present"));
-        for(const wchar_t* extension:{L"wim",L"iso",L"udf",L"esd",L"swm"}) {
+        // Match Configure's channel-specific registrations. Preview's
+        // legacy disk containers never advertise F5/Delete.
+#if defined(ISO_WCX_RC_NUMBER) && ISO_WCX_RC_NUMBER > 0
+        constexpr std::array extensions{
+            L"wim",L"iso",L"udf",L"esd",L"swm",L"fdi",L"hdi",L"nhd"
+        };
+#else
+        constexpr std::array extensions{L"wim",L"iso",L"udf",L"esd",L"swm"};
+#endif
+        for(const wchar_t* extension:extensions) {
             const std::wstring value=profile(associations,L"PackerPlugins",extension);
             put(out,L"");
             put(out,L"["+std::wstring(extension)+L"]");
@@ -163,8 +172,9 @@ std::filesystem::path export_tc_registration_audit() noexcept {
             put(out,L"Entry: "+value);
             const unsigned mask=tc_association::flags(value);
             put(out,L"Capabilities: "+std::to_wstring(mask));
-            const bool editable=std::wstring_view(extension)!=L"esd" &&
-                                std::wstring_view(extension)!=L"swm";
+            const auto kind=std::wstring_view(extension);
+            const bool editable=kind==L"wim" || kind==L"iso" ||
+                                kind==L"udf";
             if(editable&&!tc_association::can_edit(mask))
                 put(out,L"ERROR: WCX registration DISABLES F5/Delete (MODIFY/DELETE flags missing).");
             else if(editable) {
@@ -175,12 +185,19 @@ std::filesystem::path export_tc_registration_audit() noexcept {
                     put(out,L"HOST F5 MASK: 159 (tested in Total Commander 11.58.1).");
             }
             else {
-                put(out,L"ESD/SWM: read-only; no F5/Delete expected.");
+                if(kind==L"esd" || kind==L"swm")
+                    put(out,L"ESD/SWM: read-only; no F5/Delete expected.");
+                else
+                    put(out,L"FDI/HDI/NHD: read-only; no F5/Delete expected.");
                 if(mask!=192)
-                    put(out,L"WARNING: read-only ESD/SWM should use capabilities 192.");
+                    put(out,L"WARNING: read-only WCX association should use capabilities 192.");
             }
-            if(tc_association::can_create(mask))
-                put(out,L"NOTE: NEW archive bit enabled; ISO-WCX does not create WIMs from scratch.");
+            if(tc_association::can_create(mask)) {
+                if(editable)
+                    put(out,L"NOTE: NEW bit permits tested TC F5 dispatch; archive creation is unsupported.");
+                else
+                    put(out,L"WARNING: NEW bit is unexpected for a read-only WCX association.");
+            }
             const auto delimiter=value.find(L',');
             if(delimiter==value.npos){
                 put(out,L"ERROR: Missing comma/path in PackerPlugins entry.");
