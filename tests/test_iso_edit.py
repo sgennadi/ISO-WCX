@@ -42,6 +42,36 @@ def fixture(joliet=False, boot=False, boot_efi=False):
     return b
 
 
+def emulated_boot_fixture(media=2, *, visible=True, valid=True):
+    """An independent, bounded floppy/HDD file referenced by El Torito.
+
+    Media 1/2/3 denote floppy images, media 4 denotes hard-disk emulation.
+    A boot-load size of 1 sector deliberately does not describe the full disk.
+    """
+    sizes={1:1200*1024, 2:1440*1024, 3:2880*1024, 4:1024*1024}
+    size=sizes[media]
+    b=fixture(boot=True)
+    start=25*B
+    b.extend(bytes(max(0,start+size-len(b))))
+    if visible:
+        dots=iso_record(20,B,2,bytes([0]))+iso_record(20,B,2,bytes([1]))
+        existing=iso_record(21,5,0,b'HELLO.TXT;1')
+        boot_file=iso_record(25,size if valid else size-512,0,b'EMUBOOT.IMG;1')
+        directory=dots+existing+boot_file
+        b[20*B:21*B]=bytes(B)
+        b[20*B:20*B+len(directory)]=directory
+    b[24*B+33]=media
+    struct.pack_into('<H',b,24*B+38,1)  # one initial 512-byte sector
+    if media==4 and valid:
+        mbr=25*B
+        b[mbr+510:mbr+512]=bytes((0x55,0xaa))
+        b[mbr+446]=0x80
+        b[mbr+450]=0x06
+        struct.pack_into('<II',b,mbr+454,1,size//512-1)
+    both(b,16*B+80,len(b)//B)
+    return b
+
+
 def read_image(path, joliet=False):
     data=path.read_bytes();sector=17 if joliet else 16
     root=data[sector*B+156:sector*B+190];out={}
@@ -230,6 +260,29 @@ def main(binary, reader=None):
         run('add','EFI_DATA.TXT')
         assert image.read_bytes()[17*B:18*B]==before[17*B:18*B], 'El Torito boot descriptor changed'
         assert image.read_bytes()[24*B:27*B]==before[24*B:27*B], 'BIOS/EFI boot data changed'
+        # Emulated El Torito floppy/HDD images require a FULL ISO-visible
+        # extent. The initial 512-byte SectorCount is not the disk length.
+        # F5 on unrelated files is safe; modifying the boot disk is not.
+        for media in (1,2,3,4):
+            image.write_bytes(emulated_boot_fixture(media))
+            protected=image.read_bytes()
+            protected_boot=protected[24*B:]
+            run('add','EMULATION_SAFE.TXT')
+            assert read_image(image)['EMULATION_SAFE.TXT']==source.read_bytes()
+            assert image.read_bytes()[24*B:24*B+len(protected_boot)]==protected_boot, (
+                'El Torito emulated disk or catalog changed during F5')
+            run('delete','EMUBOOT.IMG',False)
+            run('add','EMUBOOT.IMG',False)
+            run('cancel','CANCELLED.TXT',False)
+        for media,visible,valid in (
+                (1,False,True), (2,True,False), (4,True,False)):
+            image.write_bytes(emulated_boot_fixture(media,visible=visible,valid=valid))
+            run('add','MUST_REFUSE.TXT',False)
+        # A hard-disk MBR partition extending past its ISO file is unsafe.
+        damaged=emulated_boot_fixture(4)
+        struct.pack_into('<II',damaged,25*B+454,1,0xffffffff)
+        image.write_bytes(damaged)
+        run('add','INVALID_HDD.TXT',False)
         # The payload of a boot image may be embedded in a file extent
         # whose first LBA is NOT the catalog or the image's first LBA.
         b=fixture(boot=True)
