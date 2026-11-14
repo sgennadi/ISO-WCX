@@ -57,6 +57,44 @@ int wmain(){
             "$checksum$=deadbeef\r\n";
         write_text(path,initial);
         const auto original=read(path);
+        // Regression: rundll32 supplies an argument fragment and may keep
+        // leading spaces/tabs, including for paths with spaces and Unicode.
+        // This previously produced an empty first argv entry and broke F5
+        // association repair before the worker could wait for TC to close.
+        const std::wstring test_ini=L"C:\\Users\\Example User\\AppData\\Roaming\\GHISLER\\wincmd.ini";
+        const std::wstring test_plugin=L"C:\\Program Files\\TotalCmd\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx";
+        const std::wstring quoted=L"\"" + test_ini + L"\" \"" + test_plugin + L"\"";
+        for(const auto prefix:{L"",L" ",L"    ",L"\t ",L" \t\r\n"}) {
+            const auto parsed=iso_wcx::parse_association_worker_arguments(
+                std::wstring(prefix)+quoted);
+            require(parsed.ini.wstring()==test_ini &&
+                    parsed.plugin32.wstring()==test_plugin &&
+                    !parsed.replace_legacy_iso,
+                    "rundll32 leading-whitespace arguments were misparsed");
+            const auto legacy=iso_wcx::parse_association_worker_arguments(
+                std::wstring(prefix)+quoted+L" --legacy-iso");
+            require(legacy.ini.wstring()==test_ini &&
+                    legacy.plugin32.wstring()==test_plugin &&
+                    legacy.replace_legacy_iso,
+                    "rundll32 legacy-ISO option was lost");
+        }
+        const std::wstring unicode_ini=
+            L"C:\\Users\\Лаборатория\\wincmd.ini";
+        const auto parsed_unicode=iso_wcx::parse_association_worker_arguments(
+            L"\t \"" + unicode_ini + L"\" \"" + test_plugin + L"\"");
+        require(parsed_unicode.ini.wstring()==unicode_ini,
+                "rundll32 Unicode INI argument was corrupted");
+        const auto must_reject=[](std::wstring_view arguments) {
+            try{
+                (void)iso_wcx::parse_association_worker_arguments(arguments);
+                return false;
+            }catch(const std::exception&){return true;}
+        };
+        require(must_reject(L"") && must_reject(L"  ") &&
+                must_reject(L"\"only-one-arg\"") &&
+                must_reject(quoted+L" --unknown-flag") &&
+                must_reject(quoted+L" --legacy-iso extra"),
+                "malformed rundll32 arguments were accepted");
         auto preview=preview_association_fix(path,dll);
         require(preview.changes==4 && preview.conflicts==0,
                 "missing ISO and stale masks must be detected");

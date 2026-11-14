@@ -466,6 +466,32 @@ void report_worker(std::wstring status){
 }
 } // namespace
 
+AssociationWorkerArguments parse_association_worker_arguments(
+        std::wstring_view arguments) {
+    if(arguments.size()>16000 || arguments.find(L'\0')!=arguments.npos)
+        fail("Invalid association worker arguments");
+    // rundll32 forwards only the part after the exported function name.
+    // In particular it can start with whitespace; CommandLineToArgvW
+    // would then insert an *empty* argv[0], changing the argument count.
+    // Supplying a fixed, synthetic program name makes quote parsing
+    // deterministic and also avoids argv[0]'s special executable-path
+    // rules for the first actual INI argument.
+    std::wstring command=L"ISO-WCX-Worker.exe ";
+    command.append(arguments);
+    int argc=0;
+    LPWSTR* argv=CommandLineToArgvW(command.c_str(),&argc);
+    if(!argv)fail("Invalid association worker arguments");
+    struct FreeArgs {
+        LPWSTR* value;
+        ~FreeArgs(){LocalFree(value);}
+    } cleanup{argv};
+    if((argc!=3 && argc!=4) ||
+       (argc==4 && std::wstring_view(argv[3])!=L"--legacy-iso") ||
+       !argv[1][0] || !argv[2][0])
+        fail("Invalid association worker arguments");
+    return {fs::path(argv[1]),fs::path(argv[2]),argc==4};
+}
+
 AssociationFixPlan preview_association_fix(
         const fs::path& ini,const fs::path& plugin32,
         bool replace_legacy_iso){
@@ -562,8 +588,11 @@ bool offer_association_fix(HWND parent,HINSTANCE plugin,bool russian,
                 CREATE_NEW_PROCESS_GROUP,nullptr,nullptr,&si,&pi))
             fail("Cannot start built-in Windows association repair worker");
         CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
-        status=russian?L"Запланировано. Закройте все окна Total Commander."
-                      :L"Fix scheduled. Close all Total Commander windows.";
+        status=russian?
+            L"Обработчик запущен. Закройте все окна Total Commander. "
+            L"Результат будет сохранён в ISO-WCX\\Reports.":
+            L"Repair worker started. Close all Total Commander windows. "
+            L"The result will be saved in ISO-WCX\\Reports.";
         return true;
     }catch(const std::exception& e){
         status=L"Association fix unavailable: ";
@@ -576,17 +605,10 @@ bool offer_association_fix(HWND parent,HINSTANCE plugin,bool russian,
 void run_association_fix_worker(HINSTANCE module, std::wstring_view arguments) noexcept {
     std::wstring status;
     try{
-        std::wstring command(arguments);
-        int argc=0;
-        LPWSTR* argv=CommandLineToArgvW(command.c_str(),&argc);
-        if(!argv || (argc!=2 && argc!=3) ||
-           (argc==3 && std::wstring_view(argv[2])!=L"--legacy-iso")){
-            if(argv)LocalFree(argv);
-            fail("Invalid association worker arguments");
-        }
-        const bool replace_legacy_iso=argc==3;
-        const fs::path ini(argv[0]),binary(argv[1]);
-        LocalFree(argv);
+        const auto request=parse_association_worker_arguments(arguments);
+        const bool replace_legacy_iso=request.replace_legacy_iso;
+        const fs::path& ini=request.ini;
+        const fs::path& binary=request.plugin32;
         if(!safe_file(binary) || !safe_file(binary.parent_path()/L"ISO-WCX.wcx64"))
             fail("Installed ISO-WCX plugin was removed before repair");
         // The worker must come from the exact installed WCX directory that
