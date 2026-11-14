@@ -376,6 +376,15 @@ int wmain(int argc,wchar_t** argv) {
         if(repeated_rc!=24 || load(original)!=before_invalid_batch)
             return 49;
         if(!clean_wim_workspaces())return 40;
+        // Windows ordinal case-insensitive matching must also reject
+        // non-ASCII aliases, not just A/a or other ASCII differences.
+        write(incoming/L"\\u00c4.TXT","unicode-case-collision");
+        wchar_t repeated_unicode[]=L"\\u00c4.TXT\\0\\u00e4.txt\\0\\0";
+        const int unicode_rc=pack(packed.data(),sub.data(),src.data(),
+                                   repeated_unicode,0);
+        if(unicode_rc!=24 || load(original)!=before_invalid_batch)
+            return 51;
+        if(!clean_wim_workspaces())return 40;
         // This can happen when TC selects imageN and a child together for
         // Delete. Silently deleting the index while ignoring its child edit
         // is not an acceptable completed transaction.
