@@ -101,13 +101,23 @@ VirtualArchive::VirtualArchive(const std::filesystem::path& image)
     }
     constexpr std::size_t max_items = 100000;
     if (partitions.empty()) {
+        auto suffix=image.extension().string();
+        std::transform(suffix.begin(),suffix.end(),suffix.begin(),
+            [](unsigned char c){return static_cast<char>(std::tolower(c));});
         const bool anex_floppy =
             disk_.format() == VirtualDiskFormat::anex86_fdi_hdi &&
-            image.extension() == ".fdi";
+            suffix == ".fdi";
         require(disk_.format() == VirtualDiskFormat::raw_image ||
                 disk_.format() == VirtualDiskFormat::compressed_floppy ||
                 anex_floppy,
                 "virtual disk has no validated MBR/GPT partition table");
+        if(anex_floppy) {
+            const auto boot=disk_.read(0,512);
+            const auto declared=static_cast<unsigned>(boot[11]) |
+                                (static_cast<unsigned>(boot[12])<<8);
+            require(declared==sector,
+                    "Anex86 FDI sector size differs from FAT BPB");
+        }
         auto volume = std::make_unique<FatVolume>(disk_, 0, disk_.size());
         auto files = volume->list();
         require(files.size() <= max_items,
