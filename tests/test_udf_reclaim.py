@@ -311,8 +311,37 @@ def check_empty_directory_reclaim(editor, inspector, root):
     no_temp(root)
     run(editor, image, "delete", "docs", success=False)
     no_temp(root)
+
+    # A large FID directory spills into a ShortAD block. The old parent
+    # extent must remain valid while the child folder's own FE is released.
+    image.write_bytes(bitmap_image())
+    names = [f"E{i:02d}-" + "x" * 65 + ".dir" for i in range(18)]
+    for name in names:
+        run(editor, image, "mkdir", name)
+    external = image.read_bytes()
+    assert (struct.unpack_from("<H", external, ROOT + 34)[0] & 7) == 0, (
+        "root did not spill to ShortAD")
+    victim = names[-1]
+    external_regions = file_regions(external, victim)
+    old_parent_lba = get32(external, ROOT + 180)
+    old_free = get32(external, LVID + 80)
+    run(editor, image, "delete", victim)
+    new = image.read_bytes()
+    assert (struct.unpack_from("<H", new, ROOT + 34)[0] & 7) == 0
+    assert get32(new, ROOT + 180) == old_parent_lba
+    assert get32(new, LVID + 80) == old_free + len(
+        all_sectors(external_regions))
+    verify_scrub(new, external_regions)
+    _, _, lba, flags = fid(new, victim)
+    assert flags & 4 and lba == 0
+    out = root / "external-dir-output"
+    run(inspector, image, "--extract", out)
+    assert not (out / victim).exists()
+    assert (out / names[0]).is_dir()
+    assert (out / "hello").read_bytes() == b"world"
+    no_temp(root)
     print("PASS empty-directory Delete: tombstone, unique FE reclaim, "
-          "LVID, mixed batch, nonempty refusal, nested directory readback",
+          "LVID, mixed batch, nonempty refusal, nested + ShortAD parent readback",
           flush=True)
 
 
