@@ -253,8 +253,7 @@ public:
             need(allow_udf_bridge || !udf_bridge,
                  "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         }
-        // Hybrid MBR support is restricted to a UDF byte-only writer.
-        // Check this AFTER even the declared-volume-end AVDP has been probed.
+        // Inspect UDF anchors before classifying a hybrid MBR image.
         // Hybrid ISO without UDF is parsed only for the strictly
         // same-size, no-metadata writer in edit_iso(). No ISO rebuild
         // or partition-table update is permitted for these images.
@@ -694,6 +693,9 @@ void edit_iso_hybrid_equal_length(
     }
     unchanged.protect(end,image.size-end);
     unchanged.verify(path,tx.output,progress);
+    // Close both verification streams before MoveFileExW. An open staged
+    // stream can deny FILE_SHARE_DELETE and prevent the atomic rename.
+    {
     std::ifstream staged(tx.output,std::ios::binary);
     need(bool(staged),"cannot read staged hybrid ISO");
     std::vector<char> first(data.size()),second(data.size());
@@ -714,6 +716,7 @@ void edit_iso_hybrid_equal_length(
                  "staged hybrid file differs from its F5 source");
             left-=static_cast<std::uint64_t>(n);
         }
+    }
     }
     tx.commit(progress);
 }
