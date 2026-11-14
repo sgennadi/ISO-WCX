@@ -13,6 +13,8 @@ import tempfile
 
 from test_native_vhdx import make_image
 from test_virtual_fat import build_disk, make_fixed_vhd
+from test_totalimage_legacy_containers import anex86, nhd
+from test_floppy_edit import floppy_image
 
 
 def run(executable: pathlib.Path, *args: object, ok: bool = True) -> str:
@@ -63,6 +65,12 @@ def main(executable: pathlib.Path, wcx_dll: pathlib.Path | None = None,
                 vhd = root / "fixed.vhd"
                 make_fixed_vhd(raw, vhd)
                 check(vhd, expected, root / "extracted-vhd")
+                fdi_hdd = root / "anex86.hdi"
+                nhd_hdd = root / "t98-next.nhd"
+                fdi_hdd.write_bytes(anex86(raw.read_bytes(), floppy=False))
+                nhd_hdd.write_bytes(nhd(raw.read_bytes()))
+                check(fdi_hdd, expected, root / "extracted-anex86-hdi")
+                check(nhd_hdd, expected, root / "extracted-t98-nhd")
             if kind == "fat12":
                 raw_bytes = raw.read_bytes()
                 fixed = root / "fixed.vhdx"
@@ -71,6 +79,16 @@ def main(executable: pathlib.Path, wcx_dll: pathlib.Path | None = None,
                 dynamic.write_bytes(make_image(raw_bytes, fixed=False))
                 check(fixed, expected, root / "extracted-vhdx")
                 check(dynamic, expected, root / "extracted-dynamic-vhdx")
+
+        # FDI is a headered superfloppy; its root has no partition1 prefix.
+        # Our TC-compatible Disc path must still expose genuine FAT content.
+        fdi = root / "anex86.fdi"
+        fdi.write_bytes(anex86(floppy_image(), floppy=True))
+        listing = run(executable, fdi)
+        assert "HELLO.TXT" in listing and "TESTDIR/NESTED.TXT" in listing
+        run(executable, fdi, "--extract", root / "extracted-anex86-fdi")
+        assert (root / "extracted-anex86-fdi" / "HELLO.TXT").read_bytes() == (
+            b"Hello floppy")
 
         # A broken FAT file chain must not replace an existing destination,
         # and must leave no .iso-wcx staging file after the failed extraction.
