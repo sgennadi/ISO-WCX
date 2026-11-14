@@ -117,6 +117,12 @@ def main(reader: pathlib.Path, partition_reader: pathlib.Path) -> None:
         bad = bytearray(nhd(hard_disk))
         struct.pack_into("<I", bad, 272, 0x7FFFFFFF)
         negative(reader, root / "invalid.nhd", bytes(bad), root)
+        # The parser must not interpret the last 256 bytes of the NHD
+        # descriptor as disk data, even if the total physical length
+        # is forged to agree with a bogus 256-byte header.
+        bad = bytearray(nhd(hard_disk)[:-256])
+        struct.pack_into("<I", bad, 272, 256)
+        negative(reader, root / "invalid.nhd", bytes(bad), root)
         bad = bytearray(nhd(hard_disk))
         struct.pack_into("<H", bad, 284, 1024)
         negative(reader, root / "invalid.nhd", bytes(bad), root)
