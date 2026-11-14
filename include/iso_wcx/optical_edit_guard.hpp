@@ -29,8 +29,27 @@ public:
     void verify(const std::filesystem::path& original,
                 const std::filesystem::path& staged,
                 const EditProgress& progress = {}) const {
-        if(std::filesystem::file_size(original)!=size_ ||
-           std::filesystem::file_size(staged)!=size_)
+        verify_ranges(original,staged,progress,false);
+    }
+
+    // A plain ISO9660/Joliet rebuild appends new filesystem records after the
+    // original image. Validate unchanged immutable ranges within the original
+    // prefix while permitting only growth, never truncation. All staging still
+    // occurs in a private transaction followed by an atomic commit.
+    void verify_appended(const std::filesystem::path& original,
+                         const std::filesystem::path& staged,
+                         const EditProgress& progress = {}) const {
+        verify_ranges(original,staged,progress,true);
+    }
+
+private:
+    void verify_ranges(const std::filesystem::path& original,
+                       const std::filesystem::path& staged,
+                       const EditProgress& progress,bool allow_growth) const {
+        const auto original_size=std::filesystem::file_size(original);
+        const auto staged_size=std::filesystem::file_size(staged);
+        if(original_size!=size_ ||
+           (allow_growth ? staged_size<size_ : staged_size!=size_))
             throw EditUnsupported("staged optical size differs from original");
         auto protected_ranges=ranges_;
         std::sort(protected_ranges.begin(),protected_ranges.end());
@@ -80,7 +99,6 @@ public:
         }
     }
 
-private:
     std::uint64_t size_;
     std::vector<std::pair<std::uint64_t,std::uint64_t>> ranges_;
 };

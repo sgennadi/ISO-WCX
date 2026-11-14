@@ -37,6 +37,27 @@ int main() {
         guard.protect(10240,1024); // Adjacent regions merge
         guard.verify(original,staged);
 
+        // ISO9660 append-only writer grows the file, but all original boot
+        // descriptor/catalog/image bytes must remain identical.
+        altered=bytes+std::string(2048,'N');
+        altered[4500]='X'; // unprotected original-prefix metadata
+        put(staged,altered);
+        guard.verify_appended(original,staged);
+        altered[8192]='B'; // protected boot payload within original prefix
+        put(staged,altered);
+        bool append_refused=false;
+        try{guard.verify_appended(original,staged);}
+        catch(const iso_wcx::EditUnsupported&){append_refused=true;}
+        require(append_refused,"append-only guard accepted changed boot image");
+        altered=bytes.substr(0,bytes.size()-1);
+        put(staged,altered);
+        append_refused=false;
+        try{guard.verify_appended(original,staged);}
+        catch(const iso_wcx::EditUnsupported&){append_refused=true;}
+        require(append_refused,"append-only guard accepted truncated original");
+
+        altered=bytes;
+        put(staged,altered);
         altered[8192]='B'; // First byte of an immutable boot image
         put(staged,altered);
         bool refused=false;

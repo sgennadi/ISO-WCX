@@ -10,7 +10,8 @@ USB/CD metadata.
 
 | Optical layout | Add/delete/resize | Same-length replacement |
 | --- | --- | --- |
-| Validated nonhybrid ISO9660 / Joliet, optional El Torito | Native transactional rebuild, subject to boot-extent and name checks | Native transactional rebuild |
+| Validated nonhybrid ISO9660 / Joliet, optional no-emulation El Torito | Native transactional rebuild, subject to boot-extent and name checks | Native transactional rebuild |
+| Nonhybrid ISO9660 / Joliet + El Torito floppy/HDD emulation | **Preview:** add/delete/replace unrelated files only, with full boot-disk extent and MBR safety checks | Same limits; boot image files themselves immutable |
 | Same layout with a bounded **all-zero** trailing pad | Preview native rebuild; PVD/Joliet sizes are synchronized | Preview native rebuild |
 | Standalone UDF Type-1 2048-byte images | Limited native writer Preview, gated by UDF format validations | Limited native writer Preview |
 | ISO/UDF Bridge without boot catalog | Not supported | Preview: single contiguous existing UDF or shared ISO/UDF file, exactly same length; both namespaces validated |
@@ -22,6 +23,34 @@ USB/CD metadata.
 These are *capability preconditions*, not blanket promises for any disc.
 For individual archive failures, the WCX adapter records the native refusal
 reason in `%LOCALAPPDATA%\ISO-WCX\Logs\edit-errors.log`.
+
+## El Torito floppy and hard-disk emulation (v0.21.2 Preview)
+
+The plain ISO9660/Joliet writer no longer rejects **El Torito media types
+1/2/3/4** merely because the boot catalog declares disk emulation.
+This is not permission to edit the boot image itself:
+
+- Floppy emulation requires the referenced LBA to start at an ISO-visible,
+  single-extent file of the **exact** 1.2, 1.44 or 2.88 MiB media size.
+- Hard-disk emulation requires an ISO-visible, 512-byte-aligned full file
+  with a valid MBR signature and bounded non-GPT partition entries.
+- El Torito's `SectorCount` is only the initial 512-byte BIOS load. It
+  does **not** bound the full emulated disk; hidden, conflicting, out-of-range
+  and otherwise ambiguous images are rejected before editing.
+- Original boot descriptor, raw boot catalog, system area and the **entire
+  emulated floppy/HDD file extent** are immutable. The staged ISO is
+  re-parsed and checked against the original protected byte ranges before
+  the final atomic replacement.
+- Unrelated ISO-visible F5 add/replace, Delete and directory edits may
+  work after all ISO/Joliet and boot preflight validations pass. The
+  referenced boot image file itself cannot be replaced or removed.
+- Rock Ridge, ISO/UDF Bridge metadata remaster, GPT/isohybrid layouts,
+  unknown system area and unverifiable boot metadata remain guarded.
+
+Tests include independently generated emulation catalogs from xorriso,
+the native ISO editor's transactional rollback and Win32/x64 WCX runs.
+**This is still a Draft Preview**: preserving byte-identical boot data
+cannot certify bootability of a modified real machine image.
 
 ## AOMEI Partition Assistant 10.12.2 WinPE field-report profile (2026-11-04)
 
@@ -112,6 +141,36 @@ a Stable release.
    structures and boot signatures before atomic commit.
 6. Report progress/cancellation through WCX. Keep the original unchanged on
    unsupported inputs, cancellation and verification failure.
+
+## El Torito floppy and hard-disk emulation (experimental Preview)
+
+The plain ISO9660/Joliet native rebuild now recognizes boot catalog media types
+1 (1.2 MiB floppy), 2 (1.44 MiB floppy), 3 (2.88 MiB floppy), and 4
+(hard-disk emulation), in addition to no-emulation type 0. Previously F5 was
+immediately refused on any emulated boot entry.
+
+An emulated boot LBA **must** be the first sector of a regular ISO9660 file
+extent; a hidden, ambiguous or partially mapped disk is not writable. Floppy
+file size must precisely match the declared media type. Hard-disk images must
+be 512-byte aligned, carry a valid MBR signature and have bounded, consistent
+MBR primary partition entries; protective GPT and malformed partitions are
+not accepted. The boot catalog's 512-byte SectorCount records initial loader
+sectors only, **never** the full floppy/HDD disk length.
+
+Only edits to unrelated ISO files and directories are permitted. Boot image
+replacement, deletion, or edits to a containing directory are still refused.
+The append-only writer compares the original system area, boot descriptors,
+boot catalog, **entire emulated boot image file extents** and initial loader
+ranges byte-for-byte before commit. This works with an ISO9660/Joliet image
+only; ISO/UDF Bridge, Rock Ridge and hybrid system areas keep their existing
+stricter constraints. Reparse and boundedness failures leave the original
+image unchanged.
+
+Synthetic regressions cover positive unrelated-file F5 for all four media
+types and negative tests for unlisted boot images, wrong floppy size, missing
+HDD MBR, out-of-bounds MBR partitions, and attempts to modify boot images.
+These prove guarded byte preservation, not real BIOS/UEFI bootability. The
+feature must remain Preview pending CI and disposable-machine boot testing.
 
 ## Independently mastered El Torito regression
 
