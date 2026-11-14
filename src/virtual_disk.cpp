@@ -174,6 +174,11 @@ VirtualDiskReader::VirtualDiskReader(const std::filesystem::path& image) {
                 header[15]==0,
                 "invalid T98-Next NHD signature");
         const auto header_size=le32(header.data()+272);
+        // NHD stores its CHS/sector metadata inside the mandatory first
+        // 512 bytes. A shorter advertised header must never let those
+        // descriptor bytes become visible as logical disk-sector data.
+        require(header_size>=header.size(),
+                "T98-Next NHD data overlaps the 512-byte metadata header");
         const auto geometry=validate_headered_disk(
             physical_length,header_size,physical_length>=header_size?
             physical_length-header_size:0u,
