@@ -90,7 +90,7 @@ def main(reader: pathlib.Path, partition_reader: pathlib.Path) -> None:
             contents(reader, image, fat16, "partition1/",
                      root / ("unpacked-" + suffix))
             layout = run(partition_reader, image).stdout.decode("utf-8")
-                assert "2048" in layout and "16384" in layout, layout
+            assert "2048" in layout and "16384" in layout, layout
             assert image.read_bytes() == image_bytes
 
         # Neither an implausible CHS map nor padding outside the data can be
