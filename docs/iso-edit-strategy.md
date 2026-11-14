@@ -16,6 +16,7 @@ USB/CD metadata.
 | Standalone UDF Type-1 2048-byte images | Preview F5, F7, Delete files and **empty directories**, gated by strict bitmap/FE/FID/LVID validation | Limited native writer Preview |
 | ISO/UDF Bridge without boot catalog | Not supported | Preview: single contiguous existing UDF or shared ISO/UDF file, exactly same length; both namespaces validated |
 | Bootable ISO/UDF Bridge | **Preview:** UDF-only F5 add, Delete files/**empty UDF directories**, F7 and bounded resize when strict Type-1 bitmap/FE/FID/LVID validation passes and ISO/El Torito remain immutable | Existing contiguous UDF-only or shared-extent equal-size payload replacement; embedded/complex replacements route to the protected UDF writer |
+| Validated conventional **MBR-isohybrid ISO-only** (no UDF) | Blocked: a partition-aware ISO remasterer is required | **Preview:** existing non-boot ISO-visible file, same size only; byte-exact MBR/El Torito/metadata preservation |
 | Validated conventional MBR-isohybrid ISO/UDF Bridge | Metadata edits, adds, deletes and resize blocked | Preview: same-size replacement of a contiguous existing UDF-only file, after protected-region validation |
 | GPT-hybrid or unknown nonzero system area | Not supported | Not supported; preserve boot/partition metadata |
 | Rock Ridge, multi-extent and unrecognized variants | Not supported | Currently blocked if parser cannot guarantee all metadata is preserved |
@@ -23,6 +24,34 @@ USB/CD metadata.
 These are *capability preconditions*, not blanket promises for any disc.
 For individual archive failures, the WCX adapter records the native refusal
 reason in `%LOCALAPPDATA%\ISO-WCX\Logs\edit-errors.log`.
+
+## ISO-only MBR-isohybrid same-length F5 (Preview)
+
+The ISO9660/Joliet writer now recognizes a conventional MBR-isohybrid
+**without UDF** as a restricted payload-patching case. An ISO rebuild or
+append is unsafe because it can change the extent map without updating
+the image's MBR partitions. Only an existing ordinary ISO-visible file
+may be replaced, with **exactly the same size**. F5 addition, Delete,
+directory creation, resize, shared aliases and boot-image replacement
+remain refused; unknown/GPT system areas are still unsupported.
+
+The candidate target must have a unique, bounded file extent, no overlap
+with any ISO directory/other file, path table, volume descriptor or
+El Torito boot range. The entire original optical image is copied to a
+private sibling transaction and only the intended payload extents are
+patched. Both the staged ISO and its boot references are reparsed;
+all bytes outside the changed file ranges (including the full 32-KiB
+system area, MBR, vendor sectors, boot catalog and unused padding) are
+compared against the original. Changed bytes are independently compared
+with every F5 source stream before atomic commit. Cancellation and any
+verification failure discard the private stage without modifying the
+original. Windows' source-identity guard remains mandatory.
+
+Synthetic ISO-only MBR and BIOS/EFI El Torito scenarios are covered,
+including a previously rewritten ISO with path tables, readback,
+same-size enforcement, multi-file batch rollback and refusal to touch
+an emulated boot floppy. Real USB/BIOS/UEFI startup of vendor media
+still requires a separate field test and is **not certified**.
 
 ## Shared source-mutation guard for ISO/WIM (Preview)
 
