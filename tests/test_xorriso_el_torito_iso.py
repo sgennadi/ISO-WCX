@@ -89,7 +89,7 @@ def independently_mastered_emulation(editor: str, xorriso: str, root: pathlib.Pa
             disk[446] = 0x80
             disk[450] = 0x06
             struct.pack_into("<II", disk, 454, 1, size//512-1)
-        disk[510:512] = b"\\x55\\xaa"
+        disk[510:512] = bytes((0x55, 0xaa))
         (boot_folder / "DISK.IMG").write_bytes(disk)
         (source / "OTHER.TXT").write_bytes(b"unchanged")
         image = root / f"independent-emulated-{media}.iso"
