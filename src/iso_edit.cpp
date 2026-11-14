@@ -112,6 +112,14 @@ public:
     std::uint64_t size;
     std::vector<std::pair<std::uint32_t,Bytes>> descriptors;
     std::set<std::uint32_t> boot_lbas;
+    std::set<std::uint32_t> boot_descriptor_lbas;
+    struct BootEntry {
+        std::uint32_t lba=0;
+        std::uint8_t media=0;
+        std::uint16_t initial_512_sectors=0;
+        bool operator==(const BootEntry&) const = default;
+    };
+    std::vector<BootEntry> boot_entries;
     std::vector<std::pair<std::uint64_t,std::uint64_t>> boot_regions;
     bool boot_regions_bounded=true;
     std::set<std::uint32_t> unbounded_boot_lbas;
@@ -217,7 +225,7 @@ public:
         Bytes primary,supplementary;bool end=false;
         for(std::uint32_t lba=16;lba<64;++lba){auto b=read(std::uint64_t(lba)*block,block);need(std::memcmp(b.data()+1,"CD001",5)==0&&b[6]==1,"unsupported ISO descriptors");
             if(b[0]==255){end=true;break;}
-            if(b[0]==0){need(std::memcmp(b.data()+7,"EL TORITO SPECIFICATION",23)==0,"unsupported boot descriptor");boot_catalog(le(b,71));continue;}
+            if(b[0]==0){need(std::memcmp(b.data()+7,"EL TORITO SPECIFICATION",23)==0,"unsupported boot descriptor");boot_descriptor_lbas.insert(lba);boot_catalog(le(b,71));continue;}
             need(b[0]==1||b[0]==2,"unsupported ISO descriptor type");
             if(b[0]==1){need(primary.empty(),"multiple primary descriptors");primary=b;}
             else {need(supplementary.empty()&&b[88]=='%'&&b[89]=='/'&&(b[90]=='@'||b[90]=='C'||b[90]=='E'),"unsupported supplementary descriptor");supplementary=b;joliet=true;}
@@ -284,6 +292,7 @@ public:
         // namespace independently describes the full boot image extent,
         // protect the WHOLE referenced file, not merely the catalog count.
         // Unknown boot images absent from ISO remain strictly read-only.
+        std::set<std::uint32_t> resolved_boot_images;
         std::vector<const Node*> boot_nodes{root.get()};
         while(!boot_nodes.empty()) {
             const Node* node=boot_nodes.back();
@@ -298,9 +307,60 @@ public:
                 if(reference>=start && reference<end) {
                     boot_regions.emplace_back(start,node->size);
                     unbounded_boot_lbas.erase(lba);
+                    for(const auto& entry:boot_entries) {
+                        if(entry.lba!=lba)continue;
+                        need(resolved_boot_images.insert(lba).second,
+                             "El Torito boot image maps to multiple ISO extents");
+                        // SectorCount describes the initial BIOS load, NOT
+                        // the length of an emulated disk or UEFI image.
+                        need(std::uint64_t(entry.initial_512_sectors)*512<=end-reference,
+                             "El Torito initial load exceeds boot image file");
+                        if(!entry.media)continue; // no-emulation has no disk geometry
+                        need(reference==start,
+                             "emulated El Torito image must start at ISO file extent");
+                        if(entry.media<=3) {
+                            constexpr std::uint32_t floppy_sizes[]={
+                                0u,1200u*1024u,1440u*1024u,2880u*1024u};
+                            need(node->size==floppy_sizes[entry.media],
+                                 "emulated El Torito floppy image size disagrees with media");
+                        } else {
+                            need(node->size>=1024u && node->size%512u==0,
+                                 "emulated El Torito hard disk image is not sector aligned");
+                            // A hard-disk-emulated image must be an independently
+                            // bounded ISO file with a self-contained MBR.
+                            // Reject partitions pointing outside that file;
+                            // never infer disk length from SectorCount.
+                            const auto mbr=read(start,512);
+                            need(mbr[510]==0x55 && mbr[511]==0xaa,
+                                 "emulated El Torito hard disk MBR signature missing");
+                            const std::uint64_t sectors=node->size/512u;
+                            bool has_partition=false;
+                            for(unsigned i=0;i<4;++i) {
+                                const auto at=446u+i*16u;
+                                const auto status=mbr[at],type=mbr[at+4u];
+                                const auto first=le(mbr,at+8u);
+                                const auto length=le(mbr,at+12u);
+                                need(status==0 || status==0x80,
+                                     "emulated El Torito hard disk partition flag invalid");
+                                if(type) {
+                                    need(type!=0xee && first && length &&
+                                         first<sectors && length<=sectors-first,
+                                         "emulated El Torito hard disk partition outside image");
+                                    has_partition=true;
+                                } else need(!first && !length,
+                                            "emulated El Torito hard disk empty partition invalid");
+                            }
+                            need(has_partition,
+                                 "emulated El Torito hard disk has no bounded MBR partition");
+                        }
+                    }
                 }
             }
         }
+        for(const auto& entry:boot_entries)
+            if(entry.media)
+                need(resolved_boot_images.contains(entry.lba),
+                     "emulated El Torito boot image is not an ISO-visible file");
         boot_regions_bounded=unbounded_boot_lbas.empty();
     }
     Bytes read(std::uint64_t at,std::size_t count){need(at<=size&&count<=size-at,"ISO extent outside image");Bytes b(count);file.clear();file.seekg(static_cast<std::streamoff>(at));file.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(count));need(bool(file),"ISO read failed");return b;}
@@ -310,19 +370,25 @@ public:
         auto entry=[&](std::size_t at){
             need(b[at]==0||b[at]==0x88,"unsupported boot entry");
             if(b[at]!=0x88)return;
-            need(b[at+1]==0,"emulated boot ISO editing is not supported");
+            const auto media=b[at+1];
+            need(media<=4,"unsupported El Torito boot media type");
             const auto loc=le(b,at+8);
-            need(std::uint64_t(loc)*block<size,"invalid boot image extent");
-            boot_lbas.insert(loc);
-            // El Torito's sector count is expressed in 512-byte units.
-            // An absent count is not an authorization to edit near the
-            // image: bridge writes fail closed until its full span is known.
+            need(loc && std::uint64_t(loc)*block<size,
+                 "invalid boot image extent");
+            // Reject contradictory claims about the same boot LBA.
+            for(const auto& previous:boot_entries)
+                need(previous.lba!=loc || previous.media==media,
+                     "conflicting El Torito boot media for one extent");
             const auto count=le(b,at+6,2);
-            if(!count){
+            boot_entries.push_back({loc,media,static_cast<std::uint16_t>(count)});
+            boot_lbas.insert(loc);
+            // A 512-byte initial load cannot bound the full emulated disk.
+            // Require a separately validated ISO file extent for floppy/HDD.
+            if(media || !count) {
                 boot_regions_bounded=false;
                 unbounded_boot_lbas.insert(loc);
-                return;
             }
+            if(!count)return;
             const auto bytes=(std::uint64_t(count)*512+block-1)/block*block;
             const auto start=std::uint64_t(loc)*block;
             need(bytes<=size-start,"El Torito boot image outside ISO bounds");
@@ -781,6 +847,8 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         }
         return;
     }
+    need(image.boot_regions_bounded,
+         "El Torito full boot image extent cannot be established for safe ISO editing");
     for(const auto& change:changes){auto p=edit_path(change.path);std::istringstream split(p);std::string name;Node* parent=image.root.get();
         std::vector<std::string> parts;while(std::getline(split,name,'/'))parts.push_back(name);
         for(std::size_t i=0;i<parts.size();++i){const bool last=i+1==parts.size();const auto key=upper(parts[i]);auto it=std::find_if(parent->children.begin(),parent->children.end(),[&](const auto& n){return upper(n->logical)==key;});
@@ -851,8 +919,29 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     }
     for(auto& [lba,vd]:image.descriptors){both(vd,80,static_cast<std::uint32_t>(next));out.seekp(std::uint64_t(lba)*block);write(out,vd);}
     out.flush();need(bool(out),"ISO flush failed");out.close();image.file.close();
-    // Reparse the staged namespaces, path tables and retained boot descriptors.
-    {Image verified(tx.output);need(verified.size==next*block,"staged ISO size mismatch");}
+    // Reparse the staged namespaces and reject changed El Torito references
+    // even if the ISO directory metadata itself remains parseable.
+    {
+        Image verified(tx.output);
+        need(verified.size==next*block,"staged ISO size mismatch");
+        need(verified.boot_descriptor_lbas==image.boot_descriptor_lbas &&
+             verified.boot_entries==image.boot_entries &&
+             verified.boot_lbas==image.boot_lbas &&
+             verified.boot_regions==image.boot_regions &&
+             verified.boot_regions_bounded,
+             "El Torito boot references changed in staged ISO");
+    }
+    // The ordinary ISO writer appends data and regenerates PVD/Joliet trees.
+    // It must never alter *any* original system-area, boot descriptor,
+    // boot catalog or full boot-image byte, including emulated floppy/HDD
+    // payloads. Only protected ranges in the original prefix are compared.
+    OpticalEditGuard guard(image.size);
+    guard.protect(0,16ull*block);
+    for(const auto lba:image.boot_descriptor_lbas)
+        guard.protect(std::uint64_t(lba)*block,block);
+    for(const auto& [offset,length]:image.boot_regions)
+        guard.protect(offset,length);
+    guard.verify_appended(path,tx.output,progress);
     tx.commit(progress);
 }
 }
