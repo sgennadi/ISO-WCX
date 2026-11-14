@@ -64,6 +64,9 @@ def emulated_boot_fixture(media=2, *, visible=True, valid=True):
     struct.pack_into('<H',b,24*B+38,1)  # one initial 512-byte sector
     if media==4 and valid:
         mbr=25*B
+        # The base fixture fills this sector with 'B'. Real primary MBR
+        # entries outside the first partition must be zero, not garbage.
+        b[mbr:mbr+512]=bytes(512)
         b[mbr+510:mbr+512]=bytes((0x55,0xaa))
         b[mbr+446]=0x80
         b[mbr+450]=0x06
