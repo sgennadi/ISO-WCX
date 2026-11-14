@@ -408,6 +408,64 @@ public:
         return directory_data(directory);
     }
     [[nodiscard]] bool has_bitmap() const noexcept {return bitmap_.has_value();}
+    // ISO/UDF Bridge: ISO-owned sectors may appear free in the UDF bitmap.
+    // Exclude them only during this transaction, without misreporting the
+    // original bitmap or the independent LVID free-block accounting.
+    void protect_external_ranges(const EditProtectedRanges& physical) {
+        external_blocks_.clear();
+        const auto base=std::uint64_t(partition_)*block;
+        const auto limit=base+std::uint64_t(partition_blocks_)*block;
+        need(physical.size()<=max_items*2u,
+             "ISO/UDF protected range count exceeds safety limit");
+        for(const auto& [at,length]:physical) {
+            need(at<=size_ && length<=size_-at,
+                 "ISO/UDF protected range exceeds image size");
+            if(!length)continue;
+            const auto first=std::max(at,base);
+            const auto last=std::min(at+length,limit);
+            if(first>=last)continue;
+            const auto start=(first-base)/block;
+            const auto end=(last-base+block-1u)/block;
+            need(end<=partition_blocks_ && start<end,
+                 "ISO/UDF protected range has invalid partition bounds");
+            external_blocks_.emplace_back(
+                static_cast<std::uint32_t>(start),
+                static_cast<std::uint32_t>(end));
+        }
+        std::sort(external_blocks_.begin(),external_blocks_.end());
+        std::vector<std::pair<std::uint32_t,std::uint32_t>> merged;
+        for(const auto& range:external_blocks_) {
+            if(!merged.empty() && range.first<=merged.back().second)
+                merged.back().second=std::max(merged.back().second,range.second);
+            else merged.push_back(range);
+        }
+        external_blocks_=std::move(merged);
+    }
+    [[nodiscard]] bool overlaps_external(std::uint64_t at,
+                                          std::uint64_t length) const {
+        if(!length)return false;
+        need(at<=size_ && length<=size_-at,
+             "UDF candidate exceeds image boundary");
+        const auto base=std::uint64_t(partition_)*block;
+        const auto limit=base+std::uint64_t(partition_blocks_)*block;
+        const auto first=std::max(at,base);
+        const auto last=std::min(at+length,limit);
+        if(first>=last)return false;
+        const auto begin=static_cast<std::uint32_t>((first-base)/block);
+        const auto end=static_cast<std::uint32_t>((last-base+block-1u)/block);
+        const auto it=std::lower_bound(
+            external_blocks_.begin(),external_blocks_.end(),begin,
+            [](const auto& interval,std::uint32_t pos) {
+                return interval.second<=pos;
+            });
+        return it!=external_blocks_.end() && it->first<end;
+    }
+    [[nodiscard]] bool allocatable_block(std::uint32_t logical) const {
+        need(bitmap_.has_value(),"UDF allocator requires bitmap");
+        return bitmap_free(*bitmap_,logical) &&
+               !overlaps_external(
+                   (std::uint64_t(partition_)+logical)*block,block);
+    }
     [[nodiscard]] bool is_free(std::uint32_t logical) const {
         need(bitmap_.has_value(),"UDF no bitmap for free-space verification");
         return bitmap_free(*bitmap_,logical);
@@ -424,10 +482,10 @@ public:
              "UDF requested allocation exceeds partition");
         auto& bitmap=*bitmap_;
         for(std::uint32_t start=0;start<bitmap.bits;) {
-            if(!bitmap_free(bitmap,start)){++start;continue;}
+            if(!allocatable_block(start)){++start;continue;}
             std::uint32_t run=0;
             while(run<count && run<bitmap.bits-start &&
-                  bitmap_free(bitmap,start+run))++run;
+                  allocatable_block(start+run))++run;
             if(run==count) {
                 const Location candidate{
                     (std::uint64_t(partition_)+start)*block,
@@ -463,9 +521,9 @@ public:
                             std::greater<Candidate>> best;
         const auto& bitmap=*bitmap_;
         for(std::uint32_t at=0;at<bitmap.bits;) {
-            if(!bitmap_free(bitmap,at)) {++at;continue;}
+            if(!allocatable_block(at)) {++at;continue;}
             const auto start=at;
-            do {++at;} while(at<bitmap.bits && bitmap_free(bitmap,at));
+            do {++at;} while(at<bitmap.bits && allocatable_block(at));
             const Candidate candidate{at-start,start};
             if(best.size()<ad_limit) best.push(candidate);
             else if(candidate.first>best.top().first) {
@@ -695,6 +753,8 @@ private:
     std::map<std::string,Fe> directory_files_;
     std::optional<Bitmap> bitmap_;
     std::optional<Integrity> integrity_;
+    // Sorted, merged half-open Type-1 partition sectors owned by ISO.
+    std::vector<std::pair<std::uint32_t,std::uint32_t>> external_blocks_;
     std::map<std::uint64_t,std::size_t> references_;
     std::set<std::uint64_t> deleted_icbs_;
     std::set<std::uint32_t> directories_;
@@ -1656,6 +1716,14 @@ void validate_udf_existing_change(const Type1& volume,
         const auto& target=it->second;
         need(target.fe.type==5,
              "UDF deletion or replacement of a directory is unsupported");
+        // A differently named UDF alias can point at an ISO-owned file.
+        // Refuse changes and reclamation before the expensive staged copy.
+        need(!volume.overlaps_external(target.fe.at,block),
+             "UDF file descriptor intersects immutable ISO/boot metadata");
+        for(const auto& run:target.fe.runs)
+            need(!volume.overlaps_external(
+                     run.at,std::uint64_t(run.blocks)*block),
+                 "UDF file data intersects immutable ISO/boot extent");
         if(!change.remove) {
             need(std::filesystem::is_regular_file(
                      std::filesystem::symlink_status(change.source)),
@@ -2268,13 +2336,17 @@ void create_udf_type1_batch(const std::filesystem::path& image,
 void edit_udf(const std::filesystem::path& image,
               const std::vector<ArchiveChange>& changes,
               const EditProgress& progress,bool allow_bridge,
-              const EditStageValidator& validate_stage) {
+              const EditStageValidator& validate_stage,
+              const EditProtectedRanges& protected_ranges) {
     edit_tick(progress);
     const Disc before(image);
     need(before.format()=="UDF","not a plain readable UDF volume");
     need(!allow_bridge || bool(validate_stage),
          "ISO/UDF Bridge writes require a staged ISO/boot validator");
     Type1 volume(image,allow_bridge);
+    need(!allow_bridge || !protected_ranges.empty(),
+         "ISO/UDF Bridge metadata writes need protected ISO ranges");
+    volume.protect_external_ranges(protected_ranges);
     need(!changes.empty(),"no UDF changes");
     // A mixed creation/replacement/deletion batch shares one allocator and
     // one atomic image commit. Existing-only edits retain their original
