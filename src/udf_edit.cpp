@@ -404,6 +404,10 @@ public:
     [[nodiscard]] const std::map<std::string,Fe>& directories() const noexcept {
         return directory_files_;
     }
+    // Root has no parent link and is never deletable.
+    [[nodiscard]] const std::map<std::string,File>& directory_links() const noexcept {
+        return directory_links_;
+    }
     [[nodiscard]] Bytes directory_payload(const Fe& directory) {
         return directory_data(directory);
     }
@@ -613,16 +617,17 @@ public:
                        interval.range.bytes==target.bytes;
             }),reserved_.end());
     }
-    // Release only a regular file's exclusively owned FE and recorded
-    // ShortAD sectors. All destination allocations are already planned:
-    // these freed sectors cannot be reused until a later transaction.
-    [[nodiscard]] std::vector<Location> reclaim_file_blocks(const File& file) {
+    // Reclaim a uniquely owned regular file or EMPTY directory. Its parent
+    // FID must first be tombstoned. Blocks stay unavailable in this batch.
+    [[nodiscard]] std::vector<Location> reclaim_entry_blocks(
+            const File& file,bool directory) {
         need(bitmap_ && integrity_,"UDF reclamation needs a closed bitmap/LVID");
         const auto owner=file.fe.at;
         const auto found=references_.find(owner);
-        need(file.fe.type==5 && found!=references_.end() &&
-             found->second==1 && !deleted_icbs_.count(owner),
-             "UDF file has aliases or dangling deleted FID references");
+        need(file.fe.type==(directory?4u:5u) &&
+             found!=references_.end() && found->second==1 &&
+             !deleted_icbs_.count(owner),
+             "UDF entry has aliases or dangling deleted FID references");
         std::vector<Location> reclaimed{{owner,block}};
         for(const auto& run:file.fe.runs) {
             need(run.blocks && run.recorded &&
@@ -755,6 +760,7 @@ private:
     std::uint32_t partition_{},partition_blocks_{};
     std::map<std::string,File> files_;
     std::map<std::string,Fe> directory_files_;
+    std::map<std::string,File> directory_links_;
     std::optional<Bitmap> bitmap_;
     std::optional<Integrity> integrity_;
     // Sorted, merged half-open Type-1 partition sectors owned by ISO.
@@ -910,7 +916,16 @@ private:
                 need(references_[child.at]==1,
                      "hard-linked/multiple referenced UDF entries read-only");
                 if(child.type==4) {
-                    reserved_.push_back({{child.at,block},child.at});
+                    // Recursive walk owns the FE and all ShortAD sectors.
+                    // A duplicate parent reservation would reject safe reclaim.
+                    File link;
+                    link.fe=std::move(child);
+                    link.fid_at=directory.data_at+p;
+                    link.fid_bytes=len;
+                    link.parent_at=directory.at;
+                    link.parent_embedded=directory.storage==3;
+                    need(directory_links_.emplace(path,std::move(link)).second,
+                         "duplicate UDF directory parent link");
                     walk(child_lba,child_map,path,depth+1);
                 } else {
                     reserved_.push_back({{child.at,block},child.at});
