@@ -102,7 +102,10 @@ def main(reader: pathlib.Path, partition_reader: pathlib.Path) -> None:
         struct.pack_into("<I", bad, 12, len(floppy) + 512)
         negative(reader, fdi, bytes(bad), root)
         bad = bytearray(wrapped_fdi)
-        struct.pack_into("<I", bad, 16, 1024)  # BPB and CHS disagree
+        # Keep total CHS byte count valid while changing the sector size:
+        # only the FAT BPB consistency check must now reject this wrapper.
+        struct.pack_into("<I", bad, 16, 1024)
+        struct.pack_into("<I", bad, 20, 9)
         negative(reader, fdi, bytes(bad), root)
         negative(reader, fdi, wrapped_fdi + bytes(512), root)
         bad = bytearray(wrapped_fdi)
