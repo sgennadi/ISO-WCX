@@ -32,8 +32,12 @@ int wmain() {
                <<L"wim=192,"<<(plugin/L"ISO-WCX.wcx").wstring()<<L"\n"
                <<L"iso=158,"<<(plugin/L"ISO-WCX.wcx").wstring()<<L"\n"
                <<L"udf=222,"<<(plugin/L"ISO-WCX.wcx").wstring()<<L"\n"
-               <<L"esd=192,"<<(plugin/L"ISO-WCX.wcx").wstring()<<L"\n"
-               <<L"[PackerPlugins64]\n"
+               <<L"esd=192,"<<(plugin/L"ISO-WCX.wcx").wstring()<<L"\n";
+#if defined(ISO_WCX_RC_NUMBER) && ISO_WCX_RC_NUMBER > 0
+            out<<L"fdi=192,"<<(plugin/L"ISO-WCX.wcx").wstring()<<L"\n"
+               <<L"hdi=192,C:\\Other\\ForeignHDI.wcx\n";
+#endif
+            out<<L"[PackerPlugins64]\n"
                <<L"exts=iso*wim*udf*esd*\n";
         }
         if(!SetEnvironmentVariableW(L"COMMANDER_INI",ini.c_str())||
@@ -59,6 +63,30 @@ int wmain() {
            text.find(L"ESD/SWM: read-only")==text.npos)
             return 5;
         if(text.find(L"STATUS: NOT REGISTERED")==text.npos)return 6; // SWM
+#if defined(ISO_WCX_RC_NUMBER) && ISO_WCX_RC_NUMBER > 0
+        const auto fdi_start=text.find(L"[fdi]");
+        const auto hdi_start=text.find(L"[hdi]");
+        const auto nhd_start=text.find(L"[nhd]");
+        if(fdi_start==text.npos || hdi_start==text.npos ||
+           nhd_start==text.npos || hdi_start<=fdi_start ||
+           nhd_start<=hdi_start ||
+           text.find(L"FDI/HDI/NHD: read-only; no F5/Delete expected.")==text.npos)
+            return 8;
+        const auto fdi=text.substr(fdi_start,hdi_start-fdi_start);
+        if(fdi.find(L"Capabilities: 192")==fdi.npos ||
+           fdi.find(L"EDIT FLAGS:")!=fdi.npos ||
+           fdi.find(L"ERROR: WCX registration DISABLES F5/Delete")!=fdi.npos ||
+           fdi.find(L"read-only WCX association should use capabilities 192")!=fdi.npos)
+            return 9;
+        const auto hdi=text.substr(hdi_start,nhd_start-hdi_start);
+        if(hdi.find(L"ERROR: different/legacy plugin registered") == hdi.npos)
+            return 10; // A foreign handler is reported, not taken over.
+#else
+        if(text.find(L"[fdi]")!=text.npos ||
+           text.find(L"[hdi]")!=text.npos ||
+           text.find(L"[nhd]")!=text.npos)
+            return 8; // Stable cannot advertise Preview disk formats.
+#endif
         std::error_code ignored;
         fs::remove_all(folder,ignored);
         std::cout<<"PASS: TC association report classifies 192/158/222, flags missing SWM and checks x64 DLL\n";
