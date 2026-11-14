@@ -39,6 +39,12 @@ int main(int argc,char** argv) {
             case iso_wcx::VirtualDiskFormat::vhdx:
                 container="VHDX (native read-only)";
                 break;
+            case iso_wcx::VirtualDiskFormat::anex86_fdi_hdi:
+                container="Anex86 FDI/HDI (native read-only)";
+                break;
+            case iso_wcx::VirtualDiskFormat::t98_next_nhd:
+                container="T98-Next NHD (native read-only)";
+                break;
         }
         std::cout<<"Container: "<<container
                  <<" ("<<device.size()<<" logical bytes)\n";
