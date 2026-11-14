@@ -263,7 +263,48 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
         throw std::runtime_error("restore WIM scratch cleanup access (Win32 "+
                                  std::to_string(result)+")");
 }
-void remove_tree(const std::filesystem::path& path){
+// Prefer Windows backup/restore access to rewriting a captured ACL. This
+// operates only on the transaction's private NTFS scratch entries, opens the
+// final path component itself (never a reparse target), and never touches the
+// source WIM or unrelated directories. Ordinary Win32 deletion stays first.
+bool remove_wim_scratch_by_backup_handle(const std::filesystem::path& path) {
+    constexpr DWORD shares=FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE;
+    constexpr DWORD flags=FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT;
+    // DeleteFile/SetFileAttributes do not request backup semantics. A captured
+    // NTFS ACL can deny DELETE or FILE_WRITE_ATTRIBUTES even to Administrators.
+    // Explicit handles can use the already validated SeRestorePrivilege.
+    const DWORD initial=GetFileAttributesW(path.c_str());
+    if(initial==INVALID_FILE_ATTRIBUTES)return false;
+    if(initial&FILE_ATTRIBUTE_READONLY) {
+        HANDLE h=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES|FILE_WRITE_ATTRIBUTES,
+                             shares,nullptr,OPEN_EXISTING,flags,nullptr);
+        if(h==INVALID_HANDLE_VALUE)return false;
+        DWORD error=ERROR_SUCCESS;
+        FILE_BASIC_INFO basic{};
+        if(!GetFileInformationByHandleEx(h,FileBasicInfo,&basic,sizeof(basic)))
+            error=GetLastError();
+        else if(basic.FileAttributes&FILE_ATTRIBUTE_READONLY) {
+            basic.FileAttributes&=~FILE_ATTRIBUTE_READONLY;
+            if(!basic.FileAttributes)basic.FileAttributes=FILE_ATTRIBUTE_NORMAL;
+            if(!SetFileInformationByHandle(h,FileBasicInfo,&basic,sizeof(basic)))
+                error=GetLastError();
+        }
+        if(!CloseHandle(h) && error==ERROR_SUCCESS)error=GetLastError();
+        if(error!=ERROR_SUCCESS){SetLastError(error);return false;}
+    }
+    HANDLE h=CreateFileW(path.c_str(),DELETE,shares,nullptr,OPEN_EXISTING,flags,nullptr);
+    if(h==INVALID_HANDLE_VALUE)return false;
+    FILE_DISPOSITION_INFO disposition{};
+    disposition.DeleteFile=TRUE;
+    DWORD error=ERROR_SUCCESS;
+    if(!SetFileInformationByHandle(h,FileDispositionInfo,
+                                   &disposition,sizeof(disposition)))
+        error=GetLastError();
+    if(!CloseHandle(h) && error==ERROR_SUCCESS)error=GetLastError();
+    if(error!=ERROR_SUCCESS){SetLastError(error);return false;}
+    return true;
+}
+void remove_tree_impl(const std::filesystem::path& path){
     const DWORD attr=GetFileAttributesW(path.c_str());
     if(attr==INVALID_FILE_ATTRIBUTES){
         const DWORD error=GetLastError();
@@ -286,7 +327,7 @@ void remove_tree(const std::filesystem::path& path){
             it.increment(ec);
             if(ec)throw std::filesystem::filesystem_error(
                 "advance WIM scratch enumeration",path,ec);
-            remove_tree(child);
+            remove_tree_impl(child);
         }
     }
     const auto clear_readonly=[&](){
@@ -296,6 +337,15 @@ void remove_tree(const std::filesystem::path& path){
     if(!clear_readonly()){
         const DWORD error=GetLastError();
         if(error!=ERROR_ACCESS_DENIED){SetLastError(error);checked(false,"clear WIM scratch read-only flag");}
+        // Retrying through a backup-semantics DELETE handle avoids the
+        // captured image's inherited deny-delete ACEs without changing them.
+        if(remove_wim_scratch_by_backup_handle(path))return;
+        const DWORD backup_error=GetLastError();
+        if(backup_error==ERROR_SHARING_VIOLATION ||
+           backup_error==ERROR_LOCK_VIOLATION) {
+            SetLastError(backup_error);
+            checked(false,"WIM scratch file is locked during backup-handle cleanup");
+        }
         allow_workspace_cleanup(path);
         checked(clear_readonly(),"clear WIM scratch read-only flag after ACL repair");
     }
@@ -306,9 +356,25 @@ void remove_tree(const std::filesystem::path& path){
     if(!unlink()){
         const DWORD error=GetLastError();
         if(error!=ERROR_ACCESS_DENIED){SetLastError(error);checked(false,"remove WIM scratch entry");}
+        if(remove_wim_scratch_by_backup_handle(path))return;
+        const DWORD backup_error=GetLastError();
+        if(backup_error==ERROR_SHARING_VIOLATION ||
+           backup_error==ERROR_LOCK_VIOLATION) {
+            SetLastError(backup_error);
+            checked(false,"WIM scratch file is locked during backup-handle cleanup");
+        }
+        // Only if backup/restore semantics could not remove this ONE private
+        // entry do we attempt the existing guarded DACL repair.
         allow_workspace_cleanup(path);
         checked(unlink(),"remove WIM scratch entry after ACL repair");
     }
+}
+void remove_tree(const std::filesystem::path& path) {
+    // WIMGAPI and the TC progress callback can revoke the thread token
+    // after Apply/Capture. Keep an independent, scoped privileged identity
+    // for the entire recursive cleanup, without per-file token churn.
+    Privileges cleanup_privileges;
+    remove_tree_impl(path);
 }
 // WIMGAPI may create extra temporary files directly in its configured
 // workspace, not just in the expanded image tree. Remove all of these
