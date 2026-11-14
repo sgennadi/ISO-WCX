@@ -34,7 +34,30 @@ public:
         output=workspace/(image_.filename());
     }
     EditTransaction(const EditTransaction&)=delete;
-    ~EditTransaction() { std::error_code ec;std::filesystem::remove_all(workspace,ec); }
+    ~EditTransaction() noexcept {
+        if(workspace.empty())return;
+        // Only the unique private sibling directory created by this
+        // transaction may be removed. WIM handles / an antivirus scanner
+        // can briefly lock staged files after an aborted Apply/Capture.
+        // Bounded retry avoids leaving a locked scratch tree behind
+        // permanently. Never scan for or delete previous transactions.
+#ifdef _WIN32
+        constexpr unsigned attempts=4;
+#else
+        constexpr unsigned attempts=1;
+#endif
+        for(unsigned attempt=0;attempt<attempts;++attempt) {
+            try {
+                std::error_code ec;
+                std::filesystem::remove_all(workspace,ec);
+                ec.clear();
+                if(!std::filesystem::exists(workspace,ec) && !ec)return;
+            }catch(...){}
+#ifdef _WIN32
+            if(attempt+1<attempts)Sleep(150u*(attempt+1u));
+#endif
+        }
+    }
     void commit(const EditProgress& progress) {
         edit_tick(progress);
         if(std::filesystem::file_size(image_)!=size_ || std::filesystem::last_write_time(image_)!=time_)
