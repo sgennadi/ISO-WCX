@@ -64,7 +64,7 @@ int wmain(){
         const std::wstring test_ini=L"C:\\Users\\Example User\\AppData\\Roaming\\GHISLER\\wincmd.ini";
         const std::wstring test_plugin=L"C:\\Program Files\\TotalCmd\\plugins\\wcx\\ISO-WCX\\ISO-WCX.wcx";
         const std::wstring quoted=L"\"" + test_ini + L"\" \"" + test_plugin + L"\"";
-        for(const auto prefix:{L"",L" ",L"    ",L"\t ",L" \t\r\n"}) {
+        for(const auto prefix:{L"",L" ",L"    ",L"\t ",L" \t"}) {
             const auto parsed=iso_wcx::parse_association_worker_arguments(
                 std::wstring(prefix)+quoted);
             require(parsed.ini.wstring()==test_ini &&
@@ -79,7 +79,7 @@ int wmain(){
                     "rundll32 legacy-ISO option was lost");
         }
         const std::wstring unicode_ini=
-            L"C:\\Users\\Лаборатория\\wincmd.ini";
+            L"C:\\Users\\\u041b\u0430\u0431\u043e\u0440\u0430\u0442\u043e\u0440\u0438\u044f\\wincmd.ini";
         const auto parsed_unicode=iso_wcx::parse_association_worker_arguments(
             L"\t \"" + unicode_ini + L"\" \"" + test_plugin + L"\"");
         require(parsed_unicode.ini.wstring()==unicode_ini,

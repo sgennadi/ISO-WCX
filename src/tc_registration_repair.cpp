@@ -577,10 +577,19 @@ bool offer_association_fix(HWND parent,HINSTANCE plugin,bool russian,
         const fs::path runner=fs::path(sys.data())/L"rundll32.exe";
         // Command paths are quoted, validated OS filesystem paths. The Win32
         // rundll32 process will load the 32-bit WCX, x64 the 64-bit WCX.
-        const std::wstring command=L"\""+runner.wstring()+L"\" \""+
-            source.wstring()+L"\",IsoWcxAssociationFixWorkerW \""+
-            ini.wstring()+L"\" \""+binary.wstring()+L"\""+
+        const std::wstring worker_arguments=L" \""+ini.wstring()+
+            L"\" \""+binary.wstring()+L"\""+
             (replace_legacy_iso?L" --legacy-iso":L"");
+        // Validate the exact argument fragment before displaying a
+        // "started" status. The separate rundll32 host parses precisely
+        // this fragment using the same implementation and error guards.
+        const auto check=parse_association_worker_arguments(worker_arguments);
+        if(!fs::equivalent(check.ini,ini) ||
+           !fs::equivalent(check.plugin32,binary) ||
+           check.replace_legacy_iso!=replace_legacy_iso)
+            fail("Association worker arguments failed preflight");
+        const std::wstring command=L"\""+runner.wstring()+L"\" \""+
+            source.wstring()+L"\",IsoWcxAssociationFixWorkerW"+worker_arguments;
         std::vector<wchar_t> cmd(command.begin(),command.end());cmd.push_back(0);
         STARTUPINFOW si{};si.cb=sizeof(si);
         PROCESS_INFORMATION pi{};
