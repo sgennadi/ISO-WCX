@@ -311,11 +311,15 @@ public:
                         if(entry.lba!=lba)continue;
                         need(resolved_boot_images.insert(lba).second,
                              "El Torito boot image maps to multiple ISO extents");
-                        // SectorCount describes the initial BIOS load, NOT
-                        // the length of an emulated disk or UEFI image.
-                        need(std::uint64_t(entry.initial_512_sectors)*512<=end-reference,
-                             "El Torito initial load exceeds boot image file");
+                        // No-emulation catalogs created by standard ISO
+                        // mastering tools can advertise loader sector counts
+                        // that are not the size of their ISO-visible boot file.
+                        // They remain byte-protected, as before this change.
                         if(!entry.media)continue; // no-emulation has no disk geometry
+                        // For floppy/HDD emulation, verify loader bytes fit
+                        // the independently validated disk image extent.
+                        need(std::uint64_t(entry.initial_512_sectors)*512<=end-reference,
+                             "emulated El Torito initial load exceeds disk image file");
                         need(reference==start,
                              "emulated El Torito image must start at ISO file extent");
                         if(entry.media<=3) {
