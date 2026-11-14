@@ -430,7 +430,7 @@ void remove_wim_residue(const std::filesystem::path& root,
     if(!found_output)throw EditUnsupported("verified WIM staging output disappeared");
     for(const auto& path:residue) {
         edit_tick(progress);
-        remove_tree(path);
+        remove_tree(path,progress);
     }
     // Fail closed if an unexpected temporary file reappeared while cleaning.
     for(const auto& entry:std::filesystem::directory_iterator(root)) {
@@ -579,13 +579,13 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             for(const auto& c:edits[index]){
                 callback.tick();
                 auto relative=relative_path(c.path);no_reparse(expanded,relative);auto target=expanded/relative;
-                if(c.remove){remove_tree(target);continue;}
+                if(c.remove){remove_tree(target,progress);continue;}
                 if(c.directory){std::filesystem::create_directories(target);continue;}
                 checked(std::filesystem::is_regular_file(std::filesystem::symlink_status(c.source)),"source must be a regular file");
                 std::filesystem::create_directories(target.parent_path());
                 if(std::filesystem::exists(target)){
                     if(std::filesystem::is_directory(target))throw EditUnsupported("cannot replace a directory with a file");
-                    remove_tree(target);
+                    remove_tree(target,progress);
                 }
                 checked(CopyFileW(c.source.c_str(),target.c_str(),TRUE),"copy replacement into WIM workspace");
             }
@@ -596,7 +596,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             callback.begin_stage(L"Cleanup WIM temporary files "+number,end,0);
             // Never report F5 success if expanded could not be removed.
             // The transaction will still roll back the staged WIM on failure.
-            remove_tree(expanded);
+            remove_tree(expanded,progress);
             cleanup.complete=true;
         }
         checked(api<DWORD(WINAPI*)(HANDLE)>(m,"WIMGetImageCount")(output.h)==out_index,
