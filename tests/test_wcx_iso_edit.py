@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 from test_images import B
-from test_iso_edit import fixture, read_image, validate_path_tables
+from test_iso_edit import fixture, emulated_boot_fixture, read_image, validate_path_tables
 from test_udf_bridge_edit import descriptor_bridge
 
 
@@ -69,6 +69,24 @@ def main(plugin, runner):
         assert edit("delete") == 0, "WCX DeleteFilesW returned nonzero"
         assert "EDIT.TXT" not in read_image(image, True)
         validate_path_tables(image)
+
+        # Real WCX PackFilesW/DeleteFilesW ABI, not only the archive-edit
+        # fixture: unrelated F5 must preserve complete emulated disk bytes.
+        for media in (1, 2, 3, 4):
+            image.write_bytes(emulated_boot_fixture(media))
+            before = image.read_bytes()
+            assert edit("pack") == 0, (
+                "WCX F5 rejected bounded El Torito emulated disk", media)
+            updated = image.read_bytes()
+            assert read_image(image)["EDIT.TXT"] == replacement.read_bytes(), (
+                "WCX F5 payload missing from emulated-boot ISO", media)
+            assert updated[24*B:len(before)] == before[24*B:], (
+                "WCX F5 changed emulated disk or El Torito catalog", media)
+            untouched = updated
+            assert edit("delete", "EMUBOOT.IMG") != 0, (
+                "WCX allowed deletion of emulated boot image", media)
+            assert image.read_bytes() == untouched, (
+                "WCX modified ISO after refused boot-image deletion", media)
 
         image.write_bytes(fixture() + b"X" + bytes(B - 1))
         before = image.read_bytes()
