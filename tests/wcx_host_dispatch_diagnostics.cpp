@@ -170,7 +170,31 @@ int wmain(){
             op.complete(24,
                 "UDF Bridge has no safe contiguous run outside immutable ISO/boot extents");
         }
+        // File-ID or ChangeTime mismatches must have their own fixed
+        // category, without ever leaking a private pathname.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-MUTATED-ISO.iso",1);
+            op.stage(L"commit",99);
+            op.complete(13,
+                "archive changed during edit (file ID/ChangeTime)");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-MUTATED-WIM.wim",1,1);
+            op.stage(L"Commit verified WIM",99);
+            op.complete(13,
+                "archive changed during edit (size/mtime)");
+        }
         const auto extended=read(iso_wcx::diagnostics::export_report());
+        require(contains(extended,
+                "| iso | pack | 13 | archive_source_changed | commit | 1 |"),
+                "ISO source mutation category missing");
+        require(contains(extended,
+                "| wim | pack | 13 | archive_source_changed | commit | 1 |"),
+                "WIM source mutation category missing");
+        require(!contains(extended,"PRIVATE-MUTATED"),
+                "private source archive path leaked from diagnostics");
         require(contains(extended,
                 "| iso | pack | 24 | iso_udf_bridge_allocator_protected | write | 1 |"),
                 "UDF Bridge protected allocator reason/category missing");
