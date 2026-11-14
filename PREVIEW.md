@@ -13,6 +13,27 @@ Actual real-machine WinPE bootability after edits is not certified.
 
 For the full format-by-format safety matrix and next steps for bootable ISO/UDF images, see [native ISO editing strategy](docs/iso-edit-strategy.md).
 
+## WIM F5 RC follow-up — Win32 ERROR_DIR_NOT_EMPTY 145 (2026-11-14)
+
+A real Total Commander WIM F5 attempt returned `remove WIM scratch entry
+(Win32 145)` after the earlier Win32 1008 (missing thread token) and Win32
+5 (protected scratch ACL) fixes. This is not evidence of successful F5.
+
+The private NTFS scratch cleaner now snapshots child paths, closes all Win32
+directory enumeration handles *before* deleting children, then retries only
+DELETE_PENDING / DIR_NOT_EMPTY failures with a bounded, cancellable rescan.
+A file added after the first snapshot must be discovered on the next pass.
+Protected ACL cleanup and the original single-link ownership safeguards
+remain in place. The new shared-diagnostics category
+`wim_scratch_not_empty` exposes no file names or paths.
+
+The Windows WCX smoke regression deliberately creates an extra scratch file
+after the first enumeration, while also testing the protected ACL and the
+lost thread-token scenario. Successful tests and CI establish a synthetic
+WCX API path only; **real Total Commander F5 and the original WinPE media
+must be retested using a disposable WIM copy**. No automatic cleanup of
+older/unowned workspaces and no Stable promotion.
+
 ## v0.21.2 Preview — early WIM lock detection (2026-11-14)
 
 When Total Commander or an external process holds a WIM without Windows

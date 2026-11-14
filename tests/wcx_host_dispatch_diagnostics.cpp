@@ -156,7 +156,19 @@ int wmain(){
             op.stage(L"WIM: Cleanup WIM temporary files 1/1",91);
             op.complete(13,"restore WIM scratch cleanup access (Win32 5)");
         }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-WIM-LATE-FILE.wim",1,1);
+            op.stage(L"WIM: Cleanup WIM temporary files 1/1",91);
+            op.complete(13,
+                "WIM scratch directory remained non-empty after bounded cleanup (Win32 145)");
+        }
         const auto extended=read(iso_wcx::diagnostics::export_report());
+        require(contains(extended,
+                "| wim | pack | 13 | wim_scratch_not_empty | cleanup | 1 |"),
+                "WIM scratch Win32 145 classification/stage is missing");
+        require(!contains(extended,"PRIVATE-WIM-LATE-FILE"),
+                "private WIM late-file path leaked into shared report");
         require(contains(extended,
                 "| wim | pack | 13 | wim_scratch_acl_denied | cleanup | 1 |"),
                 "protected WIM scratch ACL failure category missing");

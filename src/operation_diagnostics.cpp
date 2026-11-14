@@ -84,6 +84,9 @@ std::string classify(std::string_view reason, int code) {
        has("restore wim scratch entry ownership")||
        has("open wim scratch entry for acl repair"))
         return "wim_scratch_acl_denied";
+    if((has("wim scratch directory remained non-empty") ||
+        has("remove wim scratch entry")) && has("win32 145"))
+        return "wim_scratch_not_empty";
     if(has("remove wim scratch entry with restore privilege")||
        has("remove wim scratch entry after acl repair"))
         return "wim_scratch_delete_denied";

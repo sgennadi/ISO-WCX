@@ -271,78 +271,134 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
         throw std::runtime_error("restore WIM scratch cleanup access (Win32 "+
                                  std::to_string(result)+")");
 }
-void remove_tree(const std::filesystem::path& path){
-    const DWORD attr=GetFileAttributesW(path.c_str());
-    if(attr==INVALID_FILE_ATTRIBUTES){
-        const DWORD error=GetLastError();
-        if(error==ERROR_FILE_NOT_FOUND || error==ERROR_PATH_NOT_FOUND)return;
-        SetLastError(error);
-        checked(false,"inspect WIM scratch entry before cleanup");
-    }
-    if((attr&FILE_ATTRIBUTE_DIRECTORY) && !(attr&FILE_ATTRIBUTE_REPARSE_POINT)){
-        std::error_code ec;
-        auto it=std::filesystem::directory_iterator(path,ec);
-        if(ec==std::errc::permission_denied){
-            allow_workspace_cleanup(path);
-            ec.clear();
-            it=std::filesystem::directory_iterator(path,ec);
-        }
-        if(ec)throw std::filesystem::filesystem_error("enumerate WIM scratch",path,ec);
-        const auto end=std::filesystem::directory_iterator{};
-        while(it!=end){
-            const auto child=it->path();
-            it.increment(ec);
-            if(ec)throw std::filesystem::filesystem_error(
-                "advance WIM scratch enumeration",path,ec);
-            remove_tree(child);
-        }
-    }
-    // Prefer temporary SeRestorePrivilege for deletion before modifying
-    // NTFS security descriptors inherited from the WIM source.
-    const auto retry_privileged=[&](auto&& operation,const char* failure){
-        DWORD error=ERROR_SUCCESS;
-        {
-            Privileges identity;
-            if(operation())return true;
-            error=GetLastError();
-        }
-        if(error!=ERROR_ACCESS_DENIED){
+// An applied Windows image may contain protected folders, reparse entries
+// and many thousands of files. Never delete children while a Win32 directory
+// enumeration handle is still live: its handles can retain delete-pending
+// entries and lead to ERROR_DIR_NOT_EMPTY (145) on RemoveDirectoryW.
+void remove_tree(const std::filesystem::path& path,
+                 const EditProgress& progress = {}) {
+    constexpr unsigned max_cleanup_passes=10;
+    const auto retry_wait=[](unsigned pass) {
+        // Only 145/303 are retried; bounded waiting gives WIMGAPI/AV time
+        // to close delete-pending scratch handles, without indefinite F5.
+        Sleep(std::min(800u,100u*(pass+1u)));
+    };
+    for(unsigned pass=0;pass<max_cleanup_passes;++pass) {
+        const DWORD attr=GetFileAttributesW(path.c_str());
+        if(attr==INVALID_FILE_ATTRIBUTES){
+            const DWORD error=GetLastError();
+            if(error==ERROR_FILE_NOT_FOUND || error==ERROR_PATH_NOT_FOUND)
+                return;
+            if(error==ERROR_DELETE_PENDING && pass+1u<max_cleanup_passes) {
+                edit_tick(progress);
+                retry_wait(pass);
+                continue;
+            }
             SetLastError(error);
-            checked(false,failure);
+            checked(false,"inspect WIM scratch entry before cleanup");
         }
-        return false;
-    };
-    const auto clear_readonly=[&](){
-        return !(attr&FILE_ATTRIBUTE_READONLY) ||
-               SetFileAttributesW(path.c_str(),attr&~FILE_ATTRIBUTE_READONLY);
-    };
-    if(!clear_readonly()){
+        const bool directory=(attr&FILE_ATTRIBUTE_DIRECTORY)!=0;
+        const bool recurse=directory && !(attr&FILE_ATTRIBUTE_REPARSE_POINT);
+        if(recurse) {
+            // Snapshot the directory first and close its iterator BEFORE
+            // recursively deleting anything. This fixes a live Win32
+            // FindFirstFile handle interacting with pending child deletions.
+            std::vector<std::filesystem::path> children;
+            std::error_code ec;
+            {
+                auto it=std::filesystem::directory_iterator(path,ec);
+                if(ec==std::errc::permission_denied) {
+                    allow_workspace_cleanup(path);
+                    ec.clear();
+                    it=std::filesystem::directory_iterator(path,ec);
+                }
+                if(!ec) {
+                    const auto end=std::filesystem::directory_iterator{};
+                    while(it!=end) {
+                        children.push_back(it->path());
+                        it.increment(ec);
+                        if(ec)break;
+                    }
+                }
+            } // All directory-iterator Win32 handles are closed here.
+            if(ec) {
+                if(ec.value()==ERROR_DELETE_PENDING &&
+                   pass+1u<max_cleanup_passes) {
+                    edit_tick(progress);
+                    retry_wait(pass);
+                    continue;
+                }
+                throw std::filesystem::filesystem_error(
+                    "enumerate WIM scratch before delete",path,ec);
+            }
+            for(std::size_t i=0;i<children.size();++i) {
+                if((i&127u)==0u)edit_tick(progress);
+                remove_tree(children[i],progress);
+            }
+        }
+        // Prefer temporary SeRestorePrivilege for deletion before modifying
+        // NTFS security descriptors inherited from the WIM source.
+        const auto retry_privileged=[&](auto&& operation,
+                                        const char* failure) {
+            DWORD error=ERROR_SUCCESS;
+            {
+                Privileges identity;
+                if(operation())return true;
+                error=GetLastError();
+            }
+            if(error!=ERROR_ACCESS_DENIED){
+                SetLastError(error);
+                checked(false,failure);
+            }
+            return false;
+        };
+        const auto clear_readonly=[&](){
+            return !(attr&FILE_ATTRIBUTE_READONLY) ||
+                   SetFileAttributesW(path.c_str(),
+                                      attr&~FILE_ATTRIBUTE_READONLY);
+        };
+        if(!clear_readonly()){
+            const DWORD error=GetLastError();
+            if(error!=ERROR_ACCESS_DENIED){
+                SetLastError(error);
+                checked(false,"clear WIM scratch read-only flag");
+            }
+            if(!retry_privileged(clear_readonly,
+                   "clear WIM scratch attributes with restore privilege")){
+                allow_workspace_cleanup(path);
+                checked(clear_readonly(),
+                        "clear WIM scratch read-only flag after ACL repair");
+            }
+        }
+        const auto unlink=[&](){
+            return directory ? RemoveDirectoryW(path.c_str()) :
+                               DeleteFileW(path.c_str());
+        };
+        if(unlink())return;
         const DWORD error=GetLastError();
-        if(error!=ERROR_ACCESS_DENIED){
+        if(recurse && (error==ERROR_DIR_NOT_EMPTY ||
+                       error==ERROR_DELETE_PENDING)) {
+            if(pass+1u<max_cleanup_passes) {
+                edit_tick(progress);
+                retry_wait(pass);
+                // New WIMGAPI files, still-visible delete-pending entries,
+                // or contents raced into the scratch tree: re-enumerate.
+                continue;
+            }
             SetLastError(error);
-            checked(false,"clear WIM scratch read-only flag");
+            checked(false,
+                    "WIM scratch directory remained non-empty after bounded cleanup");
         }
-        if(!retry_privileged(clear_readonly,
-                             "clear WIM scratch attributes with restore privilege")){
-            allow_workspace_cleanup(path);
-            checked(clear_readonly(),"clear WIM scratch read-only flag after ACL repair");
-        }
-    }
-    const auto unlink=[&](){
-        return (attr&FILE_ATTRIBUTE_DIRECTORY)?
-            RemoveDirectoryW(path.c_str()):DeleteFileW(path.c_str());
-    };
-    if(!unlink()){
-        const DWORD error=GetLastError();
         if(error!=ERROR_ACCESS_DENIED){
             SetLastError(error);
             checked(false,"remove WIM scratch entry");
         }
         if(!retry_privileged(unlink,
-                             "remove WIM scratch entry with restore privilege")){
+               "remove WIM scratch entry with restore privilege")) {
             allow_workspace_cleanup(path);
             checked(unlink(),"remove WIM scratch entry after ACL repair");
         }
+        return;
     }
 }
 // WIMGAPI may create extra temporary files directly in its configured
@@ -374,7 +430,7 @@ void remove_wim_residue(const std::filesystem::path& root,
     if(!found_output)throw EditUnsupported("verified WIM staging output disappeared");
     for(const auto& path:residue) {
         edit_tick(progress);
-        remove_tree(path);
+        remove_tree(path,progress);
     }
     // Fail closed if an unexpected temporary file reappeared while cleaning.
     for(const auto& entry:std::filesystem::directory_iterator(root)) {
@@ -523,13 +579,13 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             for(const auto& c:edits[index]){
                 callback.tick();
                 auto relative=relative_path(c.path);no_reparse(expanded,relative);auto target=expanded/relative;
-                if(c.remove){remove_tree(target);continue;}
+                if(c.remove){remove_tree(target,progress);continue;}
                 if(c.directory){std::filesystem::create_directories(target);continue;}
                 checked(std::filesystem::is_regular_file(std::filesystem::symlink_status(c.source)),"source must be a regular file");
                 std::filesystem::create_directories(target.parent_path());
                 if(std::filesystem::exists(target)){
                     if(std::filesystem::is_directory(target))throw EditUnsupported("cannot replace a directory with a file");
-                    remove_tree(target);
+                    remove_tree(target,progress);
                 }
                 checked(CopyFileW(c.source.c_str(),target.c_str(),TRUE),"copy replacement into WIM workspace");
             }
@@ -540,7 +596,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             callback.begin_stage(L"Cleanup WIM temporary files "+number,end,0);
             // Never report F5 success if expanded could not be removed.
             // The transaction will still roll back the staged WIM on failure.
-            remove_tree(expanded);
+            remove_tree(expanded,progress);
             cleanup.complete=true;
         }
         checked(api<DWORD(WINAPI*)(HANDLE)>(m,"WIMGetImageCount")(output.h)==out_index,
