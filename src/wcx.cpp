@@ -294,7 +294,7 @@ void log_edit_failure(const std::wstring& archive,bool remove,const char* reason
         GetLocalTime(&stamp);
         const auto suffix=std::filesystem::path(archive).extension().wstring();
         const char* kind=(suffix==L".iso" || suffix==L".ISO" || suffix==L".udf" || suffix==L".UDF")
-                             ?"ISO":"IMAGE";
+                             ?"ISO":(suffix==L".wim" || suffix==L".WIM")?"WIM":"IMAGE";
         log << '[' << stamp.wYear << '-' << stamp.wMonth << '-' << stamp.wDay
             << ' ' << stamp.wHour << ':' << stamp.wMinute << ':' << stamp.wSecond
             << "] WCX_EDIT_FAILURE format=" << kind
