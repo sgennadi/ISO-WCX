@@ -610,11 +610,23 @@ void edit_iso_hybrid_equal_length(
                  "hybrid replacement overlaps an ISO volume descriptor");
             const auto table=le(descriptor,132);
             if(!table)continue;
-            need(le(descriptor,140) && le(descriptor,148),
+            // ECMA-119 stores L path-table locations little-endian at
+            // 140/144, but M locations big-endian at 148/152. Reading
+            // the M table as LE can invent a huge LBA and falsely reject
+            // a valid hybrid image.
+            const auto be32=[&](std::size_t at) {
+                need(at+4<=descriptor.size(),"truncated ISO path-table LBA");
+                return (std::uint32_t(descriptor[at])<<24) |
+                       (std::uint32_t(descriptor[at+1])<<16) |
+                       (std::uint32_t(descriptor[at+2])<<8) |
+                        std::uint32_t(descriptor[at+3]);
+            };
+            need(le(descriptor,140) && be32(148),
                  "hybrid ISO has missing path-table locations");
             const auto padded=(std::uint64_t(table)+block-1)/block*block;
             for(const std::size_t at:{140u,144u,148u,152u}) {
-                const auto address=le(descriptor,at);
+                const auto address=(at==140u || at==144u)?
+                    le(descriptor,at):be32(at);
                 if(!address)continue;
                 const auto begin=std::uint64_t(address)*block;
                 need(begin<=image.size && padded<=image.size-begin,
