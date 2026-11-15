@@ -253,6 +253,33 @@ int wmain(int argc,wchar_t** argv) {
         const auto process=bind<ProcessFn>(dll,"ProcessFileW");
         const auto close=bind<CloseFn>(dll,"CloseArchive");
         if(!open||!read||!process||!close)return 8;
+        // Match the documented TC WCX listing lifecycle: OpenArchive,
+        // ReadHeader/PK_SKIP and CloseArchive precede the separate F5
+        // PackFiles call. WIMGAPI must not leak a source handle after TC
+        // closes its listing; DELETE sharing is required for atomic rename.
+        {
+            std::wstring selected=original.wstring();
+            OpenW browse{};browse.ArcName=selected.data();
+            const HANDLE listing=open(&browse);
+            if(!listing || browse.OpenResult!=0)return 52;
+            HeaderExW listed{};
+            const int read_rc=read(listing,&listed);
+            const int skip_rc=read_rc==0?
+                process(listing,0,nullptr,nullptr):-1;
+            close(listing);
+            if(read_rc!=0 || skip_rc!=0)return 52;
+            const HANDLE probe=CreateFileW(original.c_str(),DELETE,
+                FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
+                OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+            const DWORD error=probe==INVALID_HANDLE_VALUE?
+                GetLastError():ERROR_SUCCESS;
+            if(probe!=INVALID_HANDLE_VALUE)CloseHandle(probe);
+            if(error!=ERROR_SUCCESS) {
+                std::cerr<<"WCX CloseArchive leaked WIM replacement lock "
+                         <<"(Win32 "<<error<<")\n";
+                return 53;
+            }
+        }
         auto verify=[&](const fs::path& file) {
             fs::remove_all(root/L"extracted");
             std::wstring path=file.wstring();
