@@ -654,7 +654,20 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                     if(std::filesystem::is_directory(target))throw EditUnsupported("cannot replace a directory with a file");
                     remove_tree(target,progress);
                 }
-                checked(CopyFileW(c.source.c_str(),target.c_str(),TRUE),"copy replacement into WIM workspace");
+                // CopyFileW can block for a long time on large F5 sources and
+                // offers no cancellation point. Reuse the WCX-aware callback:
+                // this edit phase has zero percentage span, so progress stays
+                // monotonic while Total Commander can still cancel promptly.
+                CopyContext source_copy{callback,apply_end,0};
+                const BOOL copied_source=CopyFileExW(
+                    c.source.c_str(),target.c_str(),
+                    &CopyContext::on_progress,&source_copy,nullptr,
+                    COPY_FILE_FAIL_IF_EXISTS);
+                if(!copied_source) {
+                    if(callback.cancelled.load())throw EditCancelled();
+                    checked(false,"copy replacement into WIM workspace");
+                }
+                callback.tick();
             }
             callback.begin_stage(L"Rebuild WIM image "+number,apply_end,end-apply_end);
             HANDLE captured=api<HANDLE(WINAPI*)(HANDLE,PCWSTR,DWORD)>(m,"WIMCaptureImage")(output.h,expanded.c_str(),2u|0x100u);
