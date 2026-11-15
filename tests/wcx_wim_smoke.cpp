@@ -63,6 +63,10 @@ static std::atomic<bool> drop_impersonation_at_cleanup{false};
 static std::atomic<bool> dropped_impersonation_at_cleanup{false};
 static std::atomic<bool> protect_scratch_acl_at_cleanup{false};
 static std::atomic<bool> protected_scratch_acl_at_cleanup{false};
+// Combine ERROR_ACCESS_DENIED on the expanded parent directory with a
+// late-created file producing ERROR_DIR_NOT_EMPTY after privilege retry.
+static std::atomic<bool> protect_scratch_directory_acl_at_cleanup{false};
+static std::atomic<bool> protected_scratch_directory_acl_at_cleanup{false};
 // Inject a late file AFTER the cleaner snapshots expanded/. The first
 // RemoveDirectoryW must encounter ERROR_DIR_NOT_EMPTY (145), rescan, and
 // then clear the late file without touching the original WIM.
@@ -125,6 +129,31 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
                         }
                     }catch(...){protected_entry=false;}
                     protected_scratch_acl_at_cleanup.store(protected_entry);
+                }
+                if(protect_scratch_directory_acl_at_cleanup.exchange(false)) {
+                    bool protected_parent=false;
+                    try {
+                        for(const auto& entry:fs::directory_iterator(private_test_root)) {
+                            if(!entry.is_directory() ||
+                               !entry.path().filename().wstring().starts_with(
+                                    L".iso-wcx-edit-"))continue;
+                            const auto expanded=entry.path()/L"expanded";
+                            if(!fs::is_directory(expanded))continue;
+                            PSECURITY_DESCRIPTOR raw=nullptr;
+                            if(ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                                L"D:P(D;;SD;;;WD)(A;;FA;;;BA)(A;;FA;;;SY)",
+                                SDDL_REVISION_1,&raw,nullptr)) {
+                                protected_parent=SetFileSecurityW(
+                                    expanded.c_str(),
+                                    DACL_SECURITY_INFORMATION|
+                                        PROTECTED_DACL_SECURITY_INFORMATION,
+                                    raw)!=FALSE;
+                                LocalFree(raw);
+                            }
+                            break;
+                        }
+                    }catch(...){protected_parent=false;}
+                    protected_scratch_directory_acl_at_cleanup.store(protected_parent);
                 }
                 if(drop_impersonation_at_cleanup.exchange(false)){
                     const BOOL reverted=SetThreadToken(nullptr,nullptr);
@@ -461,6 +490,8 @@ int wmain(int argc,wchar_t** argv) {
         late_file_created.store(false);
         protect_scratch_acl_at_cleanup.store(true);
         protected_scratch_acl_at_cleanup.store(false);
+        protect_scratch_directory_acl_at_cleanup.store(true);
+        protected_scratch_directory_acl_at_cleanup.store(false);
         drop_impersonation_at_cleanup.store(true);
         dropped_impersonation_at_cleanup.store(false);
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
@@ -468,6 +499,7 @@ int wmain(int argc,wchar_t** argv) {
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         drop_impersonation_at_cleanup.store(false);
         protect_scratch_acl_at_cleanup.store(false);
+        protect_scratch_directory_acl_at_cleanup.store(false);
         inject_late_file_at_cleanup.store(false);
         late_file_armed.store(false);
         if(!late_file_created.load()){
@@ -481,6 +513,10 @@ int wmain(int argc,wchar_t** argv) {
         if(!dropped_impersonation_at_cleanup.load()){
             std::cerr<<"WIM cleanup lost-token regression did not run\n";
             return 45;
+        }
+        if(!protected_scratch_directory_acl_at_cleanup.load()){
+            std::cerr<<"WIM protected-parent / Win32 145 regression did not run\n";
+            return 54;
         }
         if(folder_rc!=0){
             std::cerr<<"WIM cleanup lost-token F5 returned "<<folder_rc<<"\n";

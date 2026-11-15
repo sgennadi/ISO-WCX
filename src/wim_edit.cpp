@@ -370,35 +370,47 @@ void remove_tree(const std::filesystem::path& path,
                         "clear WIM scratch read-only flag after ACL repair");
             }
         }
-        const auto unlink=[&](){
-            return directory ? RemoveDirectoryW(path.c_str()) :
-                               DeleteFileW(path.c_str());
+        const auto unlink=[&]() -> DWORD {
+            if(directory ? RemoveDirectoryW(path.c_str()) :
+                           DeleteFileW(path.c_str()))
+                return ERROR_SUCCESS;
+            return GetLastError();
         };
-        if(unlink())return;
-        const DWORD error=GetLastError();
-        if(recurse && (error==ERROR_DIR_NOT_EMPTY ||
-                       error==ERROR_DELETE_PENDING)) {
+        DWORD error=unlink();
+        if(error==ERROR_ACCESS_DENIED) {
+            // Under applied-image ACLs the first attempt may fail with 5.
+            // Privileged unlink may instead observe a newly created file
+            // (145) or an outstanding delete (303). Preserve that actual
+            // result for the common retry loop instead of throwing inside
+            // the privilege fallback and abandoning the verified WIM.
+            {
+                Privileges identity;
+                error=unlink();
+            }
+            if(error==ERROR_ACCESS_DENIED) {
+                // Modify security only for this private, singly-linked
+                // scratch inode. The original WIM is never touched here.
+                allow_workspace_cleanup(path);
+                error=unlink();
+            }
+        }
+        if(error==ERROR_SUCCESS || error==ERROR_FILE_NOT_FOUND ||
+           error==ERROR_PATH_NOT_FOUND)
+            return;
+        if((recurse && error==ERROR_DIR_NOT_EMPTY) ||
+           error==ERROR_DELETE_PENDING) {
             if(pass+1u<max_cleanup_passes) {
                 edit_tick(progress);
                 retry_wait(pass);
-                // New WIMGAPI files, still-visible delete-pending entries,
-                // or contents raced into the scratch tree: re-enumerate.
+                // Directory handles are closed; re-enumerate children that
+                // appeared during any of the ACL/privilege deletion attempts.
                 continue;
             }
             SetLastError(error);
-            checked(false,
-                    "WIM scratch directory remained non-empty after bounded cleanup");
+            checked(false,"WIM scratch deletion remained pending after bounded cleanup");
         }
-        if(error!=ERROR_ACCESS_DENIED){
-            SetLastError(error);
-            checked(false,"remove WIM scratch entry");
-        }
-        if(!retry_privileged(unlink,
-               "remove WIM scratch entry with restore privilege")) {
-            allow_workspace_cleanup(path);
-            checked(unlink(),"remove WIM scratch entry after ACL repair");
-        }
-        return;
+        SetLastError(error);
+        checked(false,"remove WIM scratch entry");
     }
 }
 // WIMGAPI may create extra temporary files directly in its configured
