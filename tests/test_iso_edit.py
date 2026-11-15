@@ -433,6 +433,17 @@ def main(binary, reader=None):
         assert image.read_bytes()[:16*B]==hybrid[:16*B]
         assert len(image.read_bytes())==len(hybrid)
         validate_path_tables(image)
+        # A valid M path-table LBA is big-endian. Deliberately corrupt only
+        # its address, then verify a same-size F5 is refused and the original
+        # (including partition and boot bytes) is never mutated.
+        corrupted=bytearray(image.read_bytes())
+        struct.pack_into('>I',corrupted,16*B+148,0x7fffffff)
+        image.write_bytes(corrupted)
+        run('add','PATHED.TXT',False)
+        assert image.read_bytes()==corrupted
+        image.write_bytes(hybrid)
+        run('add','PATHED.TXT')
+        validate_path_tables(image)
 
         # Both BIOS and EFI El Torito boot regions must survive an unrelated
         # same-size edit in a hybrid ISO byte-for-byte.
