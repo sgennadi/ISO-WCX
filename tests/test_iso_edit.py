@@ -389,6 +389,86 @@ def main(binary, reader=None):
         assert image.read_bytes()==unusual, (
             'ISO writer ignored a UDF AVDP at sector 512')
 
+        # A non-UDF ISO with a valid isohybrid MBR must not be rebuilt:
+        # only a SAME-SIZE replacement inside an existing non-boot file is
+        # permitted. Verify every unrelated byte (including the MBR) stayed
+        # bit-identical, then independently re-parse the ISO filesystem.
+        def hybrid_mbr(payload):
+            b=bytearray(payload)
+            b[0]=0xeb
+            b[510:512]=bytes((0x55,0xaa))
+            b[446]=0x80
+            b[450]=0x17
+            struct.pack_into('<II',b,454,0,len(b)//512)
+            return b
+
+        image.write_bytes(hybrid_mbr(fixture()))
+        baseline=image.read_bytes()
+        source.write_bytes(b'RENEW')
+        run('add','HELLO.TXT')
+        replaced=image.read_bytes()
+        assert len(replaced)==len(baseline)
+        assert replaced[21*B:21*B+5]==b'RENEW'
+        assert replaced[:21*B]==baseline[:21*B]
+        assert replaced[21*B+5:]==baseline[21*B+5:]
+        assert read_image(image)['HELLO.TXT']==b'RENEW'
+        run('add','HELLO.TXT')
+        run('add','NONEXISTENT.TXT',False)
+        run('delete','HELLO.TXT',False)
+        run('mkdir','NEWFOLDER',False)
+        batch('add','HELLO.TXT',source,'add','NEW.TXT',source,ok=False)
+        source.write_bytes(b'BAD')
+        run('add','HELLO.TXT',False)
+        source.write_bytes(b'new content'*1000)
+
+        # A conventional ISO with newly generated path tables must remain
+        # replaceable after gaining an MBR. The path tables must not move.
+        image.write_bytes(fixture())
+        run('add','PATHED.TXT')
+        hybrid=hybrid_mbr(image.read_bytes())
+        image.write_bytes(hybrid)
+        source.write_bytes(b'R'*(len(b'new content')*1000))
+        run('add','PATHED.TXT')
+        assert read_image(image)['PATHED.TXT']==source.read_bytes()
+        assert image.read_bytes()[:16*B]==hybrid[:16*B]
+        assert len(image.read_bytes())==len(hybrid)
+        validate_path_tables(image)
+        # A valid M path-table LBA is big-endian. Deliberately corrupt only
+        # its address, then verify a same-size F5 is refused and the original
+        # (including partition and boot bytes) is never mutated.
+        corrupted=bytearray(image.read_bytes())
+        struct.pack_into('>I',corrupted,16*B+148,0x7fffffff)
+        image.write_bytes(corrupted)
+        run('add','PATHED.TXT',False)
+        assert image.read_bytes()==corrupted
+        image.write_bytes(hybrid)
+        run('add','PATHED.TXT')
+        validate_path_tables(image)
+
+        # Both BIOS and EFI El Torito boot regions must survive an unrelated
+        # same-size edit in a hybrid ISO byte-for-byte.
+        boot=fixture(boot=True,boot_efi=True)
+        struct.pack_into('<H',boot,24*B+38,1)
+        struct.pack_into('<H',boot,24*B+102,1)
+        image.write_bytes(hybrid_mbr(boot))
+        before_boot=image.read_bytes()
+        source.write_bytes(b'VALID')
+        run('add','HELLO.TXT')
+        after_boot=image.read_bytes()
+        assert after_boot[0:16*B]==before_boot[0:16*B]
+        assert after_boot[17*B:18*B]==before_boot[17*B:18*B]
+        assert after_boot[24*B:27*B]==before_boot[24*B:27*B]
+        assert read_image(image)['HELLO.TXT']==b'VALID'
+
+        # Never accept direct replacement of an emulated El Torito floppy,
+        # even when its source has the exact original image length.
+        protected=hybrid_mbr(emulated_boot_fixture(2))
+        image.write_bytes(protected)
+        source.write_bytes(bytes(1440*1024))
+        run('add','EMUBOOT.IMG',False)
+        assert image.read_bytes()==protected
+        source.write_bytes(b'new content'*1000)
+
         for mode in ('hybrid','isohybrid_mbr','udf','rockridge','bad_extent'):
             b=fixture()
             if mode=='hybrid':b[0]=1

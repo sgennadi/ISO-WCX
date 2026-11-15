@@ -253,10 +253,10 @@ public:
             need(allow_udf_bridge || !udf_bridge,
                  "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         }
-        // Hybrid MBR support is restricted to a UDF byte-only writer.
-        // Check this AFTER even the declared-volume-end AVDP has been probed.
-        need(!hybrid_system_area || udf_bridge,
-             "hybrid MBR ISO requires a UDF bridge for payload-only editing");
+        // Inspect UDF anchors before classifying a hybrid MBR image.
+        // Hybrid ISO without UDF is parsed only for the strictly
+        // same-size, no-metadata writer in edit_iso(). No ISO rebuild
+        // or partition-table update is permitted for these images.
         // A non-UDF ISO can have an all-zero sector-aligned trailer. Preserve
         // it during staging, then update the descriptor's volume size when
         // appending changed files/metadata. Never accept hidden nonzero
@@ -554,6 +554,183 @@ bool intersect(std::uint64_t a,std::uint64_t a_bytes,
                std::uint64_t b,std::uint64_t b_bytes) noexcept {
     // Callers validate that both bounded extents fit the image file.
     return a_bytes && b_bytes && a<b+b_bytes && b<a+a_bytes;
+}
+
+// A non-UDF ISO with a real MBR cannot use the append/rebuild path without
+// risking a desynchronized partition/boot map. Only equal-length edits to
+// already named, non-shared ISO file extents are allowed here.
+void edit_iso_hybrid_equal_length(
+    const std::filesystem::path& path,Image& image,
+    const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
+    need(image.hybrid_system_area && !image.udf_bridge,
+         "hybrid replacement requires a non-UDF MBR image");
+    need(image.boot_regions_bounded,
+         "hybrid ISO has unbounded El Torito boot resources");
+    need(!changes.empty(),"hybrid ISO has no replacement files");
+    std::vector<const Node*> nodes{image.root.get()};
+    for(std::size_t i=0;i<nodes.size();++i) {
+        for(const auto& child:nodes[i]->children)nodes.push_back(child.get());
+        need(nodes.size()<=200000,"hybrid ISO has too many directory entries");
+    }
+    std::vector<BridgePatch> patches;
+    for(const auto& change:changes) {
+        edit_tick(progress);
+        need(!change.remove && !change.directory,
+             "hybrid ISO supports only equal-length file replacement");
+        const auto key=edit_path(change.path);
+        const Node* node=image.root.get();
+        std::istringstream parts(key);
+        std::string component;
+        while(node && std::getline(parts,component,'/')) {
+            const auto it=std::find_if(node->children.begin(),node->children.end(),
+                [&](const auto& child){return child->logical==component;});
+            node=it==node->children.end()?nullptr:it->get();
+        }
+        need(node && !node->directory && node->size>0,
+             "hybrid replacement target must be an existing nonempty file");
+        need(std::filesystem::is_regular_file(
+                 std::filesystem::symlink_status(change.source)),
+             "hybrid replacement must be a regular non-symlink file");
+        need(std::filesystem::file_size(change.source)==node->size,
+             "hybrid replacement must have exactly the original file size");
+        const auto offset=std::uint64_t(node->lba)*block;
+        const auto bytes=std::uint64_t(node->size);
+        const auto volume=std::uint64_t(image.declared_volume_blocks)*block;
+        need(offset>=16ull*block && offset<=volume && bytes<=volume-offset,
+             "hybrid ISO target lies outside the declared volume");
+        protect_boot(*node,image.boot_lbas);
+        for(const auto& [start,length]:image.boot_regions)
+            need(!intersect(offset,bytes,start,length),
+                 "hybrid replacement overlaps an El Torito resource");
+        for(const auto lba:image.boot_descriptor_lbas)
+            need(!intersect(offset,bytes,std::uint64_t(lba)*block,block),
+                 "hybrid replacement overlaps a boot descriptor");
+        for(const auto& [lba,descriptor]:image.descriptors) {
+            need(!intersect(offset,bytes,std::uint64_t(lba)*block,block),
+                 "hybrid replacement overlaps an ISO volume descriptor");
+            const auto table=le(descriptor,132);
+            if(!table)continue;
+            // ECMA-119 stores L path-table locations little-endian at
+            // 140/144, but M locations big-endian at 148/152. Reading
+            // the M table as LE can invent a huge LBA and falsely reject
+            // a valid hybrid image.
+            const auto be32=[&](std::size_t at) {
+                need(at+4<=descriptor.size(),"truncated ISO path-table LBA");
+                return (std::uint32_t(descriptor[at])<<24) |
+                       (std::uint32_t(descriptor[at+1])<<16) |
+                       (std::uint32_t(descriptor[at+2])<<8) |
+                        std::uint32_t(descriptor[at+3]);
+            };
+            need(le(descriptor,140) && be32(148),
+                 "hybrid ISO has missing path-table locations");
+            const auto padded=(std::uint64_t(table)+block-1)/block*block;
+            for(const std::size_t at:{140u,144u,148u,152u}) {
+                const auto address=(at==140u || at==144u)?
+                    le(descriptor,at):be32(at);
+                if(!address)continue;
+                const auto begin=std::uint64_t(address)*block;
+                need(begin<=image.size && padded<=image.size-begin,
+                     "hybrid ISO path table exceeds image size");
+                need(!intersect(offset,bytes,begin,padded),
+                     "hybrid replacement overlaps a path table");
+            }
+        }
+        for(std::uint32_t lba=16;lba<64;++lba) {
+            const auto descriptor=image.read(std::uint64_t(lba)*block,7);
+            if(descriptor[0]==255) {
+                need(!intersect(offset,bytes,std::uint64_t(lba)*block,block),
+                     "hybrid replacement overlaps ISO terminator");
+                break;
+            }
+        }
+        for(const Node* other:nodes) {
+            if(other==node || !other->size)continue;
+            need(!intersect(offset,bytes,
+                            std::uint64_t(other->lba)*block,other->size),
+                 "hybrid replacement overlaps another ISO entry or alias");
+        }
+        for(const auto& previous:patches)
+            need(!intersect(offset,bytes,previous.at,previous.bytes),
+                 "hybrid batch contains overlapping replacements");
+        patches.push_back({key,change.source,offset,bytes});
+    }
+    std::sort(patches.begin(),patches.end(),
+        [](const auto& lhs,const auto& rhs){return lhs.at<rhs.at;});
+    EditTransaction tx(path);
+    std::fstream out(tx.output,std::ios::in|std::ios::out|
+                     std::ios::binary|std::ios::trunc);
+    need(bool(out),"cannot stage hybrid ISO");
+    image.file.clear();image.file.seekg(0);
+    copy_bytes(image.file,out,image.size,progress);
+    std::vector<char> data(256u*1024u);
+    for(const auto& patch:patches) {
+        out.clear();out.seekp(static_cast<std::streamoff>(patch.at));
+        need(bool(out),"cannot seek staged hybrid ISO");
+        std::ifstream source(patch.source,std::ios::binary);
+        need(bool(source),"cannot open hybrid replacement source");
+        for(auto left=patch.bytes;left;) {
+            edit_tick(progress);
+            const auto n=static_cast<std::streamsize>(
+                std::min<std::uint64_t>(left,data.size()));
+            source.read(data.data(),n);
+            need(source.gcount()==n,"hybrid source truncated during F5");
+            out.write(data.data(),n);
+            need(bool(out),"hybrid payload write failed");
+            left-=static_cast<std::uint64_t>(n);
+        }
+        need(source.peek()==std::char_traits<char>::eof(),
+             "hybrid replacement source grew during F5");
+    }
+    out.flush();need(bool(out),"cannot flush staged hybrid ISO");
+    out.close();image.file.close();
+    {
+        Image verified(tx.output,true);
+        need(verified.hybrid_system_area && !verified.udf_bridge &&
+             verified.size==image.size &&
+             verified.descriptors==image.descriptors &&
+             verified.boot_descriptor_lbas==image.boot_descriptor_lbas &&
+             verified.boot_lbas==image.boot_lbas &&
+             verified.boot_entries==image.boot_entries &&
+             verified.boot_regions==image.boot_regions,
+             "staged hybrid ISO metadata or El Torito references changed");
+    }
+    // Verify every byte outside the requested file extents, including MBR,
+    // all ISO/Joliet metadata, hidden vendor sectors, boot data and padding.
+    OpticalEditGuard unchanged(image.size);
+    std::uint64_t end=0;
+    for(const auto& patch:patches) {
+        need(end<=patch.at,"overlapping staged hybrid file extents");
+        unchanged.protect(end,patch.at-end);
+        end=patch.at+patch.bytes;
+    }
+    unchanged.protect(end,image.size-end);
+    unchanged.verify(path,tx.output,progress);
+    // Close both verification streams before MoveFileExW. An open staged
+    // stream can deny FILE_SHARE_DELETE and prevent the atomic rename.
+    {
+    std::ifstream staged(tx.output,std::ios::binary);
+    need(bool(staged),"cannot read staged hybrid ISO");
+    std::vector<char> first(data.size()),second(data.size());
+    for(const auto& patch:patches) {
+        std::ifstream input(patch.source,std::ios::binary);
+        need(bool(input),"cannot reopen hybrid F5 source");
+        staged.clear();staged.seekg(static_cast<std::streamoff>(patch.at));
+        need(bool(staged),"cannot locate hybrid file after staging");
+        for(auto left=patch.bytes;left;) {
+            edit_tick(progress);
+            const auto n=static_cast<std::streamsize>(
+                std::min<std::uint64_t>(left,first.size()));
+            input.read(first.data(),n);
+            staged.read(second.data(),n);
+            need(input.gcount()==n && staged.gcount()==n &&
+                 std::memcmp(first.data(),second.data(),
+                             static_cast<std::size_t>(n))==0,
+                 "staged hybrid file differs from its F5 source");
+            left-=static_cast<std::uint64_t>(n);
+        }
+    }
+    }
+    tx.commit(progress);
 }
 
 void edit_iso_udf_bridge_equal_length(
@@ -854,6 +1031,10 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
             if(!other.remove)
                 need(!upper(edit_path(other.path)).starts_with(folder),
                      "ISO edit batch adds into a deleted directory");
+    }
+    if(image.hybrid_system_area && !image.udf_bridge) {
+        edit_iso_hybrid_equal_length(path,image,changes,progress);
+        return;
     }
     if(image.udf_bridge) {
         // Prefer the non-metadata equal-length replacement for a pre-existing
