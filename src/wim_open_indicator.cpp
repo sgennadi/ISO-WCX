@@ -194,7 +194,14 @@ LRESULT CALLBACK WimOpenIndicator::fallback_proc(
         }else{
             self->refresh(window);
             ++self->fallback_frame_;
-            InvalidateRect(window,nullptr,FALSE);
+            const UINT dpi=std::max(96u,GetDpiForSystem());
+            const auto scale=[&](int value){
+                return MulDiv(value,static_cast<int>(dpi),96);
+            };
+            RECT bar{scale(18),scale(129),scale(518),scale(148)};
+            // Repaint just the animated track; large index labels and
+            // the Cancel button must not flicker at 200% DPI.
+            InvalidateRect(window,&bar,FALSE);
         }
         return 0;
     case WM_PAINT: {
