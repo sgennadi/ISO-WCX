@@ -348,16 +348,26 @@ void remove_tree(const std::filesystem::path& path,
         // to close delete-pending scratch handles, without indefinite F5.
         Sleep(std::min(800u,100u*(pass+1u)));
     };
+    // DeleteFileW success can mean delete-on-last-close, not namespace
+    // removal. Windows may report ACCESS_DENIED when querying that same
+    // delete-pending file, so remember the state across bounded passes.
+    bool pending_legacy_delete=false;
     for(unsigned pass=0;pass<max_cleanup_passes;++pass) {
         const DWORD attr=GetFileAttributesW(path.c_str());
         if(attr==INVALID_FILE_ATTRIBUTES){
             const DWORD error=GetLastError();
             if(error==ERROR_FILE_NOT_FOUND || error==ERROR_PATH_NOT_FOUND)
                 return;
-            if(error==ERROR_DELETE_PENDING && pass+1u<max_cleanup_passes) {
-                edit_tick(progress);
-                retry_wait(pass);
-                continue;
+            if((error==ERROR_DELETE_PENDING ||
+                (error==ERROR_ACCESS_DENIED && pending_legacy_delete))) {
+                if(pass+1u<max_cleanup_passes) {
+                    edit_tick(progress);
+                    retry_wait(pass);
+                    continue;
+                }
+                SetLastError(ERROR_DELETE_PENDING);
+                checked(false,
+                    "WIM scratch deletion remained pending after bounded cleanup");
             }
             SetLastError(error);
             checked(false,"inspect WIM scratch entry before cleanup");
@@ -487,6 +497,12 @@ void remove_tree(const std::filesystem::path& path,
             if(outcome==ERROR_FILE_NOT_FOUND ||
                outcome==ERROR_PATH_NOT_FOUND)
                 return ERROR_SUCCESS;
+            // Microsoft's DeleteFileW contract permits ACCESS_DENIED on a
+            // later open of an already delete-pending name. We already
+            // deleted successfully, so this is not evidence of a bad DACL.
+            if(outcome==ERROR_ACCESS_DENIED ||
+               outcome==ERROR_DELETE_PENDING)
+                return ERROR_DELETE_PENDING;
             return outcome;
         };
         DWORD error=unlink();
@@ -512,6 +528,8 @@ void remove_tree(const std::filesystem::path& path,
             return;
         if((recurse && error==ERROR_DIR_NOT_EMPTY) ||
            error==ERROR_DELETE_PENDING) {
+            if(error==ERROR_DELETE_PENDING && !directory)
+                pending_legacy_delete=true;
             if(pass+1u<max_cleanup_passes) {
                 edit_tick(progress);
                 retry_wait(pass);
