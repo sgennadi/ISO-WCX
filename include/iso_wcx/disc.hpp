@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <string>
@@ -38,9 +39,29 @@ struct IsoNamespaceView {
 [[nodiscard]] IsoNamespaceView inspect_iso_namespace(
     const std::filesystem::path& image, bool primary_only = true);
 
+// OpenArchive runs before Total Commander registers its per-handle WCX
+// progress callback. WIM metadata scanning therefore reports its own
+// indeterminate, cancellable progress instead of a fabricated percentage.
+struct ArchiveOpenStatus {
+    enum class Phase { opening, loading_index, enumerating, complete };
+    Phase phase = Phase::opening;
+    std::uint32_t image_index = 0;
+    std::uint32_t image_count = 0;
+    std::uint64_t entries_scanned = 0;
+};
+using ArchiveOpenProgress = std::function<bool(const ArchiveOpenStatus&)>;
+
+class ArchiveOpenCancelled final : public std::exception {
+public:
+    const char* what() const noexcept override {
+        return "archive opening cancelled";
+    }
+};
+
 class Disc {
 public:
-    explicit Disc(std::filesystem::path image);
+    explicit Disc(std::filesystem::path image,
+                  ArchiveOpenProgress open_progress = {});
     [[nodiscard]] const std::vector<Item>& items() const noexcept { return entries_; }
     [[nodiscard]] const std::string& format() const noexcept { return format_; }
     // Returns false when cancelled. Throws on damaged source or I/O error.

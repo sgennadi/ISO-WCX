@@ -8,9 +8,11 @@
 #include <windows.h>
 #include <sddl.h>
 #include "iso_wcx/wim_index_report.hpp"
+#include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/image_report.hpp"
 // WIMGAPI is resolved dynamically; the optional Windows ADK header is not needed.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <thread>
@@ -320,6 +322,52 @@ int wmain(int argc,wchar_t** argv) {
         // retain the original read-only entry for scratch cleanup coverage.
         if(!SetFileAttributesW(readonly_input.c_str(),readonly_attributes))
             return 42;
+        // OpenArchive must report honest metadata phases rather than a
+        // made-up byte percentage. WIMGAPI does not expose the total file
+        // count before it finishes enumerating each image index.
+        {
+            bool loading=false,enumerating=false,complete=false;
+            unsigned highest_index=0;
+            std::uint64_t previous_entries=0;
+            iso_wcx::WimArchive scan(original,0,
+                [&](const iso_wcx::ArchiveOpenStatus& status) {
+                    using Phase=iso_wcx::ArchiveOpenStatus::Phase;
+                    if(status.entries_scanned<previous_entries)
+                        throw std::runtime_error(
+                            "WIM open entry count moved backwards");
+                    previous_entries=status.entries_scanned;
+                    if(status.phase==Phase::loading_index &&
+                       status.image_index>0)loading=true;
+                    if(status.phase==Phase::enumerating)enumerating=true;
+                    if(status.phase==Phase::complete)complete=true;
+                    highest_index=std::max(highest_index,status.image_index);
+                    return true;
+                });
+            if(!loading||!enumerating||!complete||highest_index!=3 ||
+               scan.items().empty()||previous_entries!=scan.items().size()){
+                std::cerr<<"WIM open metadata progress stages missing\n";
+                return 58;
+            }
+        }
+        // Cancellation at the safe boundary immediately after WIMLoadImage
+        // must unwind its handles, not leave a locked source or temp mount.
+        {
+            bool cancelled=false;
+            try {
+                iso_wcx::WimArchive scan(original,0,
+                    [](const iso_wcx::ArchiveOpenStatus& status) {
+                        return !(status.phase==
+                            iso_wcx::ArchiveOpenStatus::Phase::enumerating &&
+                            status.image_index==1);
+                    });
+            }catch(const iso_wcx::ArchiveOpenCancelled&) {
+                cancelled=true;
+            }
+            if(!cancelled){
+                std::cerr<<"WIM metadata-open cancellation was ignored\n";
+                return 59;
+            }
+        }
         // DISM /Get-WimInfo-equivalent, built into the plugin with no
         // helper EXE or mount. Check all three indexes and the no-mount label.
         const auto summary=iso_wcx::build_wim_index_summary(original);
@@ -349,7 +397,29 @@ int wmain(int argc,wchar_t** argv) {
         const auto read=bind<ReadFn>(dll,"ReadHeaderExW");
         const auto process=bind<ProcessFn>(dll,"ProcessFileW");
         const auto close=bind<CloseFn>(dll,"CloseArchive");
-        if(!open||!read||!process||!close)return 8;
+        using ProbeFn=int(__stdcall*)(wchar_t*);
+        const auto probe=bind<ProbeFn>(dll,"CanYouHandleThisFileW");
+        if(!open||!read||!process||!close||!probe)return 8;
+        // TC probes format recognition before calling OpenArchive. It must
+        // not silently load/scan every WIM image during this probe.
+        {
+            auto path=original.wstring();
+            if(probe(path.data())!=1)return 60;
+            const auto invalid=root/L"not-a-wim.wim";
+            write(invalid,"NOT A WIM");
+            auto bad=invalid.wstring();
+            if(probe(bad.data())!=0)return 61;
+            // A plausible but incomplete header is intentionally accepted
+            // by the fast probe and rejected later by real WIMGAPI open.
+            // This proves the probe is not performing expensive enumeration.
+            std::string header(208,'\0');
+            header.replace(0,5,"MSWIM");
+            header[8]=static_cast<char>(208);
+            const auto header_only=root/L"header-only.wim";
+            write(header_only,header);
+            auto candidate=header_only.wstring();
+            if(probe(candidate.data())!=1)return 62;
+        }
         // Match the documented TC WCX listing lifecycle: OpenArchive,
         // ReadHeader/PK_SKIP and CloseArchive precede the separate F5
         // PackFiles call. WIMGAPI must not leak a source handle after TC
