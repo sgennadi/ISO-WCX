@@ -17,6 +17,7 @@
 #include <string>
 #include <utility>
 #include <cstdint>
+#include <exception>
 
 namespace iso_wcx { namespace {
 void checked(bool ok,const char* what){if(!ok)throw std::runtime_error(std::string(what)+" (Win32 "+std::to_string(GetLastError())+")");}
@@ -420,35 +421,61 @@ void remove_tree(const std::filesystem::path& path,
 void remove_wim_residue(const std::filesystem::path& root,
                         const std::filesystem::path& output,
                         const EditProgress& progress) {
-    const DWORD root_attr=GetFileAttributesW(root.c_str());
-    if(root_attr==INVALID_FILE_ATTRIBUTES ||
-       !(root_attr&FILE_ATTRIBUTE_DIRECTORY) ||
-       (root_attr&FILE_ATTRIBUTE_REPARSE_POINT))
-        throw EditUnsupported("WIM edit workspace was replaced or removed");
-    std::vector<std::filesystem::path> residue;
-    bool found_output=false;
-    // Enumerate first and remove second. Mutating a directory while a Win32
-    // iterator is running may skip residual WIMGAPI temporary entries.
-    for(const auto& entry:std::filesystem::directory_iterator(root)) {
+    // WIMGAPI may release temporary handles shortly after WIMCloseHandle.
+    // Retry the whole sweep rather than failing on one late entry. The
+    // verified staged WIM must be the ONLY remaining file before commit.
+    constexpr unsigned max_residue_passes=6;
+    std::exception_ptr last_failure;
+    for(unsigned pass=0;pass<max_residue_passes;++pass) {
         edit_tick(progress);
-        if(entry.path().filename()==output.filename()) {
-            const DWORD attr=GetFileAttributesW(entry.path().c_str());
-            if(attr==INVALID_FILE_ATTRIBUTES ||
-               (attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)))
-                throw EditUnsupported("WIM staging output is not a regular file");
-            found_output=true;
-        }else residue.push_back(entry.path());
+        const DWORD root_attr=GetFileAttributesW(root.c_str());
+        if(root_attr==INVALID_FILE_ATTRIBUTES ||
+           !(root_attr&FILE_ATTRIBUTE_DIRECTORY) ||
+           (root_attr&FILE_ATTRIBUTE_REPARSE_POINT))
+            throw EditUnsupported("WIM edit workspace was replaced or removed");
+        try {
+            std::vector<std::filesystem::path> residue;
+            bool found_output=false;
+            // Enumerate first, close all iterator handles, then delete.
+            for(const auto& entry:std::filesystem::directory_iterator(root)) {
+                edit_tick(progress);
+                if(entry.path().filename()==output.filename()) {
+                    const DWORD attr=GetFileAttributesW(entry.path().c_str());
+                    if(attr==INVALID_FILE_ATTRIBUTES ||
+                       (attr&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)))
+                        throw EditUnsupported("WIM staging output is not a regular file");
+                    found_output=true;
+                }else residue.push_back(entry.path());
+            }
+            if(!found_output)
+                throw EditUnsupported("verified WIM staging output disappeared");
+            for(const auto& entry:residue) {
+                edit_tick(progress);
+                remove_tree(entry,progress);
+            }
+            bool clean=true;
+            for(const auto& entry:std::filesystem::directory_iterator(root)) {
+                edit_tick(progress);
+                if(entry.path().filename()!=output.filename())clean=false;
+            }
+            if(clean)return;
+            throw std::runtime_error(
+                "WIM temporary files still remain before commit");
+        }catch(const EditCancelled&) {
+            throw;
+        }catch(const EditUnsupported&) {
+            // Structural safety failures must not be retried or hidden.
+            throw;
+        }catch(...) {
+            last_failure=std::current_exception();
+        }
+        if(pass+1u<max_residue_passes) {
+            edit_tick(progress);
+            Sleep(std::min(1500u,200u*(pass+1u)));
+        }
     }
-    if(!found_output)throw EditUnsupported("verified WIM staging output disappeared");
-    for(const auto& path:residue) {
-        edit_tick(progress);
-        remove_tree(path,progress);
-    }
-    // Fail closed if an unexpected temporary file reappeared while cleaning.
-    for(const auto& entry:std::filesystem::directory_iterator(root)) {
-        if(entry.path().filename()!=output.filename())
-            throw EditUnsupported("WIM temporary files still remain before commit");
-    }
+    if(last_failure)std::rethrow_exception(last_failure);
+    throw std::runtime_error("WIM transaction residue cleanup exhausted");
 }
 // Rollback must use the same ACL-aware deletion as successful WIM cleanup.
 // Ordinary remove_all can leave TrustedInstaller-protected expanded files
@@ -622,7 +649,11 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 callback.tick();
                 continue;
             }
-            const auto expanded=tx.workspace/L"expanded";
+            // Use a unique Apply directory for each edited image. A folder
+            // awaiting WIMGAPI handle release cannot contaminate the next.
+            const auto expanded=tx.workspace/
+                (edits.size()==1 ? std::wstring(L"expanded") :
+                 std::wstring(L"expanded-image")+std::to_wstring(index));
             checked(std::filesystem::create_directory(expanded),
                     "create fresh WIM staging directory");
             struct Cleanup {
@@ -658,6 +689,8 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 // offers no cancellation point. Reuse the WCX-aware callback:
                 // this edit phase has zero percentage span, so progress stays
                 // monotonic while Total Commander can still cancel promptly.
+                callback.begin_stage(L"Copy F5 source into WIM workspace "+number,
+                                     apply_end,0);
                 CopyContext source_copy{callback,apply_end,0};
                 const BOOL copied_source=CopyFileExW(
                     c.source.c_str(),target.c_str(),
@@ -674,9 +707,17 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             callback.tick();Handle result(captured,close);preserve_metadata(m,image.h,result.h);
             }
             callback.begin_stage(L"Cleanup WIM temporary files "+number,end,0);
-            // Never report F5 success if expanded could not be removed.
-            // The transaction will still roll back the staged WIM on failure.
-            remove_tree(expanded,progress);
+            // A WIMGAPI worker or AV filter may still hold a scratch file.
+            // If early cleanup fails, retry after ALL source/output WIMGAPI
+            // handles close. Final residue cleanup is mandatory before commit.
+            try {
+                remove_tree(expanded,progress);
+            }catch(const EditCancelled&) {
+                throw;
+            }catch(const std::exception&) {
+                // Private folder remains under the guarded transaction root.
+                // Never commit while any of its contents survive.
+            }
             cleanup.complete=true;
         }
         checked(api<DWORD(WINAPI*)(HANDLE)>(m,"WIMGetImageCount")(output.h)==out_index,

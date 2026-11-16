@@ -87,8 +87,22 @@ std::string classify(std::string_view reason, int code) {
        has("open wim scratch entry for acl repair"))
         return "wim_scratch_acl_denied";
     if((has("wim scratch directory remained non-empty") ||
-        has("remove wim scratch entry")) && has("win32 145"))
+         has("wim scratch deletion remained pending") ||
+         has("remove wim scratch entry")) && has("win32 145"))
         return "wim_scratch_not_empty";
+    if(has("wim scratch deletion remained pending") && has("win32 303"))
+        return "wim_scratch_delete_pending";
+    if(has("wim temporary files still remain before commit") ||
+       has("wim transaction residue cleanup exhausted"))
+        return "wim_residue_remains";
+    if(has("enumerate wim scratch before delete"))
+        return "wim_scratch_enumeration";
+    if(has("inspect wim scratch entry before cleanup"))
+        return "wim_scratch_inspection";
+    if(has("clear wim scratch read-only flag"))
+        return "wim_scratch_attributes";
+    if(has("remove wim scratch entry") && has("win32 32"))
+        return "wim_scratch_sharing";
     if(has("remove wim scratch entry with restore privilege")||
        has("remove wim scratch entry after acl repair"))
         return "wim_scratch_delete_denied";
@@ -150,6 +164,12 @@ std::string classify(std::string_view reason, int code) {
 std::string stage_name(std::wstring_view description) {
     std::wstring s(description.substr(0,160));
     std::transform(s.begin(),s.end(),s.begin(),[](wchar_t c){return wchar_t(towlower(c));});
+    // Distinguish per-index Apply cleanup from the post-WIMGAPI root sweep
+    // without exporting any local path, filename or exception message.
+    if(s.find(L"cleanup wim temporary files")!=s.npos)
+        return "cleanup_expanded";
+    if(s.find(L"cleanup wim transaction scratch")!=s.npos)
+        return "cleanup_residue";
     if(s.find(L"copy")!=s.npos)return "copy";
     if(s.find(L"export")!=s.npos)return "export";
     if(s.find(L"apply")!=s.npos||s.find(L"extract")!=s.npos)return "apply";

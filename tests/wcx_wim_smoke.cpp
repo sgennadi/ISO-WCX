@@ -57,6 +57,8 @@ static std::atomic<unsigned> wim_stage_calls{0};
 static std::atomic<unsigned> wim_copy_stage_calls{0};
 static std::atomic<unsigned> wim_export_stage_calls{0};
 static std::atomic<bool> cancel_next_wim{false};
+static std::atomic<bool> cancel_wim_f5_source_copy{false};
+static std::atomic<bool> observed_wim_f5_source_copy{false};
 // Simulate WIMGAPI/host restoring the thread to the process security context
 // just before ACL-aware scratch cleanup. Previously that caused Win32 1008.
 static std::atomic<bool> drop_impersonation_at_cleanup{false};
@@ -73,6 +75,12 @@ static std::atomic<bool> protected_scratch_directory_acl_at_cleanup{false};
 static std::atomic<bool> inject_late_file_at_cleanup{false};
 static std::atomic<bool> late_file_armed{false};
 static std::atomic<bool> late_file_created{false};
+// Hold an ordinary applied file without FILE_SHARE_DELETE through the first
+// cleanup attempt, then release it after WIMGAPI source/output handles close.
+static std::atomic<bool> hold_wim_scratch_file_at_cleanup{false};
+static std::atomic<bool> held_wim_scratch_file_at_cleanup{false};
+static std::atomic<bool> released_wim_scratch_file_at_cleanup{false};
+static std::atomic<HANDLE> held_wim_scratch_handle{INVALID_HANDLE_VALUE};
 static fs::path private_test_root;
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
@@ -102,6 +110,26 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
                        L"Cleanup WIM temporary files")!=std::wstring_view::npos) {
                 if(inject_late_file_at_cleanup.exchange(false))
                     late_file_armed.store(true);
+                if(hold_wim_scratch_file_at_cleanup.exchange(false)) {
+                    HANDLE held=INVALID_HANDLE_VALUE;
+                    try {
+                        for(const auto& entry:fs::directory_iterator(private_test_root)) {
+                            if(!entry.is_directory() ||
+                               !entry.path().filename().wstring().starts_with(
+                                   L".iso-wcx-edit-"))continue;
+                            const auto file=entry.path()/L"expanded"/L"HELLO.TXT";
+                            if(!fs::is_regular_file(file))continue;
+                            held=CreateFileW(file.c_str(),GENERIC_READ,
+                                FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL,nullptr);
+                            break;
+                        }
+                    }catch(...){}
+                    if(held!=INVALID_HANDLE_VALUE) {
+                        held_wim_scratch_handle.store(held);
+                        held_wim_scratch_file_at_cleanup.store(true);
+                    }
+                }
                 if(protect_scratch_acl_at_cleanup.exchange(false)){
                     // Inject a protected DELETE-denying DACL on a private,
                     // freshly applied scratch file, not the source WIM.
@@ -160,11 +188,25 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
                     dropped_impersonation_at_cleanup.store(reverted!=FALSE);
                 }
             }
+            if(std::wstring_view(stage).find(
+                   L"Cleanup WIM transaction scratch")!=std::wstring_view::npos) {
+                const HANDLE held=held_wim_scratch_handle.exchange(
+                    INVALID_HANDLE_VALUE);
+                if(held!=INVALID_HANDLE_VALUE) {
+                    CloseHandle(held);
+                    released_wim_scratch_file_at_cleanup.store(true);
+                }
+            }
             ++wim_stage_calls;
             if(std::wstring_view(stage).find(L"Copy WIM")!=std::wstring_view::npos)
                 ++wim_copy_stage_calls;
             if(std::wstring_view(stage).find(L"Export unchanged WIM image")!=std::wstring_view::npos)
                 ++wim_export_stage_calls;
+        }
+        if(cancel_wim_f5_source_copy.load() && stage &&
+           std::wstring_view(stage).find(L"Copy F5 source into WIM workspace")!=std::wstring_view::npos) {
+            observed_wim_f5_source_copy.store(true);
+            return 0;
         }
         if(cancel_next_wim.load() && stage &&
            std::wstring_view(stage).find(L"Extract WIM image")!=std::wstring_view::npos)
@@ -525,6 +567,53 @@ int wmain(int argc,wchar_t** argv) {
         if(!clean_wim_workspaces())return 40;
         if(wim_percent_calls.load()==0 || wim_stage_calls.load()==0)
             return 32; // Progress must be visible even for empty folders.
+        // A temporary file held without FILE_SHARE_DELETE must not abort
+        // an otherwise verified F5. First deletion fails with sharing
+        // violation, then succeeds after WIMGAPI archive handles close.
+        {
+            fs::create_directories(incoming/L"DEFERRED_CLEANUP_FOLDER");
+            wchar_t defer_list[]=L"DEFERRED_CLEANUP_FOLDER\0\0";
+            private_test_root=root;
+            held_wim_scratch_file_at_cleanup.store(false);
+            released_wim_scratch_file_at_cleanup.store(false);
+            hold_wim_scratch_file_at_cleanup.store(true);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int defer_rc=pack(packed.data(),sub.data(),src.data(),defer_list,0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            hold_wim_scratch_file_at_cleanup.store(false);
+            const HANDLE held=held_wim_scratch_handle.exchange(
+                INVALID_HANDLE_VALUE);
+            if(held!=INVALID_HANDLE_VALUE)CloseHandle(held);
+            if(!held_wim_scratch_file_at_cleanup.load() ||
+               !released_wim_scratch_file_at_cleanup.load() ||
+               defer_rc!=0 || !clean_wim_workspaces()) {
+                std::cerr<<"WIM post-WIMGAPI scratch cleanup retry failed: "
+                         <<defer_rc<<"\n";
+                return 57;
+            }
+        }
+        // Cancel the WIM F5 source copy after WIMGAPI Apply, before recapture.
+        // Verify exact rollback and no leaked scratch directory.
+        {
+            const auto before_source_cancel=load(original);
+            write(incoming/L"CANCEL_COPY.TXT",std::string(2*1024*1024,'C'));
+            wchar_t copy_list[]=L"CANCEL_COPY.TXT\0\0";
+            observed_wim_f5_source_copy.store(false);
+            cancel_wim_f5_source_copy.store(true);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int copy_rc=pack(packed.data(),sub.data(),src.data(),copy_list,0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            cancel_wim_f5_source_copy.store(false);
+            if(!observed_wim_f5_source_copy.load()){
+                std::cerr<<"WIM F5 source-copy cancellation stage not observed\n";
+                return 55;
+            }
+            if(copy_rc!=21 || load(original)!=before_source_cancel ||
+               !clean_wim_workspaces()) {
+                std::cerr<<"WIM cancelled F5 source copy changed original or leaked scratch\n";
+                return 56;
+            }
+        }
         // Cancel during a long apply before replacing the original WIM.
         fs::create_directories(incoming/L"CANCEL_FOLDER");
         wchar_t cancel_list[]=L"CANCEL_FOLDER\0\0";
@@ -541,7 +630,7 @@ int wmain(int argc,wchar_t** argv) {
             OpenW args{};args.ArcName=packed.data();
             HANDLE h=open(&args);
             if(!h)return 28;
-            bool seen_folder=false;
+            bool seen_folder=false,seen_deferred_folder=false;
             for(;;){
                 HeaderExW item{};
                 const int result=read(h,&item);
@@ -549,10 +638,12 @@ int wmain(int argc,wchar_t** argv) {
                 if(result){close(h);return 29;}
                 if(std::wstring_view(item.FileName)==L"image1\\NEW_EMPTY_FOLDER")
                     seen_folder=(item.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
+                if(std::wstring_view(item.FileName)==L"image1\\DEFERRED_CLEANUP_FOLDER")
+                    seen_deferred_folder=(item.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
                 if(process(h,0,nullptr,nullptr)){close(h);return 30;}
             }
             close(h);
-            if(!seen_folder)return 31;
+            if(!seen_folder||!seen_deferred_folder)return 31;
         }
         auto content=[&](const std::wstring& wanted,std::string& data){
             OpenW a{};a.ArcName=packed.data();HANDLE h=open(&a);if(!h)return false;
