@@ -258,33 +258,32 @@ struct WimScratchAcl {
     ~WimScratchAcl(){if(acl)LocalFree(acl);}
 };
 
-// Protect only the freshly created, randomly named sibling scratch tree.
-// Windows may legitimately choose BUILTIN\Administrators as owner, and
-// forcing owner reassignment can fail with Win32 5. Cleanup depends on
-// an explicit, inheritable DACL for host user, SYSTEM and Administrators.
-// Never modify the original WIM or the enclosing folder.
-void protect_wim_workspace(const std::filesystem::path& workspace) {
+// Create a private sibling workspace atomically with the desired DACL.
+// A second SetSecurityInfo/WRITE_DAC call can fail with Win32 5 on elevated
+// domain machines even when the caller has permission to create the folder.
+// No owner reassignment, global takeown, or modification of parent/image.
+bool create_wim_workspace(const std::filesystem::path& workspace) {
     ProcessUserSid user;
     WimScratchAcl acl(user.sid(),SUB_CONTAINERS_AND_OBJECTS_INHERIT);
-    HANDLE raw=CreateFileW(workspace.c_str(),
-        FILE_READ_ATTRIBUTES|WRITE_DAC,
-        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
-        nullptr,OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
-    checked(raw!=INVALID_HANDLE_VALUE,"open WIM private workspace for ACL");
-    struct File {HANDLE h;~File(){CloseHandle(h);}} folder{raw};
-    BY_HANDLE_FILE_INFORMATION info{};
-    checked(GetFileInformationByHandle(folder.h,&info),
-            "inspect WIM private workspace for ACL");
-    if(!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) ||
-       (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))
-        throw EditUnsupported("WIM private workspace is not a regular directory");
-    const DWORD result=SetSecurityInfo(folder.h,SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
-        nullptr,nullptr,acl.acl,nullptr);
-    if(result!=ERROR_SUCCESS)
-        throw std::runtime_error("protect WIM private workspace ACL (Win32 "+
-                                 std::to_string(result)+")");
+    SECURITY_DESCRIPTOR security{};
+    checked(InitializeSecurityDescriptor(&security,
+                                         SECURITY_DESCRIPTOR_REVISION),
+            "initialize WIM workspace descriptor");
+    checked(SetSecurityDescriptorDacl(&security,TRUE,acl.acl,FALSE),
+            "attach WIM workspace DACL");
+    checked(SetSecurityDescriptorControl(
+                &security,SE_DACL_PROTECTED,SE_DACL_PROTECTED),
+            "protect WIM workspace DACL inheritance");
+    SECURITY_ATTRIBUTES attributes{};
+    attributes.nLength=sizeof(attributes);
+    attributes.lpSecurityDescriptor=&security;
+    attributes.bInheritHandle=FALSE;
+    if(CreateDirectoryW(workspace.c_str(),&attributes))return true;
+    const DWORD error=GetLastError();
+    if(error==ERROR_ALREADY_EXISTS || error==ERROR_FILE_EXISTS)return false;
+    SetLastError(error);
+    checked(false,"create WIM workspace with explicit ACL");
+    return false;
 }
 
 // Restore access ONLY for private WIM apply/capture scratch entries.
@@ -720,9 +719,12 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     wim_preflight::ImageLease lease(path);
     // No DISM mount/unmount is invoked: registered mounts remain untouched.
     wim_preflight::reject_registered_mounts(m,path);
-    Privileges privileges;Apartment apartment;EditTransaction tx(path);
+    Privileges privileges;Apartment apartment;
+    // Create the unique sibling directory with the ACL already attached.
+    // Atomic creation works for domain-admin TC without WRITE_DAC on an
+    // existing directory and avoids a security-transition window.
+    EditTransaction tx(path,&create_wim_workspace);
     WimWorkspaceCleanup scratch{tx.workspace};
-    protect_wim_workspace(tx.workspace);
     // Native Windows capture/apply preserve security and alternate streams on NTFS.
     wchar_t volume[MAX_PATH]{},filesystem[MAX_PATH]{};checked(GetVolumePathNameW(tx.workspace.c_str(),volume,MAX_PATH),"find WIM workspace volume");checked(GetVolumeInformationW(volume,nullptr,0,nullptr,nullptr,nullptr,filesystem,MAX_PATH),"inspect WIM workspace filesystem");
     if(_wcsicmp(filesystem,L"NTFS")!=0)throw EditUnsupported("WIM editing requires an NTFS workspace volume");
