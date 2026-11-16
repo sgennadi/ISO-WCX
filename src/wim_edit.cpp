@@ -658,6 +658,8 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 // offers no cancellation point. Reuse the WCX-aware callback:
                 // this edit phase has zero percentage span, so progress stays
                 // monotonic while Total Commander can still cancel promptly.
+                callback.begin_stage(L"Copy F5 source into WIM workspace "+number,
+                                     apply_end,0);
                 CopyContext source_copy{callback,apply_end,0};
                 const BOOL copied_source=CopyFileExW(
                     c.source.c_str(),target.c_str(),
