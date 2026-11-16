@@ -104,7 +104,11 @@ std::string classify(std::string_view reason, int code) {
     if(has("protect wim private workspace acl")||
        has("create wim workspace security acl")||
        has("open wim private workspace for acl")||
-       has("inspect wim private workspace for acl"))
+       has("inspect wim private workspace for acl")||
+       has("initialize wim workspace descriptor")||
+       has("attach wim workspace dacl")||
+       has("protect wim workspace dacl inheritance")||
+       has("create wim workspace with explicit acl"))
         return "wim_workspace_acl_denied";
     if(has("restore wim scratch cleanup access")||
        has("restore wim scratch entry ownership")||
