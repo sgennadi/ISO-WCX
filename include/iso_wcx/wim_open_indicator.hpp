@@ -39,6 +39,12 @@ private:
         HWND dialog, UINT message, WPARAM wparam,
         LPARAM lparam, LONG_PTR context) noexcept;
     void run() noexcept;
+    // Compatibility window when the hosting Total Commander process has
+    // comctl32 v5 (TaskDialogIndirect is unavailable). Never hide a long
+    // WIM load just because the OS modern-dialog API cannot be activated.
+    void run_fallback() noexcept;
+    static LRESULT CALLBACK fallback_proc(
+        HWND window, UINT message, WPARAM wparam, LPARAM lparam) noexcept;
     void refresh(HWND dialog) noexcept;
     [[nodiscard]] std::wstring status_text() const;
 
@@ -53,6 +59,8 @@ private:
     std::atomic<std::uint64_t> scanned_{0};
     std::atomic<bool> cancelled_{false};
     std::atomic<HWND> dialog_{nullptr};
+    std::atomic<bool> fallback_window_{false};
+    unsigned fallback_frame_ = 0; // fallback UI thread only
     HANDLE stop_event_ = nullptr;
     std::thread thread_;
 };

@@ -409,7 +409,7 @@ if(WIN32)
               src/universal_diagnostics_bridge.cpp
               src/vendor/universal_diagnostics_embedded.cpp
               "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc")
-  target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32)
+  target_link_libraries(ISO-WCX PRIVATE iso_disc winhttp bcrypt advapi32 shell32 comdlg32 user32 gdi32)
   target_compile_definitions(ISO-WCX PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
     ISO_WCX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     ISO_WCX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
