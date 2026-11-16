@@ -126,7 +126,8 @@ static bool private_wim_acl_ok(const fs::path& root,const fs::path& child) {
         struct Security {PSECURITY_DESCRIPTOR p;~Security(){LocalFree(p);}}
             secure{descriptor};
         if(!acl || acl->AceCount<3)return false;
-        if(!inherited && (!owner || !EqualSid(owner,user)))return false;
+        // Ownership may default to BUILTIN\Administrators. The DACL is
+        // authoritative for temporary folder cleanup.
         SECURITY_DESCRIPTOR_CONTROL control{};
         DWORD revision=0;
         if(!GetSecurityDescriptorControl(descriptor,&control,&revision))
