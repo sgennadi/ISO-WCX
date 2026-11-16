@@ -81,6 +81,11 @@ static std::atomic<bool> hold_wim_scratch_file_at_cleanup{false};
 static std::atomic<bool> held_wim_scratch_file_at_cleanup{false};
 static std::atomic<bool> released_wim_scratch_file_at_cleanup{false};
 static std::atomic<HANDLE> held_wim_scratch_handle{INVALID_HANDLE_VALUE};
+// Reproduce Win32 145 when a scanner keeps a DELETE-sharing read handle
+// open after DeleteFileW: POSIX disposition must unlink the private name.
+static std::atomic<bool> hold_delete_sharing_scratch_at_cleanup{false};
+static std::atomic<bool> held_delete_sharing_scratch_at_cleanup{false};
+static std::atomic<HANDLE> delete_sharing_scratch_handle{INVALID_HANDLE_VALUE};
 static fs::path private_test_root;
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
@@ -128,6 +133,27 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
                     if(held!=INVALID_HANDLE_VALUE) {
                         held_wim_scratch_handle.store(held);
                         held_wim_scratch_file_at_cleanup.store(true);
+                    }
+                }
+                if(hold_delete_sharing_scratch_at_cleanup.exchange(false)) {
+                    HANDLE held=INVALID_HANDLE_VALUE;
+                    try {
+                        for(const auto& entry:fs::directory_iterator(private_test_root)) {
+                            if(!entry.is_directory() ||
+                               !entry.path().filename().wstring().starts_with(
+                                   L".iso-wcx-edit-"))continue;
+                            const auto file=entry.path()/L"expanded"/L"HELLO.TXT";
+                            if(!fs::is_regular_file(file))continue;
+                            held=CreateFileW(file.c_str(),GENERIC_READ,
+                                FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                                nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,
+                                nullptr);
+                            break;
+                        }
+                    }catch(...){}
+                    if(held!=INVALID_HANDLE_VALUE) {
+                        delete_sharing_scratch_handle.store(held);
+                        held_delete_sharing_scratch_at_cleanup.store(true);
                     }
                 }
                 if(protect_scratch_acl_at_cleanup.exchange(false)){
@@ -590,6 +616,33 @@ int wmain(int argc,wchar_t** argv) {
                 std::cerr<<"WIM post-WIMGAPI scratch cleanup retry failed: "
                          <<defer_rc<<"\n";
                 return 57;
+            }
+        }
+        // A DELETE-sharing handle can outlive the WIMGAPI capture. Ordinary
+        // DeleteFileW leaves the name delete-pending and RemoveDirectoryW
+        // returns Win32 145. The private scratch must disappear BEFORE
+        // the scanner's handle closes, with the committed WIM intact.
+        {
+            fs::create_directories(incoming/L"POSIX_SCRATCH_FOLDER");
+            wchar_t posix_list[]=L"POSIX_SCRATCH_FOLDER\0\0";
+            private_test_root=root;
+            held_delete_sharing_scratch_at_cleanup.store(false);
+            hold_delete_sharing_scratch_at_cleanup.store(true);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int posix_rc=pack(
+                packed.data(),sub.data(),src.data(),posix_list,0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            hold_delete_sharing_scratch_at_cleanup.store(false);
+            const bool clean_while_handle_open=clean_wim_workspaces();
+            const HANDLE held=delete_sharing_scratch_handle.exchange(
+                INVALID_HANDLE_VALUE);
+            if(held!=INVALID_HANDLE_VALUE)CloseHandle(held);
+            if(!held_delete_sharing_scratch_at_cleanup.load() ||
+               posix_rc!=0 || !clean_while_handle_open) {
+                std::cerr<<"WIM POSIX scratch unlink failed with an "
+                         <<"outstanding delete-sharing handle: "
+                         <<posix_rc<<"\n";
+                return 63;
             }
         }
         // Cancel the WIM F5 source copy after WIMGAPI Apply, before recapture.
