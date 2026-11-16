@@ -222,7 +222,9 @@ def main(binary, reader=None):
         # so it is never silently discarded or overwritten.
         image.write_bytes(fixture()+bytes(4*B-1)+b'X')
         run('add','MUST_FAIL.TXT',False)
-        # Truncation and namespace disagreement remain hard failures.
+        # Truncation remains a hard failure. Independently valid Primary
+        # and Joliet descriptors may declare different bounded view sizes;
+        # F5 normalizes both only after validating BOTH namespace extents.
         truncated=fixture()
         both(truncated,16*B+80,len(truncated)//B+1)
         image.write_bytes(truncated)
@@ -230,6 +232,24 @@ def main(binary, reader=None):
         inconsistent=fixture(joliet=True)
         both(inconsistent,17*B+80,len(inconsistent)//B-1)
         image.write_bytes(inconsistent)
+        run('add','MISMATCH_SAFE.TXT')
+        normalized=image.read_bytes()
+        assert read_image(image,True)['MISMATCH_SAFE.TXT']==source.read_bytes()
+        for descriptor in (16,17):
+            assert int.from_bytes(normalized[descriptor*B+80:descriptor*B+84],
+                                  'little')==len(normalized)//B
+        validate_path_tables(image)
+        # The smaller Joliet descriptor must NOT be used to authorize an
+        # extent that reaches beyond its own Volume Space Size.
+        bad_joliet=fixture(joliet=True)
+        both(bad_joliet,17*B+80,22)  # Joliet root directory is at LBA 22.
+        image.write_bytes(bad_joliet)
+        run('add','MUST_FAIL.TXT',False)
+        bad_table=fixture(joliet=True)
+        both(bad_table,17*B+80,35)
+        struct.pack_into('<I',bad_table,17*B+132,1)
+        struct.pack_into('<I',bad_table,17*B+140,35)
+        image.write_bytes(bad_table)
         run('add','MUST_FAIL.TXT',False)
         # An ISO/UDF bridge can legitimately have a physical file longer
         # than ISO's declared extent. Its writer must still validate UDF,
@@ -306,10 +326,27 @@ def main(binary, reader=None):
             run('delete','EMUBOOT.IMG',False)
             run('add','EMUBOOT.IMG',False)
             run('cancel','CANCELLED.TXT',False)
+        # A floppy has an exact media-defined size even if its image is
+        # hidden from the ISO9660 namespace. Keep ALL original boot bytes.
+        for media in (1,2,3):
+            image.write_bytes(emulated_boot_fixture(media,visible=False))
+            original=image.read_bytes()
+            run('add','HIDDEN_FLOPPY_SAFE.TXT')
+            assert read_image(image)['HIDDEN_FLOPPY_SAFE.TXT']==source.read_bytes()
+            assert image.read_bytes()[24*B:len(original)]==original[24*B:], (
+                'hidden El Torito floppy bytes were changed',media)
+        # A hidden HDD cannot be bounded by its media type, and a visible
+        # floppy/HDD with invalid disk length must still be rejected.
         for media,visible,valid in (
-                (1,False,True), (2,True,False), (4,True,False)):
+                (2,True,False), (4,True,False), (4,False,True)):
             image.write_bytes(emulated_boot_fixture(media,visible=visible,valid=valid))
             run('add','MUST_REFUSE.TXT',False)
+        # The floppy's fixed extent must not alias an ordinary ISO file.
+        overlap=emulated_boot_fixture(2,visible=False)
+        dots=iso_record(20,B,2,bytes([0]))+iso_record(20,B,2,bytes([1]))
+        both(overlap,20*B+len(dots)+2,25)
+        image.write_bytes(overlap)
+        run('add','MUST_REFUSE.TXT',False)
         # A hard-disk MBR partition extending past its ISO file is unsafe.
         damaged=emulated_boot_fixture(4)
         struct.pack_into('<II',damaged,25*B+454,1,0xffffffff)
