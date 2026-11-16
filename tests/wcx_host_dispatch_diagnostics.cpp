@@ -267,7 +267,32 @@ int wmain(){
             op.stage(L"Check WIM mount state and edit lock",4);
             op.complete(13,"read WIM registered mount state (Win32 5)");
         }
+        // WIM free-space preflight occurs before transaction staging. Reports
+        // are fixed path-free categories; only the local log has byte counts.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-WIM-NOSPACE.wim",1,1);
+            op.stage(L"Check WIM staging capacity",4);
+            op.complete(24,
+                "WIM staging capacity insufficient (available_mib=800, minimum_required_mib=1400)");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-WIM-UNKNOWN-SPACE.wim",1,1);
+            op.stage(L"Check WIM staging capacity",4);
+            op.complete(13,"query WIM staging capacity (Win32 5)");
+        }
         const auto extended=read(iso_wcx::diagnostics::export_report());
+        require(contains(extended,
+                "| wim | pack | 24 | wim_staging_space_insufficient | preflight | 1 |"),
+                "WIM low-space preflight was not classified");
+        require(contains(extended,
+                "| wim | pack | 13 | wim_staging_capacity_unavailable | preflight | 1 |"),
+                "WIM unknown-capacity preflight was not classified");
+        require(!contains(extended,"PRIVATE-WIM-NOSPACE") &&
+                !contains(extended,"PRIVATE-WIM-UNKNOWN-SPACE") &&
+                !contains(extended,"minimum_required_mib=1400"),
+                "WIM capacity diagnostics leaked path or local byte counts");
         require(contains(extended,
                 "| wim | pack | 24 | wim_mount_registered | preflight | 1 |"),
                 "registered WIM mount must block editing");

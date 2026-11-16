@@ -148,6 +148,29 @@ read-only WIMGAPI mount-list query, but creates no Windows mount points.
 The existing WIM smoke tests still cover Apply/Capture, F5, rollback,
 scratch cleanup, metadata preservation and output readback.
 
+## Early NTFS staging capacity check (RC Preview)
+
+A normal WIMGAPI F5/Delete creates a complete staged WIM and expands one or
+more image indexes on the same filesystem. A small logical edit can therefore
+use much more disk space than the copied file. The editor now queries
+`GetDiskFreeSpaceExW` **before** creating its unique scratch directory.
+It refuses an obviously impossible operation when the caller has less than:
+
+`source WIM size + clamp(source size / 8, 128 MiB, 1 GiB)`
+
+This is a conservative *minimum* for staging, not a prediction of Apply
+expansion. Large uncompressed installations may still need many extra GiB.
+The check is read-only, does not reserve/delete disk space, and never changes
+a mounted WIM. If Windows cannot report available space or arithmetic
+overflows, the edit fails before WIMGAPI Apply, without modifying the image.
+
+The local diagnostic log includes rounded available/required MiB counts
+when space is insufficient. The shareable report includes only the fixed
+`wim_staging_space_insufficient` or
+`wim_staging_capacity_unavailable` category and the `preflight` stage,
+not paths, source image names or disk capacities. Cross-platform CTest
+covers exact threshold boundaries, minimum/maximum reserves and overflow.
+
 ## Restricted transactional WIM editing
 
 Only existing standard, unsplit, non-solid and writable WIM images may be
