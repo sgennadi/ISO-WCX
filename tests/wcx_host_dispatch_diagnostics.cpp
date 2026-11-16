@@ -247,7 +247,40 @@ int wmain(){
             op.complete(13,
                 "archive changed during edit (size/mtime)");
         }
+        // Ported DISM-GUI style mount and cooperative-writer preflight:
+        // these are anonymous fixed diagnostic categories, not file paths.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-MOUNT-CONFLICT.wim",1,1);
+            op.stage(L"Check WIM mount state and edit lock",4);
+            op.complete(24,"WIM edit refused: image is registered as mounted");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-LEASE-BUSY.wim",1,1);
+            op.stage(L"Check WIM mount state and edit lock",4);
+            op.complete(24,"WIM edit already active on this computer");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-MOUNT-QUERY.wim",1,1);
+            op.stage(L"Check WIM mount state and edit lock",4);
+            op.complete(13,"read WIM registered mount state (Win32 5)");
+        }
         const auto extended=read(iso_wcx::diagnostics::export_report());
+        require(contains(extended,
+                "| wim | pack | 24 | wim_mount_registered | preflight | 1 |"),
+                "registered WIM mount must block editing");
+        require(contains(extended,
+                "| wim | pack | 24 | wim_operation_busy | preflight | 1 |"),
+                "concurrent WIM operation did not receive a distinct category");
+        require(contains(extended,
+                "| wim | pack | 13 | wim_mount_state_unknown | preflight | 1 |"),
+                "WIM mount registry uncertainty category missing");
+        require(!contains(extended,"PRIVATE-MOUNT-CONFLICT") &&
+                !contains(extended,"PRIVATE-LEASE-BUSY") &&
+                !contains(extended,"PRIVATE-MOUNT-QUERY"),
+                "WIM preflight diagnostic leaked a private file path");
         require(contains(extended,
                 "| wim | open | 21 | cancelled | metadata_enumerate | 1 |"),
                 "cancelled WIM open metadata stage missing");
