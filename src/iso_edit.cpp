@@ -14,6 +14,9 @@
 namespace iso_wcx { namespace {
 using Bytes=std::vector<unsigned char>;
 constexpr std::uint32_t block=2048;
+// Defined below Image; needed while validating hidden El Torito extents.
+bool intersect(std::uint64_t a,std::uint64_t a_bytes,
+               std::uint64_t b,std::uint64_t b_bytes) noexcept;
 void need(bool ok,const char* message) { if(!ok)throw EditUnsupported(message); }
 std::uint32_t le(const Bytes& b,std::size_t p,unsigned n=4) {
     need(p+n<=b.size(),"truncated ISO field");std::uint32_t v=0;
