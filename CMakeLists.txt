@@ -404,7 +404,7 @@ if(WIN32)
                  "${CMAKE_CURRENT_BINARY_DIR}/iso_wcx_version.rc" @ONLY)
   add_library(ISO-WCX MODULE
               src/wcx.cpp src/wcx_updater.cpp src/operation_diagnostics.cpp
-              src/modern_dialog.cpp
+              src/modern_dialog.cpp src/wim_open_indicator.cpp
               src/tc_registration_audit.cpp src/tc_registration_repair.cpp
               src/universal_diagnostics_bridge.cpp
               src/vendor/universal_diagnostics_embedded.cpp
