@@ -98,6 +98,31 @@ without any user paths, filenames or contents. A Windows native smoke
 test holds a DELETE-sharing file handle throughout cleanup and asserts
 that no workspace survives while the handle is still open.
 
+## DISM-GUI mount safety and cross-process edit lease (RC1 Preview)
+
+The WIM editor reuses two non-destructive mechanisms from the separate
+DISM-GUI project. It stays native WIMGAPI Apply/Edit/Capture and never
+starts dism.exe, mounts a filesystem image, or calls /Cleanup-Mountpoints.
+
+1. Before creating scratch and again just before atomic commit,
+   WIMGetMountedImageInfo(Level 1) checks registered Windows DISM/WIM
+   mounts. A matching image (including an NTFS hardlink alias) blocks F5
+   regardless of mount mode or status. If mount-state enumeration cannot
+   be trusted, edit fails closed. Unrelated mounts are never modified.
+2. A machine-local, Win32 file-share-exclusive lease prevents simultaneous
+   ISO-WCX edits of the same NTFS file ID from separate TC windows/processes
+   (including 32-bit versus 64-bit Total Commander). Zero-byte lock files
+   live under %ProgramData%/ISO-WCX/ImageLocks; they intentionally persist,
+   while Windows releases the *handle* on exit or crash. Deleting live lock
+   files would allow concurrent transactions to bypass the lock.
+   Other DISM tools do not participate in this lease, so the mount check
+   is repeated immediately before committing.
+
+CI includes a synthetic WIM identity/hardlink lease test and an actual
+read-only WIMGAPI mount-list query, but creates no Windows mount points.
+The existing WIM smoke tests still cover Apply/Capture, F5, rollback,
+scratch cleanup, metadata preservation and output readback.
+
 ## Restricted transactional WIM editing
 
 Only existing standard, unsplit, non-solid and writable WIM images may be
