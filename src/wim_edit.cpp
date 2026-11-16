@@ -258,14 +258,15 @@ struct WimScratchAcl {
 };
 
 // Protect only the freshly created, randomly named sibling scratch tree.
-// Do not change the ACL or owner of the original WIM or its parent folder.
-// Inheritance lets normal scratch children be cleaned by the host account
-// even when Administrators is the default owner on a domain computer.
+// Windows may legitimately choose BUILTIN\Administrators as owner, and
+// forcing owner reassignment can fail with Win32 5. Cleanup depends on
+// an explicit, inheritable DACL for host user, SYSTEM and Administrators.
+// Never modify the original WIM or the enclosing folder.
 void protect_wim_workspace(const std::filesystem::path& workspace) {
     ProcessUserSid user;
     WimScratchAcl acl(user.sid(),SUB_CONTAINERS_AND_OBJECTS_INHERIT);
     HANDLE raw=CreateFileW(workspace.c_str(),
-        FILE_READ_ATTRIBUTES|WRITE_DAC|WRITE_OWNER,
+        FILE_READ_ATTRIBUTES|WRITE_DAC,
         FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
         nullptr,OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
@@ -278,9 +279,8 @@ void protect_wim_workspace(const std::filesystem::path& workspace) {
        (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))
         throw EditUnsupported("WIM private workspace is not a regular directory");
     const DWORD result=SetSecurityInfo(folder.h,SE_FILE_OBJECT,
-        OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION|
-        PROTECTED_DACL_SECURITY_INFORMATION,
-        user.sid(),nullptr,acl.acl,nullptr);
+        DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr,nullptr,acl.acl,nullptr);
     if(result!=ERROR_SUCCESS)
         throw std::runtime_error("protect WIM private workspace ACL (Win32 "+
                                  std::to_string(result)+")");
