@@ -277,7 +277,8 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
 // enumeration handle is still live: its handles can retain delete-pending
 // entries and lead to ERROR_DIR_NOT_EMPTY (145) on RemoveDirectoryW.
 void remove_tree(const std::filesystem::path& path,
-                 const EditProgress& progress = {}) {
+                 const EditProgress& progress = {},
+                 bool posix_delete = false) {
     constexpr unsigned max_cleanup_passes=10;
     const auto retry_wait=[](unsigned pass) {
         // Only 145/303 are retried; bounded waiting gives WIMGAPI/AV time
@@ -334,7 +335,7 @@ void remove_tree(const std::filesystem::path& path,
             }
             for(std::size_t i=0;i<children.size();++i) {
                 if((i&127u)==0u)edit_tick(progress);
-                remove_tree(children[i],progress);
+                remove_tree(children[i],progress,posix_delete);
             }
         }
         // Prefer temporary SeRestorePrivilege for deletion before modifying
@@ -372,6 +373,41 @@ void remove_tree(const std::filesystem::path& path,
             }
         }
         const auto unlink=[&]() -> DWORD {
+            if(posix_delete && !directory) {
+                // DeleteFileW can succeed but leave an NTFS name DELETE_PENDING
+                // while WIMGAPI/AV retains a FILE_SHARE_DELETE handle.
+                // The parent then reports Win32 145 despite the deleted file.
+                // POSIX disposition unlinks that name immediately while
+                // existing readers can finish using their handles.
+                //
+                // Only for our private staging tree after Apply/Capture;
+                // never follow a reparse point or touch the original WIM.
+                HANDLE handle=CreateFileW(path.c_str(),
+                    DELETE|FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                    nullptr,OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,
+                    nullptr);
+                if(handle!=INVALID_HANDLE_VALUE) {
+                    FILE_DISPOSITION_INFO_EX disposition{};
+                    disposition.Flags=FILE_DISPOSITION_FLAG_DELETE|
+                        FILE_DISPOSITION_FLAG_POSIX_SEMANTICS|
+                        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
+                    BOOL unlinked=SetFileInformationByHandle(
+                        handle,FileDispositionInfoEx,&disposition,
+                        sizeof(disposition));
+                    if(!unlinked && GetLastError()==ERROR_INVALID_PARAMETER) {
+                        // Older Windows may lack ignore-readonly support.
+                        disposition.Flags=FILE_DISPOSITION_FLAG_DELETE|
+                            FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+                        unlinked=SetFileInformationByHandle(
+                            handle,FileDispositionInfoEx,&disposition,
+                            sizeof(disposition));
+                    }
+                    CloseHandle(handle);
+                    if(unlinked)return ERROR_SUCCESS;
+                }
+            }
             if(directory ? RemoveDirectoryW(path.c_str()) :
                            DeleteFileW(path.c_str()))
                 return ERROR_SUCCESS;
@@ -407,8 +443,30 @@ void remove_tree(const std::filesystem::path& path,
                 // appeared during any of the ACL/privilege deletion attempts.
                 continue;
             }
+            // Only aggregate survivors enter diagnostics; never private
+            // paths, filenames or image contents. Zero visible entries
+            // with 145 suggests an outstanding delete-pending handle.
+            std::size_t survivors=0,folders=0,reparse=0;
+            std::error_code scan_error;
+            auto scan=std::filesystem::directory_iterator(path,scan_error);
+            const auto end=std::filesystem::directory_iterator{};
+            while(!scan_error && scan!=end && survivors<32u) {
+                ++survivors;
+                const DWORD child=GetFileAttributesW(scan->path().c_str());
+                if(child!=INVALID_FILE_ATTRIBUTES) {
+                    if(child&FILE_ATTRIBUTE_DIRECTORY)++folders;
+                    if(child&FILE_ATTRIBUTE_REPARSE_POINT)++reparse;
+                }
+                scan.increment(scan_error);
+            }
+            const std::string reason=
+                "WIM scratch deletion remained pending after bounded cleanup"
+                " (survivors_up_to_32="+std::to_string(survivors)+
+                ", folders="+std::to_string(folders)+
+                ", reparse="+std::to_string(reparse)+
+                ", scan_error="+std::to_string(scan_error.value())+")";
             SetLastError(error);
-            checked(false,"WIM scratch deletion remained pending after bounded cleanup");
+            checked(false,reason.c_str());
         }
         SetLastError(error);
         checked(false,"remove WIM scratch entry");
@@ -451,7 +509,7 @@ void remove_wim_residue(const std::filesystem::path& root,
                 throw EditUnsupported("verified WIM staging output disappeared");
             for(const auto& entry:residue) {
                 edit_tick(progress);
-                remove_tree(entry,progress);
+                remove_tree(entry,progress,true);
             }
             bool clean=true;
             for(const auto& entry:std::filesystem::directory_iterator(root)) {
@@ -488,7 +546,7 @@ struct WimWorkspaceCleanup {
         // token and retry ACL-aware cleanup of this one private workspace.
         // Never delete unrelated/older .iso-wcx-edit-* directories.
         for(unsigned attempt=0;attempt<4;++attempt) {
-            try {remove_tree(folder);return;}catch(...){}
+            try {remove_tree(folder,{},true);return;}catch(...){}
             if(attempt<3)Sleep(150u*(attempt+1u));
         }
     }
@@ -660,7 +718,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 std::filesystem::path path;
                 bool complete=false;
                 ~Cleanup() noexcept {
-                    if(!complete)try{remove_tree(path);}catch(...){}
+                    if(!complete)try{remove_tree(path,{},true);}catch(...){}
                 }
             } cleanup{expanded};
             // Loaded/captured WIMGAPI handles must close BEFORE scratch deletion.
@@ -711,7 +769,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             // If early cleanup fails, retry after ALL source/output WIMGAPI
             // handles close. Final residue cleanup is mandatory before commit.
             try {
-                remove_tree(expanded,progress);
+                remove_tree(expanded,progress,true);
             }catch(const EditCancelled&) {
                 throw;
             }catch(const std::exception&) {
