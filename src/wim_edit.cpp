@@ -3,6 +3,7 @@
 #include "iso_wcx/edit_transaction.hpp"
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/wim_parts.hpp"
+#include "iso_wcx/wim_scratch_diagnostics.hpp"
 #include "iso_wcx/wim_edit_preflight.hpp"
 #include <msxml6.h>
 #include <aclapi.h>
@@ -470,10 +471,23 @@ void remove_tree(const std::filesystem::path& path,
                     if(unlinked)return ERROR_SUCCESS;
                 }
             }
-            if(directory ? RemoveDirectoryW(path.c_str()) :
-                           DeleteFileW(path.c_str()))
+            if(directory) {
+                if(RemoveDirectoryW(path.c_str()))return ERROR_SUCCESS;
+                return GetLastError();
+            }
+            if(!DeleteFileW(path.c_str()))return GetLastError();
+            if(!posix_delete)return ERROR_SUCCESS;
+            // Legacy DeleteFileW can succeed merely by marking a name
+            // DELETE_PENDING; the parent still reports Win32 145. Never
+            // mistake that state for a completed private scratch cleanup.
+            const DWORD remaining=GetFileAttributesW(path.c_str());
+            if(remaining!=INVALID_FILE_ATTRIBUTES)
+                return ERROR_DELETE_PENDING;
+            const DWORD outcome=GetLastError();
+            if(outcome==ERROR_FILE_NOT_FOUND ||
+               outcome==ERROR_PATH_NOT_FOUND)
                 return ERROR_SUCCESS;
-            return GetLastError();
+            return outcome;
         };
         DWORD error=unlink();
         if(error==ERROR_ACCESS_DENIED) {
@@ -505,28 +519,22 @@ void remove_tree(const std::filesystem::path& path,
                 // appeared during any of the ACL/privilege deletion attempts.
                 continue;
             }
-            // Only aggregate survivors enter diagnostics; never private
-            // paths, filenames or image contents. Zero visible entries
-            // with 145 suggests an outstanding delete-pending handle.
-            std::size_t survivors=0,folders=0,reparse=0;
-            std::error_code scan_error;
-            auto scan=std::filesystem::directory_iterator(path,scan_error);
-            const auto end=std::filesystem::directory_iterator{};
-            while(!scan_error && scan!=end && survivors<32u) {
-                ++survivors;
-                const DWORD child=GetFileAttributesW(scan->path().c_str());
-                if(child!=INVALID_FILE_ATTRIBUTES) {
-                    if(child&FILE_ATTRIBUTE_DIRECTORY)++folders;
-                    if(child&FILE_ATTRIBUTE_REPARSE_POINT)++reparse;
-                }
-                scan.increment(scan_error);
+            if(!recurse) {
+                // A file can remain DELETE_PENDING while another process
+                // retains its handle. Do not enumerate a regular file as
+                // a directory, and do not claim a successful F5.
+                SetLastError(error);
+                checked(false,
+                    "WIM scratch deletion remained pending after bounded cleanup");
             }
-            const std::string reason=
-                "WIM scratch deletion remained pending after bounded cleanup"
-                " (survivors_up_to_32="+std::to_string(survivors)+
-                ", folders="+std::to_string(folders)+
-                ", reparse="+std::to_string(reparse)+
-                ", scan_error="+std::to_string(scan_error.value())+")";
+            // Only aggregate metadata and numeric Win32 categories leave
+            // this private scratch tree; no filenames, paths or contents.
+            // A DELETE-open probe distinguishes lingering handles, DACLs
+            // and delete-pending names without modifying any survivor.
+            const auto state=wim_scratch::probe_directory(path);
+            const auto reason=std::string(
+                "WIM scratch deletion remained pending after bounded cleanup")+
+                state.counts();
             SetLastError(error);
             checked(false,reason.c_str());
         }

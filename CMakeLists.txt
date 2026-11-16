@@ -512,6 +512,15 @@ if(WIN32)
       COMMAND wim_edit_preflight_windows_tests)
     set_tests_properties(wim_mount_registry_and_local_edit_lease
       PROPERTIES TIMEOUT 60)
+    # Native path-free Win32 scratch diagnosis and sharing-handle regression.
+    add_executable(wim_scratch_cleanup_diagnostics_windows_tests
+      tests/wim_scratch_cleanup_diagnostics_windows.cpp)
+    target_include_directories(wim_scratch_cleanup_diagnostics_windows_tests
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    add_test(NAME wim_scratch_delete_pending_and_sharing_probe
+      COMMAND wim_scratch_cleanup_diagnostics_windows_tests)
+    set_tests_properties(wim_scratch_delete_pending_and_sharing_probe
+      PROPERTIES TIMEOUT 30)
     # Shared transaction safety for both ISO and WIM, including archived
     # path swaps or same-size external writes with a restored timestamp.
     add_executable(edit_transaction_source_identity_tests

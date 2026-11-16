@@ -93,11 +93,23 @@ does not follow reparse points, and never touches the original WIM.
 The staged output must still pass readback and residue checks before
 atomic commit.
 
-If Win32 145 persists, the private error message now contains **counts
-only** (`survivors_up_to_32`, `folders`, `reparse`, `scan_error`)
-without any user paths, filenames or contents. A Windows native smoke
-test holds a DELETE-sharing file handle throughout cleanup and asserts
-that no workspace survives while the handle is still open.
+If Win32 145 persists, diagnostics include **only bounded counts**:
+`survivors_up_to_32`, `files`, `folders`, `reparse`, `readonly`,
+`delete_open_ok`, `sharing`, `access_denied`, `delete_pending`,
+`vanished`, `other` and `scan_error`. A read-only DELETE-access
+probe on each of at most 32 immediate survivors distinguishes an
+antivirus/driver handle (sharing), a protected DACL (access denied),
+and a name still pending deletion. Names, paths, identities and
+contents are never included. A native Windows regression holds and
+releases a no-delete-sharing handle to verify those distinctions.
+An existing Windows smoke test also covers POSIX scratch unlink.
+
+Successful `DeleteFileW` alone does not prove the NTFS name has gone:
+on the private post-Capture cleanup path, ISO-WCX now checks whether
+it remains DELETE_PENDING and retries safely. Persistent failures
+still abort F5 before committing the staged WIM. A leftover private
+scratch directory is not evidence of a DISM mount, and ISO-WCX never
+removes an unrelated WIMMount registration.
 
 ## DISM-GUI mount safety and cross-process edit lease (RC1 Preview)
 
