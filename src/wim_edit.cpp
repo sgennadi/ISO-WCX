@@ -443,8 +443,30 @@ void remove_tree(const std::filesystem::path& path,
                 // appeared during any of the ACL/privilege deletion attempts.
                 continue;
             }
+            // Only aggregate survivors enter diagnostics; never private
+            // paths, filenames or image contents. Zero visible entries
+            // with 145 suggests an outstanding delete-pending handle.
+            std::size_t survivors=0,folders=0,reparse=0;
+            std::error_code scan_error;
+            auto scan=std::filesystem::directory_iterator(path,scan_error);
+            const auto end=std::filesystem::directory_iterator{};
+            while(!scan_error && scan!=end && survivors<32u) {
+                ++survivors;
+                const DWORD child=GetFileAttributesW(scan->path().c_str());
+                if(child!=INVALID_FILE_ATTRIBUTES) {
+                    if(child&FILE_ATTRIBUTE_DIRECTORY)++folders;
+                    if(child&FILE_ATTRIBUTE_REPARSE_POINT)++reparse;
+                }
+                scan.increment(scan_error);
+            }
+            const std::string reason=
+                "WIM scratch deletion remained pending after bounded cleanup"
+                " (survivors_up_to_32="+std::to_string(survivors)+
+                ", folders="+std::to_string(folders)+
+                ", reparse="+std::to_string(reparse)+
+                ", scan_error="+std::to_string(scan_error.value())+")";
             SetLastError(error);
-            checked(false,"WIM scratch deletion remained pending after bounded cleanup");
+            checked(false,reason.c_str());
         }
         SetLastError(error);
         checked(false,"remove WIM scratch entry");
@@ -487,7 +509,7 @@ void remove_wim_residue(const std::filesystem::path& root,
                 throw EditUnsupported("verified WIM staging output disappeared");
             for(const auto& entry:residue) {
                 edit_tick(progress);
-                remove_tree(entry,progress);
+                remove_tree(entry,progress,true);
             }
             bool clean=true;
             for(const auto& entry:std::filesystem::directory_iterator(root)) {
@@ -524,7 +546,7 @@ struct WimWorkspaceCleanup {
         // token and retry ACL-aware cleanup of this one private workspace.
         // Never delete unrelated/older .iso-wcx-edit-* directories.
         for(unsigned attempt=0;attempt<4;++attempt) {
-            try {remove_tree(folder);return;}catch(...){}
+            try {remove_tree(folder,{},true);return;}catch(...){}
             if(attempt<3)Sleep(150u*(attempt+1u));
         }
     }
@@ -696,7 +718,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 std::filesystem::path path;
                 bool complete=false;
                 ~Cleanup() noexcept {
-                    if(!complete)try{remove_tree(path);}catch(...){}
+                    if(!complete)try{remove_tree(path,{},true);}catch(...){}
                 }
             } cleanup{expanded};
             // Loaded/captured WIMGAPI handles must close BEFORE scratch deletion.
@@ -747,7 +769,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             // If early cleanup fails, retry after ALL source/output WIMGAPI
             // handles close. Final residue cleanup is mandatory before commit.
             try {
-                remove_tree(expanded,progress);
+                remove_tree(expanded,progress,true);
             }catch(const EditCancelled&) {
                 throw;
             }catch(const std::exception&) {
