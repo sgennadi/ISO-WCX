@@ -10,6 +10,7 @@
 #include <mutex>
 #include <atomic>
 #include <type_traits>
+#include <utility>
 #include <cwctype>
 #include <windows.h>
 #include <algorithm>
@@ -88,7 +89,8 @@ bool probe_wim_header(const std::filesystem::path& image) {
         (std::uint32_t(header[10])<<16)|
         (std::uint32_t(header[11])<<24);
     return header_size>=208 && header_size<=4096 &&
-           std::uint64_t(header_size)<=static_cast<std::uint64_t>(size);
+           std::uint64_t(header_size)<=
+               static_cast<std::uint64_t>(static_cast<std::streamoff>(size));
 }
 std::wstring from_bytes(const char* s,UINT encoding) {
     if(!s)return {};
