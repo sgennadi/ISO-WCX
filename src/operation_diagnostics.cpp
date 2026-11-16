@@ -82,6 +82,12 @@ std::string classify(std::string_view reason, int code) {
         return "wim_mount_registered";
     if(has("wim edit already active on this computer"))
         return "wim_operation_busy";
+    if(has("wim staging capacity insufficient"))
+        return "wim_staging_space_insufficient";
+    if(has("locate wim staging volume") ||
+       has("query wim staging capacity") ||
+       has("wim staging capacity arithmetic overflow"))
+        return "wim_staging_capacity_unavailable";
     if(has("wim mount state api unavailable") ||
        has("read wim registered mount state") ||
        has("enumerate wim registered mounts") ||
@@ -204,7 +210,8 @@ std::string stage_name(std::wstring_view description) {
     std::transform(s.begin(),s.end(),s.begin(),[](wchar_t c){return wchar_t(towlower(c));});
     if(s.find(L"wim metadata load")!=s.npos)return "metadata_load";
     if(s.find(L"wim metadata enumeration")!=s.npos)return "metadata_enumerate";
-    if(s.find(L"check wim mount state")!=s.npos)
+    if(s.find(L"check wim mount state")!=s.npos ||
+       s.find(L"check wim staging capacity")!=s.npos)
         return "preflight";
     // Distinguish per-index Apply cleanup from the post-WIMGAPI root sweep
     // without exporting any local path, filename or exception message.
