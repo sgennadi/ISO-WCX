@@ -277,7 +277,8 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
 // enumeration handle is still live: its handles can retain delete-pending
 // entries and lead to ERROR_DIR_NOT_EMPTY (145) on RemoveDirectoryW.
 void remove_tree(const std::filesystem::path& path,
-                 const EditProgress& progress = {}) {
+                 const EditProgress& progress = {},
+                 bool posix_delete = false) {
     constexpr unsigned max_cleanup_passes=10;
     const auto retry_wait=[](unsigned pass) {
         // Only 145/303 are retried; bounded waiting gives WIMGAPI/AV time
@@ -334,7 +335,7 @@ void remove_tree(const std::filesystem::path& path,
             }
             for(std::size_t i=0;i<children.size();++i) {
                 if((i&127u)==0u)edit_tick(progress);
-                remove_tree(children[i],progress);
+                remove_tree(children[i],progress,posix_delete);
             }
         }
         // Prefer temporary SeRestorePrivilege for deletion before modifying
@@ -372,6 +373,41 @@ void remove_tree(const std::filesystem::path& path,
             }
         }
         const auto unlink=[&]() -> DWORD {
+            if(posix_delete && !directory) {
+                // DeleteFileW can succeed but leave an NTFS name DELETE_PENDING
+                // while WIMGAPI/AV retains a FILE_SHARE_DELETE handle.
+                // The parent then reports Win32 145 despite the deleted file.
+                // POSIX disposition unlinks that name immediately while
+                // existing readers can finish using their handles.
+                //
+                // Only for our private staging tree after Apply/Capture;
+                // never follow a reparse point or touch the original WIM.
+                HANDLE handle=CreateFileW(path.c_str(),
+                    DELETE|FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                    nullptr,OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,
+                    nullptr);
+                if(handle!=INVALID_HANDLE_VALUE) {
+                    FILE_DISPOSITION_INFO_EX disposition{};
+                    disposition.Flags=FILE_DISPOSITION_FLAG_DELETE|
+                        FILE_DISPOSITION_FLAG_POSIX_SEMANTICS|
+                        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
+                    BOOL unlinked=SetFileInformationByHandle(
+                        handle,FileDispositionInfoEx,&disposition,
+                        sizeof(disposition));
+                    if(!unlinked && GetLastError()==ERROR_INVALID_PARAMETER) {
+                        // Older Windows may lack ignore-readonly support.
+                        disposition.Flags=FILE_DISPOSITION_FLAG_DELETE|
+                            FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+                        unlinked=SetFileInformationByHandle(
+                            handle,FileDispositionInfoEx,&disposition,
+                            sizeof(disposition));
+                    }
+                    CloseHandle(handle);
+                    if(unlinked)return ERROR_SUCCESS;
+                }
+            }
             if(directory ? RemoveDirectoryW(path.c_str()) :
                            DeleteFileW(path.c_str()))
                 return ERROR_SUCCESS;
