@@ -132,8 +132,16 @@ void WimOpenIndicator::refresh(HWND dialog) noexcept {
         const auto text=status_text();
         if(text==last_text_)return;
         last_text_=text;
-        SendMessageW(dialog,TDM_SET_ELEMENT_TEXT,
-                     TDE_CONTENT,reinterpret_cast<LPARAM>(text.c_str()));
+        if(fallback_window_.load(std::memory_order_acquire)) {
+            // TaskDialog messages have no meaning for a plain Win32 window.
+            // Update its real content STATIC so large WIM indexes and entry
+            // counts remain visible while the marquee is animated.
+            if(const HWND status=GetDlgItem(dialog,1001))
+                SetWindowTextW(status,text.c_str());
+        }else{
+            SendMessageW(dialog,TDM_SET_ELEMENT_TEXT,
+                         TDE_CONTENT,reinterpret_cast<LPARAM>(text.c_str()));
+        }
     }catch(...) {
         // A progress label must never interrupt WIMGAPI or WCX.
     }
