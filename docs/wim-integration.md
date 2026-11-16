@@ -21,6 +21,32 @@ WIMSetReferenceFile; no joining or mounting occurs.
 WCX per-file extraction skips unsafe reparse entries and does not restore
 NTFS alternate streams, security descriptors or reparse-point targets.
 
+## Win32 145 scratch cleanup after Apply/Capture (0.21.2 RC Preview)
+
+Field logs from November 16 still report
+`WIM scratch deletion remained pending after bounded cleanup (Win32 145)`
+even after the previous retry and privilege fixes. The underlying race
+can occur when an antivirus/filter/WIMGAPI reader holds a private applied
+file with `FILE_SHARE_DELETE`: traditional `DeleteFileW` marks the
+name for deletion but the parent directory may remain nonempty until
+that reader releases its handle.
+
+After Apply/Capture has finished, the private scratch cleaner now tries
+`FileDispositionInfoEx` with POSIX unlink semantics for scratch **files**.
+The name disappears immediately while any already-open reader handles
+remain valid. On unsupported filesystems or older Windows, it falls
+back to the existing ACL-aware Win32 deletion and bounded retries.
+It does not use POSIX deletion while editing files before capture,
+does not follow reparse points, and never touches the original WIM.
+The staged output must still pass readback and residue checks before
+atomic commit.
+
+If Win32 145 persists, the private error message now contains **counts
+only** (`survivors_up_to_32`, `folders`, `reparse`, `scan_error`)
+without any user paths, filenames or contents. A Windows native smoke
+test holds a DELETE-sharing file handle throughout cleanup and asserts
+that no workspace survives while the handle is still open.
+
 ## Restricted transactional WIM editing
 
 Only existing standard, unsplit, non-solid and writable WIM images may be
