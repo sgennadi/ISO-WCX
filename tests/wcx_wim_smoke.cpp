@@ -12,6 +12,7 @@
 #include "iso_wcx/image_report.hpp"
 // WIMGAPI is resolved dynamically; the optional Windows ADK header is not needed.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <thread>
