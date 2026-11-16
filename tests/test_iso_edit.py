@@ -347,6 +347,20 @@ def main(binary, reader=None):
         both(overlap,20*B+len(dots)+2,25)
         image.write_bytes(overlap)
         run('add','MUST_REFUSE.TXT',False)
+        # Two catalog entries can refer to the same hidden floppy LBA.
+        # Validate BOTH initial load sizes before deduplicating references.
+        duplicate=emulated_boot_fixture(2,visible=False)
+        duplicate.extend(bytes(64*B))
+        both(duplicate,16*B+80,len(duplicate)//B)
+        duplicate[24*B+64]=0x91
+        duplicate[24*B+65]=0xef
+        struct.pack_into('<H',duplicate,24*B+66,1)
+        duplicate[24*B+96]=0x88
+        duplicate[24*B+97]=2
+        struct.pack_into('<H',duplicate,24*B+102,3000)
+        struct.pack_into('<I',duplicate,24*B+104,25)
+        image.write_bytes(duplicate)
+        run('add','MUST_REFUSE.TXT',False)
         # A hard-disk MBR partition extending past its ISO file is unsafe.
         damaged=emulated_boot_fixture(4)
         struct.pack_into('<II',damaged,25*B+454,1,0xffffffff)
