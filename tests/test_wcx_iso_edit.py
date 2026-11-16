@@ -88,6 +88,28 @@ def main(plugin, runner):
             assert image.read_bytes() == untouched, (
                 "WCX modified ISO after refused boot-image deletion", media)
 
+        # Exercise the exact WCX F5 dispatch for a hidden El Torito
+        # floppy (no ISO9660 directory entry points to its full disk).
+        for media in (1, 2, 3):
+            image.write_bytes(emulated_boot_fixture(media, visible=False))
+            before = image.read_bytes()
+            assert edit("pack") == 0, (
+                "WCX rejected a bounded hidden El Torito floppy", media)
+            assert read_image(image)["EDIT.TXT"] == replacement.read_bytes()
+            assert image.read_bytes()[24 * B:len(before)] == before[24 * B:], (
+                "WCX F5 changed a hidden floppy boot image", media)
+        # Different but individually bounded PVD/Joliet Volume Space Sizes
+        # must not block a normal F5 add or truncate either namespace.
+        unequal = fixture(joliet=True)
+        volume = len(unequal) // B
+        for pos, order in ((17 * B + 80, "little"),
+                           (17 * B + 84, "big")):
+            unequal[pos:pos + 4] = (volume - 1).to_bytes(4, order)
+        image.write_bytes(unequal)
+        assert edit("pack") == 0, (
+            "WCX rejected bounded unequal ISO/Joliet volume descriptors")
+        assert read_image(image, True)["EDIT.TXT"] == replacement.read_bytes()
+        validate_path_tables(image)
         image.write_bytes(fixture() + b"X" + bytes(B - 1))
         before = image.read_bytes()
         assert edit("pack") != 0, "nonzero trailer must be read-only"
