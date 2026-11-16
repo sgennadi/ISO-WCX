@@ -157,6 +157,21 @@ int wmain(){
             op.complete(13,
                 "WIM editing requires administrator backup/restore/security privileges (Win32 1300)");
         }
+        // Report domain/local-admin workspace ACL and host token failures
+        // separately from the protected ACLs inside applied WIM files.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-ROOT-ACL.wim",1,1);
+            op.stage(L"Prepare NTFS staging",3);
+            op.complete(13,
+                "protect WIM private workspace ACL (Win32 5)");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-HOST-IDENTITY.wim",1,1);
+            op.stage(L"Prepare NTFS staging",3);
+            op.complete(13,"read WIM host user SID (Win32 5)");
+        }
         // Distinguish protected WIM scratch ACL failure from unrelated
         // access errors without including private paths in shared reports.
         {
@@ -293,6 +308,15 @@ int wmain(){
         require(contains(extended,
                 "| wim | pack | 13 | wim_privileges_unavailable | prepare | 1 |"),
                 "missing WIM imaging privileges lacked a distinct category");
+        require(contains(extended,
+                "| wim | pack | 13 | wim_workspace_acl_denied | prepare | 1 |"),
+                "WIM scratch root ACL failure category missing");
+        require(contains(extended,
+                "| wim | pack | 13 | wim_host_identity_unavailable | prepare | 1 |"),
+                "WIM process identity failure category missing");
+        require(!contains(extended,"PRIVATE-ROOT-ACL") &&
+                !contains(extended,"PRIVATE-HOST-IDENTITY"),
+                "private account/ACL fixture path leaked in diagnostics");
         require(!contains(extended,"PRIVATE-LOCKED") &&
                 !contains(extended,"PRIVATE-REPLACE") &&
                 !contains(extended,"PRIVATE-TOKEN"),
