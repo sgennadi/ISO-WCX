@@ -80,8 +80,18 @@ std::string classify(std::string_view reason, int code) {
         return "archive_source_changed";
     if(has("administrator backup/restore")||
        has("cannot create imaging token")||
-       has("cannot activate imaging token"))
+       has("cannot activate imaging token")||
+       has("cannot read wim host process token"))
         return "wim_privileges_unavailable";
+    if(has("open wim host user token")||
+       has("size wim host user sid")||
+       has("read wim host user sid"))
+        return "wim_host_identity_unavailable";
+    if(has("protect wim private workspace acl")||
+       has("create wim workspace security acl")||
+       has("open wim private workspace for acl")||
+       has("inspect wim private workspace for acl"))
+        return "wim_workspace_acl_denied";
     if(has("restore wim scratch cleanup access")||
        has("restore wim scratch entry ownership")||
        has("open wim scratch entry for acl repair"))
