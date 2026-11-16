@@ -217,6 +217,13 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
                         diagnostic.stage(L"WIM metadata enumeration",0);
                     return indicator.report(status);
                 });
+            // Disc copies the completed WIM listing after WIMGAPI reports
+            // "complete". Honor Cancel during that final potentially large
+            // copy as well, before returning a WCX archive handle.
+            if(!indicator.report(iso_wcx::ArchiveOpenStatus{
+                iso_wcx::ArchiveOpenStatus::Phase::complete,0,0,
+                static_cast<std::uint64_t>(state->disc.items().size())}))
+                throw iso_wcx::ArchiveOpenCancelled{};
             d->OpenResult=0;
             diagnostic.complete(0);
             return reinterpret_cast<HANDLE>(state.release());
@@ -247,6 +254,13 @@ WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
                         diagnostic.stage(L"WIM metadata enumeration",0);
                     return indicator.report(status);
                 });
+            // Disc copies the completed WIM listing after WIMGAPI reports
+            // "complete". Honor Cancel during that final potentially large
+            // copy as well, before returning a WCX archive handle.
+            if(!indicator.report(iso_wcx::ArchiveOpenStatus{
+                iso_wcx::ArchiveOpenStatus::Phase::complete,0,0,
+                static_cast<std::uint64_t>(state->disc.items().size())}))
+                throw iso_wcx::ArchiveOpenCancelled{};
             d->OpenResult=0;
             diagnostic.complete(0);
             return reinterpret_cast<HANDLE>(state.release());
