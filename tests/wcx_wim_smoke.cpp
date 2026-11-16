@@ -7,6 +7,7 @@
 #endif
 #include <windows.h>
 #include <sddl.h>
+#include <aclapi.h>
 #include "iso_wcx/wim_index_report.hpp"
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/image_report.hpp"
@@ -65,6 +66,8 @@ static std::atomic<bool> observed_wim_f5_source_copy{false};
 // just before ACL-aware scratch cleanup. Previously that caused Win32 1008.
 static std::atomic<bool> drop_impersonation_at_cleanup{false};
 static std::atomic<bool> dropped_impersonation_at_cleanup{false};
+static std::atomic<bool> inspect_private_acl_at_apply{false};
+static std::atomic<bool> verified_private_acl_at_apply{false};
 static std::atomic<bool> protect_scratch_acl_at_cleanup{false};
 static std::atomic<bool> protected_scratch_acl_at_cleanup{false};
 // Combine ERROR_ACCESS_DENIED on the expanded parent directory with a
@@ -89,6 +92,74 @@ static std::atomic<bool> hold_delete_sharing_scratch_at_cleanup{false};
 static std::atomic<bool> held_delete_sharing_scratch_at_cleanup{false};
 static std::atomic<HANDLE> delete_sharing_scratch_handle{INVALID_HANDLE_VALUE};
 static fs::path private_test_root;
+// Verify the scratch root's real owner and the *inherited* user/system/admin
+// rights on its new child BEFORE WIMGAPI overwrites child metadata. This
+// runs against an artificial WIM and never changes a real Windows directory.
+static bool private_wim_acl_ok(const fs::path& root,const fs::path& child) {
+    HANDLE raw=nullptr;
+    if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw))return false;
+    struct Token {HANDLE h;~Token(){if(h)CloseHandle(h);}} token{raw};
+    DWORD bytes=0;
+    GetTokenInformation(token.h,TokenUser,nullptr,0,&bytes);
+    if(GetLastError()!=ERROR_INSUFFICIENT_BUFFER ||
+       bytes<sizeof(TOKEN_USER) || bytes>=65536u)return false;
+    std::vector<BYTE> buffer(bytes);
+    if(!GetTokenInformation(token.h,TokenUser,buffer.data(),bytes,&bytes))
+        return false;
+    const auto user=reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid;
+    BYTE system[SECURITY_MAX_SID_SIZE]{};
+    BYTE admins[SECURITY_MAX_SID_SIZE]{};
+    DWORD system_len=sizeof(system),admin_len=sizeof(admins);
+    if(!CreateWellKnownSid(WinLocalSystemSid,nullptr,system,&system_len) ||
+       !CreateWellKnownSid(WinBuiltinAdministratorsSid,nullptr,admins,&admin_len))
+        return false;
+    const PSID expected[3]={user,system,admins};
+    auto inspect=[&](const fs::path& path,bool inherited)->bool {
+        std::wstring name=path.wstring();
+        PSID owner=nullptr;
+        PACL acl=nullptr;
+        PSECURITY_DESCRIPTOR descriptor=nullptr;
+        DWORD result=GetNamedSecurityInfoW(name.data(),SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION,
+            &owner,nullptr,&acl,nullptr,&descriptor);
+        if(result!=ERROR_SUCCESS)return false;
+        struct Security {PSECURITY_DESCRIPTOR p;~Security(){LocalFree(p);}}
+            secure{descriptor};
+        if(!acl || acl->AceCount<3)return false;
+        // Ownership may default to BUILTIN\Administrators. The DACL is
+        // authoritative for temporary folder cleanup.
+        SECURITY_DESCRIPTOR_CONTROL control{};
+        DWORD revision=0;
+        if(!GetSecurityDescriptorControl(descriptor,&control,&revision))
+            return false;
+        if(!inherited && !(control&SE_DACL_PROTECTED))return false;
+        for(PSID identity:expected) {
+            bool found=false;
+            for(DWORD i=0;i<acl->AceCount;++i) {
+                void* entry=nullptr;
+                if(!GetAce(acl,i,&entry))return false;
+                const auto* head=static_cast<ACE_HEADER*>(entry);
+                if(head->AceType!=ACCESS_ALLOWED_ACE_TYPE)continue;
+                const auto* ace=static_cast<ACCESS_ALLOWED_ACE*>(entry);
+                if(!EqualSid(reinterpret_cast<PSID>(
+                        const_cast<DWORD*>(&ace->SidStart)),identity))
+                    continue;
+                if((ace->Mask & FILE_ALL_ACCESS)!=FILE_ALL_ACCESS)continue;
+                if(inherited) {
+                    if(!(head->AceFlags&INHERITED_ACE))continue;
+                }else if((head->AceFlags &
+                          (CONTAINER_INHERIT_ACE|OBJECT_INHERIT_ACE)) !=
+                         (CONTAINER_INHERIT_ACE|OBJECT_INHERIT_ACE))
+                    continue;
+                found=true;
+                break;
+            }
+            if(!found)return false;
+        }
+        return true;
+    };
+    return inspect(root,false) && inspect(child,true);
+}
 static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     ++pack_progress_calls;
     if(size==0 && late_file_armed.exchange(false)) {
@@ -113,6 +184,23 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
     if(size<0){
         ++wim_percent_calls;
         if(stage && std::wstring_view(stage).starts_with(L"WIM: ")) {
+            if(std::wstring_view(stage).find(
+                       L"Extract WIM image")!=std::wstring_view::npos &&
+               inspect_private_acl_at_apply.exchange(false)) {
+                bool valid=false;
+                try {
+                    for(const auto& entry:fs::directory_iterator(private_test_root)) {
+                        if(!entry.is_directory() ||
+                           !entry.path().filename().wstring().starts_with(
+                               L".iso-wcx-edit-"))continue;
+                        const auto expanded=entry.path()/L"expanded";
+                        if(!fs::is_directory(expanded))continue;
+                        valid=private_wim_acl_ok(entry.path(),expanded);
+                        break;
+                    }
+                }catch(...){valid=false;}
+                verified_private_acl_at_apply.store(valid);
+            }
             if(std::wstring_view(stage).find(
                        L"Cleanup WIM temporary files")!=std::wstring_view::npos) {
                 if(inject_late_file_at_cleanup.exchange(false))
@@ -246,6 +334,38 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
 template<typename F>
 F bind(HMODULE library,const char* export_name) {
     return reinterpret_cast<F>(GetProcAddress(library,export_name));
+}
+// Report only a bounded native operation label and Win32 code when
+// a synthetic CI WIM edit fails. Never print user paths or image content.
+static void report_ci_wim_failure() {
+    wchar_t local[32768]{};
+    DWORD n=GetEnvironmentVariableW(L"LOCALAPPDATA",local,32768);
+    if(n==0 || n>=32768)return;
+    std::ifstream in(fs::path(local)/L"ISO-WCX"/L"Logs"/L"edit-errors.log");
+    if(!in)return;
+    std::string line,last;
+    while(std::getline(in,line)) {
+        if(line.find("WCX_EDIT_FAILURE format=WIM")!=std::string::npos)
+            last=std::move(line);
+    }
+    const auto pos=last.find(" reason=");
+    if(pos==std::string::npos)return;
+    const auto message=last.substr(pos+8);
+    const auto win32=message.find("(Win32 ");
+    if(win32==std::string::npos) {
+        std::cerr<<"WIM failure: no native Win32 code\n";
+        return;
+    }
+    const auto tail=message.find(')',win32);
+    if(tail==std::string::npos)return;
+    const auto stage=message.substr(0,win32);
+    const bool safe=!stage.empty() && stage.size()<100u &&
+        std::all_of(stage.begin(),stage.end(),[](unsigned char c) {
+            return (c>='a'&&c<='z') || (c>='A'&&c<='Z') ||
+                   c==' ' || c=='-' || c=='_';
+        });
+    std::cerr<<"WIM native failure: "<<(safe?stage:"stage-redacted")
+             <<" "<<message.substr(win32,tail-win32+1)<<'\n';
 }
 void write(const fs::path& filename,const std::string& data) {
     fs::create_directories(filename.parent_path());
@@ -611,7 +731,7 @@ int wmain(int argc,wchar_t** argv) {
         std::thread worker([&]{packed_result=pack(packed.data(),sub.data(),src.data(),add_list,0);});
         worker.join();
         set_progress(INVALID_HANDLE_VALUE,nullptr);
-        if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";return 21;}
+        if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";report_ci_wim_failure();return 21;}
         if(!clean_wim_workspaces())return 40;
         if(!pack_progress_calls.load())return 26;
         // Regression: Total Commander creates an *empty folder* through the
@@ -623,6 +743,8 @@ int wmain(int argc,wchar_t** argv) {
         // WIM expanded directory is removed. This is the host-reported
         // failure on v0.21.2 RC1 B1360 (Win32 ERROR_NO_TOKEN/1008).
         private_test_root=root;
+        verified_private_acl_at_apply.store(false);
+        inspect_private_acl_at_apply.store(true);
         inject_late_file_at_cleanup.store(true);
         late_file_armed.store(false);
         late_file_created.store(false);
@@ -636,6 +758,11 @@ int wmain(int argc,wchar_t** argv) {
         const int folder_rc=pack(packed.data(),sub.data(),src.data(),mkdir_list,0);
         set_progress(INVALID_HANDLE_VALUE,nullptr);
         drop_impersonation_at_cleanup.store(false);
+        inspect_private_acl_at_apply.store(false);
+        if(!verified_private_acl_at_apply.load()){
+            std::cerr<<"WIM domain/local-admin scratch ACL regression failed\n";
+            return 64;
+        }
         protect_scratch_acl_at_cleanup.store(false);
         protect_scratch_directory_acl_at_cleanup.store(false);
         inject_late_file_at_cleanup.store(false);

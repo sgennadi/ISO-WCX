@@ -3,6 +3,8 @@
 #include "iso_wcx/edit_transaction.hpp"
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/wim_parts.hpp"
+#include "iso_wcx/wim_scratch_diagnostics.hpp"
+#include "iso_wcx/wim_edit_preflight.hpp"
 #include <msxml6.h>
 #include <aclapi.h>
 #include <vector>
@@ -31,10 +33,19 @@ struct Privileges {
     Privileges(){
         if(!OpenThreadToken(GetCurrentThread(),TOKEN_QUERY|TOKEN_DUPLICATE|TOKEN_IMPERSONATE,TRUE,&prior))
             checked(GetLastError()==ERROR_NO_TOKEN,"cannot read thread token");
-        HANDLE source=prior;
-        if(!source)checked(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE,&source),"cannot read process token");
-        const BOOL copied=DuplicateTokenEx(source,TOKEN_QUERY|TOKEN_ADJUST_PRIVILEGES|TOKEN_IMPERSONATE,nullptr,SecurityImpersonation,TokenImpersonation,&token);
-        if(!prior)CloseHandle(source);
+        // Always borrow privileges from the elevated host process. WIMGAPI
+        // may temporarily impersonate a local service/account on this
+        // thread; that identity can lack backup/restore rights or differ
+        // from the domain user who started Total Commander.
+        HANDLE source=nullptr;
+        if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE,&source)){
+            if(prior)CloseHandle(prior);
+            checked(false,"cannot read WIM host process token");
+        }
+        const BOOL copied=DuplicateTokenEx(source,
+            TOKEN_QUERY|TOKEN_ADJUST_PRIVILEGES|TOKEN_IMPERSONATE,
+            nullptr,SecurityImpersonation,TokenImpersonation,&token);
+        CloseHandle(source);
         if(!copied){if(prior)CloseHandle(prior);checked(false,"cannot create imaging token");}
         try{for(const wchar_t* name:{L"SeBackupPrivilege",L"SeRestorePrivilege",L"SeSecurityPrivilege"}){
             TOKEN_PRIVILEGES p{};p.PrivilegeCount=1;checked(LookupPrivilegeValueW(nullptr,name,&p.Privileges[0].Luid),"privilege lookup failed");p.Privileges[0].Attributes=SE_PRIVILEGE_ENABLED;
@@ -192,49 +203,101 @@ std::filesystem::path relative_path(const std::string& text){return std::filesys
 void no_reparse(const std::filesystem::path& root,const std::filesystem::path& relative){
     auto path=root;for(const auto& part:relative){path/=part;DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){auto err=GetLastError();checked(err==ERROR_FILE_NOT_FOUND||err==ERROR_PATH_NOT_FOUND,"cannot inspect WIM edit path");continue;}if(attr&FILE_ATTRIBUTE_REPARSE_POINT)throw EditUnsupported("editing through WIM reparse points is not supported");}
 }
-// This is used ONLY for private WIM apply/capture scratch files, never on
-// the original image. Applied Windows images may contain TrustedInstaller or
-// other ACLs that prevent even an elevated user from removing their contents.
-// Grant DELETE access to the current elevated thread user and SYSTEM only,
-// on the individual scratch entry, without following a reparse point.
+// The current WIMGAPI thread may impersonate a local account even when
+// Total Commander was started by an elevated domain account. Anchor private
+// workspace ownership and cleanup access to the stable host process SID.
+struct ProcessUserSid {
+    std::vector<BYTE> bytes;
+    ProcessUserSid() {
+        HANDLE raw=nullptr;
+        checked(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw),
+                "open WIM host user token");
+        struct Token {HANDLE h;~Token(){CloseHandle(h);}} token{raw};
+        DWORD size=0;
+        GetTokenInformation(token.h,TokenUser,nullptr,0,&size);
+        checked(size>=sizeof(TOKEN_USER) && size<65536u &&
+                GetLastError()==ERROR_INSUFFICIENT_BUFFER,
+                "size WIM host user SID");
+        bytes.resize(size);
+        checked(GetTokenInformation(token.h,TokenUser,bytes.data(),size,&size),
+                "read WIM host user SID");
+    }
+    PSID sid() const {
+        return reinterpret_cast<const TOKEN_USER*>(bytes.data())->User.Sid;
+    }
+};
+
+struct WimScratchAcl {
+    std::array<BYTE,SECURITY_MAX_SID_SIZE> system_sid{},admin_sid{};
+    PACL acl=nullptr;
+    WimScratchAcl(PSID process_user,DWORD inheritance) {
+        DWORD system_bytes=static_cast<DWORD>(system_sid.size());
+        DWORD admin_bytes=static_cast<DWORD>(admin_sid.size());
+        checked(CreateWellKnownSid(WinLocalSystemSid,nullptr,
+                                   system_sid.data(),&system_bytes),
+                "create WIM SYSTEM SID");
+        checked(CreateWellKnownSid(WinBuiltinAdministratorsSid,nullptr,
+                                   admin_sid.data(),&admin_bytes),
+                "create WIM Administrators SID");
+        EXPLICIT_ACCESSW entries[3]{};
+        const PSID identities[3]={process_user,system_sid.data(),admin_sid.data()};
+        for(unsigned i=0;i<3;++i) {
+            auto& entry=entries[i];
+            entry.grfAccessPermissions=FILE_ALL_ACCESS;
+            entry.grfAccessMode=GRANT_ACCESS;
+            entry.grfInheritance=inheritance;
+            entry.Trustee.TrusteeForm=TRUSTEE_IS_SID;
+            entry.Trustee.TrusteeType=i==2?TRUSTEE_IS_GROUP:TRUSTEE_IS_USER;
+            entry.Trustee.ptstrName=reinterpret_cast<LPWSTR>(identities[i]);
+        }
+        const DWORD result=SetEntriesInAclW(3,entries,nullptr,&acl);
+        if(result!=ERROR_SUCCESS)
+            throw std::runtime_error("create WIM workspace security ACL (Win32 "+
+                                     std::to_string(result)+")");
+    }
+    WimScratchAcl(const WimScratchAcl&)=delete;
+    ~WimScratchAcl(){if(acl)LocalFree(acl);}
+};
+
+// Create a private sibling workspace atomically with the desired DACL.
+// A second SetSecurityInfo/WRITE_DAC call can fail with Win32 5 on elevated
+// domain machines even when the caller has permission to create the folder.
+// No owner reassignment, global takeown, or modification of parent/image.
+bool create_wim_workspace(const std::filesystem::path& workspace) {
+    ProcessUserSid user;
+    WimScratchAcl acl(user.sid(),SUB_CONTAINERS_AND_OBJECTS_INHERIT);
+    SECURITY_DESCRIPTOR security{};
+    checked(InitializeSecurityDescriptor(&security,
+                                         SECURITY_DESCRIPTOR_REVISION),
+            "initialize WIM workspace descriptor");
+    checked(SetSecurityDescriptorDacl(&security,TRUE,acl.acl,FALSE),
+            "attach WIM workspace DACL");
+    checked(SetSecurityDescriptorControl(
+                &security,SE_DACL_PROTECTED,SE_DACL_PROTECTED),
+            "protect WIM workspace DACL inheritance");
+    SECURITY_ATTRIBUTES attributes{};
+    attributes.nLength=sizeof(attributes);
+    attributes.lpSecurityDescriptor=&security;
+    attributes.bInheritHandle=FALSE;
+    if(CreateDirectoryW(workspace.c_str(),&attributes))return true;
+    const DWORD error=GetLastError();
+    if(error==ERROR_ALREADY_EXISTS || error==ERROR_FILE_EXISTS)return false;
+    SetLastError(error);
+    checked(false,"create WIM workspace with explicit ACL");
+    return false;
+}
+
+// Restore access ONLY for private WIM apply/capture scratch entries.
+// An applied Windows image may contain TrustedInstaller-protected ACLs.
+// Grant cleanup to the elevated host process user, SYSTEM and Administrators,
+// without following a reparse point or changing the original WIM.
 void allow_workspace_cleanup(const std::filesystem::path& path){
     // WIMGAPI can end impersonation or disable privileges while applying
     // an image. Rebuild a scoped privileged identity even if a thread
     // token is still present, and restore the caller identity on exit.
     Privileges cleanup_identity;
-    HANDLE raw_token=nullptr;
-    checked(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&raw_token),
-            "open WIM cleanup impersonation token");
-    struct Token {HANDLE h;~Token(){CloseHandle(h);}} token{raw_token};
-    DWORD bytes=0;
-    GetTokenInformation(token.h,TokenUser,nullptr,0,&bytes);
-    checked(bytes>=sizeof(TOKEN_USER) && bytes<65536u &&
-            GetLastError()==ERROR_INSUFFICIENT_BUFFER,
-            "size WIM cleanup user SID");
-    std::vector<std::uint8_t> buffer(bytes);
-    checked(GetTokenInformation(token.h,TokenUser,buffer.data(),bytes,&bytes),
-            "read WIM cleanup user SID");
-    BYTE system_sid[SECURITY_MAX_SID_SIZE]{};
-    DWORD system_sid_bytes=sizeof(system_sid);
-    checked(CreateWellKnownSid(WinLocalSystemSid,nullptr,system_sid,
-                               &system_sid_bytes),"create SYSTEM SID");
-    EXPLICIT_ACCESSW access[2]{};
-    for(auto& entry:access){
-        entry.grfAccessPermissions=FILE_ALL_ACCESS;
-        entry.grfAccessMode=SET_ACCESS;
-        entry.grfInheritance=NO_INHERITANCE;
-        entry.Trustee.TrusteeForm=TRUSTEE_IS_SID;
-        entry.Trustee.TrusteeType=TRUSTEE_IS_USER;
-    }
-    access[0].Trustee.ptstrName=reinterpret_cast<LPWSTR>(
-        reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid);
-    access[1].Trustee.ptstrName=reinterpret_cast<LPWSTR>(system_sid);
-    PACL raw_acl=nullptr;
-    const DWORD acl_result=SetEntriesInAclW(2,access,nullptr,&raw_acl);
-    if(acl_result!=ERROR_SUCCESS)
-        throw std::runtime_error("create WIM scratch cleanup ACL (Win32 "+
-                                 std::to_string(acl_result)+")");
-    struct Acl {PACL p;~Acl(){LocalFree(p);}} acl{raw_acl};
+    ProcessUserSid user;
+    WimScratchAcl acl(user.sid(),NO_INHERITANCE);
     HANDLE raw_file=CreateFileW(path.c_str(),WRITE_DAC|WRITE_OWNER,
         FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
         OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
@@ -252,7 +315,7 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
     const auto set_scratch_dacl=[&]{
         return SetSecurityInfo(file.h,SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
-            nullptr,nullptr,acl.p,nullptr);
+            nullptr,nullptr,acl.acl,nullptr);
     };
     DWORD result=set_scratch_dacl();
     if(result==ERROR_ACCESS_DENIED){
@@ -261,7 +324,7 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
         // this one disposable scratch inode, then retry its DACL.
         const DWORD owner_result=SetSecurityInfo(file.h,SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION,
-            reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid,
+            user.sid(),
             nullptr,nullptr,nullptr);
         if(owner_result!=ERROR_SUCCESS)
             throw std::runtime_error("restore WIM scratch entry ownership (Win32 "+
@@ -285,16 +348,26 @@ void remove_tree(const std::filesystem::path& path,
         // to close delete-pending scratch handles, without indefinite F5.
         Sleep(std::min(800u,100u*(pass+1u)));
     };
+    // DeleteFileW success can mean delete-on-last-close, not namespace
+    // removal. Windows may report ACCESS_DENIED when querying that same
+    // delete-pending file, so remember the state across bounded passes.
+    bool pending_legacy_delete=false;
     for(unsigned pass=0;pass<max_cleanup_passes;++pass) {
         const DWORD attr=GetFileAttributesW(path.c_str());
         if(attr==INVALID_FILE_ATTRIBUTES){
             const DWORD error=GetLastError();
             if(error==ERROR_FILE_NOT_FOUND || error==ERROR_PATH_NOT_FOUND)
                 return;
-            if(error==ERROR_DELETE_PENDING && pass+1u<max_cleanup_passes) {
-                edit_tick(progress);
-                retry_wait(pass);
-                continue;
+            if((error==ERROR_DELETE_PENDING ||
+                (error==ERROR_ACCESS_DENIED && pending_legacy_delete))) {
+                if(pass+1u<max_cleanup_passes) {
+                    edit_tick(progress);
+                    retry_wait(pass);
+                    continue;
+                }
+                SetLastError(ERROR_DELETE_PENDING);
+                checked(false,
+                    "WIM scratch deletion remained pending after bounded cleanup");
             }
             SetLastError(error);
             checked(false,"inspect WIM scratch entry before cleanup");
@@ -408,10 +481,29 @@ void remove_tree(const std::filesystem::path& path,
                     if(unlinked)return ERROR_SUCCESS;
                 }
             }
-            if(directory ? RemoveDirectoryW(path.c_str()) :
-                           DeleteFileW(path.c_str()))
+            if(directory) {
+                if(RemoveDirectoryW(path.c_str()))return ERROR_SUCCESS;
+                return GetLastError();
+            }
+            if(!DeleteFileW(path.c_str()))return GetLastError();
+            if(!posix_delete)return ERROR_SUCCESS;
+            // Legacy DeleteFileW can succeed merely by marking a name
+            // DELETE_PENDING; the parent still reports Win32 145. Never
+            // mistake that state for a completed private scratch cleanup.
+            const DWORD remaining=GetFileAttributesW(path.c_str());
+            if(remaining!=INVALID_FILE_ATTRIBUTES)
+                return ERROR_DELETE_PENDING;
+            const DWORD outcome=GetLastError();
+            if(outcome==ERROR_FILE_NOT_FOUND ||
+               outcome==ERROR_PATH_NOT_FOUND)
                 return ERROR_SUCCESS;
-            return GetLastError();
+            // Microsoft's DeleteFileW contract permits ACCESS_DENIED on a
+            // later open of an already delete-pending name. We already
+            // deleted successfully, so this is not evidence of a bad DACL.
+            if(outcome==ERROR_ACCESS_DENIED ||
+               outcome==ERROR_DELETE_PENDING)
+                return ERROR_DELETE_PENDING;
+            return outcome;
         };
         DWORD error=unlink();
         if(error==ERROR_ACCESS_DENIED) {
@@ -436,6 +528,8 @@ void remove_tree(const std::filesystem::path& path,
             return;
         if((recurse && error==ERROR_DIR_NOT_EMPTY) ||
            error==ERROR_DELETE_PENDING) {
+            if(error==ERROR_DELETE_PENDING && !directory)
+                pending_legacy_delete=true;
             if(pass+1u<max_cleanup_passes) {
                 edit_tick(progress);
                 retry_wait(pass);
@@ -443,28 +537,22 @@ void remove_tree(const std::filesystem::path& path,
                 // appeared during any of the ACL/privilege deletion attempts.
                 continue;
             }
-            // Only aggregate survivors enter diagnostics; never private
-            // paths, filenames or image contents. Zero visible entries
-            // with 145 suggests an outstanding delete-pending handle.
-            std::size_t survivors=0,folders=0,reparse=0;
-            std::error_code scan_error;
-            auto scan=std::filesystem::directory_iterator(path,scan_error);
-            const auto end=std::filesystem::directory_iterator{};
-            while(!scan_error && scan!=end && survivors<32u) {
-                ++survivors;
-                const DWORD child=GetFileAttributesW(scan->path().c_str());
-                if(child!=INVALID_FILE_ATTRIBUTES) {
-                    if(child&FILE_ATTRIBUTE_DIRECTORY)++folders;
-                    if(child&FILE_ATTRIBUTE_REPARSE_POINT)++reparse;
-                }
-                scan.increment(scan_error);
+            if(!recurse) {
+                // A file can remain DELETE_PENDING while another process
+                // retains its handle. Do not enumerate a regular file as
+                // a directory, and do not claim a successful F5.
+                SetLastError(error);
+                checked(false,
+                    "WIM scratch deletion remained pending after bounded cleanup");
             }
-            const std::string reason=
-                "WIM scratch deletion remained pending after bounded cleanup"
-                " (survivors_up_to_32="+std::to_string(survivors)+
-                ", folders="+std::to_string(folders)+
-                ", reparse="+std::to_string(reparse)+
-                ", scan_error="+std::to_string(scan_error.value())+")";
+            // Only aggregate metadata and numeric Win32 categories leave
+            // this private scratch tree; no filenames, paths or contents.
+            // A DELETE-open probe distinguishes lingering handles, DACLs
+            // and delete-pending names without modifying any survivor.
+            const auto state=wim_scratch::probe_directory(path);
+            const auto reason=std::string(
+                "WIM scratch deletion remained pending after bounded cleanup")+
+                state.counts();
             SetLastError(error);
             checked(false,reason.c_str());
         }
@@ -650,9 +738,19 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                     std::to_string(failure)+")");
         } else CloseHandle(probe);
     }
-    Privileges privileges;Apartment apartment;EditTransaction tx(path);
-    WimWorkspaceCleanup scratch{tx.workspace};
     Library library;auto m=library.h;
+    report(L"Check WIM mount state and edit lock",4);
+    // Machine-local lease prevents overlapping WCX transactions from two
+    // Total Commander processes, including x86/x64 and image hardlinks.
+    wim_preflight::ImageLease lease(path);
+    // No DISM mount/unmount is invoked: registered mounts remain untouched.
+    wim_preflight::reject_registered_mounts(m,path);
+    Privileges privileges;Apartment apartment;
+    // Create the unique sibling directory with the ACL already attached.
+    // Atomic creation works for domain-admin TC without WRITE_DAC on an
+    // existing directory and avoids a security-transition window.
+    EditTransaction tx(path,&create_wim_workspace);
+    WimWorkspaceCleanup scratch{tx.workspace};
     // Native Windows capture/apply preserve security and alternate streams on NTFS.
     wchar_t volume[MAX_PATH]{},filesystem[MAX_PATH]{};checked(GetVolumePathNameW(tx.workspace.c_str(),volume,MAX_PATH),"find WIM workspace volume");checked(GetVolumeInformationW(volume,nullptr,0,nullptr,nullptr,nullptr,filesystem,MAX_PATH),"inspect WIM workspace filesystem");
     if(_wcsicmp(filesystem,L"NTFS")!=0)throw EditUnsupported("WIM editing requires an NTFS workspace volume");
@@ -848,6 +946,9 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     }
     report(L"Cleanup WIM transaction scratch",98);
     remove_wim_residue(tx.workspace,tx.output,progress);
+    // DISM may have registered a mount while Apply/Capture was running.
+    // Refuse to replace the source rather than touching an active mount.
+    wim_preflight::reject_registered_mounts(m,path);
     report(L"Commit verified WIM",99);
     tx.commit(progress);
     // No cancellation or throwing callbacks after the atomic commit.

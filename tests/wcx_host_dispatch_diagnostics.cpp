@@ -157,6 +157,21 @@ int wmain(){
             op.complete(13,
                 "WIM editing requires administrator backup/restore/security privileges (Win32 1300)");
         }
+        // Report domain/local-admin workspace ACL and host token failures
+        // separately from the protected ACLs inside applied WIM files.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-ROOT-ACL.wim",1,1);
+            op.stage(L"Prepare NTFS staging",3);
+            op.complete(13,
+                "protect WIM private workspace ACL (Win32 5)");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-HOST-IDENTITY.wim",1,1);
+            op.stage(L"Prepare NTFS staging",3);
+            op.complete(13,"read WIM host user SID (Win32 5)");
+        }
         // Distinguish protected WIM scratch ACL failure from unrelated
         // access errors without including private paths in shared reports.
         {
@@ -232,7 +247,40 @@ int wmain(){
             op.complete(13,
                 "archive changed during edit (size/mtime)");
         }
+        // Ported DISM-GUI style mount and cooperative-writer preflight:
+        // these are anonymous fixed diagnostic categories, not file paths.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-MOUNT-CONFLICT.wim",1,1);
+            op.stage(L"Check WIM mount state and edit lock",4);
+            op.complete(24,"WIM edit refused: image is registered as mounted");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-LEASE-BUSY.wim",1,1);
+            op.stage(L"Check WIM mount state and edit lock",4);
+            op.complete(24,"WIM edit already active on this computer");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-MOUNT-QUERY.wim",1,1);
+            op.stage(L"Check WIM mount state and edit lock",4);
+            op.complete(13,"read WIM registered mount state (Win32 5)");
+        }
         const auto extended=read(iso_wcx::diagnostics::export_report());
+        require(contains(extended,
+                "| wim | pack | 24 | wim_mount_registered | preflight | 1 |"),
+                "registered WIM mount must block editing");
+        require(contains(extended,
+                "| wim | pack | 24 | wim_operation_busy | preflight | 1 |"),
+                "concurrent WIM operation did not receive a distinct category");
+        require(contains(extended,
+                "| wim | pack | 13 | wim_mount_state_unknown | preflight | 1 |"),
+                "WIM mount registry uncertainty category missing");
+        require(!contains(extended,"PRIVATE-MOUNT-CONFLICT") &&
+                !contains(extended,"PRIVATE-LEASE-BUSY") &&
+                !contains(extended,"PRIVATE-MOUNT-QUERY"),
+                "WIM preflight diagnostic leaked a private file path");
         require(contains(extended,
                 "| wim | open | 21 | cancelled | metadata_enumerate | 1 |"),
                 "cancelled WIM open metadata stage missing");
@@ -293,6 +341,15 @@ int wmain(){
         require(contains(extended,
                 "| wim | pack | 13 | wim_privileges_unavailable | prepare | 1 |"),
                 "missing WIM imaging privileges lacked a distinct category");
+        require(contains(extended,
+                "| wim | pack | 13 | wim_workspace_acl_denied | prepare | 1 |"),
+                "WIM scratch root ACL failure category missing");
+        require(contains(extended,
+                "| wim | pack | 13 | wim_host_identity_unavailable | prepare | 1 |"),
+                "WIM process identity failure category missing");
+        require(!contains(extended,"PRIVATE-ROOT-ACL") &&
+                !contains(extended,"PRIVATE-HOST-IDENTITY"),
+                "private account/ACL fixture path leaked in diagnostics");
         require(!contains(extended,"PRIVATE-LOCKED") &&
                 !contains(extended,"PRIVATE-REPLACE") &&
                 !contains(extended,"PRIVATE-TOKEN"),

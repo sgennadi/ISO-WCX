@@ -58,7 +58,10 @@ class EditTransaction {
 #endif
 public:
     std::filesystem::path workspace, output;
-    explicit EditTransaction(const std::filesystem::path& image):image_(std::filesystem::absolute(image)),
+    using WorkspaceCreator=bool(*)(const std::filesystem::path&);
+    explicit EditTransaction(const std::filesystem::path& image,
+                             WorkspaceCreator create_private_workspace=nullptr):
+        image_(std::filesystem::absolute(image)),
         size_(std::filesystem::file_size(image)),time_(std::filesystem::last_write_time(image)) {
         if(!std::filesystem::is_regular_file(std::filesystem::symlink_status(image_)))
             throw EditUnsupported("archive must be a regular non-symlink file");
@@ -68,7 +71,14 @@ public:
         std::random_device random;
         for(unsigned i=0;i<32;++i) {
             auto candidate=image_.parent_path()/(".iso-wcx-edit-"+std::to_string(random())+"-"+std::to_string(random()));
-            if(std::filesystem::create_directory(candidate)) { workspace=candidate;break; }
+            // Formats with special staging requirements (WIM NTFS ACLs)
+            // can create the unique sibling atomically with a security
+            // descriptor. All other formats retain ordinary directory
+            // creation and their established transaction behavior.
+            const bool created=create_private_workspace ?
+                create_private_workspace(candidate) :
+                std::filesystem::create_directory(candidate);
+            if(created) { workspace=candidate;break; }
         }
         if(workspace.empty())throw std::runtime_error("cannot create edit workspace");
         output=workspace/(image_.filename());

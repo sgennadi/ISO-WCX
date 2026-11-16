@@ -78,10 +78,38 @@ std::string classify(std::string_view reason, int code) {
     if(has("cannot replace archive"))return "archive_replace_failed";
     if(has("archive changed during edit"))
         return "archive_source_changed";
+    if(has("wim edit refused: image is registered as mounted"))
+        return "wim_mount_registered";
+    if(has("wim edit already active on this computer"))
+        return "wim_operation_busy";
+    if(has("wim mount state api unavailable") ||
+       has("read wim registered mount state") ||
+       has("enumerate wim registered mounts") ||
+       has("wim mount registry") ||
+       has("wim registered mount has an invalid source path"))
+        return "wim_mount_state_unknown";
+    if(has("wim machine-local lock root unavailable") ||
+       has("create wim image operation lock directory") ||
+       has("acquire wim image operation lock"))
+        return "wim_lease_unavailable";
     if(has("administrator backup/restore")||
        has("cannot create imaging token")||
-       has("cannot activate imaging token"))
+       has("cannot activate imaging token")||
+       has("cannot read wim host process token"))
         return "wim_privileges_unavailable";
+    if(has("open wim host user token")||
+       has("size wim host user sid")||
+       has("read wim host user sid"))
+        return "wim_host_identity_unavailable";
+    if(has("protect wim private workspace acl")||
+       has("create wim workspace security acl")||
+       has("open wim private workspace for acl")||
+       has("inspect wim private workspace for acl")||
+       has("initialize wim workspace descriptor")||
+       has("attach wim workspace dacl")||
+       has("protect wim workspace dacl inheritance")||
+       has("create wim workspace with explicit acl"))
+        return "wim_workspace_acl_denied";
     if(has("restore wim scratch cleanup access")||
        has("restore wim scratch entry ownership")||
        has("open wim scratch entry for acl repair"))
@@ -176,6 +204,8 @@ std::string stage_name(std::wstring_view description) {
     std::transform(s.begin(),s.end(),s.begin(),[](wchar_t c){return wchar_t(towlower(c));});
     if(s.find(L"wim metadata load")!=s.npos)return "metadata_load";
     if(s.find(L"wim metadata enumeration")!=s.npos)return "metadata_enumerate";
+    if(s.find(L"check wim mount state")!=s.npos)
+        return "preflight";
     // Distinguish per-index Apply cleanup from the post-WIMGAPI root sweep
     // without exporting any local path, filename or exception message.
     if(s.find(L"cleanup wim temporary files")!=s.npos)

@@ -45,6 +45,34 @@ This opening indicator is distinct from the existing WCX Apply/Capture
 progress shown for F5/Delete. Native Win32/x64 tests check metadata
 phases, monotonic scanned counts, cancellation and the fast format probe.
 
+## Elevated domain user versus local Administrator (0.21.2 RC Preview)
+
+Total Commander may run elevated under a domain user while WIMGAPI applies
+files with different inherited ACLs or temporarily changes thread
+impersonation. A directory owner displayed as `BUILTIN\\Administrators`
+does **not** by itself explain a delete failure; inspect the actual DACL
+and Win32 error as well as outstanding file handles.
+
+For private WIM edits, ISO-WCX now derives its user SID and backup/restore
+privileges from the **host process** rather than an arbitrary impersonated
+thread. It creates the random sibling `.iso-wcx-edit-*` workspace
+**atomically with a protected, inheritable DACL** granting the process
+user, SYSTEM and BUILTIN\\Administrators full access. The existing owner
+is preserved. Earlier attempts to set ownership or replace the DACL
+*after* directory creation returned Win32 5 on Windows CI.
+WIMGAPI-created children can still bring restrictive image ACLs;
+the existing ACL-aware cleanup repairs
+those *individual private scratch entries* only, never the input WIM,
+the containing folder, or unrelated transactions.
+
+The native WCX regression checks the root DACL and inherited rights on the
+new Apply directory before WIMGAPI writes image metadata; it also exercises
+protected scratch entries, dropped impersonation, late files, locked files,
+and Win32 145. CI runners are not AD domain members, so a real elevated
+domain-host test is still required. Path-free reports distinguish
+`wim_host_identity_unavailable`, `wim_workspace_acl_denied` and
+`wim_scratch_acl_denied` from sharing/dir-not-empty errors.
+
 ## Win32 145 scratch cleanup after Apply/Capture (0.21.2 RC Preview)
 
 Field logs from November 16 still report
@@ -65,11 +93,48 @@ does not follow reparse points, and never touches the original WIM.
 The staged output must still pass readback and residue checks before
 atomic commit.
 
-If Win32 145 persists, the private error message now contains **counts
-only** (`survivors_up_to_32`, `folders`, `reparse`, `scan_error`)
-without any user paths, filenames or contents. A Windows native smoke
-test holds a DELETE-sharing file handle throughout cleanup and asserts
-that no workspace survives while the handle is still open.
+If Win32 145 persists, diagnostics include **only bounded counts**:
+`survivors_up_to_32`, `files`, `folders`, `reparse`, `readonly`,
+`delete_open_ok`, `sharing`, `access_denied`, `delete_pending`,
+`vanished`, `other` and `scan_error`. A read-only DELETE-access
+probe on each of at most 32 immediate survivors distinguishes an
+antivirus/driver handle (sharing), a protected DACL (access denied),
+and a name still pending deletion. Names, paths, identities and
+contents are never included. A native Windows regression holds and
+releases a no-delete-sharing handle to verify those distinctions.
+An existing Windows smoke test also covers POSIX scratch unlink.
+
+Successful `DeleteFileW` alone does not prove the NTFS name has gone:
+on the private post-Capture cleanup path, ISO-WCX now checks whether
+it remains DELETE_PENDING and retries safely. Persistent failures
+still abort F5 before committing the staged WIM. A leftover private
+scratch directory is not evidence of a DISM mount, and ISO-WCX never
+removes an unrelated WIMMount registration.
+
+## DISM-GUI mount safety and cross-process edit lease (RC1 Preview)
+
+The WIM editor reuses two non-destructive mechanisms from the separate
+DISM-GUI project. It stays native WIMGAPI Apply/Edit/Capture and never
+starts dism.exe, mounts a filesystem image, or calls /Cleanup-Mountpoints.
+
+1. Before creating scratch and again just before atomic commit,
+   WIMGetMountedImageInfo(Level 1) checks registered Windows DISM/WIM
+   mounts. A matching image (including an NTFS hardlink alias) blocks F5
+   regardless of mount mode or status. If mount-state enumeration cannot
+   be trusted, edit fails closed. Unrelated mounts are never modified.
+2. A machine-local, Win32 file-share-exclusive lease prevents simultaneous
+   ISO-WCX edits of the same NTFS file ID from separate TC windows/processes
+   (including 32-bit versus 64-bit Total Commander). Zero-byte lock files
+   live under %ProgramData%/ISO-WCX/ImageLocks; they intentionally persist,
+   while Windows releases the *handle* on exit or crash. Deleting live lock
+   files would allow concurrent transactions to bypass the lock.
+   Other DISM tools do not participate in this lease, so the mount check
+   is repeated immediately before committing.
+
+CI includes a synthetic WIM identity/hardlink lease test and an actual
+read-only WIMGAPI mount-list query, but creates no Windows mount points.
+The existing WIM smoke tests still cover Apply/Capture, F5, rollback,
+scratch cleanup, metadata preservation and output readback.
 
 ## Restricted transactional WIM editing
 
