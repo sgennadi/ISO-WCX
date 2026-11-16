@@ -752,8 +752,11 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     // workspace. This lower bound is deliberately not a prediction of
     // the final uncompressed Apply size.
     report(L"Check WIM staging capacity",4);
+    // GetVolumePathNameW requires a fully qualified input; callers of the
+    // WCX interface may pass relative archive paths.
+    const auto staging_source=std::filesystem::absolute(path);
     wchar_t scratch_volume[MAX_PATH]{};
-    checked(GetVolumePathNameW(path.c_str(),scratch_volume,MAX_PATH),
+    checked(GetVolumePathNameW(staging_source.c_str(),scratch_volume,MAX_PATH),
             "locate WIM staging volume");
     ULARGE_INTEGER available{};
     checked(GetDiskFreeSpaceExW(scratch_volume,&available,nullptr,nullptr),
