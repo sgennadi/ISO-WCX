@@ -21,6 +21,30 @@ WIMSetReferenceFile; no joining or mounting occurs.
 WCX per-file extraction skips unsafe reparse entries and does not restore
 NTFS alternate streams, security descriptors or reparse-point targets.
 
+## Opening large WIM/ESD/SWM images (0.21.2 RC Preview)
+
+Total Commander calls `CanYouHandleThisFile` and then `OpenArchive`
+**before** it registers the WCX per-handle progress callback. The
+previous format probe performed a full WIMGAPI scan, silently repeating
+the expensive enumeration in `OpenArchive`. The WIM/ESD/SWM format
+probe now checks the bounded `MSWIM` header only; `OpenArchive` still
+performs the full native validation.
+
+If WIMGAPI metadata loading takes longer than about **450 ms**, the
+plugin shows its own native, DPI-aware opening dialog with an
+**indeterminate marquee**, the current image index, the number of
+enumerated entries and a **Cancel** button. Fast opens have no flashing
+dialog. No progress percentage is invented: WIMGAPI does not disclose
+the total number of directory entries in advance. The dialog runs on a
+separate UI thread, so it remains responsive during a long blocking
+`WIMLoadImage` call. Cancel is honored at the next safe boundary after
+the native API returns; all WIM handles are then closed and TC receives
+`E_EABORTED` (21). No helper EXE or image mount is used.
+
+This opening indicator is distinct from the existing WCX Apply/Capture
+progress shown for F5/Delete. Native Win32/x64 tests check metadata
+phases, monotonic scanned counts, cancellation and the fast format probe.
+
 ## Restricted transactional WIM editing
 
 Only existing standard, unsplit, non-solid and writable WIM images may be
