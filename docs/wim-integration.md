@@ -55,12 +55,13 @@ and Win32 error as well as outstanding file handles.
 
 For private WIM edits, ISO-WCX now derives its user SID and backup/restore
 privileges from the **host process** rather than an arbitrary impersonated
-thread. Immediately after creating the random sibling
-`.iso-wcx-edit-*` workspace, it sets a protected, inheritable DACL granting the process user, SYSTEM and
-BUILTIN\\Administrators full access. The existing owner is preserved;
-forcing reassignment returned Win32 5 in the Windows smoke regression.
-WIMGAPI-created children can still
-bring restrictive image ACLs; the existing ACL-aware cleanup repairs
+thread. It creates the random sibling `.iso-wcx-edit-*` workspace
+**atomically with a protected, inheritable DACL** granting the process
+user, SYSTEM and BUILTIN\\Administrators full access. The existing owner
+is preserved. Earlier attempts to set ownership or replace the DACL
+*after* directory creation returned Win32 5 on Windows CI.
+WIMGAPI-created children can still bring restrictive image ACLs;
+the existing ACL-aware cleanup repairs
 those *individual private scratch entries* only, never the input WIM,
 the containing folder, or unrelated transactions.
 
