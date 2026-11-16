@@ -41,9 +41,21 @@ separate UI thread, so it remains responsive during a long blocking
 the native API returns; all WIM handles are then closed and TC receives
 `E_EABORTED` (21). No helper EXE or image mount is used.
 
+If Total Commander uses legacy Windows Common Controls (`comctl32 v5`)
+or `TaskDialogIndirect` cannot be created, a second native Win32/GDI
+window now displays the same stage, index, scanned-entry count, Cancel
+button and continuously animated indeterminate progress bar. The
+fallback uses no helper processes, runtime downloads or external DLLs.
+It appears only after the same 450 ms delay. The fallback does not
+pretend that the number of files or remaining time is known.
+
 This opening indicator is distinct from the existing WCX Apply/Capture
 progress shown for F5/Delete. Native Win32/x64 tests check metadata
 phases, monotonic scanned counts, cancellation and the fast format probe.
+On a real desktop, open a large `install.wim` in Total Commander and
+verify an opening dialog is visible throughout the slow WIM metadata
+load. Cancel must wait until WIMGAPI reaches a safe boundary, then
+return to Total Commander without leaving handles or temporary mounts.
 
 ## Elevated domain user versus local Administrator (0.21.2 RC Preview)
 
