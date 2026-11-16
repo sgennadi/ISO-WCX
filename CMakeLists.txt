@@ -502,6 +502,16 @@ if(WIN32)
     add_executable(wcx_packed_smoke tests/wcx_packed_smoke.cpp)
     add_executable(wcx_wim_smoke tests/wcx_wim_smoke.cpp)
     target_link_libraries(wcx_wim_smoke PRIVATE iso_disc advapi32)
+    # Reuse DISM-GUI's mount registry and machine-local writer lease concepts.
+    # Only Win32 APIs are used; this never mounts a system image.
+    add_executable(wim_edit_preflight_windows_tests
+      tests/wim_edit_preflight_windows.cpp)
+    target_include_directories(wim_edit_preflight_windows_tests PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    add_test(NAME wim_mount_registry_and_local_edit_lease
+      COMMAND wim_edit_preflight_windows_tests)
+    set_tests_properties(wim_mount_registry_and_local_edit_lease
+      PROPERTIES TIMEOUT 60)
     # Shared transaction safety for both ISO and WIM, including archived
     # path swaps or same-size external writes with a restored timestamp.
     add_executable(edit_transaction_source_identity_tests
