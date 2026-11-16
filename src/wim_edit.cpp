@@ -31,10 +31,19 @@ struct Privileges {
     Privileges(){
         if(!OpenThreadToken(GetCurrentThread(),TOKEN_QUERY|TOKEN_DUPLICATE|TOKEN_IMPERSONATE,TRUE,&prior))
             checked(GetLastError()==ERROR_NO_TOKEN,"cannot read thread token");
-        HANDLE source=prior;
-        if(!source)checked(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE,&source),"cannot read process token");
-        const BOOL copied=DuplicateTokenEx(source,TOKEN_QUERY|TOKEN_ADJUST_PRIVILEGES|TOKEN_IMPERSONATE,nullptr,SecurityImpersonation,TokenImpersonation,&token);
-        if(!prior)CloseHandle(source);
+        // Always borrow privileges from the elevated host process. WIMGAPI
+        // may temporarily impersonate a local service/account on this
+        // thread; that identity can lack backup/restore rights or differ
+        // from the domain user who started Total Commander.
+        HANDLE source=nullptr;
+        if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE,&source)){
+            if(prior)CloseHandle(prior);
+            checked(false,"cannot read WIM host process token");
+        }
+        const BOOL copied=DuplicateTokenEx(source,
+            TOKEN_QUERY|TOKEN_ADJUST_PRIVILEGES|TOKEN_IMPERSONATE,
+            nullptr,SecurityImpersonation,TokenImpersonation,&token);
+        CloseHandle(source);
         if(!copied){if(prior)CloseHandle(prior);checked(false,"cannot create imaging token");}
         try{for(const wchar_t* name:{L"SeBackupPrivilege",L"SeRestorePrivilege",L"SeSecurityPrivilege"}){
             TOKEN_PRIVILEGES p{};p.PrivilegeCount=1;checked(LookupPrivilegeValueW(nullptr,name,&p.Privileges[0].Luid),"privilege lookup failed");p.Privileges[0].Attributes=SE_PRIVILEGE_ENABLED;
@@ -192,49 +201,102 @@ std::filesystem::path relative_path(const std::string& text){return std::filesys
 void no_reparse(const std::filesystem::path& root,const std::filesystem::path& relative){
     auto path=root;for(const auto& part:relative){path/=part;DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){auto err=GetLastError();checked(err==ERROR_FILE_NOT_FOUND||err==ERROR_PATH_NOT_FOUND,"cannot inspect WIM edit path");continue;}if(attr&FILE_ATTRIBUTE_REPARSE_POINT)throw EditUnsupported("editing through WIM reparse points is not supported");}
 }
-// This is used ONLY for private WIM apply/capture scratch files, never on
-// the original image. Applied Windows images may contain TrustedInstaller or
-// other ACLs that prevent even an elevated user from removing their contents.
-// Grant DELETE access to the current elevated thread user and SYSTEM only,
-// on the individual scratch entry, without following a reparse point.
+// The current WIMGAPI thread may impersonate a local account even when
+// Total Commander was started by an elevated domain account. Anchor private
+// workspace ownership and cleanup access to the stable host process SID.
+struct ProcessUserSid {
+    std::vector<BYTE> bytes;
+    ProcessUserSid() {
+        HANDLE raw=nullptr;
+        checked(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw),
+                "open WIM host user token");
+        struct Token {HANDLE h;~Token(){CloseHandle(h);}} token{raw};
+        DWORD size=0;
+        GetTokenInformation(token.h,TokenUser,nullptr,0,&size);
+        checked(size>=sizeof(TOKEN_USER) && size<65536u &&
+                GetLastError()==ERROR_INSUFFICIENT_BUFFER,
+                "size WIM host user SID");
+        bytes.resize(size);
+        checked(GetTokenInformation(token.h,TokenUser,bytes.data(),size,&size),
+                "read WIM host user SID");
+    }
+    PSID sid() const {
+        return reinterpret_cast<const TOKEN_USER*>(bytes.data())->User.Sid;
+    }
+};
+
+struct WimScratchAcl {
+    std::array<BYTE,SECURITY_MAX_SID_SIZE> system_sid{},admin_sid{};
+    PACL acl=nullptr;
+    WimScratchAcl(PSID process_user,DWORD inheritance) {
+        DWORD system_bytes=static_cast<DWORD>(system_sid.size());
+        DWORD admin_bytes=static_cast<DWORD>(admin_sid.size());
+        checked(CreateWellKnownSid(WinLocalSystemSid,nullptr,
+                                   system_sid.data(),&system_bytes),
+                "create WIM SYSTEM SID");
+        checked(CreateWellKnownSid(WinBuiltinAdministratorsSid,nullptr,
+                                   admin_sid.data(),&admin_bytes),
+                "create WIM Administrators SID");
+        EXPLICIT_ACCESSW entries[3]{};
+        const PSID identities[3]={process_user,system_sid.data(),admin_sid.data()};
+        for(unsigned i=0;i<3;++i) {
+            auto& entry=entries[i];
+            entry.grfAccessPermissions=FILE_ALL_ACCESS;
+            entry.grfAccessMode=GRANT_ACCESS;
+            entry.grfInheritance=inheritance;
+            entry.Trustee.TrusteeForm=TRUSTEE_IS_SID;
+            entry.Trustee.TrusteeType=i==2?TRUSTEE_IS_GROUP:TRUSTEE_IS_USER;
+            entry.Trustee.ptstrName=reinterpret_cast<LPWSTR>(identities[i]);
+        }
+        const DWORD result=SetEntriesInAclW(3,entries,nullptr,&acl);
+        if(result!=ERROR_SUCCESS)
+            throw std::runtime_error("create WIM workspace security ACL (Win32 "+
+                                     std::to_string(result)+")");
+    }
+    WimScratchAcl(const WimScratchAcl&)=delete;
+    ~WimScratchAcl(){if(acl)LocalFree(acl);}
+};
+
+// Protect only the freshly created, randomly named sibling scratch tree.
+// Do not change the ACL or owner of the original WIM or its parent folder.
+// Inheritance lets normal scratch children be cleaned by the host account
+// even when Administrators is the default owner on a domain computer.
+void protect_wim_workspace(const std::filesystem::path& workspace) {
+    ProcessUserSid user;
+    WimScratchAcl acl(user.sid(),SUB_CONTAINERS_AND_OBJECTS_INHERIT);
+    HANDLE raw=CreateFileW(workspace.c_str(),
+        FILE_READ_ATTRIBUTES|WRITE_DAC|WRITE_OWNER,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+    checked(raw!=INVALID_HANDLE_VALUE,"open WIM private workspace for ACL");
+    struct File {HANDLE h;~File(){CloseHandle(h);}} folder{raw};
+    BY_HANDLE_FILE_INFORMATION info{};
+    checked(GetFileInformationByHandle(folder.h,&info),
+            "inspect WIM private workspace for ACL");
+    if(!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) ||
+       (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))
+        throw EditUnsupported("WIM private workspace is not a regular directory");
+    const DWORD result=SetSecurityInfo(folder.h,SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION|
+        PROTECTED_DACL_SECURITY_INFORMATION,
+        user.sid(),nullptr,acl.acl,nullptr);
+    if(result!=ERROR_SUCCESS)
+        throw std::runtime_error("protect WIM private workspace ACL (Win32 "+
+                                 std::to_string(result)+")");
+}
+
+// Restore access ONLY for private WIM apply/capture scratch entries.
+// An applied Windows image may contain TrustedInstaller-protected ACLs.
+// Grant cleanup to the elevated host process user, SYSTEM and Administrators,
+// without following a reparse point or changing the original WIM.
 void allow_workspace_cleanup(const std::filesystem::path& path){
     // WIMGAPI can end impersonation or disable privileges while applying
     // an image. Rebuild a scoped privileged identity even if a thread
     // token is still present, and restore the caller identity on exit.
     Privileges cleanup_identity;
-    HANDLE raw_token=nullptr;
-    checked(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&raw_token),
-            "open WIM cleanup impersonation token");
-    struct Token {HANDLE h;~Token(){CloseHandle(h);}} token{raw_token};
-    DWORD bytes=0;
-    GetTokenInformation(token.h,TokenUser,nullptr,0,&bytes);
-    checked(bytes>=sizeof(TOKEN_USER) && bytes<65536u &&
-            GetLastError()==ERROR_INSUFFICIENT_BUFFER,
-            "size WIM cleanup user SID");
-    std::vector<std::uint8_t> buffer(bytes);
-    checked(GetTokenInformation(token.h,TokenUser,buffer.data(),bytes,&bytes),
-            "read WIM cleanup user SID");
-    BYTE system_sid[SECURITY_MAX_SID_SIZE]{};
-    DWORD system_sid_bytes=sizeof(system_sid);
-    checked(CreateWellKnownSid(WinLocalSystemSid,nullptr,system_sid,
-                               &system_sid_bytes),"create SYSTEM SID");
-    EXPLICIT_ACCESSW access[2]{};
-    for(auto& entry:access){
-        entry.grfAccessPermissions=FILE_ALL_ACCESS;
-        entry.grfAccessMode=SET_ACCESS;
-        entry.grfInheritance=NO_INHERITANCE;
-        entry.Trustee.TrusteeForm=TRUSTEE_IS_SID;
-        entry.Trustee.TrusteeType=TRUSTEE_IS_USER;
-    }
-    access[0].Trustee.ptstrName=reinterpret_cast<LPWSTR>(
-        reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid);
-    access[1].Trustee.ptstrName=reinterpret_cast<LPWSTR>(system_sid);
-    PACL raw_acl=nullptr;
-    const DWORD acl_result=SetEntriesInAclW(2,access,nullptr,&raw_acl);
-    if(acl_result!=ERROR_SUCCESS)
-        throw std::runtime_error("create WIM scratch cleanup ACL (Win32 "+
-                                 std::to_string(acl_result)+")");
-    struct Acl {PACL p;~Acl(){LocalFree(p);}} acl{raw_acl};
+    ProcessUserSid user;
+    WimScratchAcl acl(user.sid(),NO_INHERITANCE);
     HANDLE raw_file=CreateFileW(path.c_str(),WRITE_DAC|WRITE_OWNER,
         FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
         OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
@@ -252,7 +314,7 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
     const auto set_scratch_dacl=[&]{
         return SetSecurityInfo(file.h,SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
-            nullptr,nullptr,acl.p,nullptr);
+            nullptr,nullptr,acl.acl,nullptr);
     };
     DWORD result=set_scratch_dacl();
     if(result==ERROR_ACCESS_DENIED){
@@ -261,7 +323,7 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
         // this one disposable scratch inode, then retry its DACL.
         const DWORD owner_result=SetSecurityInfo(file.h,SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION,
-            reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid,
+            user.sid(),
             nullptr,nullptr,nullptr);
         if(owner_result!=ERROR_SUCCESS)
             throw std::runtime_error("restore WIM scratch entry ownership (Win32 "+
@@ -652,6 +714,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     }
     Privileges privileges;Apartment apartment;EditTransaction tx(path);
     WimWorkspaceCleanup scratch{tx.workspace};
+    protect_wim_workspace(tx.workspace);
     Library library;auto m=library.h;
     // Native Windows capture/apply preserve security and alternate streams on NTFS.
     wchar_t volume[MAX_PATH]{},filesystem[MAX_PATH]{};checked(GetVolumePathNameW(tx.workspace.c_str(),volume,MAX_PATH),"find WIM workspace volume");checked(GetVolumeInformationW(volume,nullptr,0,nullptr,nullptr,nullptr,filesystem,MAX_PATH),"inspect WIM workspace filesystem");
