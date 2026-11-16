@@ -127,6 +127,10 @@ public:
     bool boot_regions_bounded=true;
     std::set<std::uint32_t> unbounded_boot_lbas;
     std::vector<std::pair<std::uint64_t,std::uint64_t>> udf_metadata_regions;
+    // Joliet directories may occupy different sectors from Primary ISO.
+    // Retain both namespaces' extents when protecting hidden boot media.
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> joliet_regions;
+    std::uint32_t terminator_lba=0;
     std::unique_ptr<Node> root;
     bool joliet=false;
     bool udf_bridge=false;
@@ -229,7 +233,7 @@ public:
              "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         Bytes primary,supplementary;bool end=false;
         for(std::uint32_t lba=16;lba<64;++lba){auto b=read(std::uint64_t(lba)*block,block);need(std::memcmp(b.data()+1,"CD001",5)==0&&b[6]==1,"unsupported ISO descriptors");
-            if(b[0]==255){end=true;break;}
+            if(b[0]==255){end=true;terminator_lba=lba;break;}
             if(b[0]==0){need(std::memcmp(b.data()+7,"EL TORITO SPECIFICATION",23)==0,"unsupported boot descriptor");boot_descriptor_lbas.insert(lba);boot_catalog(le(b,71));continue;}
             need(b[0]==1||b[0]==2,"unsupported ISO descriptor type");
             if(b[0]==1){need(primary.empty(),"multiple primary descriptors");primary=b;}
@@ -341,6 +345,17 @@ public:
                 validate_view(*root,primary,primary_volume_blocks);
                 validate_view(*other,supplementary,supplementary_volume_blocks);
             }
+            std::vector<const Node*> supplementary_nodes{other.get()};
+            for(std::size_t i=0;i<supplementary_nodes.size();++i) {
+                const auto* node=supplementary_nodes[i];
+                if(node->size)
+                    joliet_regions.emplace_back(
+                        std::uint64_t(node->lba)*block,node->size);
+                for(const auto& child:node->children)
+                    supplementary_nodes.push_back(child.get());
+                need(supplementary_nodes.size()<=200000,
+                     "Joliet boot-protection extent limit exceeded");
+            }
             pair(*root,*other);
         }
         // Some genuine bootable ISO/UDF bridges set El Torito's 512-byte
@@ -445,6 +460,13 @@ public:
                                 std::uint64_t(node->lba)*block,node->size),
                      "hidden El Torito floppy overlaps an ISO file or directory");
             }
+            for(const auto& [offset,length]:joliet_regions)
+                need(!intersect(start,bytes,offset,length),
+                     "hidden El Torito floppy overlaps Joliet file or directory");
+            need(terminator_lba>=16 &&
+                 !intersect(start,bytes,16ull*block,
+                            std::uint64_t(terminator_lba-15u)*block),
+                 "hidden El Torito floppy overlaps ISO descriptor sequence");
             for(const auto other_lba:boot_lbas)
                 if(other_lba!=entry.lba)
                     need(!intersect(start,bytes,
