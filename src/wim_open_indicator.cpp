@@ -199,10 +199,13 @@ void WimOpenIndicator::run() noexcept {
             cfg.pfCallback=&WimOpenIndicator::task_callback;
             cfg.lpCallbackData=reinterpret_cast<LONG_PTR>(this);
             int clicked=0;
-            (void)proc(&cfg,&clicked,nullptr,nullptr);
-            // If Windows closes the dialog independently, cancel the
-            // pending OpenArchive instead of leaving an invisible scan.
-            if(!stopped(stop_event_))
+            const HRESULT result=proc(&cfg,&clicked,nullptr,nullptr);
+            // A missing visual-styles activation context may cause
+            // TaskDialogIndirect to fail. That is a GUI failure, NOT a
+            // request to cancel a valid WIM open. Only a successfully
+            // dismissed Cancel dialog can request cancellation.
+            if(SUCCEEDED(result) && clicked==IDCANCEL &&
+               !stopped(stop_event_))
                 cancelled_.store(true,std::memory_order_release);
         }
         if(loaded)FreeLibrary(controls);
