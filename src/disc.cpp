@@ -1173,7 +1173,8 @@ IsoNamespaceView inspect_iso_namespace(const std::filesystem::path& image,
     return view;
 }
 
-Disc::Disc(std::filesystem::path image,ArchiveOpenProgress open_progress)
+Disc::Disc(std::filesystem::path image,
+           [[maybe_unused]] ArchiveOpenProgress open_progress)
     : image_(std::move(image)) {
     // For descriptor-driven disc images, each independently recognizable
     // filesystem track is made available. Do not scan raw media heuristically:
