@@ -3,6 +3,7 @@
 #include "iso_wcx/edit_transaction.hpp"
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/wim_parts.hpp"
+#include "iso_wcx/wim_edit_preflight.hpp"
 #include <msxml6.h>
 #include <aclapi.h>
 #include <vector>
@@ -712,10 +713,16 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                     std::to_string(failure)+")");
         } else CloseHandle(probe);
     }
+    Library library;auto m=library.h;
+    report(L"Check WIM mount state and edit lock",4);
+    // Machine-local lease prevents overlapping WCX transactions from two
+    // Total Commander processes, including x86/x64 and image hardlinks.
+    wim_preflight::ImageLease lease(path);
+    // No DISM mount/unmount is invoked: registered mounts remain untouched.
+    wim_preflight::reject_registered_mounts(m,path);
     Privileges privileges;Apartment apartment;EditTransaction tx(path);
     WimWorkspaceCleanup scratch{tx.workspace};
     protect_wim_workspace(tx.workspace);
-    Library library;auto m=library.h;
     // Native Windows capture/apply preserve security and alternate streams on NTFS.
     wchar_t volume[MAX_PATH]{},filesystem[MAX_PATH]{};checked(GetVolumePathNameW(tx.workspace.c_str(),volume,MAX_PATH),"find WIM workspace volume");checked(GetVolumeInformationW(volume,nullptr,0,nullptr,nullptr,nullptr,filesystem,MAX_PATH),"inspect WIM workspace filesystem");
     if(_wcsicmp(filesystem,L"NTFS")!=0)throw EditUnsupported("WIM editing requires an NTFS workspace volume");
@@ -911,6 +918,9 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     }
     report(L"Cleanup WIM transaction scratch",98);
     remove_wim_residue(tx.workspace,tx.output,progress);
+    // DISM may have registered a mount while Apply/Capture was running.
+    // Refuse to replace the source rather than touching an active mount.
+    wim_preflight::reject_registered_mounts(m,path);
     report(L"Commit verified WIM",99);
     tx.commit(progress);
     // No cancellation or throwing callbacks after the atomic commit.
