@@ -9,6 +9,7 @@
 #include <array>
 #include <cwchar>
 #include <filesystem>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -101,15 +102,18 @@ inline void reject_registered_mounts(HMODULE wimgapi,const fs::path& image) {
             // An unrelated stale mount may contain a missing path. Compare
             // identity if possible; never clean up someone else's registry.
         }
+        // A registry source may be a hardlink or a symlink to the same
+        // NTFS file, so resolve the target for identity comparison. If an
+        // unrelated stale record is inaccessible, do not delete or repair it.
+        bool same_file=false;
         try {
-            if(current==image_identity(registered))
-                throw EditUnsupported("WIM edit refused: image is registered as mounted");
-        }catch(const EditUnsupported&) {
-            throw;
+            same_file=current==image_identity(registered);
         }catch(const std::exception&) {
-            // Invalid/unreadable unrelated mount paths must not prevent an
-            // edit of an independent image. Same-path matches were blocked.
+            // Unreadable unrelated mount source: only the exact pathname
+            // match above can be established without modifying anything.
         }
+        if(same_file)
+            throw EditUnsupported("WIM edit refused: image is registered as mounted");
     }
 }
 
