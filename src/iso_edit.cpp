@@ -444,15 +444,18 @@ public:
             if(!entry.media || resolved_boot_images.contains(entry.lba))continue;
             need(entry.media<=3,
                  "emulated El Torito hard disk is not an ISO-visible file");
-            if(!resolved_hidden_floppies.insert(entry.lba).second)continue;
             constexpr std::uint32_t floppy_sizes[]={
                 0u,1200u*1024u,1440u*1024u,2880u*1024u};
-            const auto start=std::uint64_t(entry.lba)*block;
             const auto bytes=std::uint64_t(floppy_sizes[entry.media]);
+            // Validate EVERY catalog entry, including duplicate references
+            // to the same floppy LBA with a different initial load count.
+            need(std::uint64_t(entry.initial_512_sectors)*512<=bytes,
+                 "hidden El Torito floppy load exceeds media geometry");
+            if(!resolved_hidden_floppies.insert(entry.lba).second)continue;
+            const auto start=std::uint64_t(entry.lba)*block;
             const auto volume=std::uint64_t(declared_volume_blocks)*block;
             need(start<=size && bytes<=size-start &&
-                 start<=volume && bytes<=volume-start &&
-                 std::uint64_t(entry.initial_512_sectors)*512<=bytes,
+                 start<=volume && bytes<=volume-start,
                  "hidden El Torito floppy extent exceeds ISO volume");
             for(const auto* node:all_boot_nodes) {
                 if(!node->size)continue;
