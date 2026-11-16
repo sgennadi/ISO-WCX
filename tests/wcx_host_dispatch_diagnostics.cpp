@@ -105,6 +105,15 @@ int wmain(){
         require(!contains(read(fixture.folder/L"ISO-WCX"/L"Logs"/L"operations.jsonl"),
                           "SECRET-USER-F5"),
                 "operation journal leaked a private image name");
+        // OpenArchive reports the exact WIM metadata stage even though
+        // TC has not registered any WCX progress callback yet.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "open",fixture.folder/L"PRIVATE-LARGE-INSTALL.wim");
+            op.stage(L"WIM metadata load",0);
+            op.stage(L"WIM metadata enumeration",0);
+            op.complete(21,"cancelled");
+        }
         // Normalized WIM stage + ISO guard subtype make failures
         // actionable while private input paths remain invisible.
         {
@@ -224,6 +233,11 @@ int wmain(){
                 "archive changed during edit (size/mtime)");
         }
         const auto extended=read(iso_wcx::diagnostics::export_report());
+        require(contains(extended,
+                "| wim | open | 21 | cancelled | metadata_enumerate | 1 |"),
+                "cancelled WIM open metadata stage missing");
+        require(!contains(extended,"PRIVATE-LARGE-INSTALL"),
+                "private WIM open filename leaked into shared report");
         require(contains(extended,
                 "| iso | pack | 13 | archive_source_changed | commit | 1 |"),
                 "ISO source mutation category missing");
