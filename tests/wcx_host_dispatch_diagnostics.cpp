@@ -183,6 +183,30 @@ int wmain(){
             op.complete(24,
                 "UDF Bridge has no safe contiguous run outside immutable ISO/boot extents");
         }
+        // B1412 field failures: a hidden El Torito disk is not a UDF
+        // bridge, and a PVD/Joliet mismatch needs its own descriptor
+        // category. Never publish the image name or native reason.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-ELTORITO.iso",1);
+            op.stage(L"write",0);
+            op.complete(24,
+                "emulated El Torito boot image is not an ISO-visible file");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-ISO-DESCRIPTOR.iso",1);
+            op.stage(L"write",0);
+            op.complete(24,
+                "ISO primary and Joliet volume sizes disagree");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-ISO-VIEW.iso",1);
+            op.stage(L"write",0);
+            op.complete(24,
+                "ISO/Joliet view extent exceeds its own declared volume");
+        }
         // File-ID or ChangeTime mismatches must have their own fixed
         // category, without ever leaking a private pathname.
         {
@@ -213,6 +237,16 @@ int wmain(){
                 "UDF Bridge protected allocator reason/category missing");
         require(!contains(extended,"PRIVATE-ISO-UDF-SECTOR"),
                 "ISO/UDF private file name leaked into shared diagnostics");
+        require(contains(extended,
+                "| iso | pack | 24 | iso_el_torito_protected | write | 1 |"),
+                "hidden El Torito misclassified as ISO/UDF bridge");
+        require(contains(extended,
+                "| iso | pack | 24 | iso_descriptor_bounds | write | 2 |"),
+                "unequal PVD/Joliet descriptor error category missing");
+        require(!contains(extended,"PRIVATE-ELTORITO") &&
+                !contains(extended,"PRIVATE-ISO-DESCRIPTOR") &&
+                !contains(extended,"PRIVATE-ISO-VIEW"),
+                "private ISO filename leaked into shared report");
         require(contains(extended,
                 "| wim | pack | 13 | wim_scratch_not_empty | cleanup_expanded | 2 |"),
                 "WIM scratch Win32 145 classification/stage is missing");

@@ -13,6 +13,7 @@ USB/CD metadata.
 | Validated nonhybrid ISO9660 / Joliet, optional no-emulation El Torito | Native transactional rebuild, subject to boot-extent and name checks | Native transactional rebuild |
 | Nonhybrid ISO9660 / Joliet + El Torito floppy/HDD emulation | **Preview:** add/delete/replace unrelated files only, with full boot-disk extent and MBR safety checks | Same limits; boot image files themselves immutable |
 | Same layout with a bounded **all-zero** trailing pad | Preview native rebuild; PVD/Joliet sizes are synchronized | Preview native rebuild |
+| Bounded but **unequal** Primary/Joliet volume sizes | Preview rebuild only after each namespace tree and path table is validated against its own descriptor; output sizes normalized | Same validation |
 | Standalone UDF Type-1 2048-byte images | Preview F5, F7, Delete files and **empty directories**, gated by strict bitmap/FE/FID/LVID validation | Limited native writer Preview |
 | ISO/UDF Bridge without boot catalog | Not supported | Preview: single contiguous existing UDF or shared ISO/UDF file, exactly same length; both namespaces validated |
 | Bootable ISO/UDF Bridge | **Preview:** UDF-only F5 add, Delete files/**empty UDF directories**, F7 and bounded resize when strict Type-1 bitmap/FE/FID/LVID validation passes and ISO/El Torito remain immutable | Existing contiguous UDF-only or shared-extent equal-size payload replacement; embedded/complex replacements route to the protected UDF writer |
@@ -91,15 +92,19 @@ The plain ISO9660/Joliet writer no longer rejects **El Torito media types
 1/2/3/4** merely because the boot catalog declares disk emulation.
 This is not permission to edit the boot image itself:
 
-- Floppy emulation requires the referenced LBA to start at an ISO-visible,
-  single-extent file of the **exact** 1.2, 1.44 or 2.88 MiB media size.
-- Hard-disk emulation requires an ISO-visible, 512-byte-aligned full file
-  with a valid MBR signature and bounded non-GPT partition entries.
+- Floppy emulation uses the **exact** 1.2, 1.44 or 2.88 MiB media
+  size. The full disk may be an ISO-visible file **or a hidden extent**,
+  provided it is completely inside the declared volume and does not
+  overlap any ISO file/directory, path table, descriptor, UDF metadata
+  or another boot resource. All floppy bytes remain immutable.
+- Hard-disk emulation still requires an ISO-visible, 512-byte-aligned
+  full file with a valid MBR and bounded non-GPT partition entries.
+  **Hidden HDD images remain read-only:** their length is unknown.
 - El Torito's `SectorCount` is only the initial 512-byte BIOS load. It
-  does **not** bound the full emulated disk; hidden, conflicting, out-of-range
-  and otherwise ambiguous images are rejected before editing.
+  does **not** bound the full emulated disk. Conflicting, out-of-range
+  or otherwise ambiguous images are rejected before editing.
 - Original boot descriptor, raw boot catalog, system area and the **entire
-  emulated floppy/HDD file extent** are immutable. The staged ISO is
+  bounded emulated floppy/HDD extent** are immutable. The staged ISO is
   re-parsed and checked against the original protected byte ranges before
   the final atomic replacement.
 - Unrelated ISO-visible F5 add/replace, Delete and directory edits may
@@ -112,6 +117,25 @@ Tests include independently generated emulation catalogs from xorriso,
 the native ISO editor's transactional rollback and Win32/x64 WCX runs.
 **This is still a Draft Preview**: preserving byte-identical boot data
 cannot certify bootability of a modified real machine image.
+
+## Field-reported ISO F5 restrictions (RC1 B1412)
+
+The sanitized field report showed two independent WCX 24 refusals:
+`emulated El Torito boot image is not an ISO-visible file` and
+`ISO primary and Joliet volume sizes disagree`. Neither is a Total
+Commander dispatch failure. A hidden **floppy** can now be safely
+bounded by its media type and protected byte-for-byte during an unrelated
+ISO rebuild; a hidden **HDD** remains refused. Independently valid
+Primary/Joliet volume sizes may differ, but each descriptor's directory
+tree and path tables must fit **inside its own declared volume**. The
+transaction copies the complete physical image, rebuilds both namespaces,
+normalizes their volume-size fields, verifies F5 payloads and original
+boot bytes, and only then atomically commits.
+
+Synthetic plain ISO and native Win32/x64 WCX tests cover both accepted
+cases and rejection of truncated views, overlapping hidden boot files,
+out-of-range path tables and unbounded HDD emulation. Real BIOS/UEFI
+bootability of modified vendor ISOs still requires separate validation.
 
 ## Empty UDF directory Delete (v0.21.2 Preview)
 

@@ -14,6 +14,9 @@
 namespace iso_wcx { namespace {
 using Bytes=std::vector<unsigned char>;
 constexpr std::uint32_t block=2048;
+// Defined below Image; needed while validating hidden El Torito extents.
+bool intersect(std::uint64_t a,std::uint64_t a_bytes,
+               std::uint64_t b,std::uint64_t b_bytes) noexcept;
 void need(bool ok,const char* message) { if(!ok)throw EditUnsupported(message); }
 std::uint32_t le(const Bytes& b,std::size_t p,unsigned n=4) {
     need(p+n<=b.size(),"truncated ISO field");std::uint32_t v=0;
@@ -124,11 +127,17 @@ public:
     bool boot_regions_bounded=true;
     std::set<std::uint32_t> unbounded_boot_lbas;
     std::vector<std::pair<std::uint64_t,std::uint64_t>> udf_metadata_regions;
+    // Joliet directories may occupy different sectors from Primary ISO.
+    // Retain both namespaces' extents when protecting hidden boot media.
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> joliet_regions;
+    std::uint32_t terminator_lba=0;
     std::unique_ptr<Node> root;
     bool joliet=false;
     bool udf_bridge=false;
     bool hybrid_system_area=false; // MBR present; only byte-stable payload edits
     std::uint32_t declared_volume_blocks=0;
+    std::uint32_t primary_volume_blocks=0;
+    std::uint32_t supplementary_volume_blocks=0;
     std::size_t items=0;
     explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false)
         :file(p,std::ios::binary),size(std::filesystem::file_size(p)) {
@@ -224,7 +233,7 @@ public:
              "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         Bytes primary,supplementary;bool end=false;
         for(std::uint32_t lba=16;lba<64;++lba){auto b=read(std::uint64_t(lba)*block,block);need(std::memcmp(b.data()+1,"CD001",5)==0&&b[6]==1,"unsupported ISO descriptors");
-            if(b[0]==255){end=true;break;}
+            if(b[0]==255){end=true;terminator_lba=lba;break;}
             if(b[0]==0){need(std::memcmp(b.data()+7,"EL TORITO SPECIFICATION",23)==0,"unsupported boot descriptor");boot_descriptor_lbas.insert(lba);boot_catalog(le(b,71));continue;}
             need(b[0]==1||b[0]==2,"unsupported ISO descriptor type");
             if(b[0]==1){need(primary.empty(),"multiple primary descriptors");primary=b;}
@@ -236,23 +245,28 @@ public:
             const auto volume_blocks=le(b,80);
             need(volume_blocks>=18 && volume_blocks<=sectors,
                  "ISO descriptor volume exceeds actual image bounds");
-            if(declared_volume_blocks)
-                need(declared_volume_blocks==volume_blocks,
-                     "ISO primary and Joliet volume sizes disagree");
-            declared_volume_blocks=volume_blocks;
+            // Primary and Joliet are independent volume descriptors.
+            // Some mastering tools declare different bounded view sizes.
+            // Preserve the larger view's complete source prefix; the writer
+            // will normalize both descriptors to the rebuilt image size.
+            if(b[0]==1)primary_volume_blocks=volume_blocks;
+            else supplementary_volume_blocks=volume_blocks;
+            declared_volume_blocks=std::max(declared_volume_blocks,volume_blocks);
             descriptors.emplace_back(lba,std::move(b));
         }
         need(end&&!primary.empty(),"missing ISO primary/terminator");
         // Detect UDF anchors relative to the logical volume as well as the
         // physical file end. ISO/UDF bridges may have zero padding after the
         // actual ECMA-167 anchor, and cannot use the plain ISO rebuild path.
-        if(declared_volume_blocks<sectors) {
-            if(declared_volume_blocks>256)
-                udf_bridge=add_udf_anchor(declared_volume_blocks-256) || udf_bridge;
-            udf_bridge=add_udf_anchor(declared_volume_blocks-1) || udf_bridge;
-            need(allow_udf_bridge || !udf_bridge,
-                 "ISO/UDF Bridge directory edits require a synchronized UDF writer");
+        for(const auto volume_blocks:
+            {primary_volume_blocks,supplementary_volume_blocks}) {
+            if(!volume_blocks || volume_blocks>=sectors)continue;
+            if(volume_blocks>256)
+                udf_bridge=add_udf_anchor(volume_blocks-256) || udf_bridge;
+            udf_bridge=add_udf_anchor(volume_blocks-1) || udf_bridge;
         }
+        need(allow_udf_bridge || !udf_bridge,
+             "ISO/UDF Bridge directory edits require a synchronized UDF writer");
         // Inspect UDF anchors before classifying a hybrid MBR image.
         // Hybrid ISO without UDF is parsed only for the strictly
         // same-size, no-metadata writer in edit_iso(). No ISO rebuild
@@ -286,7 +300,64 @@ public:
         }
         std::set<std::uint32_t> seen;root=parse(Bytes(primary.begin()+156,primary.begin()+190),false,nullptr,0,seen);
         root->name="";root->logical="";
-        if(joliet){seen.clear();auto other=parse(Bytes(supplementary.begin()+156,supplementary.begin()+190),true,nullptr,0,seen);pair(*root,*other);}
+        if(joliet) {
+            seen.clear();
+            auto other=parse(Bytes(supplementary.begin()+156,
+                                   supplementary.begin()+190),true,nullptr,0,seen);
+            if(primary_volume_blocks!=supplementary_volume_blocks) {
+                // A mismatched descriptor is safe to rebuild only when
+                // EACH independent namespace fits inside its OWN declared
+                // volume. Reject truncated trees and path tables rather than
+                // trusting the larger descriptor or physical ISO length.
+                const auto validate_view=[&](const Node& view,const Bytes& vd,
+                                             std::uint32_t blocks) {
+                    const auto limit=std::uint64_t(blocks)*block;
+                    std::vector<const Node*> nodes{&view};
+                    for(std::size_t i=0;i<nodes.size();++i) {
+                        const auto* node=nodes[i];
+                        const auto at=std::uint64_t(node->lba)*block;
+                        need(at<=limit && node->size<=limit-at,
+                             "ISO/Joliet view extent exceeds its own declared volume");
+                        for(const auto& child:node->children)
+                            nodes.push_back(child.get());
+                        need(nodes.size()<=200000,"ISO/Joliet view entry limit exceeded");
+                    }
+                    const auto be32=[&](std::size_t at) {
+                        return (std::uint32_t(vd[at])<<24) |
+                               (std::uint32_t(vd[at+1])<<16) |
+                               (std::uint32_t(vd[at+2])<<8) |
+                                std::uint32_t(vd[at+3]);
+                    };
+                    need(be32(84)==blocks,
+                         "ISO/Joliet volume size byte orders disagree");
+                    const auto table_bytes=le(vd,132);
+                    if(table_bytes) {
+                        for(const std::size_t at:{140u,144u,148u,152u}) {
+                            const auto lba=(at==140u||at==144u)?
+                                le(vd,at):be32(at);
+                            if(!lba)continue;
+                            const auto offset=std::uint64_t(lba)*block;
+                            need(offset<=limit && table_bytes<=limit-offset,
+                                 "ISO/Joliet path table exceeds its own declared volume");
+                        }
+                    }
+                };
+                validate_view(*root,primary,primary_volume_blocks);
+                validate_view(*other,supplementary,supplementary_volume_blocks);
+            }
+            std::vector<const Node*> supplementary_nodes{other.get()};
+            for(std::size_t i=0;i<supplementary_nodes.size();++i) {
+                const auto* node=supplementary_nodes[i];
+                if(node->size)
+                    joliet_regions.emplace_back(
+                        std::uint64_t(node->lba)*block,node->size);
+                for(const auto& child:node->children)
+                    supplementary_nodes.push_back(child.get());
+                need(supplementary_nodes.size()<=200000,
+                     "Joliet boot-protection extent limit exceeded");
+            }
+            pair(*root,*other);
+        }
         // Some genuine bootable ISO/UDF bridges set El Torito's 512-byte
         // sector count to zero or to just one boot sector. When the ISO9660
         // namespace independently describes the full boot image extent,
@@ -294,9 +365,11 @@ public:
         // Unknown boot images absent from ISO remain strictly read-only.
         std::set<std::uint32_t> resolved_boot_images;
         std::vector<const Node*> boot_nodes{root.get()};
+        std::vector<const Node*> all_boot_nodes;
         while(!boot_nodes.empty()) {
             const Node* node=boot_nodes.back();
             boot_nodes.pop_back();
+            all_boot_nodes.push_back(node);
             for(const auto& child:node->children)
                 boot_nodes.push_back(child.get());
             if(node->directory || !node->size)continue;
@@ -361,10 +434,82 @@ public:
                 }
             }
         }
-        for(const auto& entry:boot_entries)
-            if(entry.media)
-                need(resolved_boot_images.contains(entry.lba),
-                     "emulated El Torito boot image is not an ISO-visible file");
+        // Floppy emulation has an exact size defined by El Torito media
+        // type (1.2/1.44/2.88 MiB). Even when the floppy is not a named
+        // ISO9660 file, its FULL extent can be independently bounded and
+        // byte-protected. HDD emulation has no such geometry: keep a hidden
+        // HDD strictly read-only rather than guessing its last sector.
+        std::set<std::uint32_t> resolved_hidden_floppies;
+        for(const auto& entry:boot_entries) {
+            if(!entry.media || resolved_boot_images.contains(entry.lba))continue;
+            need(entry.media<=3,
+                 "emulated El Torito hard disk is not an ISO-visible file");
+            constexpr std::uint32_t floppy_sizes[]={
+                0u,1200u*1024u,1440u*1024u,2880u*1024u};
+            const auto bytes=std::uint64_t(floppy_sizes[entry.media]);
+            // Validate EVERY catalog entry, including duplicate references
+            // to the same floppy LBA with a different initial load count.
+            need(std::uint64_t(entry.initial_512_sectors)*512<=bytes,
+                 "hidden El Torito floppy load exceeds media geometry");
+            if(!resolved_hidden_floppies.insert(entry.lba).second)continue;
+            const auto start=std::uint64_t(entry.lba)*block;
+            const auto volume=std::uint64_t(declared_volume_blocks)*block;
+            need(start<=size && bytes<=size-start &&
+                 start<=volume && bytes<=volume-start,
+                 "hidden El Torito floppy extent exceeds ISO volume");
+            for(const auto* node:all_boot_nodes) {
+                if(!node->size)continue;
+                need(!intersect(start,bytes,
+                                std::uint64_t(node->lba)*block,node->size),
+                     "hidden El Torito floppy overlaps an ISO file or directory");
+            }
+            for(const auto& [offset,length]:joliet_regions)
+                need(!intersect(start,bytes,offset,length),
+                     "hidden El Torito floppy overlaps Joliet file or directory");
+            need(terminator_lba>=16 &&
+                 !intersect(start,bytes,16ull*block,
+                            std::uint64_t(terminator_lba-15u)*block),
+                 "hidden El Torito floppy overlaps ISO descriptor sequence");
+            for(const auto other_lba:boot_lbas)
+                if(other_lba!=entry.lba)
+                    need(!intersect(start,bytes,
+                                    std::uint64_t(other_lba)*block,block),
+                         "hidden El Torito floppy overlaps another boot resource");
+            for(const auto lba:boot_descriptor_lbas)
+                need(!intersect(start,bytes,std::uint64_t(lba)*block,block),
+                     "hidden El Torito floppy overlaps boot descriptor");
+            for(const auto& [offset,length]:boot_regions)
+                if(offset!=start)
+                    need(!intersect(start,bytes,offset,length),
+                         "hidden El Torito floppy overlaps protected boot data");
+            for(const auto& [offset,length]:udf_metadata_regions)
+                need(!intersect(start,bytes,offset,length),
+                     "hidden El Torito floppy overlaps UDF metadata");
+            for(const auto& [lba,vd]:descriptors) {
+                need(!intersect(start,bytes,std::uint64_t(lba)*block,block),
+                     "hidden El Torito floppy overlaps volume descriptor");
+                const auto table_bytes=le(vd,132);
+                if(!table_bytes)continue;
+                const auto be32=[&](std::size_t at) {
+                    return (std::uint32_t(vd[at])<<24) |
+                           (std::uint32_t(vd[at+1])<<16) |
+                           (std::uint32_t(vd[at+2])<<8) |
+                            std::uint32_t(vd[at+3]);
+                };
+                for(const std::size_t at:{140u,144u,148u,152u}) {
+                    const auto table_lba=(at==140u||at==144u)?
+                        le(vd,at):be32(at);
+                    if(!table_lba)continue;
+                    const auto offset=std::uint64_t(table_lba)*block;
+                    need(offset<=size && table_bytes<=size-offset,
+                         "hidden El Torito floppy has invalid ISO path table");
+                    need(!intersect(start,bytes,offset,table_bytes),
+                         "hidden El Torito floppy overlaps ISO path table");
+                }
+            }
+            boot_regions.emplace_back(start,bytes);
+            unbounded_boot_lbas.erase(entry.lba);
+        }
         boot_regions_bounded=unbounded_boot_lbas.empty();
     }
     Bytes read(std::uint64_t at,std::size_t count){need(at<=size&&count<=size-at,"ISO extent outside image");Bytes b(count);file.clear();file.seekg(static_cast<std::streamoff>(at));file.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(count));need(bool(file),"ISO read failed");return b;}

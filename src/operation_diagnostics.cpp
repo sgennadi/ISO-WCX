@@ -140,6 +140,16 @@ std::string classify(std::string_view reason, int code) {
         return "iso_gpt_protected";
     if(has("hybrid mbr")||has("isohybrid"))
         return "iso_hybrid_restricted";
+    // El Torito can contain a hidden disk without a UDF bridge. Do not
+    // misclassify "not an ISO-visible file" as a UDF-only limitation.
+    if(has("emulated el torito")||has("hidden el torito")||
+       has("el torito floppy"))
+        return "iso_el_torito_protected";
+    if(has("iso primary and joliet volume sizes disagree")||
+       has("iso/joliet view extent")||
+       has("iso/joliet path table")||
+       has("iso/joliet volume size"))
+        return "iso_descriptor_bounds";
     if(has("iso/udf")||has("iso-visible")||has("synchronized udf"))
         return "iso_udf_bridge_restricted";
     if(has("wimgapi open/load")||has("wimgapi unavailable"))
