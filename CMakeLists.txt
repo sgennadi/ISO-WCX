@@ -237,6 +237,13 @@ if(BUILD_TESTING)
   add_executable(wim_fast_edit_probe_tests tests/wim_fast_edit_probe.cpp)
   target_include_directories(wim_fast_edit_probe_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME wim_fast_edit_read_only_preflight COMMAND wim_fast_edit_probe_tests)
+  # Pure math test for the new pre-Apply WIM disk-space lower bound. It
+  # intentionally does not create a disk image or reserve disk space.
+  add_executable(wim_staging_budget_tests tests/wim_staging_budget.cpp)
+  target_include_directories(wim_staging_budget_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME wim_preflight_staging_capacity_budget
+    COMMAND wim_staging_budget_tests)
   # No runtime write capability: validate uncompressed on-disk WIM metadata.
   add_executable(wim_metadata_tree_tests tests/wim_metadata_tree.cpp)
   target_include_directories(wim_metadata_tree_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
