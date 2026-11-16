@@ -334,6 +334,38 @@ template<typename F>
 F bind(HMODULE library,const char* export_name) {
     return reinterpret_cast<F>(GetProcAddress(library,export_name));
 }
+// Report only a bounded native operation label and Win32 code when
+// a synthetic CI WIM edit fails. Never print user paths or image content.
+static void report_ci_wim_failure() {
+    wchar_t local[32768]{};
+    DWORD n=GetEnvironmentVariableW(L"LOCALAPPDATA",local,32768);
+    if(n==0 || n>=32768)return;
+    std::ifstream in(fs::path(local)/L"ISO-WCX"/L"Logs"/L"edit-errors.log");
+    if(!in)return;
+    std::string line,last;
+    while(std::getline(in,line)) {
+        if(line.find("WCX_EDIT_FAILURE format=WIM")!=std::string::npos)
+            last=std::move(line);
+    }
+    const auto pos=last.find(" reason=");
+    if(pos==std::string::npos)return;
+    const auto message=last.substr(pos+8);
+    const auto win32=message.find("(Win32 ");
+    if(win32==std::string::npos) {
+        std::cerr<<"WIM failure: no native Win32 code\n";
+        return;
+    }
+    const auto tail=message.find(')',win32);
+    if(tail==std::string::npos)return;
+    const auto stage=message.substr(0,win32);
+    const bool safe=!stage.empty() && stage.size()<100u &&
+        std::all_of(stage.begin(),stage.end(),[](unsigned char c) {
+            return (c>='a'&&c<='z') || (c>='A'&&c<='Z') ||
+                   c==' ' || c=='-' || c=='_';
+        });
+    std::cerr<<"WIM native failure: "<<(safe?stage:"stage-redacted")
+             <<" "<<message.substr(win32,tail-win32+1)<<'\n';
+}
 void write(const fs::path& filename,const std::string& data) {
     fs::create_directories(filename.parent_path());
     std::ofstream file(filename,std::ios::binary);
@@ -698,7 +730,7 @@ int wmain(int argc,wchar_t** argv) {
         std::thread worker([&]{packed_result=pack(packed.data(),sub.data(),src.data(),add_list,0);});
         worker.join();
         set_progress(INVALID_HANDLE_VALUE,nullptr);
-        if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";return 21;}
+        if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";report_ci_wim_failure();return 21;}
         if(!clean_wim_workspaces())return 40;
         if(!pack_progress_calls.load())return 26;
         // Regression: Total Commander creates an *empty folder* through the
