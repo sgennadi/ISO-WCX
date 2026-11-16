@@ -52,6 +52,33 @@ The original image is only replaced after the checks and flush succeed.
 A cancelled or rejected edit does not modify the original WIM; temporary
 disk usage can be substantial. This is still a Preview implementation.
 
+## WIM scratch cleanup after WIMGAPI closes (RC1 Preview)
+
+A real Total Commander 0.21.2 RC1 B1412 diagnostic reported WCX error
+13 (`wim_workspace_cleanup`) **after** the F5 call reached `PackFilesW`.
+Earlier fixes for Win32 145 and protected ACLs did not eliminate this
+field failure. The aggregate report alone cannot identify the native
+exception: the separate local `edit-errors.log` is needed.
+
+The editor now tries to clean each extracted image immediately after
+WIMCaptureImage and per-image handles close. If an antivirus filter or
+WIMGAPI worker still holds a temporary file, that cleanup is deferred.
+Multiple edited indexes use distinct extraction folders to avoid
+reusing a pending-delete tree. After the source/output WIMGAPI archive
+handles have also closed, the editor re-enumerates and removes every
+remaining private scratch entry with bounded retries. The verified
+staged WIM is the **only** file permitted to remain before atomic commit.
+Any persistent cleanup failure or cancellation still aborts the edit;
+the original WIM is not replaced.
+
+Windows WCX smoke tests hold an applied scratch file without delete
+sharing during the first cleanup attempt, release it at the post-close
+stage and require a successful F5, no scratch leak and correct output.
+Shareable diagnostics now distinguish `cleanup_expanded` from
+`cleanup_residue` and report fixed path-free error categories. This is
+not yet a claim that real multi-gigabyte `boot.wim` or `install.wim`
+field tests have passed.
+
 ## Source identity and concurrent-modification check (Preview)
 
 Before replacing an ISO/WIM archive, the shared transaction checks the
