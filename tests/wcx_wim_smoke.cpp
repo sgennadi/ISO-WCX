@@ -57,6 +57,8 @@ static std::atomic<unsigned> wim_stage_calls{0};
 static std::atomic<unsigned> wim_copy_stage_calls{0};
 static std::atomic<unsigned> wim_export_stage_calls{0};
 static std::atomic<bool> cancel_next_wim{false};
+static std::atomic<bool> cancel_wim_f5_source_copy{false};
+static std::atomic<bool> observed_wim_f5_source_copy{false};
 // Simulate WIMGAPI/host restoring the thread to the process security context
 // just before ACL-aware scratch cleanup. Previously that caused Win32 1008.
 static std::atomic<bool> drop_impersonation_at_cleanup{false};
@@ -165,6 +167,11 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
                 ++wim_copy_stage_calls;
             if(std::wstring_view(stage).find(L"Export unchanged WIM image")!=std::wstring_view::npos)
                 ++wim_export_stage_calls;
+        }
+        if(cancel_wim_f5_source_copy.load() && stage &&
+           std::wstring_view(stage).find(L"Copy F5 source into WIM workspace")!=std::wstring_view::npos) {
+            observed_wim_f5_source_copy.store(true);
+            return 0;
         }
         if(cancel_next_wim.load() && stage &&
            std::wstring_view(stage).find(L"Extract WIM image")!=std::wstring_view::npos)
@@ -525,6 +532,28 @@ int wmain(int argc,wchar_t** argv) {
         if(!clean_wim_workspaces())return 40;
         if(wim_percent_calls.load()==0 || wim_stage_calls.load()==0)
             return 32; // Progress must be visible even for empty folders.
+        // Cancel the WIM F5 source copy after WIMGAPI Apply, before recapture.
+        // Verify exact rollback and no leaked scratch directory.
+        {
+            const auto before_source_cancel=load(original);
+            write(incoming/L"CANCEL_COPY.TXT",std::string(2*1024*1024,'C'));
+            wchar_t copy_list[]=L"CANCEL_COPY.TXT\0\0";
+            observed_wim_f5_source_copy.store(false);
+            cancel_wim_f5_source_copy.store(true);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int copy_rc=pack(packed.data(),sub.data(),src.data(),copy_list,0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            cancel_wim_f5_source_copy.store(false);
+            if(!observed_wim_f5_source_copy.load()){
+                std::cerr<<"WIM F5 source-copy cancellation stage not observed\n";
+                return 55;
+            }
+            if(copy_rc!=21 || load(original)!=before_source_cancel ||
+               !clean_wim_workspaces()) {
+                std::cerr<<"WIM cancelled F5 source copy changed original or leaked scratch\n";
+                return 56;
+            }
+        }
         // Cancel during a long apply before replacing the original WIM.
         fs::create_directories(incoming/L"CANCEL_FOLDER");
         wchar_t cancel_list[]=L"CANCEL_FOLDER\0\0";
