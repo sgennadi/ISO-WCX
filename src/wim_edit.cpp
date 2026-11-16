@@ -5,6 +5,7 @@
 #include "iso_wcx/wim_parts.hpp"
 #include "iso_wcx/wim_scratch_diagnostics.hpp"
 #include "iso_wcx/wim_edit_preflight.hpp"
+#include "iso_wcx/wim_staging_budget.hpp"
 #include <msxml6.h>
 #include <aclapi.h>
 #include <vector>
@@ -745,6 +746,29 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
     wim_preflight::ImageLease lease(path);
     // No DISM mount/unmount is invoked: registered mounts remain untouched.
     wim_preflight::reject_registered_mounts(m,path);
+
+    // WIMGAPI will materialize an expanded NTFS tree and a staged WIM.
+    // Refuse clearly insufficient space BEFORE creating any private
+    // workspace. This lower bound is deliberately not a prediction of
+    // the final uncompressed Apply size.
+    report(L"Check WIM staging capacity",4);
+    wchar_t scratch_volume[MAX_PATH]{};
+    checked(GetVolumePathNameW(path.c_str(),scratch_volume,MAX_PATH),
+            "locate WIM staging volume");
+    ULARGE_INTEGER available{};
+    checked(GetDiskFreeSpaceExW(scratch_volume,&available,nullptr,nullptr),
+            "query WIM staging capacity");
+    const auto capacity=wim_detail::wim_staging_budget(
+        std::filesystem::file_size(path),available.QuadPart);
+    if(capacity.arithmetic_overflow)
+        throw EditUnsupported("WIM staging capacity arithmetic overflow");
+    if(!capacity.enough)
+        throw EditUnsupported(
+            "WIM staging capacity insufficient (available_mib="+
+            std::to_string(wim_detail::wim_mib_ceil(capacity.available_bytes))+
+            ", minimum_required_mib="+
+            std::to_string(wim_detail::wim_mib_ceil(capacity.required_bytes))+
+            "; expanded image requires additional free space)");
     Privileges privileges;Apartment apartment;
     // Create the unique sibling directory with the ACL already attached.
     // Atomic creation works for domain-admin TC without WRITE_DAC on an
