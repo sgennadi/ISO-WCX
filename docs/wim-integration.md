@@ -45,6 +45,32 @@ This opening indicator is distinct from the existing WCX Apply/Capture
 progress shown for F5/Delete. Native Win32/x64 tests check metadata
 phases, monotonic scanned counts, cancellation and the fast format probe.
 
+## Elevated domain user versus local Administrator (0.21.2 RC Preview)
+
+Total Commander may run elevated under a domain user while WIMGAPI applies
+files with different inherited ACLs or temporarily changes thread
+impersonation. A directory owner displayed as `BUILTIN\\Administrators`
+does **not** by itself explain a delete failure; inspect the actual DACL
+and Win32 error as well as outstanding file handles.
+
+For private WIM edits, ISO-WCX now derives its user SID and backup/restore
+privileges from the **host process** rather than an arbitrary impersonated
+thread. Immediately after creating the random sibling
+`.iso-wcx-edit-*` workspace, it sets its owner to the process user SID
+and a protected, inheritable DACL granting the process user, SYSTEM and
+BUILTIN\\Administrators full access. WIMGAPI-created children can still
+bring restrictive image ACLs; the existing ACL-aware cleanup repairs
+those *individual private scratch entries* only, never the input WIM,
+the containing folder, or unrelated transactions.
+
+The native WCX regression checks the root owner and inherited DACL on the
+new Apply directory before WIMGAPI writes image metadata; it also exercises
+protected scratch entries, dropped impersonation, late files, locked files,
+and Win32 145. CI runners are not AD domain members, so a real elevated
+domain-host test is still required. Path-free reports distinguish
+`wim_host_identity_unavailable`, `wim_workspace_acl_denied` and
+`wim_scratch_acl_denied` from sharing/dir-not-empty errors.
+
 ## Win32 145 scratch cleanup after Apply/Capture (0.21.2 RC Preview)
 
 Field logs from November 16 still report
