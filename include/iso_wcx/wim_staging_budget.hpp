@@ -33,8 +33,10 @@ struct WimStagingBudget {
     budget.source_bytes=compressed_wim_bytes;
     budget.available_bytes=available_to_caller_bytes;
     const auto proportional=compressed_wim_bytes/8u;
+    constexpr std::uint64_t minimum_reserve=128u*wim_mib;
+    constexpr std::uint64_t maximum_reserve=1u*wim_gib;
     budget.reserve_bytes=std::clamp(proportional,
-        128ull*wim_mib, 1ull*wim_gib);
+        minimum_reserve,maximum_reserve);
     if(compressed_wim_bytes >
        std::numeric_limits<std::uint64_t>::max()-budget.reserve_bytes) {
         budget.arithmetic_overflow=true;
