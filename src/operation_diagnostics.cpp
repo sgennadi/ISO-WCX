@@ -174,6 +174,8 @@ std::string classify(std::string_view reason, int code) {
 std::string stage_name(std::wstring_view description) {
     std::wstring s(description.substr(0,160));
     std::transform(s.begin(),s.end(),s.begin(),[](wchar_t c){return wchar_t(towlower(c));});
+    if(s.find(L"wim metadata load")!=s.npos)return "metadata_load";
+    if(s.find(L"wim metadata enumeration")!=s.npos)return "metadata_enumerate";
     // Distinguish per-index Apply cleanup from the post-WIMGAPI root sweep
     // without exporting any local path, filename or exception message.
     if(s.find(L"cleanup wim temporary files")!=s.npos)

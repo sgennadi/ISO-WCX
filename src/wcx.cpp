@@ -1,6 +1,7 @@
 // Public Total Commander WCX ABI adapter. Modern parsers live in iso_disc.
 #ifdef _WIN32
 #include "iso_wcx/disc.hpp"
+#include "iso_wcx/wim_open_indicator.hpp"
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/tc_registration_repair.hpp"
@@ -9,9 +10,11 @@
 #include <mutex>
 #include <atomic>
 #include <type_traits>
+#include <utility>
 #include <cwctype>
 #include <windows.h>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -45,7 +48,9 @@ std::mutex edit_mutex;
 using ChangeA=int (__stdcall*)(char*,int);
 using ChangeW=int (__stdcall*)(wchar_t*,int);
 struct State {
-    explicit State(std::filesystem::path p):archive_path(p),disc(std::move(p)){}
+    explicit State(std::filesystem::path p,
+                   iso_wcx::ArchiveOpenProgress open_progress = {})
+        :archive_path(p),disc(std::move(p),std::move(open_progress)){}
     std::filesystem::path archive_path;
     iso_wcx::Disc disc;
     std::size_t cursor=0;
@@ -55,6 +60,38 @@ struct State {
     ChangeW change_w=nullptr;
 };
 
+// CanYouHandleThisFile is invoked BEFORE OpenArchive by some TC versions.
+// Constructing Disc here used to enumerate every WIM index twice without
+// any progress callback. A bounded header probe avoids that silent scan;
+// the real WIMGAPI validation still occurs in OpenArchive.
+bool is_wim_extension(const std::filesystem::path& image) {
+    auto ext=image.extension().wstring();
+    std::transform(ext.begin(),ext.end(),ext.begin(),
+        [](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});
+    return ext==L".wim" || ext==L".esd" || ext==L".swm";
+}
+bool probe_wim_header(const std::filesystem::path& image) {
+    std::ifstream stream(image,std::ios::binary|std::ios::ate);
+    if(!stream)return false;
+    const auto size=stream.tellg();
+    if(size<std::streampos(208))return false;
+    stream.seekg(0);
+    std::array<unsigned char,12> header{};
+    stream.read(reinterpret_cast<char*>(header.data()),
+                static_cast<std::streamsize>(header.size()));
+    if(stream.gcount()!=static_cast<std::streamsize>(header.size()))
+        return false;
+    constexpr std::array<unsigned char,8> magic={
+        'M','S','W','I','M',0,0,0};
+    if(!std::equal(magic.begin(),magic.end(),header.begin()))return false;
+    const auto header_size=std::uint32_t(header[8])|
+        (std::uint32_t(header[9])<<8)|
+        (std::uint32_t(header[10])<<16)|
+        (std::uint32_t(header[11])<<24);
+    return header_size>=208 && header_size<=4096 &&
+           std::uint64_t(header_size)<=
+               static_cast<std::uint64_t>(static_cast<std::streamoff>(size));
+}
 std::wstring from_bytes(const char* s,UINT encoding) {
     if(!s)return {};
     int len=MultiByteToWideChar(encoding,MB_ERR_INVALID_CHARS,s,-1,nullptr,0);
@@ -171,10 +208,29 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
         const auto image=std::filesystem::path(d->ArcName);
         iso_wcx::diagnostics::Operation diagnostic("open",image);
         try {
-            auto state=std::make_unique<State>(image);
+            iso_wcx::WimOpenIndicator indicator(image);
+            auto state=std::make_unique<State>(
+                image,[&](const iso_wcx::ArchiveOpenStatus& status) {
+                    if(status.phase==iso_wcx::ArchiveOpenStatus::Phase::loading_index)
+                        diagnostic.stage(L"WIM metadata load",0);
+                    else if(status.phase==iso_wcx::ArchiveOpenStatus::Phase::enumerating)
+                        diagnostic.stage(L"WIM metadata enumeration",0);
+                    return indicator.report(status);
+                });
+            // Disc copies the completed WIM listing after WIMGAPI reports
+            // "complete". Honor Cancel during that final potentially large
+            // copy as well, before returning a WCX archive handle.
+            if(!indicator.report(iso_wcx::ArchiveOpenStatus{
+                iso_wcx::ArchiveOpenStatus::Phase::complete,0,0,
+                static_cast<std::uint64_t>(state->disc.items().size())}))
+                throw iso_wcx::ArchiveOpenCancelled{};
             d->OpenResult=0;
             diagnostic.complete(0);
             return reinterpret_cast<HANDLE>(state.release());
+        }catch(const iso_wcx::ArchiveOpenCancelled&) {
+            d->OpenResult=E_EABORTED;
+            diagnostic.complete(E_EABORTED,"cancelled");
+            return nullptr;
         }catch(const std::exception& e){
             diagnostic.complete(E_UNKNOWN_FORMAT,e.what());return nullptr;
         }catch(...){diagnostic.complete(E_UNKNOWN_FORMAT,"unknown exception");return nullptr;}
@@ -189,10 +245,29 @@ WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
         const auto image=std::filesystem::path(from_bytes(d->ArcName,CP_ACP));
         iso_wcx::diagnostics::Operation diagnostic("open",image);
         try {
-            auto state=std::make_unique<State>(image);
+            iso_wcx::WimOpenIndicator indicator(image);
+            auto state=std::make_unique<State>(
+                image,[&](const iso_wcx::ArchiveOpenStatus& status) {
+                    if(status.phase==iso_wcx::ArchiveOpenStatus::Phase::loading_index)
+                        diagnostic.stage(L"WIM metadata load",0);
+                    else if(status.phase==iso_wcx::ArchiveOpenStatus::Phase::enumerating)
+                        diagnostic.stage(L"WIM metadata enumeration",0);
+                    return indicator.report(status);
+                });
+            // Disc copies the completed WIM listing after WIMGAPI reports
+            // "complete". Honor Cancel during that final potentially large
+            // copy as well, before returning a WCX archive handle.
+            if(!indicator.report(iso_wcx::ArchiveOpenStatus{
+                iso_wcx::ArchiveOpenStatus::Phase::complete,0,0,
+                static_cast<std::uint64_t>(state->disc.items().size())}))
+                throw iso_wcx::ArchiveOpenCancelled{};
             d->OpenResult=0;
             diagnostic.complete(0);
             return reinterpret_cast<HANDLE>(state.release());
+        }catch(const iso_wcx::ArchiveOpenCancelled&) {
+            d->OpenResult=E_EABORTED;
+            diagnostic.complete(E_EABORTED,"cancelled");
+            return nullptr;
         }catch(const std::exception& e) {
             diagnostic.complete(E_UNKNOWN_FORMAT,e.what());return nullptr;
         }catch(...){diagnostic.complete(E_UNKNOWN_FORMAT,"unknown exception");return nullptr;}
@@ -465,12 +540,20 @@ WCX_EXPORT int __stdcall GetPackerCaps() {
 WCX_EXPORT int __stdcall CanYouHandleThisFileW(wchar_t* path) {
     iso_wcx::schedule_update_check();
     if(!path)return 0;
-    try{iso_wcx::Disc test{std::filesystem::path(path)};return 1;}catch(...){return 0;}
+    try{
+        const std::filesystem::path image(path);
+        if(is_wim_extension(image))return probe_wim_header(image)?1:0;
+        iso_wcx::Disc test{image};return 1;
+    }catch(...){return 0;}
 }
 WCX_EXPORT int __stdcall CanYouHandleThisFile(char* path) {
     iso_wcx::schedule_update_check();
     if(!path)return 0;
-    try{iso_wcx::Disc test{std::filesystem::path(from_bytes(path,CP_ACP))};return 1;}catch(...){return 0;}
+    try{
+        const std::filesystem::path image(from_bytes(path,CP_ACP));
+        if(is_wim_extension(image))return probe_wim_header(image)?1:0;
+        iso_wcx::Disc test{image};return 1;
+    }catch(...){return 0;}
 }
 #else
 #error "WCX adapter must be compiled for Windows"

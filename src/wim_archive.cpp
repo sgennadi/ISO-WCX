@@ -180,12 +180,21 @@ struct WimArchive::Impl {
 };
 
 WimArchive::WimArchive(const std::filesystem::path& image,
-                       std::uint32_t selected_index)
+                       std::uint32_t selected_index,
+                       ArchiveOpenProgress open_progress)
     : api_(std::make_unique<Impl>()) {
+    using Phase = ArchiveOpenStatus::Phase;
+    const auto report=[&](Phase phase,DWORD index,DWORD total) {
+        if(open_progress && !open_progress(ArchiveOpenStatus{
+            phase,index,total,static_cast<std::uint64_t>(entries_.size())}))
+            throw ArchiveOpenCancelled{};
+    };
+    report(Phase::opening,0,0);
     require(std::filesystem::is_regular_file(image) &&
             !std::filesystem::is_symlink(image),
             "WIM input must be a regular non-symlink file");
     const auto parts = resolve_wim_parts(image);
+    report(Phase::opening,0,0);
     const auto input = parts.front().wstring();
     require(!input.empty(), "invalid WIM archive path");
 
@@ -215,6 +224,7 @@ WimArchive::WimArchive(const std::filesystem::path& image,
             "WIM has no image indexes or too many images");
     require(selected_index == 0 || selected_index <= count,
             "selected WIM verification index is not in the archive");
+    report(Phase::loading_index,0,count);
     format_ = "WIM / Windows Imaging API / " + std::to_string(count) +
               " image(s) / " + std::to_string(parts.size()) + " part(s) / read-only";
     constexpr std::size_t max_items = 1'000'000;
@@ -230,9 +240,14 @@ WimArchive::WimArchive(const std::filesystem::path& image,
             api_->images.push_back(nullptr);
             continue;
         }
+        // WIMLoadImage may spend a long time expanding index metadata;
+        // its native API has no truthful per-file percentage. The separate
+        // opening UI stays indeterminate until this blocking call returns.
+        report(Phase::loading_index,index,count);
         HANDLE himage = api_->load(api_->archive, index);
         if (!is_valid(himage)) fail_windows("WIMLoadImage failed");
         api_->images.push_back(himage);
+        report(Phase::enumerating,index,count);
         std::string prefix = "image" + std::to_string(index);
         Item top;
         top.path = prefix;
@@ -244,6 +259,9 @@ WimArchive::WimArchive(const std::filesystem::path& image,
         std::vector<Pending> stack;
         stack.push_back({L"", prefix, 0});
         while (!stack.empty()) {
+            // Check cancellation even for many empty directories.
+            if((entries_.size()&63u)==0u)
+                report(Phase::enumerating,index,count);
             auto current = std::move(stack.back());
             stack.pop_back();
             require(current.depth <= 128,
@@ -295,6 +313,10 @@ WimArchive::WimArchive(const std::filesystem::path& image,
                         item.attributes = data.dwFileAttributes;
                         entries_.push_back(std::move(item));
                         locations_.push_back({index, source});
+                        // Update counts and honor Cancel during very large
+                        // single directories (e.g. install.wim WinSxS).
+                        if((entries_.size()&127u)==0u)
+                            report(Phase::enumerating,index,count);
                         if (directory)
                             stack.push_back({source, relative, current.depth + 1});
                     }
@@ -309,7 +331,9 @@ WimArchive::WimArchive(const std::filesystem::path& image,
                 }
             }
         }
+        report(Phase::enumerating,index,count);
     }
+    report(Phase::complete,count,count);
 }
 
 WimArchive::~WimArchive() = default;
