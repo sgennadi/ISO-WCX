@@ -165,6 +165,19 @@ int wmain(){
         }
         {
             iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-WIM-RESIDUE.wim",1,1);
+            op.stage(L"WIM: Cleanup WIM transaction scratch",98);
+            op.complete(13,"WIM temporary files still remain before commit");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"PRIVATE-WIM-PENDING.wim",1,1);
+            op.stage(L"WIM: Cleanup WIM temporary files 1/1",90);
+            op.complete(13,
+                "WIM scratch deletion remained pending after bounded cleanup (Win32 145)");
+        }
+        {
+            iso_wcx::diagnostics::Operation op(
                 "pack",fixture.folder/L"PRIVATE-ISO-UDF-SECTOR.iso",1);
             op.stage(L"write",0);
             op.complete(24,
@@ -201,12 +214,17 @@ int wmain(){
         require(!contains(extended,"PRIVATE-ISO-UDF-SECTOR"),
                 "ISO/UDF private file name leaked into shared diagnostics");
         require(contains(extended,
-                "| wim | pack | 13 | wim_scratch_not_empty | cleanup | 1 |"),
+                "| wim | pack | 13 | wim_scratch_not_empty | cleanup_expanded | 2 |"),
                 "WIM scratch Win32 145 classification/stage is missing");
         require(!contains(extended,"PRIVATE-WIM-LATE-FILE"),
                 "private WIM late-file path leaked into shared report");
         require(contains(extended,
-                "| wim | pack | 13 | wim_scratch_acl_denied | cleanup | 1 |"),
+                "| wim | pack | 13 | wim_residue_remains | cleanup_residue | 1 |"),
+                "post-WIMGAPI residue classification/stage missing");
+        require(!contains(extended,"PRIVATE-WIM-RESIDUE"),
+                "private WIM residue path leaked into shared report");
+        require(contains(extended,
+                "| wim | pack | 13 | wim_scratch_acl_denied | cleanup_expanded | 1 |"),
                 "protected WIM scratch ACL failure category missing");
         require(!contains(extended,"PRIVATE-SCRATCH-ACL"),
                 "protected WIM scratch name leaked into report");
