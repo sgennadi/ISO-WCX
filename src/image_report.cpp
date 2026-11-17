@@ -7,6 +7,7 @@
 #include "iso_wcx/udf_edit_inspection.hpp"
 #ifdef _WIN32
 #include "iso_wcx/wim_index_report.hpp"
+#include "iso_wcx/wim_resource_audit.hpp"
 #include "iso_wcx/wim_parts.hpp"
 #include <sstream>
 #endif
@@ -365,6 +366,29 @@ std::string build_image_structure_report(const std::filesystem::path& image){
             report.append("WIM index summary unavailable: "+
                           safe_text(ex.what()));
         }
+        report.append("");
+        // Only explicit user-requested Export Image Structure invokes this
+        // bounded research audit, never normal OpenArchive or F5. Most
+        // production install.wim metadata is compressed and will correctly
+        // report incomplete rather than imply that fast writes are safe.
+        report.append("WIM RESOURCE SHA-1 AUDIT (READ ONLY)");
+        const auto audit=wim_detail::audit_wim_resource_links(image);
+        report.append_kv("Metadata SHA-1",
+                         audit.metadata_verified?"verified":"not verified");
+        report.append_kv("Normal file and ADS resource links",
+                         audit.references_resolved?"resolved":"not verified");
+        report.append_kv("File/ADS references",std::to_string(audit.referenced_hashes));
+        report.append_kv("Plain resource digests checked",
+                         std::to_string(audit.uncompressed_payloads_verified));
+        report.append_kv("Unverified referenced resources",
+                         std::to_string(audit.unverified_payloads));
+        report.append_kv("Requires decompression",
+                         audit.requires_decompression?"yes":"no");
+        report.append_kv("Bounded audit result",
+                         audit.limited_audit_complete?"passed":"incomplete/rejected");
+        report.append_kv("Audit detail",safe_text(audit.reason));
+        report.append("Fast WIM metadata writer: DISABLED");
+        report.append("Full ACL, hardlink, XML and integrity validation: NOT IMPLEMENTED");
         report.append("");
     }
 #endif
