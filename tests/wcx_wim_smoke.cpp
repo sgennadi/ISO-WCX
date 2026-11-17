@@ -11,6 +11,7 @@
 #include "iso_wcx/wim_index_report.hpp"
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/image_report.hpp"
+#include "iso_wcx/wim_resource_audit.hpp"
 // WIMGAPI is resolved dynamically; the optional Windows ADK header is not needed.
 
 #include <algorithm>
@@ -438,6 +439,35 @@ int wmain(int argc,wchar_t** argv) {
             close_wim(image);
         }
         close_wim(archive);
+        // A real, WIMGAPI-created three-index XPRESS WIM is a stronger
+        // interoperability fixture than our synthetic chunk tables.
+        // Audit independently and require all metadata/resource SHA-1 links
+        // to verify without mounting, extracting or changing source bytes.
+        // WIMGAPI marks the output XPRESS (compression type 2).
+        {
+            const auto state=iso_wcx::wim_detail::probe_fast_edit_metadata(original);
+            const auto audit=iso_wcx::wim_detail::audit_wim_resource_links(original);
+            if(!audit.metadata_verified ||
+               !audit.references_resolved ||
+               audit.metadata_resources_verified!=3u ||
+               audit.images!=3u) {
+                std::cerr<<"Real WIMGAPI XPRESS metadata audit incomplete: "
+                         <<audit.reason
+                         <<" | images="<<audit.images
+                         <<" verified="<<audit.metadata_resources_verified
+                         <<" chunks="<<audit.chunk_tables_verified
+                         <<" | probe="<<state.reason<<"\n";
+                return 66;
+            }
+            // The fixture contains only bounded small files. Every file
+            // and any ADS actually captured must be content-verified.
+            if(!audit.limited_audit_complete ||
+               audit.unverified_payloads!=0u) {
+                std::cerr<<"Real WIMGAPI XPRESS content audit incomplete: "
+                         <<audit.reason<<"\n";
+                return 67;
+            }
+        }
         // Restore test input permissions only AFTER capture; the WIM must
         // retain the original read-only entry for scratch cleanup coverage.
         if(!SetFileAttributesW(readonly_input.c_str(),readonly_attributes))
