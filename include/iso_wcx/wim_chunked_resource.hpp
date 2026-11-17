@@ -198,6 +198,25 @@ template<class Decode>
     if(!layout.valid || layout.stored_bytes!=stored.size() ||
        layout.original_bytes>128ull*1024ull*1024ull)
         throw std::runtime_error("WIM chunk layout not validated");
+    // Layout is a public value type: valid=true is not a trust boundary.
+    // Rebind every descriptor to the current table before copying or calling
+    // a decoder. In particular, a forged raw descriptor must never copy more
+    // bytes than its destination span holds.
+    const auto verified=inspect_wim_chunks(
+        stored,layout.original_bytes,layout.chunk_size);
+    if(!verified.valid || layout.table_bytes!=verified.table_bytes ||
+       layout.compressed_chunks!=verified.compressed_chunks ||
+       layout.chunks.size()!=verified.chunks.size())
+        throw std::runtime_error("WIM chunk layout changed after validation");
+    for(std::size_t i=0;i<verified.chunks.size();++i) {
+        const auto& actual=verified.chunks[i];
+        const auto& supplied=layout.chunks[i];
+        if(supplied.data_offset!=actual.data_offset ||
+           supplied.stored_bytes!=actual.stored_bytes ||
+           supplied.expected_bytes!=actual.expected_bytes ||
+           supplied.compressed!=actual.compressed)
+            throw std::runtime_error("WIM chunk descriptor changed after validation");
+    }
     std::vector<std::uint8_t> output(
         static_cast<std::size_t>(layout.original_bytes));
     std::size_t next=0;

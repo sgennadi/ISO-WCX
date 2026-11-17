@@ -107,6 +107,49 @@ static void test_layout_and_rejections() {
           "one-chunk raw WIM resource rejected");
 }
 
+static void test_modified_layout_refusal() {
+    constexpr std::uint32_t chunk=4096u;
+    std::vector<std::uint8_t> stored(4u+chunk+17u,0x41u);
+    put32(stored,0u,chunk);
+    const auto layout=inspect_wim_chunks(stored,chunk+17u,chunk);
+    check(layout.valid,"raw layout fixture invalid");
+    const auto reject=[&](const auto& bytes,const auto& candidate) {
+        bool rejected=false;
+        unsigned calls=0;
+        try {
+            (void)expand_wim_chunks(bytes,candidate,
+                [&](auto,auto){++calls;});
+        }catch(const std::runtime_error&) {rejected=true;}
+        check(rejected && calls==0,
+              "modified layout reached copy or decompressor");
+    };
+    auto bad=layout;
+    // Previously this copied 4096 bytes into an eight-byte output span.
+    bad.original_bytes=8u;
+    bad.chunks.resize(1u);
+    bad.chunks[0].expected_bytes=8u;
+    reject(stored,bad);
+    bad=layout; bad.chunks[0].expected_bytes=1u; reject(stored,bad);
+    bad=layout; bad.chunks[0].stored_bytes+=1u; reject(stored,bad);
+    bad=layout; bad.chunks[0].data_offset=0u; reject(stored,bad);
+    bad=layout; bad.chunks[0].compressed=true; reject(stored,bad);
+    bad=layout; bad.chunks.pop_back(); reject(stored,bad);
+    bad=layout; bad.chunks.push_back(bad.chunks.back()); reject(stored,bad);
+    bad=layout; bad.table_bytes=0u; reject(stored,bad);
+    bad=layout; bad.compressed_chunks=1u; reject(stored,bad);
+    bad=layout; bad.chunk_size=0u; reject(stored,bad);
+    bad=layout; bad.original_bytes=0u; reject(stored,bad);
+    // Same-sized storage with a changed table must not reuse old descriptors.
+    auto changed=stored;
+    put32(changed,0u,chunk-1u);
+    reject(changed,layout);
+    // Payload changes do not change layout; SHA-1 remains the caller's job.
+    stored.back()=0x55u;
+    const auto output=expand_wim_chunks(stored,layout,[](auto,auto){});
+    check(output.size()==chunk+17u && output.back()==0x55u,
+          "valid raw resource rejected after payload-only change");
+}
+
 #ifdef _WIN32
 static void test_native_xpress() {
     // Generate genuine raw XPRESS+Huffman input with the documented
@@ -172,6 +215,7 @@ static void test_native_xpress() {
 int main() {
     try {
         test_layout_and_rejections();
+        test_modified_layout_refusal();
 #ifdef _WIN32
         test_native_xpress();
 #endif
