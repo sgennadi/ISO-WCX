@@ -116,6 +116,15 @@ int wmain() {
         const auto lx_before=read_image(lx);
 
         const auto xp_probe=probe_fast_edit_metadata(xp);
+        const auto* table_header=xp_before.data()+48;
+        std::cout << "REAL XPRESS lookup: stored="
+                  << fast_probe_detail::resource_size(table_header)
+                  << " original=" << fast_probe_detail::le64(table_header+16)
+                  << " offset=" << fast_probe_detail::le64(table_header+8)
+                  << " flags=" << unsigned(table_header[7])
+                  << " mod50=" << (fast_probe_detail::resource_size(table_header)%50u)
+                  << " file_bytes=" << xp_before.size()
+                  << std::endl;
         std::cout << "REAL XPRESS preflight: valid="
                   << xp_probe.header_and_lookup_valid
                   << " images=" << xp_probe.images
