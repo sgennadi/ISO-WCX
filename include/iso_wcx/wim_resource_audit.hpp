@@ -190,8 +190,10 @@ inline std::vector<std::uint8_t> load(
             "bounded SHA-1/resource-link audit complete; fast writer DISABLED" :
             "incomplete: compressed or oversized WIM payloads were not hashed";
     }catch(const std::exception& error) {
-        result.metadata_verified=false;
-        result.references_resolved=false;
+        // Preserve already verified stages in the diagnostic result. A
+        // missing ADS link must not erase a successfully verified metadata
+        // SHA-1, and a bad payload must not erase resolved lookup references.
+        // Never report the combined audit as complete after any failure.
         result.uncompressed_resources_verified=false;
         result.limited_audit_complete=false;
         result.reason=error.what();
