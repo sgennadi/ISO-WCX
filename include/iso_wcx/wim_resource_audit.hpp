@@ -172,7 +172,6 @@ inline std::vector<std::uint8_t> load(
 #endif
                 bytes=read_wim_chunked_metadata(
                     bytes,m.original,chunk_size,algorithm);
-                ++result.compressed_metadata_verified;
             }
             if(wim_sha1(bytes)!=m.digest)
                 throw std::runtime_error("WIM metadata resource SHA-1 mismatch");
@@ -181,6 +180,7 @@ inline std::vector<std::uint8_t> load(
                 throw std::runtime_error(
                     "WIM metadata directory tree invalid: "+tree.reason);
             ++result.metadata_resources_verified;
+            if(m.flags&4u)++result.compressed_metadata_verified;
             for(const auto& hash:tree.referenced_resource_hashes) {
                 if(required.size()>=1000000u)
                     throw std::runtime_error(
@@ -218,7 +218,8 @@ inline std::vector<std::uint8_t> load(
             }
             auto bytes=resource_audit_detail::load(
                 in,entry.offset,entry.stored);
-            if(entry.flags&4u) {
+            const bool compressed_payload=(entry.flags&4u)!=0;
+            if(compressed_payload) {
                 const auto chunks=inspect_wim_chunks(
                     bytes,entry.original,chunk_size);
                 if(!chunks.valid)
@@ -239,13 +240,13 @@ inline std::vector<std::uint8_t> load(
 #endif
                 bytes=read_wim_chunked_metadata(
                     bytes,entry.original,chunk_size,algorithm);
-                ++result.compressed_payloads_verified;
-            }else{
-                ++result.uncompressed_payloads_verified;
             }
             used+=entry.original;
             if(wim_sha1(bytes)!=hash)
                 throw std::runtime_error("WIM payload resource SHA-1 mismatch");
+            // Stage accounting is advanced only AFTER digest verification.
+            if(compressed_payload)++result.compressed_payloads_verified;
+            else ++result.uncompressed_payloads_verified;
         }
         result.uncompressed_resources_verified=result.unverified_payloads==0;
         result.limited_audit_complete=result.metadata_verified &&
