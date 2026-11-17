@@ -98,3 +98,13 @@ Format study: Microsoft's published WIM layout and the independent
 Serialized directory and stream record sizes are rounded up to an 8-byte
 storage boundary when advancing. A zero or 8-byte sentinel ends a sibling
 list. Logical record length must still cover the declared names/streams.
+
+## Chunk descriptor revalidation
+
+Expansion rechecks the chunk table against the current resource and compares
+all supplied descriptors before allocating output or calling a decompressor.
+The public layout structure and its `valid` flag alone are not trusted:
+modified raw lengths could otherwise overflow the destination copy. Tests
+cover altered lengths, offsets, flags, chunk counts, table metadata and a
+same-sized buffer with changed offsets. Payload-only changes remain subject
+to the existing SHA-1 audit. This hardening adds no WIM writing capability.
