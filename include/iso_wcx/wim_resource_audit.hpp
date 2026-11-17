@@ -5,6 +5,7 @@
 // security descriptor semantics or license fast metadata writes.
 #include "iso_wcx/wim_metadata_tree_probe.hpp"
 #include "iso_wcx/wim_sha1.hpp"
+#include "iso_wcx/wim_chunked_resource.hpp"
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -27,6 +28,9 @@ struct WimResourceAudit {
     std::uint64_t metadata_resources_verified=0;
     std::uint64_t referenced_hashes=0;
     std::uint64_t uncompressed_payloads_verified=0;
+    std::uint64_t compressed_metadata_verified=0;
+    std::uint64_t compressed_payloads_verified=0;
+    std::uint64_t chunk_tables_verified=0;
     std::uint64_t unverified_payloads=0;
     std::string reason;
 };
@@ -72,7 +76,14 @@ inline std::vector<std::uint8_t> load(
         result.images=probe.images;
         if(!probe.header_and_lookup_valid)
             throw std::runtime_error(probe.reason);
-        if(!probe.metadata_layout_candidate) {
+        // The narrow legacy fast-write preflight intentionally rejects
+        // compressed metadata. Read-only audit is allowed to examine it,
+        // but this NEVER changes that preflight's write-disabled verdict.
+        const bool compressed_metadata_candidate=
+            !probe.metadata_layout_candidate &&
+            probe.reason=="WIM image metadata must be decompressed before fast editing";
+        if(!probe.metadata_layout_candidate &&
+           !compressed_metadata_candidate) {
             result.requires_decompression=probe.compressed_metadata_resources>0;
             result.reason="incomplete: "+probe.reason;
             return result;
@@ -85,6 +96,18 @@ inline std::vector<std::uint8_t> load(
         const auto* lookup=hdr.data()+48;
         const auto lookup_at=fast_probe_detail::le64(lookup+8);
         const auto lookup_bytes=fast_probe_detail::resource_size(lookup);
+        const auto header_flags=fast_probe_detail::le32(hdr.data()+16);
+        const auto chunk_size=fast_probe_detail::le32(hdr.data()+20);
+        // Explicit, exclusive algorithm selection. Mislabelled formats
+        // cannot be sent to a Windows decoder of the wrong codec.
+        const auto compression_bits=header_flags &
+            (0x00020000u|0x00040000u|0x00080000u|0x00100000u|0x00200000u);
+        const bool xpress=compression_bits==0x00020000u &&
+                          (header_flags&0x00000002u)!=0;
+        const auto algorithm=xpress ? WimChunkAlgorithm::xpress_huff :
+                             compression_bits==0x00040000u ?
+                             WimChunkAlgorithm::lzx :
+                             WimChunkAlgorithm::unsupported;
         std::map<WimSha1Digest,resource_audit_detail::Descriptor> resources;
         std::vector<resource_audit_detail::Descriptor> metadata_resources;
         std::array<std::uint8_t,50> raw{};
@@ -123,16 +146,34 @@ inline std::vector<std::uint8_t> load(
         std::vector<WimSha1Digest> required;
         std::uint64_t metadata_budget=0;
         for(const auto& m:metadata_resources) {
-            if(m.flags&4u) {
-                result.requires_decompression=true;
-                result.reason="incomplete: compressed WIM metadata cannot be audited";
-                return result;
-            }
-            if(m.stored>128ull*1024ull*1024ull ||
-               metadata_budget>256ull*1024ull*1024ull-m.stored)
+            if(m.original>128ull*1024ull*1024ull ||
+               metadata_budget>256ull*1024ull*1024ull-m.original)
                 throw std::runtime_error("WIM metadata audit memory budget exceeded");
-            metadata_budget+=m.stored;
+            metadata_budget+=m.original;
             auto bytes=resource_audit_detail::load(in,m.offset,m.stored);
+            if(m.flags&4u) {
+                const auto chunks=inspect_wim_chunks(
+                    bytes,m.original,chunk_size);
+                if(!chunks.valid)
+                    throw std::runtime_error(
+                        "invalid WIM metadata chunk table: "+chunks.reason);
+                ++result.chunk_tables_verified;
+                if(algorithm!=WimChunkAlgorithm::xpress_huff) {
+                    result.requires_decompression=true;
+                    result.reason="incomplete: LZX/LZMS/unknown WIM metadata codec";
+                    return result;
+                }
+#ifndef _WIN32
+                if(chunks.compressed_chunks!=0) {
+                    result.requires_decompression=true;
+                    result.reason="incomplete: XPRESS metadata decoder needs Windows";
+                    return result;
+                }
+#endif
+                bytes=read_wim_chunked_metadata(
+                    bytes,m.original,chunk_size,algorithm);
+                ++result.compressed_metadata_verified;
+            }
             if(wim_sha1(bytes)!=m.digest)
                 throw std::runtime_error("WIM metadata resource SHA-1 mismatch");
             auto tree=scan_uncompressed_metadata(bytes,true);
@@ -168,19 +209,43 @@ inline std::vector<std::uint8_t> load(
         for(const auto& [hash,unused]:unique_references) {
             (void)unused;
             const auto& entry=resources.at(hash);
-            if((entry.flags&4u) ||
-               entry.stored>per_resource_limit ||
-               used>total_limit-entry.stored) {
+            if(entry.stored>per_resource_limit ||
+               entry.original>per_resource_limit ||
+               used>total_limit-entry.original) {
                 ++result.unverified_payloads;
                 if(entry.flags&4u)result.requires_decompression=true;
                 continue;
             }
-            used+=entry.stored;
-            const auto bytes=resource_audit_detail::load(
+            auto bytes=resource_audit_detail::load(
                 in,entry.offset,entry.stored);
+            if(entry.flags&4u) {
+                const auto chunks=inspect_wim_chunks(
+                    bytes,entry.original,chunk_size);
+                if(!chunks.valid)
+                    throw std::runtime_error(
+                        "invalid WIM payload chunk table: "+chunks.reason);
+                ++result.chunk_tables_verified;
+                if(algorithm!=WimChunkAlgorithm::xpress_huff) {
+                    ++result.unverified_payloads;
+                    result.requires_decompression=true;
+                    continue;
+                }
+#ifndef _WIN32
+                if(chunks.compressed_chunks!=0) {
+                    ++result.unverified_payloads;
+                    result.requires_decompression=true;
+                    continue;
+                }
+#endif
+                bytes=read_wim_chunked_metadata(
+                    bytes,entry.original,chunk_size,algorithm);
+                ++result.compressed_payloads_verified;
+            }else{
+                ++result.uncompressed_payloads_verified;
+            }
+            used+=entry.original;
             if(wim_sha1(bytes)!=hash)
                 throw std::runtime_error("WIM payload resource SHA-1 mismatch");
-            ++result.uncompressed_payloads_verified;
         }
         result.uncompressed_resources_verified=result.unverified_payloads==0;
         result.limited_audit_complete=result.metadata_verified &&
@@ -188,7 +253,7 @@ inline std::vector<std::uint8_t> load(
                                       result.uncompressed_resources_verified;
         result.reason=result.limited_audit_complete ?
             "bounded SHA-1/resource-link audit complete; fast writer DISABLED" :
-            "incomplete: compressed or oversized WIM payloads were not hashed";
+            "incomplete: unsupported codec or oversized WIM payloads remain unverified";
     }catch(const std::exception& error) {
         // Preserve already verified stages in the diagnostic result. A
         // missing ADS link must not erase a successfully verified metadata
