@@ -125,10 +125,13 @@ static std::vector<std::uint8_t> image(
 static std::vector<std::uint8_t> chunked_metadata_image(
         const std::vector<std::uint8_t>& original,
         const std::vector<std::uint8_t>& stored,
-        std::uint32_t header_flags=0x00020002u) {
+        std::uint32_t header_flags=0x00020002u,
+        std::size_t expanded_metadata_size=320u) {
     constexpr std::size_t header=208u,plain_metadata=320u;
     require(original.size()>=header+plain_metadata+150u &&
-            !stored.empty() && stored.size()<=plain_metadata,
+            expanded_metadata_size>=plain_metadata &&
+            expanded_metadata_size<=128u*1024u &&
+            !stored.empty() && stored.size()<=expanded_metadata_size,
             "invalid disposable WIM metadata fixture");
     const auto old_lookup=fast_probe_detail::le64(original.data()+56);
     require(old_lookup>=header+plain_metadata &&
@@ -144,10 +147,15 @@ static std::vector<std::uint8_t> chunked_metadata_image(
     put32(result,16,header_flags);
     put32(result,20,32768u);
     put64(result,56,new_lookup);
-    const auto digest=wim_sha1(std::span<const std::uint8_t>(
-        original.data()+header,plain_metadata));
+    // The throwaway physical WIM may store a larger padded metadata
+    // resource. The 320-byte directory tree remains intact while the
+    // padded expanded form is SHA-1 authenticated as one resource.
+    std::vector<std::uint8_t> expanded(expanded_metadata_size);
+    std::copy(original.begin()+header,
+              original.begin()+header+plain_metadata,expanded.begin());
+    const auto digest=wim_sha1(expanded);
     descriptor(result,new_lookup,stored.size(),6u,header,digest);
-    put64(result,new_lookup+16u,plain_metadata);
+    put64(result,new_lookup+16u,expanded_metadata_size);
     const auto delta=static_cast<std::int64_t>(stored.size())-
                      static_cast<std::int64_t>(plain_metadata);
     for(std::size_t i=1;i<3;++i) {
@@ -334,11 +342,15 @@ int main(){
                 !lzx_result.limited_audit_complete,
                 "LZX was incorrectly sent to the XPRESS decoder");
 #ifdef _WIN32
-        const auto expanded=std::span<const std::uint8_t>(
-            original.data()+208,320);
+        // Huffman has fixed coding overhead: 320-byte metadata is too
+        // small to compress efficiently. Pad the harmless test resource
+        // to 8 KiB so it exercises a genuinely compressed XPRESS chunk.
+        std::vector<std::uint8_t> expanded(8192u);
+        std::copy(original.begin()+208,original.begin()+208+320,
+                  expanded.begin());
         const auto compressed_bytes=native_xpress(expanded);
         const auto compressed_wim=chunked_metadata_image(
-            original,compressed_bytes);
+            original,compressed_bytes,0x00020002u,expanded.size());
         write(path,compressed_wim);
         const auto compressed_metadata=audit_wim_resource_links(path);
         if(!compressed_metadata.limited_audit_complete)
