@@ -4,6 +4,7 @@
 // On-disk structures follow Microsoft's WIM specification and go-winio's
 // independent direntry/security-table reader. No code is copied from wimlib.
 #include "iso_wcx/wim_fast_edit_probe.hpp"
+#include "iso_wcx/wim_sha1.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +30,9 @@ struct MetadataTreeProbe {
     std::uint64_t streams = 0;
     std::uint64_t security_descriptors = 0;
     std::uint64_t uncompressed_bytes = 0;
+    // Populated ONLY for an explicit read-only SHA-1 audit. Normal WIM
+    // browsing and preflight never allocate per-file hash metadata.
+    std::vector<WimSha1Digest> referenced_resource_hashes;
 };
 
 namespace metadata_tree_detail {
@@ -72,7 +76,8 @@ inline void utf16(Bytes b, std::uint64_t pos, std::uint16_t bytes) {
 }
 class Decoder {
 public:
-    explicit Decoder(Bytes b) : data_(b) {}
+    explicit Decoder(Bytes b,bool collect_hashes=false)
+        : data_(b), collect_hashes_(collect_hashes) {}
     MetadataTreeProbe parse() {
         ensure(data_.size()>=16,"truncated WIM security table");
         const auto table_length=static_cast<std::uint64_t>(u32(data_,0));
@@ -152,6 +157,8 @@ public:
                        "inconsistent WIM directory child offset");
                 if(directory) ++stats_.directories;
                 ++stats_.entries;
+                if(collect_hashes_)
+                    capture_hash(cursor+64u); // 20-byte normal file hash
                 occupy(cursor,cursor+length);
                 std::uint64_t next=cursor+length;
                 for(unsigned j=0;j<stream_count;++j) {
@@ -169,6 +176,8 @@ public:
                     ensure(within(next,stream_length,data_.size()),
                            "truncated padded WIM stream record");
                     utf16(data_,next+38,stream_name_length);
+                    if(collect_hashes_)
+                        capture_hash(next+16u); // 20-byte ADS/resource hash
                     occupy(next,next+stream_length);
                     next+=stream_length;
                     ++stats_.streams;
@@ -199,7 +208,19 @@ private:
         ensure(occupied_.emplace(begin,end).second,
                "reused WIM directory-list offset");
     }
+    void capture_hash(std::uint64_t offset) {
+        ensure(within(offset,20,data_.size()),
+               "truncated WIM stream SHA-1 reference");
+        WimSha1Digest hash{};
+        for(unsigned i=0;i<hash.size();++i)
+            hash[i]=data_[static_cast<std::size_t>(offset+i)];
+        if(wim_sha1_is_zero(hash))return; // empty stream or directory
+        ensure(stats_.referenced_resource_hashes.size()<1000000u,
+               "WIM resource-reference audit limit exceeded");
+        stats_.referenced_resource_hashes.push_back(hash);
+    }
     Bytes data_;
+    bool collect_hashes_ = false;
     std::map<std::uint64_t,std::uint64_t> occupied_;
     MetadataTreeProbe stats_;
 };
@@ -207,9 +228,11 @@ private:
 
 // Direct memory-only entry point for fuzzing and isolated regression fixtures.
 inline MetadataTreeProbe scan_uncompressed_metadata(
-        std::span<const std::uint8_t> metadata) {
+        std::span<const std::uint8_t> metadata,
+        bool collect_resource_hashes=false) {
     try {
-        return metadata_tree_detail::Decoder(metadata).parse();
+        return metadata_tree_detail::Decoder(
+            metadata,collect_resource_hashes).parse();
     }catch(const std::exception& e) {
         MetadataTreeProbe failed;
         failed.reason=e.what();
