@@ -248,6 +248,13 @@ if(BUILD_TESTING)
   add_executable(wim_metadata_tree_tests tests/wim_metadata_tree.cpp)
   target_include_directories(wim_metadata_tree_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME wim_uncompressed_metadata_tree_read_only COMMAND wim_metadata_tree_tests)
+  # Research only: SHA-1 integrity of uncompressed WIM metadata, normal
+  # files and ADS referenced by the on-disk lookup table. No write route.
+  add_executable(wim_resource_sha1_audit_tests tests/wim_resource_audit.cpp)
+  target_include_directories(wim_resource_sha1_audit_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME wim_sha1_metadata_stream_and_ads_audit_read_only
+    COMMAND wim_resource_sha1_audit_tests)
 endif()
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
 # runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
