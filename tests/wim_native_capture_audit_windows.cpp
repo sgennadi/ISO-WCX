@@ -116,6 +116,14 @@ int wmain() {
         const auto lx_before=read_image(lx);
 
         const auto xp_probe=probe_fast_edit_metadata(xp);
+        std::cout << "REAL XPRESS preflight: valid="
+                  << xp_probe.header_and_lookup_valid
+                  << " images=" << xp_probe.images
+                  << " version=" << xp_probe.version
+                  << " flags=" << xp_probe.flags
+                  << " lookup_entries=" << xp_probe.lookup_entries
+                  << " metadata_resources=" << xp_probe.metadata_resources
+                  << " reason=" << xp_probe.reason << std::endl;
         require(xp_probe.header_and_lookup_valid &&
                 xp_probe.images==1u,
                 "real XPRESS WIM lookup preflight failed");
