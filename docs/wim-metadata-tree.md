@@ -17,6 +17,38 @@ semantics, extended reparse objects, content reference counts, the WIM
 integrity resource, nor transaction-safe metadata serialization has been
 implemented. The existing full WIMGAPI apply/capture editor remains in use.
 
+## Stage 3A: bounded SHA-1 resource-link audit (read-only)
+
+The separate `wim_resource_audit.hpp` scanner is the next research step.
+It calculates the actual WIM-format SHA-1 digest over **uncompressed**
+directory metadata, verifies metadata resource hashes from the 50-byte
+lookup entries, and collects the 20-byte hashes referenced by regular
+file entries and alternate data streams. Every nonzero hash must exist
+in the lookup table and point to a non-metadata resource.
+
+For small plain/uncompressed file and ADS resources, the scanner reads
+at most 32 MiB per resource and 128 MiB in aggregate, then compares
+its SHA-1 to the hash referenced by the metadata. It rejects truncated
+lookup records, missing ADS/file resources, corrupt hash digests,
+duplicate resource-hash descriptors and out-of-bounds locations.
+The scan limits metadata to 128 MiB per image, 256 MiB across images,
+and 1 million stream references and lookup rows.
+
+**Compressed LZX/XPRESS/LZMS metadata or file resources are not
+authenticated by this stage.** They return an explicitly incomplete
+result; large uncompressed payloads above the audit budget also remain
+unverified. Even a fully successful *bounded* SHA-1 audit does not check
+all WIM integrity resources, ACL semantics, hard links, XML or global
+reference counts. It is not an authorization for fast writes.
+Original WIM files are opened read-only: no WIMGAPI Apply/Capture, no
+mount, no external binaries, no temporary workspace and no modification.
+
+The cross-platform CTest uses known SHA-1 vectors and independently
+constructed disposable WIM fixtures with a regular file and an ADS.
+It checks exact byte preservation after scanning, missing lookup
+references, metadata and payload corruption, truncated tables, and
+compressed-resource refusal.
+
 Before enabling fast mkdir/delete, implement independent metadata decompression,
 cross-reference every original stream hash against resource descriptors,
 support the full Windows metadata forms, then perform staged atomic updates,
