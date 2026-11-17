@@ -381,6 +381,17 @@ int main(){
                 audited_payload.compressed_payloads_verified==1u &&
                 audited_payload.uncompressed_payloads_verified==1u,
                 "XPRESS file payload and its ADS were not both verified");
+        // A corrupt compressed file may fail in the native decoder or only
+        // at the SHA-1 stage. Both are failures; never increment "verified".
+        auto corrupt_file=payload_wim;
+        corrupt_file[208u+320u+compressed_payload.size()/2u]^=0x80u;
+        write(path,corrupt_file);
+        const auto failed_file=audit_wim_resource_links(path);
+        require(!failed_file.limited_audit_complete &&
+                failed_file.metadata_verified &&
+                failed_file.references_resolved &&
+                failed_file.compressed_payloads_verified==0u,
+                "corrupt XPRESS file resource was counted as verified");
 #endif
         broken=original;
         // Truncated lookup entry must be rejected before metadata traversal.
