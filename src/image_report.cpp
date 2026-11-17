@@ -380,6 +380,12 @@ std::string build_image_structure_report(const std::filesystem::path& image){
         report.append_kv("File/ADS references",std::to_string(audit.referenced_hashes));
         report.append_kv("Plain resource digests checked",
                          std::to_string(audit.uncompressed_payloads_verified));
+        report.append_kv("XPRESS metadata SHA-1 verified",
+                         std::to_string(audit.compressed_metadata_verified));
+        report.append_kv("XPRESS file/ADS SHA-1 verified",
+                         std::to_string(audit.compressed_payloads_verified));
+        report.append_kv("WIM compression chunk tables validated",
+                         std::to_string(audit.chunk_tables_verified));
         report.append_kv("Unverified referenced resources",
                          std::to_string(audit.unverified_payloads));
         report.append_kv("Requires decompression",
