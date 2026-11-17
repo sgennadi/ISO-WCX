@@ -97,7 +97,10 @@ int wmain() {
                 std::to_wstring(i)+L".txt");
             std::ofstream out(file,std::ios::binary);
             require(bool(out),"cannot create disposable WIM fixture file");
-            for(unsigned k=0;k<4u;++k) {
+            // At least 4 KiB of highly compressible data per file so
+            // the real Windows compressor exercises resource decoding,
+            // not merely the uncompressed chunk-copy path.
+            for(unsigned k=0;k<64u;++k) {
                 out<<"WIMGAPI compression and SHA-1 metadata audit "
                    <<i<<" resource "<<k
                    <<" WIMGAPI compression and SHA-1 metadata audit\n";
@@ -126,6 +129,8 @@ int wmain() {
                  <<" payloads="<<xp_audit.compressed_payloads_verified
                  <<" unverified="<<xp_audit.unverified_payloads
                  <<" result="<<xp_audit.reason<<"\n";
+        require(xp_probe.compressed_metadata_resources>0u,
+                "WIMGAPI XPRESS fixture did not compress metadata");
         require(xp_audit.metadata_verified &&
                 xp_audit.references_resolved &&
                 xp_audit.metadata_resources_verified==1u,
@@ -133,6 +138,8 @@ int wmain() {
         require(xp_audit.compressed_metadata_verified==
                 xp_probe.compressed_metadata_resources,
                 "real XPRESS metadata chunk digest verification missing");
+        require(xp_audit.compressed_payloads_verified>0u,
+                "WIMGAPI XPRESS fixture did not exercise compressed file chunks");
         require(xp_audit.limited_audit_complete,
                 "real XPRESS WIM includes unverified referenced data");
 
