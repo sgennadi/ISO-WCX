@@ -517,7 +517,11 @@ int wmain(int argc,wchar_t** argv) {
                std::string::npos ||
            full_report.find("Fast WIM metadata writer: DISABLED")==
                std::string::npos ||
-           full_report.find("Bounded audit result:")==std::string::npos) {
+           full_report.find("Bounded audit result:")==std::string::npos ||
+           full_report.find("XPRESS metadata SHA-1 verified:")==
+               std::string::npos ||
+           full_report.find("WIM compression chunk tables validated:")==
+               std::string::npos) {
             std::cerr<<"WIM read-only SHA-1 audit missing from explicit report\n";
             return 65;
         }
