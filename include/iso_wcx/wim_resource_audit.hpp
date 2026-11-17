@@ -152,6 +152,10 @@ inline std::vector<std::uint8_t> load(
             metadata_budget+=m.original;
             auto bytes=resource_audit_detail::load(in,m.offset,m.stored);
             if(m.flags&4u) {
+                // Even on malformed metadata, preserve that decompression is
+                // required; a broken chunk table must never be reported as
+                // a successfully verified plain resource.
+                result.requires_decompression=true;
                 const auto chunks=inspect_wim_chunks(
                     bytes,m.original,chunk_size);
                 if(!chunks.valid) {
@@ -161,7 +165,6 @@ inline std::vector<std::uint8_t> load(
                 }
                 ++result.chunk_tables_verified;
                 if(algorithm!=WimChunkAlgorithm::xpress_huff) {
-                    result.requires_decompression=true;
                     result.reason="incomplete: LZX/LZMS/unknown WIM metadata codec";
                     return result;
                 }
