@@ -154,9 +154,11 @@ inline std::vector<std::uint8_t> load(
             if(m.flags&4u) {
                 const auto chunks=inspect_wim_chunks(
                     bytes,m.original,chunk_size);
-                if(!chunks.valid)
+                if(!chunks.valid) {
+                    result.requires_decompression=true;
                     throw std::runtime_error(
                         "invalid WIM metadata chunk table: "+chunks.reason);
+                }
                 ++result.chunk_tables_verified;
                 if(algorithm!=WimChunkAlgorithm::xpress_huff) {
                     result.requires_decompression=true;
@@ -222,9 +224,12 @@ inline std::vector<std::uint8_t> load(
             if(compressed_payload) {
                 const auto chunks=inspect_wim_chunks(
                     bytes,entry.original,chunk_size);
-                if(!chunks.valid)
+                if(!chunks.valid) {
+                    ++result.unverified_payloads;
+                    result.requires_decompression=true;
                     throw std::runtime_error(
                         "invalid WIM payload chunk table: "+chunks.reason);
+                }
                 ++result.chunk_tables_verified;
                 if(algorithm!=WimChunkAlgorithm::xpress_huff) {
                     ++result.unverified_payloads;
