@@ -510,6 +510,17 @@ int wmain(int argc,wchar_t** argv) {
             std::cerr<<"WIM index summary missing from Export Image Structure\n";
             return 38;
         }
+        // Real WIMGAPI fixture: user export must state when compressed
+        // metadata cannot be independently audited. It must never claim
+        // that the future direct-metadata writer is enabled.
+        if(full_report.find("WIM RESOURCE SHA-1 AUDIT (READ ONLY)")==
+               std::string::npos ||
+           full_report.find("Fast WIM metadata writer: DISABLED")==
+               std::string::npos ||
+           full_report.find("Bounded audit result:")==std::string::npos) {
+            std::cerr<<"WIM read-only SHA-1 audit missing from explicit report\n";
+            return 65;
+        }
 
         const HMODULE dll=LoadLibraryW(argv[1]);
         if(!dll)return 7;
