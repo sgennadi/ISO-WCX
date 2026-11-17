@@ -255,6 +255,14 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_test(NAME wim_sha1_metadata_stream_and_ads_audit_read_only
     COMMAND wim_resource_sha1_audit_tests)
+  # Pure chunk-table validation on every platform, and genuine raw
+  # XPRESS-HUFF Windows Cabinet API compression/decompression roundtrip.
+  # This is read-only research, not a fast metadata write path.
+  add_executable(wim_chunked_resource_tests tests/wim_chunked_resource.cpp)
+  target_include_directories(wim_chunked_resource_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  add_test(NAME wim_chunk_table_bounds_and_xpress_huff_read_only
+    COMMAND wim_chunked_resource_tests)
 endif()
 # Standalone inspectors and Setup are developer/test fixtures, never WCX
 # runtime dependencies. Release builds with BUILD_TESTING=OFF ship DLLs only.
