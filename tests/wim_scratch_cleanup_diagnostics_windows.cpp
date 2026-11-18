@@ -165,10 +165,56 @@ int wmain() {
     if(!fs::exists(partial))return 46;
     fs::remove(partial);
 
+    // Unlike a simulated vanished-only Snapshot, these are REAL NTFS files.
+    // Their final dot/space is preserved through the \\?\\ file namespace,
+    // but ordinary DOS-path normalization may make GetFileAttributesW say
+    // FILE_NOT_FOUND while FindFirstFileW still returns both directory entries.
+    // This matches the exact "survivors=2, vanished=2, Win32 145" pattern.
+    const auto misleading=root/L"win32-namespace";
+    if(!fs::create_directory(misleading))return 47;
+    const auto literal=iso_wcx::wim_scratch::literal_private_ntfs_path(misleading);
+    const fs::path odd_names[]={L"ghost.",L"ghost "};
+    for(const auto& part:odd_names) {
+        const auto file=literal/part;
+        HANDLE h=CreateFileW(file.c_str(),GENERIC_WRITE,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+            nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(h==INVALID_HANDLE_VALUE) {
+            std::cerr<<"Could not create synthetic literal NTFS entry: "
+                     <<GetLastError()<<"\n";
+            return 48;
+        }
+        CloseHandle(h);
+    }
+    const auto old_namespace=iso_wcx::wim_scratch::probe_directory(misleading);
+    if(old_namespace.survivors!=2 || old_namespace.vanished!=2 ||
+       old_namespace.scan_error!=0) {
+        std::cerr<<"Synthetic Win32-normalized name mismatch: "
+                 <<old_namespace.counts()<<"\n";
+        return 49;
+    }
+    const auto literal_namespace=iso_wcx::wim_scratch::probe_directory(literal);
+    if(literal_namespace.survivors!=2 || literal_namespace.files!=2 ||
+       literal_namespace.vanished!=0 || literal_namespace.scan_error!=0) {
+        std::cerr<<"Literal namespace failed to resolve NTFS files: "
+                 <<literal_namespace.counts()<<"\n";
+        return 50;
+    }
+    for(const auto& part:odd_names) {
+        const auto file=literal/part;
+        if(!iso_wcx::wim_scratch::try_posix_unlink_private_entry(file,false))
+            return 51;
+        if(GetFileAttributesW(file.c_str())!=INVALID_FILE_ATTRIBUTES)
+            return 52;
+    }
+    if(!RemoveDirectoryW(literal.c_str()))return 53;
+    if(fs::exists(misleading))return 54;
+
     std::cout<<"PASS: private WIM scratch POSIX file/directory unlink, "
                 "held delete-sharing readers, nonempty-directory refusal, "
-                "vanished-only confirmed retry, live-file race protection, "
-                "type mismatch, and anonymous lock diagnostics\n";
+                "vanished-only confirmed retry, real NTFS literal names, "
+                "live-file race protection, type mismatch, and "
+                "anonymous lock diagnostics\n";
     return 0;
 }
 #else
