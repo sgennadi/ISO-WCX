@@ -186,6 +186,10 @@ int wmain() {
         }
         CloseHandle(h);
     }
+    // A real nonempty directory produces the exact Win32 145 reported
+    // from the domain host, not a synthetic/mocked error code.
+    if(RemoveDirectoryW(misleading.c_str()) ||
+       GetLastError()!=ERROR_DIR_NOT_EMPTY)return 62;
     const auto old_namespace=iso_wcx::wim_scratch::probe_directory(misleading);
     if(old_namespace.survivors!=2 || old_namespace.vanished!=2 ||
        old_namespace.trailing_dot_or_space!=2 ||
