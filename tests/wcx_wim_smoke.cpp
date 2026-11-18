@@ -10,6 +10,7 @@
 #include <aclapi.h>
 #include "iso_wcx/wim_index_report.hpp"
 #include "iso_wcx/wim_archive.hpp"
+#include "iso_wcx/wim_scratch_delete.hpp"
 #include "iso_wcx/image_report.hpp"
 // WIMGAPI is resolved dynamically; the optional Windows ADK header is not needed.
 
@@ -95,6 +96,10 @@ static std::atomic<HANDLE> delete_sharing_scratch_handle{INVALID_HANDLE_VALUE};
 static std::atomic<bool> hold_delete_sharing_directory_at_cleanup{false};
 static std::atomic<bool> held_delete_sharing_directory_at_cleanup{false};
 static std::atomic<HANDLE> delete_sharing_directory_handle{INVALID_HANDLE_VALUE};
+// Inject two REAL NTFS names that are visible in directory enumeration
+// but disappear when queried via the normalized Win32 DOS namespace.
+static std::atomic<bool> inject_literal_ghosts_at_cleanup{false};
+static std::atomic<bool> literal_ghosts_injected{false};
 static fs::path private_test_root;
 // Verify the scratch root's real owner and the *inherited* user/system/admin
 // rights on its new child BEFORE WIMGAPI overwrites child metadata. This
@@ -270,6 +275,33 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
                         delete_sharing_directory_handle.store(held);
                         held_delete_sharing_directory_at_cleanup.store(true);
                     }
+                }
+                if(inject_literal_ghosts_at_cleanup.exchange(false)) {
+                    unsigned created=0;
+                    try {
+                        for(const auto& entry:fs::directory_iterator(private_test_root)) {
+                            if(!entry.is_directory() ||
+                               !entry.path().filename().wstring().starts_with(
+                                   L".iso-wcx-edit-"))continue;
+                            const auto expanded=entry.path()/L"expanded";
+                            if(!fs::is_directory(expanded))continue;
+                            const auto literal=iso_wcx::wim_scratch::
+                                literal_private_ntfs_path(expanded);
+                            const wchar_t* odd[]={L"wcx-ghost.",L"wcx-ghost "};
+                            for(const auto* name:odd) {
+                                const auto file=literal/name;
+                                HANDLE raw=CreateFileW(file.c_str(),GENERIC_WRITE,
+                                    FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                                    nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+                                if(raw!=INVALID_HANDLE_VALUE) {
+                                    ++created;
+                                    CloseHandle(raw);
+                                }
+                            }
+                            break;
+                        }
+                    }catch(...){}
+                    literal_ghosts_injected.store(created==2);
                 }
                 if(protect_scratch_acl_at_cleanup.exchange(false)){
                     // Inject a protected DELETE-denying DACL on a private,
@@ -967,6 +999,29 @@ int wmain(int argc,wchar_t** argv) {
                             "delete-sharing handle failed: "<<directory_rc<<"\n";
                 report_ci_wim_failure();
                 return 65;
+            }
+        }
+        // Reproduce the domain-host Win32 145 / vanished=2 report through
+        // the FULL WIMGAPI Apply/Capture and native WCX F5 path. The odd
+        // files are injected after capture, solely in the private expanded
+        // directory, so they must NOT enter the resulting WIM.
+        {
+            fs::create_directories(incoming/L"LITERAL_NAMESPACE_FOLDER");
+            wchar_t literal_list[]=L"LITERAL_NAMESPACE_FOLDER\0\0";
+            private_test_root=root;
+            literal_ghosts_injected.store(false);
+            inject_literal_ghosts_at_cleanup.store(true);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int literal_rc=pack(
+                packed.data(),sub.data(),src.data(),literal_list,0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            inject_literal_ghosts_at_cleanup.store(false);
+            if(!literal_ghosts_injected.load() || literal_rc!=0 ||
+               !clean_wim_workspaces()) {
+                std::cerr<<"Real WCX F5 cleanup failed with two literal "
+                            "NTFS ghost names: "<<literal_rc<<"\n";
+                report_ci_wim_failure();
+                return 74;
             }
         }
         // Cancel the WIM F5 source copy after WIMGAPI Apply, before recapture.
