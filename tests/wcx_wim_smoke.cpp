@@ -91,6 +91,10 @@ static std::atomic<HANDLE> held_wim_scratch_handle{INVALID_HANDLE_VALUE};
 static std::atomic<bool> hold_delete_sharing_scratch_at_cleanup{false};
 static std::atomic<bool> held_delete_sharing_scratch_at_cleanup{false};
 static std::atomic<HANDLE> delete_sharing_scratch_handle{INVALID_HANDLE_VALUE};
+// An indexer can retain a handle to the WIMGAPI-expanded DIRECTORY itself.
+static std::atomic<bool> hold_delete_sharing_directory_at_cleanup{false};
+static std::atomic<bool> held_delete_sharing_directory_at_cleanup{false};
+static std::atomic<HANDLE> delete_sharing_directory_handle{INVALID_HANDLE_VALUE};
 static fs::path private_test_root;
 // Verify the scratch root's real owner and the *inherited* user/system/admin
 // rights on its new child BEFORE WIMGAPI overwrites child metadata. This
@@ -244,6 +248,27 @@ static int __stdcall count_pack_progress(wchar_t* stage,int size) {
                     if(held!=INVALID_HANDLE_VALUE) {
                         delete_sharing_scratch_handle.store(held);
                         held_delete_sharing_scratch_at_cleanup.store(true);
+                    }
+                }
+                if(hold_delete_sharing_directory_at_cleanup.exchange(false)) {
+                    HANDLE held=INVALID_HANDLE_VALUE;
+                    try {
+                        for(const auto& entry:fs::directory_iterator(private_test_root)) {
+                            if(!entry.is_directory() ||
+                               !entry.path().filename().wstring().starts_with(
+                                   L".iso-wcx-edit-"))continue;
+                            const auto expanded=entry.path()/L"expanded";
+                            if(!fs::is_directory(expanded))continue;
+                            held=CreateFileW(expanded.c_str(),FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                                nullptr,OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+                            break;
+                        }
+                    }catch(...){}
+                    if(held!=INVALID_HANDLE_VALUE) {
+                        delete_sharing_directory_handle.store(held);
+                        held_delete_sharing_directory_at_cleanup.store(true);
                     }
                 }
                 if(protect_scratch_acl_at_cleanup.exchange(false)){
@@ -857,6 +882,33 @@ int wmain(int argc,wchar_t** argv) {
                 return 63;
             }
         }
+        // An indexer can keep the actual expanded DIRECTORY open with
+        // FILE_SHARE_DELETE while F5's Apply/Capture and cleanup finish.
+        // This exercises the production POSIX directory unlink, not a
+        // standalone test-created directory.
+        {
+            fs::create_directories(incoming/L"POSIX_OPEN_DIRECTORY");
+            wchar_t directory_list[]=L"POSIX_OPEN_DIRECTORY\0\0";
+            private_test_root=root;
+            held_delete_sharing_directory_at_cleanup.store(false);
+            hold_delete_sharing_directory_at_cleanup.store(true);
+            set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
+            const int directory_rc=pack(
+                packed.data(),sub.data(),src.data(),directory_list,0);
+            set_progress(INVALID_HANDLE_VALUE,nullptr);
+            hold_delete_sharing_directory_at_cleanup.store(false);
+            const bool clean_with_directory_open=clean_wim_workspaces();
+            const HANDLE held=delete_sharing_directory_handle.exchange(
+                INVALID_HANDLE_VALUE);
+            if(held!=INVALID_HANDLE_VALUE)CloseHandle(held);
+            if(!held_delete_sharing_directory_at_cleanup.load() ||
+               directory_rc!=0 || !clean_with_directory_open) {
+                std::cerr<<"WIM F5 with outstanding expanded-directory "
+                            "delete-sharing handle failed: "<<directory_rc<<"\n";
+                report_ci_wim_failure();
+                return 65;
+            }
+        }
         // Cancel the WIM F5 source copy after WIMGAPI Apply, before recapture.
         // Verify exact rollback and no leaked scratch directory.
         {
@@ -896,6 +948,7 @@ int wmain(int argc,wchar_t** argv) {
             HANDLE h=open(&args);
             if(!h)return 28;
             bool seen_folder=false,seen_deferred_folder=false;
+            bool seen_posix_directory=false;
             for(;;){
                 HeaderExW item{};
                 const int result=read(h,&item);
@@ -905,10 +958,13 @@ int wmain(int argc,wchar_t** argv) {
                     seen_folder=(item.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
                 if(std::wstring_view(item.FileName)==L"image1\\DEFERRED_CLEANUP_FOLDER")
                     seen_deferred_folder=(item.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
+                if(std::wstring_view(item.FileName)==L"image1\\POSIX_OPEN_DIRECTORY")
+                    seen_posix_directory=(item.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
                 if(process(h,0,nullptr,nullptr)){close(h);return 30;}
             }
             close(h);
-            if(!seen_folder||!seen_deferred_folder)return 31;
+            if(!seen_folder||!seen_deferred_folder||!seen_posix_directory)
+                return 31;
         }
         auto content=[&](const std::wstring& wanted,std::string& data){
             OpenW a{};a.ArcName=packed.data();HANDLE h=open(&a);if(!h)return false;
