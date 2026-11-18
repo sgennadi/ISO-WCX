@@ -786,6 +786,15 @@ int wmain(int argc,wchar_t** argv) {
             if(wanted){tested_file=true;break;}
         }
         if(!tested_file){close(kept_panel);return 69;}
+        // Keep a second panel open but unconsumed. It will verify that a
+        // stale listing cannot read from the newly replaced WIM after F5.
+        OpenW second_panel_args{};
+        second_panel_args.ArcName=packed.data();
+        const HANDLE second_panel=open(&second_panel_args);
+        if(!second_panel || second_panel_args.OpenResult!=0) {
+            close(kept_panel);
+            return 73;
+        }
         // Still-open WIMGAPI reader can now be cached on this panel. An F5
         // on the SAME archive must close it without discarding the listing.
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
@@ -793,27 +802,34 @@ int wmain(int argc,wchar_t** argv) {
         std::thread worker([&]{packed_result=pack(packed.data(),sub.data(),src.data(),add_list,0);});
         worker.join();
         set_progress(INVALID_HANDLE_VALUE,nullptr);
-        // After a successful F5 the old list is stale; extraction through
-        // it must refuse a changed source identity, not read wrong bytes.
+        // F5 atomically changes source inode and ChangeTime. The other
+        // panel still has old metadata, so its first nonempty file must
+        // fail PK_TEST rather than silently reading the replacement.
         if(packed_result==0) {
-            bool stale_refused=false;
+            bool stale_checked=false,stale_refused=false;
             for(unsigned n=0;n<100000u;++n) {
                 HeaderExW listed{};
-                const int result=read(kept_panel,&listed);
-                if(result==10)break;
-                if(result!=0){close(kept_panel);return 70;}
-                const bool wanted=std::wstring_view(listed.FileName)==
-                                  L"image1\\ADDED.TXT";
-                const int done=process(kept_panel,wanted?1:0,nullptr,nullptr);
-                if(wanted){stale_refused=done!=0;break;}
-                if(done!=0){close(kept_panel);return 71;}
+                const int rc=read(second_panel,&listed);
+                if(rc==10)break;
+                if(rc!=0)break;
+                const bool file=(listed.FileAttr&FILE_ATTRIBUTE_DIRECTORY)==0 &&
+                                (listed.UnpSize!=0 || listed.UnpSizeHigh!=0);
+                const int done=process(second_panel,file?1:0,nullptr,nullptr);
+                if(file) {
+                    stale_checked=true;
+                    stale_refused=done!=0;
+                    break;
+                }
+                if(done!=0)break;
             }
-            if(!stale_refused) {
+            if(!stale_checked || !stale_refused) {
                 std::cerr<<"WIM stale panel read was not rejected after F5\n";
+                close(second_panel);
                 close(kept_panel);
                 return 72;
             }
         }
+        close(second_panel);
         close(kept_panel);
         if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";report_ci_wim_failure();return 21;}
         if(!clean_wim_workspaces())return 40;
