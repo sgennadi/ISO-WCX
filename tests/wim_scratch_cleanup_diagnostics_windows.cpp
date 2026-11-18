@@ -210,11 +210,36 @@ int wmain() {
     if(!RemoveDirectoryW(literal.c_str()))return 53;
     if(fs::exists(misleading))return 54;
 
+    // Deep WIM Apply paths are another documented DOS-vs-literal mismatch:
+    // the Total Commander host may not have opted into process-wide long
+    // paths. Explicit prefixing works independent of that host manifest.
+    const auto deep=iso_wcx::wim_scratch::literal_private_ntfs_path(
+        root/L"long-path-case");
+    if(!CreateDirectoryW(deep.c_str(),nullptr))return 55;
+    const auto first=deep/std::wstring(120,L'a');
+    const auto second=first/std::wstring(120,L'b');
+    if(!CreateDirectoryW(first.c_str(),nullptr) ||
+       !CreateDirectoryW(second.c_str(),nullptr))return 56;
+    const auto long_file=second/L"this-name-must-not-be-normalized.bin";
+    if(long_file.native().size()<=MAX_PATH)return 57;
+    HANDLE deep_handle=CreateFileW(long_file.c_str(),GENERIC_WRITE,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(deep_handle==INVALID_HANDLE_VALUE)return 58;
+    CloseHandle(deep_handle);
+    if(GetFileAttributesW(long_file.c_str())==INVALID_FILE_ATTRIBUTES)
+        return 59;
+    if(!iso_wcx::wim_scratch::try_posix_unlink_private_entry(
+           long_file,false))return 60;
+    if(!RemoveDirectoryW(second.c_str()) ||
+       !RemoveDirectoryW(first.c_str()) ||
+       !RemoveDirectoryW(deep.c_str()))return 61;
+
     std::cout<<"PASS: private WIM scratch POSIX file/directory unlink, "
                 "held delete-sharing readers, nonempty-directory refusal, "
                 "vanished-only confirmed retry, real NTFS literal names, "
-                "live-file race protection, type mismatch, and "
-                "anonymous lock diagnostics\n";
+                "MAX_PATH bypass, live-file race protection, "
+                "type mismatch, and anonymous lock diagnostics\n";
     return 0;
 }
 #else
