@@ -372,20 +372,50 @@ public:
             throw EditUnsupported(
                 "unsupported UDF file-set extent type (type="+
                 std::to_string(fsd_type)+"; only recorded extent 0 writable)");
-        if(fsd_size<416 || fsd_size>block)
+        // A valid File Set Descriptor *sequence* can occupy two 2048-byte
+        // logical blocks (4096 total): FSD followed by a Terminating
+        // Descriptor, or one zero-padded block. The original single-block
+        // restriction rejected real ISO/UDF images before edit preflight.
+        // Never accept arbitrary data in the second block or confuse it
+        // with another FSD/root directory descriptor.
+        if(fsd_size<416 || fsd_size>2u*block ||
+           (fsd_size>block && fsd_size!=2u*block))
             throw EditUnsupported(
                 "unsupported UDF file-set descriptor length (bytes="+
-                std::to_string(fsd_size)+"; expected 416..2048)");
+                std::to_string(fsd_size)+
+                "; expected 416..2048 or a complete 4096-byte sequence)");
         if(fsd_partition_ref!=0)
             throw EditUnsupported(
                 "unsupported UDF file-set partition reference (number="+
                 std::to_string(fsd_partition_ref)+
                 "; only the single physical Type-1 partition 0 writable)");
-        const auto fsd=read(physical(u32(lvd,252)),block);
+        const auto fsd_logical=u32(lvd,252);
+        const auto fsd_blocks=(std::uint64_t(fsd_size)+block-1u)/block;
+        need(fsd_logical<partition_blocks_ &&
+             fsd_blocks<=partition_blocks_-fsd_logical,
+             "UDF file-set sequence exceeds Type-1 partition");
+        const auto fsd_start=physical(fsd_logical);
+        const auto fsd=read(fsd_start,block);
         tag_check(fsd,0,256);
+        if(fsd_blocks==2) {
+            const auto tail=read(fsd_start+block,block);
+            const bool blank=std::all_of(
+                tail.begin(),tail.end(),[](std::uint8_t c){return c==0;});
+            if(!blank) {
+                need(u16(tail,0)==8,
+                     "unsupported UDF file-set sequence tail (expected terminator or zero block)");
+                tag_check(tail,0,8);
+                const auto used=16u+u16(tail,10);
+                need(std::all_of(tail.begin()+used,tail.end(),
+                         [](std::uint8_t c){return c==0;}),
+                     "unsupported UDF file-set terminator trailing data");
+            }
+        }
         reserved_.push_back({{256*block,block},0});
         reserved_.push_back({{std::uint64_t(start)*block,len},0});
-        reserved_.push_back({{physical(u32(lvd,252)),block},0});
+        // Reserve both sectors, including the terminator/padding, in the
+        // allocator and the before/after layout protection checks.
+        reserved_.push_back({{fsd_start,fsd_blocks*block},0});
         walk(u32(fsd,404),u16(fsd,408),"",0);
         if(bitmap_) {
             std::uint64_t free_bits=0;
