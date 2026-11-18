@@ -116,8 +116,58 @@ int wmain() {
            child,true))return 31;
     if(!fs::exists(child))return 32;
 
+    // Windows directory enumeration can see names that disappear before
+    // GetFileAttributesW. This models the field report precisely:
+    // survivors_up_to_32=2, vanished=2, files=folders=sharing=0.
+    // The finalizer must confirm actual directory removal with the OS.
+    iso_wcx::wim_scratch::Snapshot two_vanished{};
+    two_vanished.survivors=2;
+    two_vanished.vanished=2;
+    const auto ghost_empty=root/L"vanished-entries-empty";
+    if(!fs::create_directory(ghost_empty))return 33;
+    if(!iso_wcx::wim_scratch::retry_vanished_private_directory(
+           ghost_empty,two_vanished))return 34;
+    if(fs::exists(ghost_empty))return 35;
+
+    // Do NOT infer that the directory is empty just because a previous
+    // snapshot said everything vanished: an unrelated live file can appear
+    // after that snapshot. The OS must reject the attempted directory unlink.
+    const auto ghost_live=root/L"vanished-entries-raced";
+    if(!fs::create_directory(ghost_live))return 36;
+    const auto new_child=ghost_live/L"live-child.bin";
+    {
+        std::ofstream out(new_child,std::ios::binary);
+        out<<"DO NOT DELETE";
+        if(!out)return 37;
+    }
+    if(iso_wcx::wim_scratch::retry_vanished_private_directory(
+           ghost_live,two_vanished,2))return 38;
+    if(!fs::exists(new_child) ||
+       !fs::exists(ghost_live))return 39;
+    fs::remove(new_child);
+    if(!iso_wcx::wim_scratch::retry_vanished_private_directory(
+           ghost_live,two_vanished))return 40;
+    if(fs::exists(ghost_live))return 41;
+
+    // Partial or errored probes are not authorization to perform the
+    // special last-chance unlink, even when the test directory is empty.
+    const auto partial=root/L"partly-vanished";
+    if(!fs::create_directory(partial))return 42;
+    auto incomplete=two_vanished;
+    incomplete.vanished=1;
+    if(iso_wcx::wim_scratch::retry_vanished_private_directory(
+           partial,incomplete,1))return 43;
+    if(!fs::exists(partial))return 44;
+    incomplete=two_vanished;
+    incomplete.scan_error=ERROR_ACCESS_DENIED;
+    if(iso_wcx::wim_scratch::retry_vanished_private_directory(
+           partial,incomplete,1))return 45;
+    if(!fs::exists(partial))return 46;
+    fs::remove(partial);
+
     std::cout<<"PASS: private WIM scratch POSIX file/directory unlink, "
                 "held delete-sharing readers, nonempty-directory refusal, "
+                "vanished-only confirmed retry, live-file race protection, "
                 "type mismatch, and anonymous lock diagnostics\n";
     return 0;
 }
