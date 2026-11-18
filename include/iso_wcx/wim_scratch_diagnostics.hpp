@@ -20,6 +20,8 @@ struct Snapshot {
     unsigned readonly = 0, delete_open_ok = 0, sharing = 0;
     unsigned access_denied = 0, delete_pending = 0;
     unsigned vanished = 0, other = 0;
+    // Aggregate-only indicators; never emit a path or filename.
+    unsigned trailing_dot_or_space = 0, path_over_max = 0;
     int scan_error = 0;
 
     std::string counts() const {
@@ -34,6 +36,8 @@ struct Snapshot {
             ", delete_pending=" + std::to_string(delete_pending) +
             ", vanished=" + std::to_string(vanished) +
             ", other=" + std::to_string(other) +
+            ", suffix_dot_space=" + std::to_string(trailing_dot_or_space) +
+            ", path_over_max=" + std::to_string(path_over_max) +
             ", scan_error=" + std::to_string(scan_error) + ")";
     }
 };
@@ -47,6 +51,17 @@ inline Snapshot probe_directory(const fs::path& directory) noexcept {
         while(!ec && it!=end && state.survivors<32u) {
             ++state.survivors;
             const auto path=it->path();
+            const auto final_component=path.filename().wstring();
+            if(!final_component.empty() &&
+               (final_component.back()==L'.' ||
+                final_component.back()==L' '))
+                ++state.trailing_dot_or_space;
+            // The literal prefix adds 4 code units. Count the equivalent
+            // normal Win32 path length for the MAX_PATH diagnostic.
+            auto length=path.wstring().size();
+            if(path.wstring().starts_with(LR"(\\?\)") && length>=4)
+                length-=4;
+            if(length>=MAX_PATH)++state.path_over_max;
             const DWORD attr=GetFileAttributesW(path.c_str());
             if(attr==INVALID_FILE_ATTRIBUTES) {
                 const DWORD error=GetLastError();
