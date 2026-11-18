@@ -74,11 +74,12 @@ int main() {
         // descriptors cannot be read safely by this bounded scanner.
         for(unsigned flags : {4u,6u,8u,0x80u}) {
             make_fixture(file);
-            std::fstream io(file,std::ios::binary|std::ios::in|std::ios::out);
-            io.seekp(48+7);
-            const char invalid=static_cast<char>(flags);
-            io.write(&invalid,1);
-            io.flush();
+            {
+                std::fstream io(file,std::ios::binary|std::ios::in|std::ios::out);
+                io.seekp(48+7);
+                const char invalid=static_cast<char>(flags);
+                io.write(&invalid,1);
+            }
             require(!probe_fast_edit_metadata(file).header_and_lookup_valid,
                     "unsupported WIM lookup flags accepted");
         }
