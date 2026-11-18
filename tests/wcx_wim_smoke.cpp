@@ -948,6 +948,7 @@ int wmain(int argc,wchar_t** argv) {
             HANDLE h=open(&args);
             if(!h)return 28;
             bool seen_folder=false,seen_deferred_folder=false;
+            bool seen_posix_directory=false;
             for(;;){
                 HeaderExW item{};
                 const int result=read(h,&item);
@@ -957,10 +958,13 @@ int wmain(int argc,wchar_t** argv) {
                     seen_folder=(item.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
                 if(std::wstring_view(item.FileName)==L"image1\\DEFERRED_CLEANUP_FOLDER")
                     seen_deferred_folder=(item.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
+                if(std::wstring_view(item.FileName)==L"image1\\POSIX_OPEN_DIRECTORY")
+                    seen_posix_directory=(item.FileAttr&FILE_ATTRIBUTE_DIRECTORY)!=0;
                 if(process(h,0,nullptr,nullptr)){close(h);return 30;}
             }
             close(h);
-            if(!seen_folder||!seen_deferred_folder)return 31;
+            if(!seen_folder||!seen_deferred_folder||!seen_posix_directory)
+                return 31;
         }
         auto content=[&](const std::wstring& wanted,std::string& data){
             OpenW a{};a.ArcName=packed.data();HANDLE h=open(&a);if(!h)return false;
