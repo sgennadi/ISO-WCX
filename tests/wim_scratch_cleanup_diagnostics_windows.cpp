@@ -3,6 +3,7 @@
 #define NOMINMAX
 #endif
 #include "iso_wcx/wim_scratch_diagnostics.hpp"
+#include "iso_wcx/wim_scratch_delete.hpp"
 #include <windows.h>
 #include <filesystem>
 #include <fstream>
@@ -54,8 +55,70 @@ int wmain() {
     if(report.find("blocked.bin")!=std::string::npos ||
        report.find("free.bin")!=std::string::npos)
         return 15;
-    std::cout<<"PASS: WIM scratch probe, share-violation vs DELETE access, "
-                "anonymous count-only report and handle-release recovery\n";
+
+    // A held delete-sharing NTFS reader must not keep a private file name
+    // alive after POSIX disposition. The reader still owns valid file data.
+    const auto held_file=root/L"read-while-unlinked.bin";
+    {
+        std::ofstream out(held_file,std::ios::binary);
+        out<<"HELLO";
+        if(!out)return 16;
+    }
+    Held reader{CreateFileW(held_file.c_str(),GENERIC_READ,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr)};
+    if(reader.h==INVALID_HANDLE_VALUE)return 17;
+    if(!iso_wcx::wim_scratch::try_posix_unlink_private_entry(
+           held_file,false))return 18;
+    if(GetFileAttributesW(held_file.c_str())!=INVALID_FILE_ATTRIBUTES)
+        return 19;
+    char bytes[5]{};
+    DWORD bytes_read=0;
+    if(!ReadFile(reader.h,bytes,5,&bytes_read,nullptr) ||
+       bytes_read!=5 || std::string(bytes,bytes+5)!="HELLO")
+        return 20;
+    CloseHandle(reader.h);
+    reader.h=INVALID_HANDLE_VALUE;
+
+    // A nonempty directory cannot be POSIX-unlinked. Never remove its
+    // contents implicitly or convert the failure into a success result.
+    const auto nonempty=root/L"not-empty";
+    if(!fs::create_directory(nonempty))return 21;
+    const auto child=nonempty/L"keep.bin";
+    {
+        std::ofstream out(child,std::ios::binary);
+        out<<"UNTOUCHED";
+        if(!out)return 22;
+    }
+    if(iso_wcx::wim_scratch::try_posix_unlink_private_entry(
+           nonempty,true))return 23;
+    if(!fs::exists(child) || !fs::exists(nonempty))return 24;
+
+    // A separate, empty directory held open by a delete-sharing reader
+    // can be unlinked without closing its handle on modern NTFS.
+    const auto empty=root/L"open-empty";
+    if(!fs::create_directory(empty))return 25;
+    Held directory_reader{CreateFileW(empty.c_str(),FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr)};
+    if(directory_reader.h==INVALID_HANDLE_VALUE)return 26;
+    if(!iso_wcx::wim_scratch::try_posix_unlink_private_entry(
+           empty,true))return 27;
+    if(GetFileAttributesW(empty.c_str())!=INVALID_FILE_ATTRIBUTES)
+        return 28;
+    if(!fs::exists(child))return 29;
+
+    // A missing entry and a file/directory mismatch must never be treated
+    // as a successful delete of another object.
+    if(iso_wcx::wim_scratch::try_posix_unlink_private_entry(
+           root/L"missing.bin",false))return 30;
+    if(iso_wcx::wim_scratch::try_posix_unlink_private_entry(
+           child,true))return 31;
+    if(!fs::exists(child))return 32;
+
+    std::cout<<"PASS: private WIM scratch POSIX file/directory unlink, "
+                "held delete-sharing readers, nonempty-directory refusal, "
+                "type mismatch, and anonymous lock diagnostics\n";
     return 0;
 }
 #else

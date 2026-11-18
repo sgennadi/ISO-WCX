@@ -4,6 +4,7 @@
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/wim_parts.hpp"
 #include "iso_wcx/wim_scratch_diagnostics.hpp"
+#include "iso_wcx/wim_scratch_delete.hpp"
 #include "iso_wcx/wim_edit_preflight.hpp"
 #include "iso_wcx/wim_staging_budget.hpp"
 #include <msxml6.h>
@@ -447,40 +448,18 @@ void remove_tree(const std::filesystem::path& path,
             }
         }
         const auto unlink=[&]() -> DWORD {
-            if(posix_delete && !directory) {
-                // DeleteFileW can succeed but leave an NTFS name DELETE_PENDING
-                // while WIMGAPI/AV retains a FILE_SHARE_DELETE handle.
-                // The parent then reports Win32 145 despite the deleted file.
-                // POSIX disposition unlinks that name immediately while
-                // existing readers can finish using their handles.
+            if(posix_delete) {
+                // NTFS can retain deleted file or *empty directory* names
+                // while a WIMGAPI/AV reader still holds a delete-sharing
+                // handle. RemoveDirectoryW then reports Win32 145 for
+                // an apparently empty parent. POSIX disposition removes the
+                // name immediately if allowed, never following a reparse
+                // point. Nonempty directories still fail closed.
                 //
-                // Only for our private staging tree after Apply/Capture;
-                // never follow a reparse point or touch the original WIM.
-                HANDLE handle=CreateFileW(path.c_str(),
-                    DELETE|FILE_READ_ATTRIBUTES,
-                    FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
-                    nullptr,OPEN_EXISTING,
-                    FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,
-                    nullptr);
-                if(handle!=INVALID_HANDLE_VALUE) {
-                    FILE_DISPOSITION_INFO_EX disposition{};
-                    disposition.Flags=FILE_DISPOSITION_FLAG_DELETE|
-                        FILE_DISPOSITION_FLAG_POSIX_SEMANTICS|
-                        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
-                    BOOL unlinked=SetFileInformationByHandle(
-                        handle,FileDispositionInfoEx,&disposition,
-                        sizeof(disposition));
-                    if(!unlinked && GetLastError()==ERROR_INVALID_PARAMETER) {
-                        // Older Windows may lack ignore-readonly support.
-                        disposition.Flags=FILE_DISPOSITION_FLAG_DELETE|
-                            FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
-                        unlinked=SetFileInformationByHandle(
-                            handle,FileDispositionInfoEx,&disposition,
-                            sizeof(disposition));
-                    }
-                    CloseHandle(handle);
-                    if(unlinked)return ERROR_SUCCESS;
-                }
+                // Invoked ONLY for entries in this transaction's private
+                // post-Apply/Capture scratch workspace, never source WIMs.
+                if(wim_scratch::try_posix_unlink_private_entry(path,directory))
+                    return ERROR_SUCCESS;
             }
             if(directory) {
                 if(RemoveDirectoryW(path.c_str()))return ERROR_SUCCESS;
