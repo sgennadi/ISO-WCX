@@ -5,8 +5,36 @@
 #endif
 #include <windows.h>
 #include <filesystem>
+#include <stdexcept>
+#include <string>
 
 namespace iso_wcx::wim_scratch {
+
+// Always use the literal Win32 file namespace for cleanup of the unique,
+// private NTFS WIM workspace. WIMGAPI can apply filenames with trailing
+// spaces/dots or very long names that FindFirstFileW enumerates, while the
+// usual DOS name normalization makes GetFileAttributesW/DeleteFileW return
+// ERROR_FILE_NOT_FOUND for those SAME directory entries. The parent then
+// fails RemoveDirectoryW with ERROR_DIR_NOT_EMPTY (145).
+//
+// This helper never changes file contents, follows links, or grants access;
+// the normal reparse-point and private-workspace checks remain mandatory.
+// Do not apply it to source WIM paths, arbitrary TC selections, or WIMMount.
+inline std::filesystem::path literal_private_ntfs_path(
+    const std::filesystem::path& entry) {
+    const auto full=std::filesystem::absolute(entry);
+    const std::wstring native=full.wstring();
+    if(native.starts_with(LR"(\\?\)"))
+        return full;
+    if(native.starts_with(LR"(\\.\)"))
+        throw std::runtime_error("private WIM scratch must not be a device path");
+    if(native.size()>=3 && native[1]==L':' && native[2]==L'\\')
+        return std::filesystem::path(std::wstring(LR"(\\?\)")+native);
+    if(native.starts_with(LR"(\\)"))
+        return std::filesystem::path(
+            std::wstring(LR"(\\?\UNC\)")+native.substr(2));
+    throw std::runtime_error("private WIM scratch path is not fully qualified");
+}
 
 // This primitive is ONLY for an entry already verified to be inside the
 // transaction's private WIM scratch directory. It never follows reparse
