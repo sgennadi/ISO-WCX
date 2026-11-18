@@ -22,12 +22,18 @@ namespace iso_wcx::wim_scratch {
 // Do not apply it to source WIM paths, arbitrary TC selections, or WIMMount.
 inline std::filesystem::path literal_private_ntfs_path(
     const std::filesystem::path& entry) {
+    // Every enumerated child already inherits its parent's literal
+    // prefix. Avoid a GetFullPathNameW/absolute conversion per file when
+    // cleaning an expanded multi-GB Windows image with many small files.
+    const auto& supplied=entry.native();
+    if(supplied.starts_with(LR"(\\?\)"))
+        return entry;
+    if(supplied.starts_with(LR"(\\.\)"))
+        throw std::runtime_error("private WIM scratch must not be a device path");
     const auto full=std::filesystem::absolute(entry);
-    const std::wstring native=full.wstring();
+    const auto& native=full.native();
     if(native.starts_with(LR"(\\?\)"))
         return full;
-    if(native.starts_with(LR"(\\.\)"))
-        throw std::runtime_error("private WIM scratch must not be a device path");
     if(native.size()>=3 && native[1]==L':' && native[2]==L'\\')
         return std::filesystem::path(std::wstring(LR"(\\?\)")+native);
     if(native.starts_with(LR"(\\)"))
