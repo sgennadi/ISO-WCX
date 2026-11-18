@@ -56,6 +56,33 @@ int main() {
         require(a.images==1 && a.lookup_entries==1 &&
                 a.metadata_resources==1 && a.metadata_uncompressed_bytes==128,
                 "lookup/metadata count mismatch");
+        // Genuine WIMGAPI captures mark the lookup resource itself as
+        // metadata (flag 0x02); synthetic fixtures historically used zero.
+        make_fixture(file);
+        {
+            std::fstream io(file,std::ios::binary|std::ios::in|std::ios::out);
+            io.seekp(48+7);
+            const char metadata_lookup=static_cast<char>(0x02u);
+            io.write(&metadata_lookup,1);
+        }
+        const auto native_lookup=probe_fast_edit_metadata(file);
+        require(native_lookup.header_and_lookup_valid &&
+                native_lookup.metadata_layout_candidate &&
+                native_lookup.lookup_entries==1u,
+                "native WIMGAPI lookup flag 0x02 rejected");
+        // Accept no other lookup flags: compressed/unknown lookup
+        // descriptors cannot be read safely by this bounded scanner.
+        for(unsigned flags : {4u,6u,8u,0x80u}) {
+            make_fixture(file);
+            {
+                std::fstream io(file,std::ios::binary|std::ios::in|std::ios::out);
+                io.seekp(48+7);
+                const char invalid=static_cast<char>(flags);
+                io.write(&invalid,1);
+            }
+            require(!probe_fast_edit_metadata(file).header_and_lookup_valid,
+                    "unsupported WIM lookup flags accepted");
+        }
         make_fixture(file,true);
         auto b=probe_fast_edit_metadata(file);
         require(b.header_and_lookup_valid && !b.metadata_layout_candidate &&

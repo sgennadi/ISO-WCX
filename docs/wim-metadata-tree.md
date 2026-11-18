@@ -86,6 +86,29 @@ This still does NOT validate the full WIM integrity stream, hardlink
 semantics, ACLs, resource refcounts or atomic metadata serialization.
 The direct metadata writer remains DISABLED.
 
+## Stage 3C: independent WIMGAPI-produced fixtures (read-only)
+
+The preceding tests generate their own WIM bytes, which can conceal a
+misunderstood descriptor, header, chunk size or image-level structure.
+The Windows-only native regression
+`wim_real_wimgapi_xpress_lzx_sha1_read_only` now uses **Windows WIMGAPI
+WIMCreateFile and WIMCaptureImage** to capture a disposable directory twice:
+once with XPRESS and once with LZX. The real XPRESS image is audited
+without WIMGAPI mount/apply; the decoder must verify metadata SHA-1,
+resolve stream resources and validate all bounded data hashes. The LZX
+image must not be decoded by the XPRESS path or misreported as verified.
+
+The regression also compares the entire original WIM byte sequence
+before and after its read-only audit. Both images are generated and
+deleted within the isolated CI scratch directory. The test is independent
+of Total Commander and never touches an existing user's WIM.
+
+A successful WIMGAPI-generated fixture is still not a substitute for
+real-world multi-index 7-GiB `install.wim` files, AD ACL/ADS/hardlink
+coverage, different servicing generations, solid/ESD/SWM, integrity
+tables or unexpected compression variants. No direct metadata writer
+is enabled by this stage.
+
 Before enabling fast mkdir/delete, implement independent metadata decompression,
 cross-reference every original stream hash against resource descriptors,
 support the full Windows metadata forms, then perform staged atomic updates,
