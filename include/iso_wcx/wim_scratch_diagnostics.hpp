@@ -150,6 +150,11 @@ inline bool retry_vanished_private_directory(
                 if(missing(directory))return true;
                 // A successful Win32 disposition may still be pending until
                 // a separate delete-sharing directory handle closes.
+            } else if(failure==ERROR_FILE_NOT_FOUND ||
+                      failure==ERROR_PATH_NOT_FOUND) {
+                // Another thread may have completed deletion between the
+                // attribute probe and RemoveDirectoryW. Confirm it is gone.
+                return missing(directory);
             } else if(failure!=ERROR_DIR_NOT_EMPTY &&
                       failure!=ERROR_DELETE_PENDING &&
                       failure!=ERROR_ACCESS_DENIED &&
