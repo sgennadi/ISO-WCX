@@ -765,12 +765,56 @@ int wmain(int argc,wchar_t** argv) {
             }
             if(!clean_wim_workspaces())return 40;
         }
-        // WCX callback registration may happen on another thread than packing.
+        // The user may leave a WIM open in the active TC panel, then
+        // press F5. A prior PK_TEST/EXTRACT also lazily reloads WIMGAPI
+        // image handles. Both idle and cached readers must stop blocking
+        // source replacement before PackFilesW begins.
+        OpenW still_open{};
+        still_open.ArcName=packed.data();
+        const HANDLE kept_panel=open(&still_open);
+        if(!kept_panel || still_open.OpenResult!=0)return 66;
+        bool tested_file=false;
+        for(unsigned n=0;n<100000u;++n) {
+            HeaderExW listed{};
+            const int result=read(kept_panel,&listed);
+            if(result==10)break;
+            if(result!=0){close(kept_panel);return 67;}
+            const bool wanted=std::wstring_view(listed.FileName)==
+                              L"image1\\HELLO.TXT";
+            const int done=process(kept_panel,wanted?1:0,nullptr,nullptr);
+            if(done!=0){close(kept_panel);return 68;}
+            if(wanted){tested_file=true;break;}
+        }
+        if(!tested_file){close(kept_panel);return 69;}
+        // Still-open WIMGAPI reader can now be cached on this panel. An F5
+        // on the SAME archive must close it without discarding the listing.
         set_progress(INVALID_HANDLE_VALUE,&count_pack_progress);
         int packed_result=-1;
         std::thread worker([&]{packed_result=pack(packed.data(),sub.data(),src.data(),add_list,0);});
         worker.join();
         set_progress(INVALID_HANDLE_VALUE,nullptr);
+        // After a successful F5 the old list is stale; extraction through
+        // it must refuse a changed source identity, not read wrong bytes.
+        if(packed_result==0) {
+            bool stale_refused=false;
+            for(unsigned n=0;n<100000u;++n) {
+                HeaderExW listed{};
+                const int result=read(kept_panel,&listed);
+                if(result==10)break;
+                if(result!=0){close(kept_panel);return 70;}
+                const bool wanted=std::wstring_view(listed.FileName)==
+                                  L"image1\\ADDED.TXT";
+                const int done=process(kept_panel,wanted?1:0,nullptr,nullptr);
+                if(wanted){stale_refused=done!=0;break;}
+                if(done!=0){close(kept_panel);return 71;}
+            }
+            if(!stale_refused) {
+                std::cerr<<"WIM stale panel read was not rejected after F5\n";
+                close(kept_panel);
+                return 72;
+            }
+        }
+        close(kept_panel);
         if(packed_result!=0){std::cerr<<"WIM PackFilesW returned "<<packed_result<<"\n";report_ci_wim_failure();return 21;}
         if(!clean_wim_workspaces())return 40;
         if(!pack_progress_calls.load())return 26;
