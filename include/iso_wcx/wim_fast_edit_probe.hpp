@@ -96,7 +96,8 @@ inline FastEditProbe probe_fast_edit_metadata(const std::filesystem::path& file)
     const auto lookup_offset = le64(lookup + 8);
     const auto lookup_original = le64(lookup + 16);
     if (!lookup_length || lookup_length > (128u << 20) ||
-        lookup_length % 50u != 0 || lookup_flags != 0 ||
+        lookup_length % 50u != 0 ||
+        (lookup_flags != 0 && lookup_flags != 0x02u) ||
         lookup_length != lookup_original ||
         !inside(lookup_offset, lookup_length, actual) || lookup_offset < header_size)
         return invalid("WIM lookup table is unsupported or outside file");
