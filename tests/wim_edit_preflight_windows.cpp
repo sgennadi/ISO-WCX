@@ -53,6 +53,35 @@ int wmain() {
             iso_wcx::wim_preflight::ImageLease after_release(alias,locks);
         }
 
+        // A simulated registration exercises safe, path-free diagnostics.
+        // It does not insert a mount into WIMMount or affect a real WIM.
+        iso_wcx::wim_preflight::MountedInfo fake{};
+        fake.ImageIndex=2;
+        fake.MountFlags=4;
+        const auto assign_mount=[&](const fs::path& path) {
+            const auto value=path.wstring();
+            if(value.size()>=MAX_PATH)
+                throw std::runtime_error("fixture mount path too long");
+            std::fill(std::begin(fake.MountPath),
+                      std::end(fake.MountPath),L'\0');
+            std::copy(value.begin(),value.end(),fake.MountPath);
+        };
+        assign_mount(root);
+        const auto present=iso_wcx::wim_preflight::
+            mount_registration_reason(fake,"path");
+        if(present.find("mount_directory=present")==std::string::npos ||
+           present.find("match=path")==std::string::npos ||
+           present.find("image_index=2")==std::string::npos ||
+           present.find("mount_flags=4")==std::string::npos ||
+           present.find(root.filename().string())!=std::string::npos)
+            throw std::runtime_error("mount registration status leaked path or lost details");
+        assign_mount(root/L"missing-mount");
+        const auto missing=iso_wcx::wim_preflight::
+            mount_registration_reason(fake,"file-id");
+        if(missing.find("mount_directory=missing")==std::string::npos ||
+           missing.find("match=file-id")==std::string::npos)
+            throw std::runtime_error("missing WIM mount directory not classified");
+
         // Actual system API, but no DISM mount is created or modified.
         HMODULE system=LoadLibraryExW(
             L"wimgapi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
