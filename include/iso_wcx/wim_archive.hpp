@@ -30,6 +30,13 @@ public:
     [[nodiscard]] const std::vector<Item>& items() const noexcept { return entries_; }
     [[nodiscard]] const std::string& format() const noexcept { return format_; }
 
+    // Release read-only WIMGAPI handles before a WCX edit/rename. Image
+    // metadata remains cached for panel listing; read() lazily reopens
+    // sources only if they still match the original file identities.
+    // Also called after initial enumeration so idle TC panels don't lock
+    // WIM files against atomic replacement.
+    void release_handles_for_edit();
+
     // Read the entire original file through WIMGAPI to the WCX transaction
     // callback. false means the WCX progress callback requested cancellation.
     bool read(std::size_t item_index,

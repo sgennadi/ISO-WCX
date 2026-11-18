@@ -1356,6 +1356,15 @@ Disc::Disc(std::filesystem::path image,
     }
 }
 
+// Panels retain a metadata listing, not an exclusive WIMGAPI source lease.
+// Before F5, close all idle image-file handles in this process. Extracting
+// on a different thread is serialized by WimArchive's read mutex.
+void Disc::release_wim_handles_for_edit() {
+#ifdef _WIN32
+    if(wim_archive_) wim_archive_->release_handles_for_edit();
+#endif
+}
+
 bool Disc::copy(std::size_t index, const std::filesystem::path& output,
                 const std::function<bool(std::uint64_t)>& progress, bool test_only) const {
     require(index<entries_.size(),"invalid image entry index");

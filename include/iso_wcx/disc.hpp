@@ -64,6 +64,9 @@ public:
                   ArchiveOpenProgress open_progress = {});
     [[nodiscard]] const std::vector<Item>& items() const noexcept { return entries_; }
     [[nodiscard]] const std::string& format() const noexcept { return format_; }
+    // Close idle native WIM file handles before a WCX write. No-op for ISO
+    // and other formats, and never invalidates the cached panel listing.
+    void release_wim_handles_for_edit();
     // Returns false when cancelled. Throws on damaged source or I/O error.
     bool copy(std::size_t index, const std::filesystem::path& output,
               const std::function<bool(std::uint64_t)>& progress = {}, bool test_only = false) const;
