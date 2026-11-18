@@ -171,6 +171,31 @@ def main(editor,inspector):
         refuse(corrupt=True,payload=b'updated')
         refuse(vrs=False,payload=b'updated')
         refuse(operation='cancel',name='hello',payload=b'updated')
+
+        # A malformed or non-Type-1 LVD long_ad must not be interpreted
+        # as an arbitrary physical FSD sector. The diagnostic must identify
+        # the exact unsupported field without changing the image.
+        for field,value,reason in (
+            ('extent_type',0x40000200,'file-set extent type (type=1'),
+            ('extent_size',320,'file-set descriptor length (bytes=320'),
+            ('partition_reference',1,'file-set partition reference (number=1'),
+        ):
+            current=bytearray(base_image())
+            lvd=261*B
+            if field=='partition_reference':
+                p16(current,lvd+256,value)
+            else:
+                p32(current,lvd+248,value)
+            checksum(current,lvd)
+            image.write_bytes(current)
+            replacement.write_bytes(b'changed')
+            result=run(editor,image,'add','hello',replacement,success=False)
+            details=(result.stdout+result.stderr).decode(errors='replace')
+            assert reason in details,(field,details)
+            assert image.read_bytes()==current,('FSD rejection changed image',field)
+            assert not list(root.glob('.iso-wcx-edit-*')),(
+                'FSD rejection leaked staging',field)
+
         print('PASS: UDF Type-1 FE/EFE, inline & shortAD growth/shrink, nested '
               'paths, FID deletions, both .udf/.iso dispatch, rejection rollback')
 

@@ -360,9 +360,27 @@ public:
             reserved_.push_back({{std::uint64_t(integrity_location)*block,
                                    integrity_length},0});
         }
-        const auto fsd_size=u32(lvd,248)&0x3fffffffu;
-        need(fsd_size>=416 && fsd_size<=block && u16(lvd,256)==0,
-             "unsupported UDF file-set mapping");
+        // The Logical Volume Contents Use field is a long_ad. Its top
+        // two extent-length bits describe recording status, not size.
+        // Reject unmapped/unrecorded or redirected FSD extents before
+        // interpreting their logical location as a physical Type-1 sector.
+        const auto fsd_extent=u32(lvd,248);
+        const auto fsd_type=fsd_extent>>30u;
+        const auto fsd_size=fsd_extent&0x3fffffffu;
+        const auto fsd_partition_ref=u16(lvd,256);
+        if(fsd_type!=0)
+            throw EditUnsupported(
+                "unsupported UDF file-set extent type (type="+
+                std::to_string(fsd_type)+"; only recorded extent 0 writable)");
+        if(fsd_size<416 || fsd_size>block)
+            throw EditUnsupported(
+                "unsupported UDF file-set descriptor length (bytes="+
+                std::to_string(fsd_size)+"; expected 416..2048)");
+        if(fsd_partition_ref!=0)
+            throw EditUnsupported(
+                "unsupported UDF file-set partition reference (number="+
+                std::to_string(fsd_partition_ref)+
+                "; only the single physical Type-1 partition 0 writable)");
         const auto fsd=read(physical(u32(lvd,252)),block);
         tag_check(fsd,0,256);
         reserved_.push_back({{256*block,block},0});
@@ -2398,11 +2416,14 @@ void edit_udf(const std::filesystem::path& image,
               const EditStageValidator& validate_stage,
               const EditProtectedRanges& protected_ranges) {
     edit_tick(progress);
-    const Disc before(image);
-    need(before.format()=="UDF","not a plain readable UDF volume");
     need(!allow_bridge || bool(validate_stage),
          "ISO/UDF Bridge writes require a staged ISO/boot validator");
+    // Run the strict Type-1 write preflight before the permissive read-only
+    // Disc parser. This preserves the precise FSD mapping failure reason
+    // even when Disc's general UDF reader cannot resolve that map.
     Type1 volume(image,allow_bridge);
+    const Disc before(image);
+    need(before.format()=="UDF","not a plain readable UDF volume");
     need(!allow_bridge || !protected_ranges.empty(),
          "ISO/UDF Bridge metadata writes need protected ISO ranges");
     volume.protect_external_ranges(protected_ranges);

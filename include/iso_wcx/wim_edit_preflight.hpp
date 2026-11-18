@@ -51,6 +51,40 @@ struct MountedInfo {
 };
 static_assert(sizeof(MountedInfo)==2*sizeof(WCHAR)*MAX_PATH+2*sizeof(DWORD));
 
+// Diagnostic only. A missing mount directory may indicate a stale WIMMount
+// registration, but does NOT prove that it is safe to write the source WIM.
+// Never return paths, usernames or image contents in an edit failure report.
+inline std::string mount_registration_reason(
+    const MountedInfo& entry,const char* match) {
+    const auto end=std::find(std::begin(entry.MountPath),
+                             std::end(entry.MountPath),L'\0');
+    std::string mount_directory;
+    if(end==std::begin(entry.MountPath))
+        mount_directory="empty";
+    else if(end==std::end(entry.MountPath))
+        mount_directory="invalid";
+    else {
+        const DWORD attr=GetFileAttributesW(entry.MountPath);
+        if(attr!=INVALID_FILE_ATTRIBUTES)
+            mount_directory=(attr&FILE_ATTRIBUTE_DIRECTORY)?
+                "present":"not-a-directory";
+        else {
+            const DWORD error=GetLastError();
+            if(error==ERROR_FILE_NOT_FOUND || error==ERROR_PATH_NOT_FOUND)
+                mount_directory="missing";
+            else if(error==ERROR_ACCESS_DENIED)
+                mount_directory="access-denied";
+            else
+                mount_directory="unavailable";
+        }
+    }
+    return "WIM edit refused: image is registered as mounted (match="+
+           std::string(match)+", mount_directory="+mount_directory+
+           ", image_index="+std::to_string(entry.ImageIndex)+
+           ", mount_flags="+std::to_string(entry.MountFlags)+
+           "; check DISM/WIMMount read-only before any cleanup)";
+}
+
 // Shared, read-only mount-state preflight adapted from DISM-GUI's Wim360Reader.
 // Never unmount, repair, discard, modify or delete an external DISM mount.
 inline void reject_registered_mounts(HMODULE wimgapi,const fs::path& image) {
@@ -95,7 +129,7 @@ inline void reject_registered_mounts(HMODULE wimgapi,const fs::path& image) {
         try {
             if(_wcsicmp(normalized.c_str(),
                 fs::absolute(registered).lexically_normal().c_str())==0)
-                throw EditUnsupported("WIM edit refused: image is registered as mounted");
+                throw EditUnsupported(mount_registration_reason(entry,"path"));
         }catch(const EditUnsupported&) {
             throw;
         }catch(const fs::filesystem_error&) {
@@ -113,7 +147,7 @@ inline void reject_registered_mounts(HMODULE wimgapi,const fs::path& image) {
             // match above can be established without modifying anything.
         }
         if(same_file)
-            throw EditUnsupported("WIM edit refused: image is registered as mounted");
+            throw EditUnsupported(mount_registration_reason(entry,"file-id"));
     }
 }
 
