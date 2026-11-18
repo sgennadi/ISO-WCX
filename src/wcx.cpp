@@ -59,6 +59,11 @@ struct State {
     ChangeA change_a=nullptr;
     ChangeW change_w=nullptr;
 };
+// Registered WIM panel instances only. CloseArchive unregisters under the
+// same lock; a concurrent F5 cannot dereference a freed State. Active
+// extraction is serialized by WimArchive::read_mutex_.
+std::mutex open_wim_states_mutex;
+std::vector<State*> open_wim_states;
 
 // CanYouHandleThisFile is invoked BEFORE OpenArchive by some TC versions.
 // Constructing Disc here used to enumerate every WIM index twice without
@@ -226,6 +231,10 @@ WCX_EXPORT HANDLE __stdcall OpenArchiveW(OpenW* d) {
                 throw iso_wcx::ArchiveOpenCancelled{};
             d->OpenResult=0;
             diagnostic.complete(0);
+            if(is_wim_extension(image)) {
+                std::lock_guard<std::mutex> lock(open_wim_states_mutex);
+                open_wim_states.push_back(state.get());
+            }
             return reinterpret_cast<HANDLE>(state.release());
         }catch(const iso_wcx::ArchiveOpenCancelled&) {
             d->OpenResult=E_EABORTED;
@@ -263,6 +272,10 @@ WCX_EXPORT HANDLE __stdcall OpenArchive(OpenA* d) {
                 throw iso_wcx::ArchiveOpenCancelled{};
             d->OpenResult=0;
             diagnostic.complete(0);
+            if(is_wim_extension(image)) {
+                std::lock_guard<std::mutex> lock(open_wim_states_mutex);
+                open_wim_states.push_back(state.get());
+            }
             return reinterpret_cast<HANDLE>(state.release());
         }catch(const iso_wcx::ArchiveOpenCancelled&) {
             d->OpenResult=E_EABORTED;
@@ -308,6 +321,13 @@ WCX_EXPORT int __stdcall ProcessFile(HANDLE handle,int operation,char* path,char
 WCX_EXPORT int __stdcall CloseArchive(HANDLE handle) {
     auto* state=reinterpret_cast<State*>(handle);
     if(state){
+        {
+            std::lock_guard<std::mutex> lock(open_wim_states_mutex);
+            open_wim_states.erase(
+                std::remove(open_wim_states.begin(),
+                            open_wim_states.end(),state),
+                open_wim_states.end());
+        }
         iso_wcx::diagnostics::Operation diagnostic(
             "close",state->archive_path,
             static_cast<unsigned>(std::min<std::size_t>(state->cursor,100000)));
@@ -446,6 +466,20 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
                 if(pa){auto narrow=to_ansi(label);return pa(narrow.data(),pct)!=0;}
                 return true;
             };
+            // OpenArchive can leave multiple WIM tabs alive in the same TC
+            // process. All idle WIMGAPI readers for this source (including
+            // hardlink aliases) must release their source handles BEFORE
+            // the atomic-replacement DELETE-sharing probe runs.
+            // Active extraction waits at the per-archive read mutex.
+            {
+                std::lock_guard<std::mutex> lock(open_wim_states_mutex);
+                for(auto* open:open_wim_states) {
+                    std::error_code ec;
+                    if(std::filesystem::equivalent(
+                           open->archive_path,image,ec) && !ec)
+                        open->disc.release_wim_handles_for_edit();
+                }
+            }
             iso_wcx::edit_wim(image,changes,progress,status);
         }
         else iso_wcx::edit_fat(image,changes,progress);
