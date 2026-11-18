@@ -536,11 +536,15 @@ void remove_tree(const std::filesystem::path& path,
             // and give the *same private directory* a bounded final retry.
             // Never infer success from vanished counts or Win32 145: only
             // a successful NTFS unlink / confirmed absent path may return.
+            const bool vanished_only=state.scan_error==0 &&
+                state.survivors>0 && state.survivors<32u &&
+                state.survivors==state.vanished;
             if(wim_scratch::retry_vanished_private_directory(path,state))
                 return;
             const auto reason=std::string(
                 "WIM scratch deletion remained pending after bounded cleanup")+
-                state.counts();
+                state.counts()+
+                (vanished_only?" (vanished_retry_exhausted=1)":"");
             SetLastError(error);
             checked(false,reason.c_str());
         }
