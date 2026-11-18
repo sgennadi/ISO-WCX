@@ -2416,11 +2416,14 @@ void edit_udf(const std::filesystem::path& image,
               const EditStageValidator& validate_stage,
               const EditProtectedRanges& protected_ranges) {
     edit_tick(progress);
-    const Disc before(image);
-    need(before.format()=="UDF","not a plain readable UDF volume");
     need(!allow_bridge || bool(validate_stage),
          "ISO/UDF Bridge writes require a staged ISO/boot validator");
+    // Run the strict Type-1 write preflight before the permissive read-only
+    // Disc parser. This preserves the precise FSD mapping failure reason
+    // even when Disc's general UDF reader cannot resolve that map.
     Type1 volume(image,allow_bridge);
+    const Disc before(image);
+    need(before.format()=="UDF","not a plain readable UDF volume");
     need(!allow_bridge || !protected_ranges.empty(),
          "ISO/UDF Bridge metadata writes need protected ISO ranges");
     volume.protect_external_ranges(protected_ranges);
