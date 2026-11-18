@@ -344,12 +344,14 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
 void remove_tree(std::filesystem::path path,
                  const EditProgress& progress = {},
                  bool posix_delete = false) {
-    // Switch once at the top of each recursive call. A WIM applied on NTFS
-    // can contain names that the DOS Win32 parser silently trims (trailing
-    // dots/spaces) or paths beyond MAX_PATH. Enumeration of those names
-    // succeeds but subsequent GetFileAttributesW reports FILE_NOT_FOUND.
-    // Use a literal path for *every* probe, ACL repair and unlink.
-    path=wim_scratch::literal_private_ntfs_path(path);
+    // Literal paths are required ONLY for disposal of our private scratch,
+    // never for a user's selected WIM file/directory removal or replacement.
+    // A WIM applied on NTFS can contain names that the DOS Win32 parser
+    // trims (trailing dots/spaces) or paths beyond MAX_PATH. Enumeration
+    // sees those names, while normal GetFileAttributesW says FILE_NOT_FOUND.
+    // Once in cleanup mode, retain the literal prefix in recursive paths.
+    if(posix_delete)
+        path=wim_scratch::literal_private_ntfs_path(path);
     constexpr unsigned max_cleanup_passes=10;
     const auto retry_wait=[](unsigned pass) {
         // Only 145/303 are retried; bounded waiting gives WIMGAPI/AV time
