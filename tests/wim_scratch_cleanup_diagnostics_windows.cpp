@@ -188,6 +188,7 @@ int wmain() {
     }
     const auto old_namespace=iso_wcx::wim_scratch::probe_directory(misleading);
     if(old_namespace.survivors!=2 || old_namespace.vanished!=2 ||
+       old_namespace.trailing_dot_or_space!=2 ||
        old_namespace.scan_error!=0) {
         std::cerr<<"Synthetic Win32-normalized name mismatch: "
                  <<old_namespace.counts()<<"\n";
@@ -195,6 +196,7 @@ int wmain() {
     }
     const auto literal_namespace=iso_wcx::wim_scratch::probe_directory(literal);
     if(literal_namespace.survivors!=2 || literal_namespace.files!=2 ||
+       literal_namespace.trailing_dot_or_space!=2 ||
        literal_namespace.vanished!=0 || literal_namespace.scan_error!=0) {
         std::cerr<<"Literal namespace failed to resolve NTFS files: "
                  <<literal_namespace.counts()<<"\n";
