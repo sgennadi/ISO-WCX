@@ -81,6 +81,39 @@ def base_image(*, layout='embedded', nested=False, efe=False, overlap=False):
         fe(image,305,b'NESTED',efe=efe)
     return image
 
+def fsd_two_sector_image(*, tail='zero'):
+    """A valid FSD sequence occupying two logical 2048-byte blocks.
+
+    Relocate the FSD to a free partition extent: the original sector 301
+    contains the ROOT FE and MUST NOT be treated as FSD padding.
+    """
+    image = bytearray(base_image())
+    old = 300*B
+    new = 340*B  # logical sector 40 of partition 300
+    image[new:new+B] = image[old:old+B]
+    image[old:old+B] = bytes(B)
+    p32(image, new+12, 40)
+    checksum(image, new)
+    lvd = 261*B
+    p32(image, lvd+248, 2*B)
+    p32(image, lvd+252, 40)
+    checksum(image, lvd)
+    if tail == 'terminator':
+        second = bytearray(B)
+        p16(second, 0, 8)
+        p16(second, 2, 2)
+        p32(second, 12, 41)
+        checksum(second, 0)
+        image[new+B:new+2*B] = second
+    elif tail == 'duplicate-fsd':
+        image[new+B:new+2*B] = image[new:new+B]
+    elif tail == 'garbage':
+        image[new+B] = 0xff
+    elif tail != 'zero':
+        raise ValueError(tail)
+    return image
+
+
 def run(exe,*args,success=True):
     proc=subprocess.run([str(exe),*map(str,args)],
                         capture_output=True,timeout=45)
@@ -130,6 +163,21 @@ def main(editor,inspector):
                 other=root/'udf_iso_readback'
                 check_disc(inspector,via_iso,other)
                 assert (other/path).read_bytes()==data
+        # A 4096-byte LVD long_ad is a two-sector FSD sequence, not
+        # a 4096-byte File Set Descriptor. Both sectors must be protected.
+        for tail in ('zero', 'terminator'):
+            original = fsd_two_sector_image(tail=tail)
+            image.write_bytes(original)
+            replacement.write_bytes(b'4096-byte FSD sequence works')
+            run(editor, image, 'add', 'hello', replacement)
+            changed = image.read_bytes()
+            assert changed != original, ('two-sector edit missing', tail)
+            assert changed[340*B:342*B] == original[340*B:342*B], (
+                'FSD terminator/padding overwritten', tail)
+            out = root / f'fsd-4096-{tail}'
+            check_disc(inspector, image, out)
+            assert (out / 'hello').read_bytes() == replacement.read_bytes(), tail
+
         for nested in (False,True):
             image.write_bytes(base_image(nested=nested))
             original=image.read_bytes()
@@ -171,6 +219,29 @@ def main(editor,inspector):
         refuse(corrupt=True,payload=b'updated')
         refuse(vrs=False,payload=b'updated')
         refuse(operation='cancel',name='hello',payload=b'updated')
+
+        # A multi-block FSD extent may contain only a terminating
+        # descriptor or all-zero padding. Never mistake an extra FSD,
+        # arbitrary data or an out-of-partition extent for free space.
+        for tail in ('garbage', 'duplicate-fsd'):
+            current = fsd_two_sector_image(tail=tail)
+            image.write_bytes(current)
+            replacement.write_bytes(b'rejected')
+            result = run(editor, image, 'add', 'hello', replacement,
+                         success=False)
+            detail = (result.stdout + result.stderr).decode(errors='replace')
+            assert 'file-set sequence tail' in detail, (tail, detail)
+            assert image.read_bytes() == current, ('bad FSD changed', tail)
+            assert not list(root.glob('.iso-wcx-edit-*')), tail
+        current = fsd_two_sector_image()
+        p32(current, 261*B+252, 249)  # last partition block, needs two
+        checksum(current, 261*B)
+        image.write_bytes(current)
+        result = run(editor, image, 'add', 'hello', replacement, success=False)
+        detail = (result.stdout + result.stderr).decode(errors='replace')
+        assert 'file-set sequence exceeds Type-1 partition' in detail, detail
+        assert image.read_bytes() == current
+        assert not list(root.glob('.iso-wcx-edit-*'))
 
         # A malformed or non-Type-1 LVD long_ad must not be interpreted
         # as an arbitrary physical FSD sector. The diagnostic must identify
