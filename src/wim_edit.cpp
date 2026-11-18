@@ -530,6 +530,14 @@ void remove_tree(const std::filesystem::path& path,
             // A DELETE-open probe distinguishes lingering handles, DACLs
             // and delete-pending names without modifying any survivor.
             const auto state=wim_scratch::probe_directory(path);
+            // WIMGAPI and antivirus may drop delete-sharing handles while
+            // the final snapshot is being taken. If ALL observed names
+            // vanished during that snapshot, close its enumeration handle
+            // and give the *same private directory* a bounded final retry.
+            // Never infer success from vanished counts or Win32 145: only
+            // a successful NTFS unlink / confirmed absent path may return.
+            if(wim_scratch::retry_vanished_private_directory(path,state))
+                return;
             const auto reason=std::string(
                 "WIM scratch deletion remained pending after bounded cleanup")+
                 state.counts();
