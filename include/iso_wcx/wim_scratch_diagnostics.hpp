@@ -125,8 +125,9 @@ inline bool retry_vanished_private_directory(
     for(unsigned pass=0;pass<max_attempts;++pass) {
         const DWORD attr=GetFileAttributesW(directory.c_str());
         if(attr==INVALID_FILE_ATTRIBUTES) {
-            if(missing(directory))return true;
             const DWORD code=GetLastError();
+            if(code==ERROR_FILE_NOT_FOUND || code==ERROR_PATH_NOT_FOUND)
+                return true;
             // The last close of a delete-sharing scan handle can leave a
             // transient DELETE_PENDING/ACCESS_DENIED pathname. Never
             // report success based on either code alone.
@@ -139,14 +140,20 @@ inline bool retry_vanished_private_directory(
             // POSIX disposition removes an empty directory name immediately
             // even when a FILE_SHARE_DELETE reader is still open. Legacy
             // RemoveDirectoryW is a safe fallback when POSIX is unavailable.
-            if(try_posix_unlink_private_entry(directory,true) ||
-               RemoveDirectoryW(directory.c_str())) {
-                if(missing(directory))return true;
+            bool removed=try_posix_unlink_private_entry(directory,true);
+            DWORD failure=ERROR_SUCCESS;
+            if(!removed) {
+                removed=RemoveDirectoryW(directory.c_str())!=FALSE;
+                if(!removed)failure=GetLastError();
             }
-            const DWORD code=GetLastError();
-            if(code!=ERROR_DIR_NOT_EMPTY && code!=ERROR_DELETE_PENDING &&
-               code!=ERROR_ACCESS_DENIED && code!=ERROR_SHARING_VIOLATION &&
-               code!=ERROR_SUCCESS)
+            if(removed) {
+                if(missing(directory))return true;
+                // A successful Win32 disposition may still be pending until
+                // a separate delete-sharing directory handle closes.
+            } else if(failure!=ERROR_DIR_NOT_EMPTY &&
+                      failure!=ERROR_DELETE_PENDING &&
+                      failure!=ERROR_ACCESS_DENIED &&
+                      failure!=ERROR_SHARING_VIOLATION)
                 return false;
         }
         if(pass+1<max_attempts)Sleep(std::min(700u,120u*(pass+1u)));
