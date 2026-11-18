@@ -8,6 +8,7 @@
 #include <string>
 #include <system_error>
 #include <algorithm>
+#include "iso_wcx/wim_scratch_delete.hpp"
 
 // Read-only and path-free diagnostics for a private ISO-WCX WIM scratch
 // directory. Only the immediate children are inspected; no links are
@@ -94,6 +95,63 @@ inline Snapshot probe_directory(const fs::path& directory) noexcept {
         state.scan_error=ERROR_GEN_FAILURE;
     }
     return state;
+}
+
+// On NTFS, a FindFirstFile enumeration can report a name that has become
+// unavailable by the time GetFileAttributesW opens it. At the same moment,
+// RemoveDirectoryW may still report ERROR_DIR_NOT_EMPTY (145). This is NOT
+// proof that the directory is gone. When every bounded probe entry vanished,
+// close the probe iterator (above) and retry the exact private directory,
+// accepting completion ONLY when Windows confirms the pathname is absent.
+//
+// Never sweep children here, do not follow reparse points, do not modify
+// ACLs and do not touch the WIM source or any WIMMount registration.
+inline bool retry_vanished_private_directory(
+    const fs::path& directory,const Snapshot& probe,
+    unsigned max_attempts=8) noexcept {
+    if(probe.scan_error!=0 || probe.survivors==0 ||
+       probe.survivors>=32u || probe.vanished!=probe.survivors ||
+       probe.files || probe.folders || probe.reparse || probe.readonly ||
+       probe.delete_open_ok || probe.sharing || probe.access_denied ||
+       probe.delete_pending || probe.other ||
+       max_attempts==0 || max_attempts>16)
+        return false;
+    const auto missing=[](const fs::path& value) noexcept {
+        if(GetFileAttributesW(value.c_str())!=INVALID_FILE_ATTRIBUTES)
+            return false;
+        const DWORD error=GetLastError();
+        return error==ERROR_FILE_NOT_FOUND || error==ERROR_PATH_NOT_FOUND;
+    };
+    for(unsigned pass=0;pass<max_attempts;++pass) {
+        const DWORD attr=GetFileAttributesW(directory.c_str());
+        if(attr==INVALID_FILE_ATTRIBUTES) {
+            if(missing(directory))return true;
+            const DWORD code=GetLastError();
+            // The last close of a delete-sharing scan handle can leave a
+            // transient DELETE_PENDING/ACCESS_DENIED pathname. Never
+            // report success based on either code alone.
+            if(code!=ERROR_DELETE_PENDING && code!=ERROR_ACCESS_DENIED)
+                return false;
+        } else {
+            if(!(attr&FILE_ATTRIBUTE_DIRECTORY) ||
+               (attr&FILE_ATTRIBUTE_REPARSE_POINT))
+                return false;
+            // POSIX disposition removes an empty directory name immediately
+            // even when a FILE_SHARE_DELETE reader is still open. Legacy
+            // RemoveDirectoryW is a safe fallback when POSIX is unavailable.
+            if(try_posix_unlink_private_entry(directory,true) ||
+               RemoveDirectoryW(directory.c_str())) {
+                if(missing(directory))return true;
+            }
+            const DWORD code=GetLastError();
+            if(code!=ERROR_DIR_NOT_EMPTY && code!=ERROR_DELETE_PENDING &&
+               code!=ERROR_ACCESS_DENIED && code!=ERROR_SHARING_VIOLATION &&
+               code!=ERROR_SUCCESS)
+                return false;
+        }
+        if(pass+1<max_attempts)Sleep(std::min(700u,120u*(pass+1u)));
+    }
+    return missing(directory);
 }
 }
 #endif
