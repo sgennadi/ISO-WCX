@@ -114,6 +114,33 @@ bool end_of_find(DWORD code) noexcept {
            code == ERROR_NO_MORE_FILES ||
            code == ERROR_NO_MORE_ITEMS;
 }
+// File identity is checked before reopening an idle panel reader. Otherwise
+// F5 could atomically replace a WIM while the old panel still has cached
+// index paths; a subsequent extract could silently read the wrong version.
+struct WimSourceIdentity {
+    DWORD volume{}, index_high{}, index_low{};
+    std::uint64_t size{};
+    LONGLONG change_time{};
+    bool operator==(const WimSourceIdentity&) const = default;
+};
+WimSourceIdentity snapshot_wim_source(const std::filesystem::path& source) {
+    HANDLE raw=CreateFileW(source.c_str(),FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+    if(!is_valid(raw))fail_windows("inspect WIM listing source identity");
+    struct Guard { HANDLE h;~Guard(){CloseHandle(h);} } guard{raw};
+    BY_HANDLE_FILE_INFORMATION info{};
+    FILE_BASIC_INFO basic{};
+    if(!GetFileInformationByHandle(raw,&info) ||
+       !GetFileInformationByHandleEx(raw,FileBasicInfo,&basic,sizeof(basic)))
+        fail_windows("read WIM listing source identity");
+    require(!(info.dwFileAttributes&
+              (FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)),
+            "WIM source changed to a directory or reparse point");
+    return {info.dwVolumeSerialNumber,info.nFileIndexHigh,info.nFileIndexLow,
+        (std::uint64_t(info.nFileSizeHigh)<<32)|
+        std::uint64_t(info.nFileSizeLow),basic.ChangeTime.QuadPart};
+}
 } // namespace
 
 struct WimArchive::Impl {
@@ -131,6 +158,9 @@ struct WimArchive::Impl {
     HMODULE module = nullptr;
     HANDLE archive = nullptr;
     std::vector<HANDLE> images;
+    std::vector<std::filesystem::path> source_parts;
+    std::vector<WimSourceIdentity> source_identities;
+    std::wstring temporary_directory;
     CloseFn close = nullptr;
     CreateFileFn create = nullptr;
     SetTempFn set_temp = nullptr;
@@ -162,11 +192,18 @@ struct WimArchive::Impl {
             throw;
         }
     }
-    ~Impl() noexcept {
-        if (close) {
-            for (HANDLE image : images) if (is_valid(image)) close(image);
-            if (is_valid(archive)) close(archive);
+    void close_idle_handles() noexcept {
+        if (!close) return;
+        // Image handles first: they hold references to the archive.
+        for (auto& image : images) {
+            if(is_valid(image))close(image);
+            image=nullptr;
         }
+        if(is_valid(archive))close(archive);
+        archive=nullptr;
+    }
+    ~Impl() noexcept {
+        close_idle_handles();
         if (module) FreeLibrary(module);
     }
     struct CloseHandle {
@@ -194,6 +231,7 @@ WimArchive::WimArchive(const std::filesystem::path& image,
             !std::filesystem::is_symlink(image),
             "WIM input must be a regular non-symlink file");
     const auto parts = resolve_wim_parts(image);
+    api_->source_parts=parts;
     report(Phase::opening,0,0);
     const auto input = parts.front().wstring();
     require(!input.empty(), "invalid WIM archive path");
@@ -212,6 +250,7 @@ WimArchive::WimArchive(const std::filesystem::path& image,
             "Windows temporary directory is unavailable");
     if (!api_->set_temp(api_->archive, temporary.data()))
         fail_windows("WIMSetTemporaryPath failed");
+    api_->temporary_directory=temporary.data();
 
     for (std::size_t i = 1; i < parts.size(); ++i) {
         // WIM_REFERENCE_APPEND, register exact validated paths before loading metadata.
@@ -334,9 +373,19 @@ WimArchive::WimArchive(const std::filesystem::path& image,
         report(Phase::enumerating,index,count);
     }
     report(Phase::complete,count,count);
+    for(const auto& part:api_->source_parts)
+        api_->source_identities.push_back(snapshot_wim_source(part));
+    // Do not retain WIMGAPI handles after OpenArchive/metadata listing.
+    // Idle Total Commander panels must not prevent F5 from replacing WIM.
+    api_->close_idle_handles();
 }
 
 WimArchive::~WimArchive() = default;
+
+void WimArchive::release_handles_for_edit() {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    api_->close_idle_handles();
+}
 
 bool WimArchive::read(
     std::size_t item_index,
@@ -351,9 +400,43 @@ bool WimArchive::read(
             location.image_index <= api_->images.size(),
             "invalid WIM image index");
 
+    if (!is_valid(api_->archive)) {
+        // F5 may have changed the image while the user kept an old panel
+        // open. Never read cached paths from a different source inode.
+        require(api_->source_parts.size()==api_->source_identities.size() &&
+                !api_->source_parts.empty(),
+                "WIM listing source metadata missing");
+        for(std::size_t i=0;i<api_->source_parts.size();++i) {
+            if(!(snapshot_wim_source(api_->source_parts[i])==
+                 api_->source_identities[i]))
+                throw std::runtime_error(
+                    "WIM changed after panel listing; reopen the archive");
+        }
+        DWORD opened=0;
+        api_->archive=api_->create(api_->source_parts.front().c_str(),
+            GENERIC_READ,OPEN_EXISTING,0,0u,&opened);
+        if(!is_valid(api_->archive))
+            fail_windows("reopen WIM image for extraction");
+        if(!api_->set_temp(api_->archive,api_->temporary_directory.c_str()))
+            fail_windows("set WIM extraction temporary directory");
+        for(std::size_t i=1;i<api_->source_parts.size();++i)
+            if(!api_->reference(api_->archive,
+                api_->source_parts[i].c_str(),0x00010000u))
+                fail_windows("restore WIM split reference for extraction");
+        require(api_->count(api_->archive)==api_->images.size(),
+                "WIM image count changed since panel listing");
+    }
+    // Loading the image only on the first actual read avoids repeated
+    // WIMLoadImage for every F5 extraction. The next pack/delete suspends
+    // these cached handles again under read_mutex_.
+    HANDLE& loaded=api_->images[location.image_index-1u];
+    if(!is_valid(loaded)) {
+        loaded=api_->load(api_->archive,location.image_index);
+        if(!is_valid(loaded))
+            fail_windows("reload WIM index for extraction");
+    }
     // Empty WIM file resources may have no backing stream.
     if (file.size == 0) return true;
-    const HANDLE loaded = api_->images[location.image_index - 1];
     HANDLE stream = api_->create_file(loaded, location.image_path.c_str(),
                                       GENERIC_READ, OPEN_EXISTING, 0);
     if (!is_valid(stream))
