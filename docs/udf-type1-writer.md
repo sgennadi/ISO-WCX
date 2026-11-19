@@ -83,18 +83,29 @@ not universal UDF 1.02–2.60 editing.
   bootable/hybrid system-area rewriting.
 - 2048-byte logical sectors, one physical Type-1 partition map, validated AVDP,
   File Set Descriptor, LVID and descriptor tag CRC16/checksums.
-- New allocations require a consistent Unallocated Space Bitmap Descriptor
-  up to 8 MiB (including descriptors spanning multiple 2048-byte sectors)
-  and a closed LVID. The original descriptor CRC coverage is preserved; a
-  legal header-only CRC is not enlarged to cover the entire bitmap.
-  A free FE block and sufficient bitmap space are required for new files.
+- New allocations require exactly one independently validated UDF
+  unallocated-space representation and a closed LVID: either
+  (a) a Space Bitmap Descriptor (tag 264) up to 8 MiB, including
+  multi-sector maps, or (b) a single-block Unallocated Space Table Entry
+  (tag 263) with ordered, nonoverlapping type-1 ShortAD free runs.
+  The table writer uses a bounded virtual map in memory and writes only the
+  existing tag-263 table extent, updating its CRC; it NEVER fabricates a
+  tag-264 bitmap or assumes unreferenced zero data is free. All new ShortAD
+  runs must fit the original table's available descriptor bytes.
+  Bitmap tag CRC coverage is preserved for bitmap media; both formats
+  must agree with the LVID free-block count.
+  A free FE block and enough allocator-authorized space are mandatory.
   File data may use multiple noncontiguous ShortAD runs within available FE
   descriptor slots; parent-directory relocation still requires **one
   contiguous** extent. AED continuation writing, sparse extents and
   overlapping allocations remain unsupported.
 - No VAT, Metadata Partition, Sparable partition, hard links, unrecorded or
   sparse extents, AED-continuation allocation, conflicting allocator edits,
-  or symlink source files.
+  or symlink source files. A volume without either usable allocator,
+  one with only a Freed Space Table/Bitmap, or one whose tag-263 table
+  requires an allocation-extent continuation remains read-only for creation.
+  If new allocations fragment the free list beyond the current tag-263 table
+  capacity, the transaction aborts before committing any image changes.
 - A sibling temporary workspace on the **same filesystem** is mandatory.
   The writer first tries filesystem-level copy-on-write staging (Linux
   `FICLONE` or Windows `FSCTL_DUPLICATE_EXTENTS_TO_FILE`, only for aligned
