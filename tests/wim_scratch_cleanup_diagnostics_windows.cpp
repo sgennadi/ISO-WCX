@@ -4,6 +4,7 @@
 #endif
 #include "iso_wcx/wim_scratch_diagnostics.hpp"
 #include "iso_wcx/wim_scratch_delete.hpp"
+#include "iso_wcx/wim_scratch_acl.hpp"
 #include <windows.h>
 #include <filesystem>
 #include <fstream>
@@ -241,10 +242,76 @@ int wmain() {
        !RemoveDirectoryW(first.c_str()) ||
        !RemoveDirectoryW(deep.c_str()))return 61;
 
+    // Model Windows' domain-admin failure *without* modifying a real
+    // user's ACL, owner or WIMMount. When protected DACL propagation is
+    // denied, plain NO_INHERITANCE must succeed without an owner change.
+    {
+        unsigned calls=0,owners=0,opened=0;
+        const auto outcome=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [&](bool protect) -> DWORD {
+                ++calls;
+                return protect?ERROR_ACCESS_DENIED:ERROR_SUCCESS;
+            },
+            [&]() -> DWORD {++owners;return ERROR_SUCCESS;},
+            [&](bool) -> DWORD {++opened;return ERROR_SUCCESS;});
+        if(!outcome.ok()||outcome.protected_first!=ERROR_ACCESS_DENIED ||
+           outcome.plain_first!=ERROR_SUCCESS || calls!=2 ||
+           owners!=0 || opened!=0)return 63;
+    }
+    // Before the new branch, an owner change was followed by the same
+    // protected operation that could fail again with Win32 5. Reopening
+    // with the new owner must be available after both modes are denied.
+    {
+        unsigned calls=0,owners=0,reopened=0;
+        const auto outcome=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [&](bool) -> DWORD {++calls;return ERROR_ACCESS_DENIED;},
+            [&]() -> DWORD {++owners;return ERROR_SUCCESS;},
+            [&](bool protect) -> DWORD {
+                ++reopened;
+                return protect?ERROR_ACCESS_DENIED:ERROR_SUCCESS;
+            });
+        if(!outcome.ok()||calls!=4||owners!=1||reopened!=1 ||
+           outcome.owner_change!=ERROR_SUCCESS ||
+           outcome.reopened_plain!=ERROR_SUCCESS)return 64;
+        const auto message=outcome.counts();
+        if(message.find("Win32")!=std::string::npos ||
+           message.find("C:\\")!=std::string::npos)return 65;
+    }
+    // No false success, and no retries that could mutate unrelated files
+    // if Windows denies every DACL attempt or the owner cannot be changed.
+    {
+        unsigned owners=0,reopened=0;
+        const auto outcome=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            [&]() -> DWORD {++owners;return ERROR_ACCESS_DENIED;},
+            [&](bool) -> DWORD {++reopened;return ERROR_SUCCESS;});
+        if(outcome.ok()||owners!=1||reopened!=0 ||
+           outcome.final_error!=ERROR_ACCESS_DENIED)return 66;
+    }
+    {
+        unsigned owners=0;
+        const auto outcome=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [](bool protect) -> DWORD {
+                return protect?ERROR_INVALID_PARAMETER:ERROR_SUCCESS;
+            },
+            [&]() -> DWORD {++owners;return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
+        if(!outcome.ok()||owners!=0)return 67;
+    }
+    {
+        const auto outcome=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            []() -> DWORD {return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_INVALID_DATA;});
+        if(outcome.ok()||outcome.final_error!=ERROR_INVALID_DATA)
+            return 68;
+    }
+
     std::cout<<"PASS: private WIM scratch POSIX file/directory unlink, "
                 "held delete-sharing readers, nonempty-directory refusal, "
                 "vanished-only confirmed retry, real NTFS literal names, "
                 "MAX_PATH bypass, live-file race protection, "
+                "ACL protected/plain/owner/reopen fail-closed paths, "
                 "type mismatch, and anonymous lock diagnostics\n";
     return 0;
 }
