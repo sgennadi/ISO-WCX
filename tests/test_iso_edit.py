@@ -511,6 +511,47 @@ def main(binary, reader=None):
         assert after_boot[24*B:27*B]==before_boot[24*B:27*B]
         assert read_image(image)['HELLO.TXT']==b'VALID'
 
+        # Real Rock Ridge (RRIP/SUSP) paths differ from primary ISO aliases.
+        # The MBR + El Torito + Joliet metadata remains byte-identical during
+        # an equal-size payload F5. Creating a new file/F7 still fails closed.
+        # This tests the independent Disc RRIP route, not a fake UDF bridge.
+        def rrip_hybrid(data):
+            raw=bytearray(data)
+            sp=b'SP'+bytes((7,1,0xbe,0xef,0))
+            er=b'ER'+bytes((18,1,10,0,0,1))+b'RRIP_1991A'
+            dot=iso_record(20,B,2,bytes([0]))+sp+er
+            dot[0]=len(dot)
+            dotdot=iso_record(20,B,2,bytes([1]))
+            name=b'rr-file'
+            nm=b'NM'+bytes((5+len(name),1,0))+name
+            target=iso_record(21,5,0,b'HELLO.TXT;1')+nm
+            target[0]=len(target)
+            directory=dot+dotdot+target
+            assert len(directory)<B
+            raw[20*B:21*B]=bytes(B)
+            raw[20*B:20*B+len(directory)]=directory
+            return hybrid_mbr(raw)
+
+        for use_joliet in (False, True):
+            image.write_bytes(rrip_hybrid(
+                fixture(joliet=use_joliet,boot=True,boot_efi=True)))
+            rr_before=image.read_bytes()
+            source.write_bytes(b'RENEW')
+            run('add','rr-file')
+            rr_after=image.read_bytes()
+            assert rr_after[21*B:21*B+5]==b'RENEW'
+            assert rr_after[:21*B]==rr_before[:21*B]
+            assert rr_after[21*B+5:]==rr_before[21*B+5:]
+            assert rr_after[:16*B]==rr_before[:16*B]
+            assert rr_after[24*B:27*B]==rr_before[24*B:27*B]
+            run('add','NEW-FILE',False)
+            run('mkdir','NEW-FOLDER',False)
+            run('delete','rr-file',False)
+            source.write_bytes(b'TOO SMALL')
+            run('add','rr-file',False)
+            assert not list(root.glob('.iso-wcx-edit-*'))
+        source.write_bytes(b'new content'*1000)
+
         # Never accept direct replacement of an emulated El Torito floppy,
         # even when its source has the exact original image length.
         protected=hybrid_mbr(emulated_boot_fixture(2))
