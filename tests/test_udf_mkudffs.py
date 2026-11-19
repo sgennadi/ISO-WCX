@@ -446,8 +446,18 @@ def check_real_unallocated_space_table(editor, inspector, root):
     assert struct.unpack_from("<I",changed,partition*2048+56)[0]==table_size
     assert struct.unpack_from("<I",changed,partition*2048+64)[0]==0
     assert not list(root.glob(".iso-wcx-edit-*"))
+    # The same UDF-only Type-1 image is commonly delivered with an .iso
+    # extension. Content-based WCX routing must not silently choose an
+    # ISO9660-only writer or discard the Unallocated Space Table.
+    as_iso = root / "real-unallocated-space-table.iso"
+    shutil.copyfile(image,as_iso)
+    source.write_bytes(b"TABLE-BASED UDF IN ISO EXTENSION\n")
+    command(editor,as_iso,"add","ISO-EXT-TABLE.TXT",source)
+    command("udfinfo",as_iso)
+    independent_extract(as_iso,root,"ISO-EXT-TABLE.TXT",source.read_bytes())
     print("PASS independent mkudffs Unallocated Space Table tag 263, "
-          "F5 create/mkdir/nested/delete, udfinfo/7z, no bitmap",flush=True)
+          ".udf/.iso F5 create/mkdir/nested/delete, udfinfo/7z, no bitmap",
+          flush=True)
 
     # Existing but malformed allocation records must not authorize a
     # synthetic bitmap, in-place metadata changes or a partially staged
