@@ -729,6 +729,17 @@ void edit_iso_hybrid_equal_length(
     need(image.boot_regions_bounded,
          "hybrid ISO has unbounded El Torito boot resources");
     need(!changes.empty(),"hybrid ISO has no replacement files");
+    // A Rock Ridge WCX path is an RRIP NM name, not necessarily the ISO
+    // primary alias (nor the Joliet name). Resolve that path through the
+    // independent reader and match its exactly bounded physical extent
+    // against a single parsed primary ISO file. All RRIP/PX/NM/CE bytes
+    // remain immutable; F5 can replace existing same-size file content,
+    // NEVER create/delete an RRIP directory record in this route.
+    const Disc rr_disc(path);
+    const bool rock_ridge=rr_disc.format()=="Rock Ridge";
+    need(!image.iso_system_use || rock_ridge,
+         "hybrid ISO has unrecognized SUSP metadata; only recognized "
+         "Rock Ridge supports verified same-size replacement");
     std::vector<const Node*> nodes{image.root.get()};
     for(std::size_t i=0;i<nodes.size();++i) {
         for(const auto& child:nodes[i]->children)nodes.push_back(child.get());
@@ -740,13 +751,48 @@ void edit_iso_hybrid_equal_length(
         need(!change.remove && !change.directory,
              "hybrid ISO supports only equal-length file replacement");
         const auto key=edit_path(change.path);
-        const Node* node=image.root.get();
-        std::istringstream parts(key);
-        std::string component;
-        while(node && std::getline(parts,component,'/')) {
-            const auto it=std::find_if(node->children.begin(),node->children.end(),
-                [&](const auto& child){return child->logical==component;});
-            node=it==node->children.end()?nullptr:it->get();
+        const Node* node=nullptr;
+        if(rock_ridge) {
+            const Item* selected=nullptr;
+            for(const auto& item:rr_disc.items()) {
+                if(item.path!=key)continue;
+                need(!selected,"ambiguous Rock Ridge file path");
+                selected=&item;
+            }
+            need(selected && !selected->directory && selected->size>0 &&
+                 selected->inline_data.empty() &&
+                 selected->direct_source.empty() &&
+                 selected->extents.size()==1 &&
+                 !selected->extents[0].sparse &&
+                 selected->extents[0].offset%block==0 &&
+                 selected->extents[0].length==selected->size,
+                 "Rock Ridge replacement requires a single physical "
+                 "extent for an existing regular file");
+            std::size_t exact_matches=0;
+            for(const Node* candidate:nodes) {
+                if(candidate->directory || !candidate->size)continue;
+                if(std::uint64_t(candidate->lba)*block==
+                       selected->extents[0].offset &&
+                   candidate->size==selected->size) {
+                    node=candidate;
+                    ++exact_matches;
+                }
+            }
+            need(exact_matches==1,
+                 "Rock Ridge file extent is missing or ambiguously "
+                 "shared in the primary ISO namespace");
+        } else {
+            node=image.root.get();
+            std::istringstream parts(key);
+            std::string component;
+            while(node && std::getline(parts,component,'/')) {
+                const auto it=std::find_if(
+                    node->children.begin(),node->children.end(),
+                    [&](const auto& child){
+                        return child->logical==component;
+                    });
+                node=it==node->children.end()?nullptr:it->get();
+            }
         }
         need(node && !node->directory && node->size>0,
              "hybrid replacement target must be an existing nonempty file");
@@ -855,6 +901,24 @@ void edit_iso_hybrid_equal_length(
              verified.boot_entries==image.boot_entries &&
              verified.boot_regions==image.boot_regions,
              "staged hybrid ISO metadata or El Torito references changed");
+        if(rock_ridge) {
+            const Disc independent(tx.output);
+            need(independent.format()=="Rock Ridge" &&
+                 independent.items().size()==rr_disc.items().size(),
+                 "staged hybrid ISO lost Rock Ridge file structure");
+            for(const auto& patch:patches) {
+                auto it=std::find_if(independent.items().begin(),
+                    independent.items().end(),[&](const Item& entry) {
+                        return entry.path==patch.path && !entry.directory;
+                    });
+                need(it!=independent.items().end() &&
+                     it->size==patch.bytes &&
+                     it->extents.size()==1 &&
+                     !it->extents[0].sparse &&
+                     it->extents[0].offset==patch.at,
+                     "Rock Ridge staged extent or namespace changed");
+            }
+        }
     }
     // Verify every byte outside the requested file extents, including MBR,
     // all ISO/Joliet metadata, hidden vendor sectors, boot data and padding.
