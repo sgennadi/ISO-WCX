@@ -29,12 +29,13 @@ def command(*args, allowed=(0,)):
     return result
 
 
-def image_with_mkudffs(root, media, label, *, blocks=BLOCK_COUNT):
+def image_with_mkudffs(root, media, label, *, blocks=BLOCK_COUNT,
+                       space="unallocbitmap"):
     path = root / f"{label}.udf"
     # Use UDF 1.02 Type-1 (not the UDF 2.50 metadata partition or a VAT).
     # --media-type must precede --udfrev; --blocksize always explicit.
     command("mkudffs", f"--media-type={media}", "--blocksize=2048",
-            "--udfrev=0x0102", "--space=unallocbitmap", "--ad=inicb",
+            "--udfrev=0x0102", f"--space={space}", "--ad=inicb",
             "--label=WCX-UDF-REAL", "--new-file", path, blocks)
     assert path.stat().st_size == blocks * 2048
     command("udfinfo", path)
@@ -399,12 +400,76 @@ def check_real_fid_slot_reuse(editor, inspector, root):
           flush=True)
 
 
+def check_real_unallocated_space_table(editor, inspector, root):
+    """A real *table-backed* UDF media image: no tag-264 bitmap exists.
+
+    The independently authored tag-263 USE and closed LVID must remain
+    valid after each F5 create, directory creation and deletion.
+    """
+    image = image_with_mkudffs(
+        root, "hd", "real-unallocated-space-table",
+        space="unalloctable")
+    raw = image.read_bytes()
+    main_vds = struct.unpack_from("<I", raw, 256*2048+20)[0]
+    partition = next(
+        sector for sector in range(main_vds, main_vds+16)
+        if struct.unpack_from("<H",raw,sector*2048)[0]==5)
+    table_size = struct.unpack_from("<I",raw,partition*2048+56)[0]
+    bitmap_size = struct.unpack_from("<I",raw,partition*2048+64)[0]
+    assert table_size >= 40 and table_size <= 2048
+    assert bitmap_size == 0, "mkudffs fixture must NOT have a bitmap"
+    table_lbn = struct.unpack_from("<I",raw,partition*2048+60)[0]
+    partition_start = struct.unpack_from("<I",raw,partition*2048+188)[0]
+    table_at = (partition_start+table_lbn)*2048
+    assert struct.unpack_from("<H",raw,table_at)[0]==263
+    source = root / "real-table-input.bin"
+    source.write_bytes(b"UDF UNALLOCATED TABLE: REAL WRITE\n")
+    command(editor,image,"add","TABLE-ROOT.TXT",source)
+    command("udfinfo",image)
+    independent_extract(image,root,"TABLE-ROOT.TXT",source.read_bytes())
+    command(editor,image,"mkdir","TABLE-FOLDER")
+    command("udfinfo",image)
+    listing=command("7z","l",image).stdout.decode(errors="replace")
+    assert "TABLE-FOLDER" in listing
+    source.write_bytes(b"NESTED TABLE DATA\n")
+    command(editor,image,"add","TABLE-FOLDER/nested.bin",source)
+    command("udfinfo",image)
+    independent_extract(image,root,"TABLE-FOLDER/nested.bin",
+                        source.read_bytes())
+    command(editor,image,"delete","TABLE-ROOT.TXT")
+    command("udfinfo",image)
+    command("7z","l",image)
+    assert "TABLE-ROOT.TXT" not in (
+        command(inspector,image).stdout.decode(errors="replace"))
+    changed = image.read_bytes()
+    assert struct.unpack_from("<H",changed,table_at)[0]==263
+    assert struct.unpack_from("<I",changed,partition*2048+56)[0]==table_size
+    assert struct.unpack_from("<I",changed,partition*2048+64)[0]==0
+    assert not list(root.glob(".iso-wcx-edit-*"))
+    print("PASS independent mkudffs Unallocated Space Table tag 263, "
+          "F5 create/mkdir/nested/delete, udfinfo/7z, no bitmap",flush=True)
+
+    # Existing but malformed allocation records must not authorize a
+    # synthetic bitmap, in-place metadata changes or a partially staged
+    # transaction. Corrupt the USE on a separate copied image.
+    malformed = root / "real-table-malformed.udf"
+    damaged = bytearray(raw)
+    damaged[table_at:table_at+2] = b"\x08\x01"  # Tag 264, not 263
+    malformed.write_bytes(damaged)
+    before=malformed.read_bytes()
+    failure=command(editor,malformed,"add","REFUSE.BIN",source,allowed=(1,))
+    assert failure.returncode != 0
+    assert malformed.read_bytes()==before
+    assert not list(root.glob(".iso-wcx-edit-*"))
+
+
 def main(editor, inspector):
     for command_name in ("mkudffs", "udfinfo", "7z"):
         assert shutil.which(command_name), f"missing CI test-only tool {command_name}"
     with tempfile.TemporaryDirectory(prefix="iso-wcx-udftools-fixture-") as t:
         root = pathlib.Path(t)
         verify_portable_udf_read(root, editor, inspector)
+        check_real_unallocated_space_table(editor, inspector, root)
         check_real_atomic_batch(editor,inspector,root)
         check_real_mixed_batch(editor,inspector,root)
         check_real_reclaim_reuse(editor,inspector,root)
