@@ -472,6 +472,36 @@ def check_real_unallocated_space_table(editor, inspector, root):
     assert malformed.read_bytes()==before
     assert not list(root.glob(".iso-wcx-edit-*"))
 
+    # Malformed but correctly CRC-tagged ShortAD. A free extent past the
+    # partition boundary must never be used for staged allocation.
+    malformed2 = root / "real-table-bad-extent.udf"
+    bad = bytearray(raw)
+    ad_bytes = struct.unpack_from("<I",bad,table_at+36)[0]
+    assert ad_bytes>=8
+    partition_blocks = struct.unpack_from(
+        "<I",bad,partition*2048+192)[0]
+    struct.pack_into("<I",bad,table_at+40,0x40000000|2048)
+    struct.pack_into("<I",bad,table_at+44,partition_blocks+1)
+    crc_bytes = struct.unpack_from("<H",bad,table_at+10)[0]
+    assert crc_bytes>=24
+    crc=0
+    for value in bad[table_at+16:table_at+16+crc_bytes]:
+        crc^=value<<8
+        for _ in range(8):
+            crc=((crc<<1)^0x1021)&0xffff if crc&0x8000 else (
+                crc<<1)&0xffff
+    struct.pack_into("<H",bad,table_at+8,crc)
+    bad[table_at+4] = sum(bad[table_at+i]
+        for i in range(16) if i!=4)&0xff
+    malformed2.write_bytes(bad)
+    failure=command(editor,malformed2,"add","REFUSE-EXTENT.BIN",source,
+                    allowed=(1,))
+    assert failure.returncode != 0
+    reason=(failure.stdout+failure.stderr).decode(errors="replace")
+    assert "invalid or overlapping ShortAD" in reason, reason
+    assert malformed2.read_bytes()==bad
+    assert not list(root.glob(".iso-wcx-edit-*"))
+
 
 def main(editor, inspector):
     for command_name in ("mkudffs", "udfinfo", "7z"):
