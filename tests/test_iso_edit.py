@@ -539,10 +539,15 @@ def main(binary, reader=None):
             struct.pack_into('<H',rr_fixture,24*B+38,1)
             struct.pack_into('<H',rr_fixture,24*B+102,1)
             if use_joliet:
+                # The base fixture's optical record permutation shifts SVD
+                # from LBA17 to LBA18; supply the mandatory next terminator.
+                rr_fixture[19*B:20*B]=bytes(B)
+                rr_fixture[19*B]=255
+                rr_fixture[19*B+1:19*B+6]=b'CD001'
+                rr_fixture[19*B+6]=1
                 # Model vendor optical media where Joliet advertises a
                 # smaller extent than the actual image (real T560 report).
-                # Same-size patches preserve these descriptor bytes, never
-                # use them as authority for allocating another sector.
+                # Same-size patches preserve these bytes; no allocation.
                 both(rr_fixture,18*B+80,21)
             image.write_bytes(rrip_hybrid(rr_fixture))
             rr_before=image.read_bytes()
