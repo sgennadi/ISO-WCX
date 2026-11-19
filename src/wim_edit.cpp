@@ -335,12 +335,13 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
         return SetSecurityInfo(file.h,SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION,user.sid(),nullptr,nullptr,nullptr);
     };
-    const auto fresh_dacl=[&](bool protect) -> DWORD {
-        // A fresh handle re-evaluates permissions after an owner change.
-        // FILE_FLAG_OPEN_REPARSE_POINT is mandatory; compare the actual
-        // NTFS identity to prevent a file replacement between opens.
-        HANDLE handle=CreateFileW(path.c_str(),
-            WRITE_DAC|WRITE_OWNER,
+    const auto checked_fresh_dacl=[&](DWORD access,bool protect) -> DWORD {
+        // MAXIMUM_ALLOWED is a documented special case for SetSecurityInfo:
+        // the call does NOT propagate inheritable ACEs into child files or
+        // directories, which may be TrustedInstaller-owned and protected.
+        // Never use this for the original WIM, parent directory, junctions,
+        // hardlinks, or another operation's temporary workspace.
+        HANDLE handle=CreateFileW(path.c_str(),access,
             FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
             OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|
                 FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
@@ -359,7 +360,15 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
     };
     const auto outcome=wim_scratch::recover_private_scratch_acl(
         [&](bool protect){return set_dacl_on(file.h,protect);},
-        set_owner,fresh_dacl);
+        set_owner,
+        [&](bool protect) {
+            return checked_fresh_dacl(WRITE_DAC|WRITE_OWNER,protect);
+        },
+        [&](bool protect) {
+            // MUST request exactly MAXIMUM_ALLOWED; OR-ing WRITE_DAC or
+            // other access bits defeats the documented no-propagation rule.
+            return checked_fresh_dacl(MAXIMUM_ALLOWED,protect);
+        });
     if(!outcome.ok()) {
         const bool owner_failed=
             outcome.owner_change!=wim_scratch::AclRecovery::unused &&
