@@ -12,7 +12,8 @@ import sys
 import tempfile
 
 from test_images import B
-from test_iso_edit import fixture, emulated_boot_fixture, read_image, validate_path_tables
+from test_iso_edit import (fixture, emulated_boot_fixture, read_image,
+                           rrip_hybrid_fixture, validate_path_tables)
 from test_udf_bridge_edit import descriptor_bridge
 
 
@@ -114,6 +115,26 @@ def main(plugin, runner):
         before = image.read_bytes()
         assert edit("pack") != 0, "nonzero trailer must be read-only"
         assert image.read_bytes() == before, "unsafe ISO edit modified source"
+
+        # Actual WCX PackFilesW ABI into a bootable MBR/El Torito ISO
+        # with Rock Ridge NM names and an undersized Joliet descriptor.
+        # All metadata, boot sectors and unrelated file bytes must remain
+        # byte-exact, whereas file creation and deletion still fail closed.
+        image.write_bytes(rrip_hybrid_fixture(joliet=True))
+        rr_before=image.read_bytes()
+        (source / "rr-file").write_bytes(b"RENEW")
+        assert edit("pack", "rr-file") == 0, (
+            "WCX F5 rejected equal-size Rock Ridge hybrid replacement")
+        rr_after=image.read_bytes()
+        assert rr_after[21*B:21*B+5] == b"RENEW"
+        assert rr_after[:21*B] == rr_before[:21*B]
+        assert rr_after[21*B+5:] == rr_before[21*B+5:]
+        (source / "RR-NEW.TXT").write_bytes(b"NEW")
+        assert edit("pack", "RR-NEW.TXT") != 0, (
+            "WCX allowed unsafe RRIP hybrid file creation")
+        assert edit("delete", "rr-file") != 0, (
+            "WCX allowed unsafe RRIP hybrid file deletion")
+        assert image.read_bytes() == rr_after
 
         # AOMEI-style WinPE ISO: the ISO9660 namespace contains boot files,
         # while normal files are visible through UDF only. A bounded,
