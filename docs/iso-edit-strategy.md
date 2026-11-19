@@ -14,13 +14,14 @@ USB/CD metadata.
 | Nonhybrid ISO9660 / Joliet + El Torito floppy/HDD emulation | **Preview:** add/delete/replace unrelated files only, with full boot-disk extent and MBR safety checks | Same limits; boot image files themselves immutable |
 | Same layout with a bounded **all-zero** trailing pad | Preview native rebuild; PVD/Joliet sizes are synchronized | Preview native rebuild |
 | Bounded but **unequal** Primary/Joliet volume sizes | Preview rebuild only after each namespace tree and path table is validated against its own descriptor; output sizes normalized | Same validation |
-| Standalone UDF Type-1 2048-byte images | Preview F5, F7, Delete files and **empty directories**, gated by strict bitmap/FE/FID/LVID validation | Limited native writer Preview |
+| Standalone UDF Type-1 2048-byte images | Preview F5, F7, Delete files and **empty directories**, gated by strict **unallocated bitmap or table**/FE/FID/LVID validation | Limited native writer Preview |
 | ISO/UDF Bridge without boot catalog | Not supported | Preview: single contiguous existing UDF or shared ISO/UDF file, exactly same length; both namespaces validated |
 | Bootable ISO/UDF Bridge | **Preview:** UDF-only F5 add, Delete files/**empty UDF directories**, F7 and bounded resize when strict Type-1 bitmap/FE/FID/LVID validation passes and ISO/El Torito remain immutable | Existing contiguous UDF-only or shared-extent equal-size payload replacement; embedded/complex replacements route to the protected UDF writer |
 | Validated conventional **MBR-isohybrid ISO-only** (no UDF) | Blocked: a partition-aware ISO remasterer is required | **Preview:** existing non-boot ISO-visible file, same size only; byte-exact MBR/El Torito/metadata preservation |
 | Validated conventional MBR-isohybrid ISO/UDF Bridge | Metadata edits, adds, deletes and resize blocked | Preview: same-size replacement of a contiguous existing UDF-only file, after protected-region validation |
 | GPT-hybrid or unknown nonzero system area | Not supported | Not supported; preserve boot/partition metadata |
-| Rock Ridge, multi-extent and unrecognized variants | Not supported | Currently blocked if parser cannot guarantee all metadata is preserved |
+| **Rock Ridge + validated MBR-isohybrid ISO-only** | New files/F7/Delete blocked until RRIP/boot-aware metadata reauthoring | **Preview:** unique existing regular file, strictly equal size, same byte ranges, RRIP and boot preserved exactly |
+| Other Rock Ridge, multi-extent and unrecognized variants | Not supported | Blocked if parser cannot guarantee all metadata is preserved |
 
 These are *capability preconditions*, not blanket promises for any disc.
 For individual archive failures, the WCX adapter records the native refusal
@@ -48,11 +49,36 @@ with every F5 source stream before atomic commit. Cancellation and any
 verification failure discard the private stage without modifying the
 original. Windows' source-identity guard remains mandatory.
 
+For a recognized Rock Ridge ISO, Total Commander's path is resolved through
+the independent RRIP reader rather than assuming that an ISO9660 alias or
+Joliet identifier has the same name. The resulting single physical extent
+must match exactly one primary ISO record. A validated original image's
+Rock Ridge NM/PX/CE metadata, MBR, unchanged Joliet descriptors (even when
+a vendor originally declared mismatched volume sizes), boot catalog and
+BIOS/EFI files remain byte-for-byte unchanged in the staged image.
+This authorizes **equal-length replacement only**. It does not provide
+safe new-file creation or deletion, nor certify USB/UEFI bootability.
+
 Synthetic ISO-only MBR and BIOS/EFI El Torito scenarios are covered,
 including a previously rewritten ISO with path tables, readback,
 same-size enforcement, multi-file batch rollback and refusal to touch
 an emulated boot floppy. Real USB/BIOS/UEFI startup of vendor media
 still requires a separate field test and is **not certified**.
+
+
+## Real-media ISO/UDF limitation: read-only UDF access type 1
+
+A vendor WinPE ISO can contain a valid ISO9660 boot catalog alongside a
+UDF Type-1 data namespace, but its UDF Partition Descriptor may advertise
+`AccessType=1` (read-only) and contain **no Unallocated Space Bitmap nor
+Unallocated Space Table**. A strict parser being compatible means the
+existing UDF files can be listed; it does *not* authorize F5 to create files.
+Do not invent free sectors, synthesize a tag-264 descriptor, or rebuild
+only ISO9660: doing so would break UDF/ISO namespace consistency and may
+change El Torito boot requirements. Exact-size content replacement through
+the existing byte-preserving protected bridge route remains a distinct,
+limited capability. F5 creation requires a separate coordinated ISO/UDF
+image reauthoring engine and independent boot/namespace verification.
 
 ## Shared source-mutation guard for ISO/WIM (Preview)
 

@@ -42,6 +42,44 @@ def fixture(joliet=False, boot=False, boot_efi=False):
     return b
 
 
+def rrip_hybrid_fixture(*, joliet=False):
+    """Disposable hybrid ISO with RRIP NM, BIOS/EFI boot and optional Joliet.
+
+    The Primary ISO alias is HELLO.TXT;1 but the visible Rock Ridge path
+    is 'rr-file'.  Its payload occupies exactly five bytes at LBA 21.
+    """
+    raw=bytearray(fixture(joliet=joliet,boot=True,boot_efi=True))
+    struct.pack_into('<H',raw,24*B+38,1)
+    struct.pack_into('<H',raw,24*B+102,1)
+    if joliet:
+        raw[19*B:20*B]=bytes(B)
+        raw[19*B]=255
+        raw[19*B+1:19*B+6]=b'CD001'
+        raw[19*B+6]=1
+        # Vendor media may advertise a smaller Joliet view without
+        # invalidating a byte-preserving file payload replacement.
+        both(raw,18*B+80,21)
+    sp=b'SP'+bytes((7,1,0xbe,0xef,0))
+    er=b'ER'+bytes((18,1,10,0,0,1))+b'RRIP_1991A'
+    dot=iso_record(20,B,2,bytes([0]))+sp+er
+    dot[0]=len(dot)
+    dotdot=iso_record(20,B,2,bytes([1]))
+    name=b'rr-file'
+    nm=b'NM'+bytes((5+len(name),1,0))+name
+    target=iso_record(21,5,0,b'HELLO.TXT;1')+nm
+    target[0]=len(target)
+    directory=dot+dotdot+target
+    assert len(directory)<B
+    raw[20*B:21*B]=bytes(B)
+    raw[20*B:20*B+len(directory)]=directory
+    raw[0]=0xeb
+    raw[510:512]=bytes((0x55,0xaa))
+    raw[446]=0x80
+    raw[450]=0x17
+    struct.pack_into('<II',raw,454,0,len(raw)//512)
+    return raw
+
+
 def emulated_boot_fixture(media=2, *, visible=True, valid=True):
     """An independent, bounded floppy/HDD file referenced by El Torito.
 
@@ -510,6 +548,27 @@ def main(binary, reader=None):
         assert after_boot[17*B:18*B]==before_boot[17*B:18*B]
         assert after_boot[24*B:27*B]==before_boot[24*B:27*B]
         assert read_image(image)['HELLO.TXT']==b'VALID'
+
+        # Rock Ridge NM name != ISO9660 alias. Only same-size F5 is
+        # allowed. MBR, descriptors and BIOS/EFI boot data remain identical.
+        for use_joliet in (False, True):
+            image.write_bytes(rrip_hybrid_fixture(joliet=use_joliet))
+            rr_before=image.read_bytes()
+            source.write_bytes(b'RENEW')
+            run('add','rr-file')
+            rr_after=image.read_bytes()
+            assert rr_after[21*B:21*B+5]==b'RENEW'
+            assert rr_after[:21*B]==rr_before[:21*B]
+            assert rr_after[21*B+5:]==rr_before[21*B+5:]
+            assert rr_after[:16*B]==rr_before[:16*B]
+            assert rr_after[24*B:27*B]==rr_before[24*B:27*B]
+            run('add','NEW-FILE',False)
+            run('mkdir','NEW-FOLDER',False)
+            run('delete','rr-file',False)
+            source.write_bytes(b'TOO SMALL')
+            run('add','rr-file',False)
+            assert not list(root.glob('.iso-wcx-edit-*'))
+        source.write_bytes(b'new content'*1000)
 
         # Never accept direct replacement of an emulated El Torito floppy,
         # even when its source has the exact original image length.

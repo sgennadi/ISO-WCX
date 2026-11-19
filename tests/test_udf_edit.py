@@ -214,6 +214,27 @@ def main(editor,inspector):
         refuse(layout='short',payload=b'X'*3000)
         refuse(name='missing',payload=b'new')
         refuse(operation='mkdir',name='new_folder')
+        # Customer AOMEI-style type-1 Partition Descriptor: access type 1
+        # (read-only), no bitmap, no Unallocated Space Table. This permits
+        # existing equal-length payload patches but NEVER new UDF allocation.
+        # Give an actionable reason rather than asking for a nonexistent
+        # bitmap which would contradict the on-disk access policy.
+        readonly=bytearray(base_image())
+        p32(readonly,260*B+184,1)
+        checksum(readonly,260*B)
+        image.write_bytes(readonly)
+        replacement.write_bytes(b'CANNOT-ALLOCATE')
+        rejected=run(editor,image,'add','NEW.TXT',replacement,success=False)
+        message=(rejected.stdout+rejected.stderr).decode(errors='replace')
+        assert 'read-only' in message and 'access type 1' in message, message
+        assert image.read_bytes()==readonly
+        assert not list(root.glob('.iso-wcx-edit-*'))
+        # Read-only access-type metadata does not prevent a same-size
+        # ISO-file payload patch in a fully staged byte-preserving workflow.
+        # The existing UDF file's sector accounting is never changed.
+        replacement.write_bytes(b'RENEW')
+        run(editor,image,'add','hello',replacement)
+        assert image.read_bytes()[302*B+176:302*B+181]==b'RENEW'
         refuse(operation='add',name='docs/inner',payload=b'abc')
         refuse(layout='short',overlap=True,payload=b'S'*10)
         refuse(corrupt=True,payload=b'updated')

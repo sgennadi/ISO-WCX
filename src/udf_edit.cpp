@@ -261,6 +261,7 @@ public:
              "only single physical UDF Type-1 partition maps are writable");
         partition_=u32(pd,188);
         partition_blocks_=u32(pd,192);
+        partition_access_type_=u32(pd,184);
         need(partition_blocks_>2 && partition_<size_/block &&
              partition_blocks_<=size_/block-partition_,
              "UDF partition bounds outside image");
@@ -557,7 +558,20 @@ public:
     [[nodiscard]] bool has_unallocated_table() const noexcept {
         return table_.has_value();
     }
+    [[nodiscard]] std::uint32_t partition_access_type() const noexcept {
+        return partition_access_type_;
+    }
     [[nodiscard]] std::string missing_allocation_map_reason() const {
+        if(partition_access_type_==1)
+            return "UDF partition access type 1 is read-only and has "
+                   "no unallocated-space bitmap or table; adding files "
+                   "requires a coordinated ISO/UDF image reauthoring"+
+                   allocation_status_;
+        if(partition_access_type_==2)
+            return "UDF partition access type 2 is write-once and has "
+                   "no unallocated-space bitmap or table; the native "
+                   "Type-1 in-place allocator cannot create files"+
+                   allocation_status_;
         return "UDF create needs a validated unallocated bitmap or "
                "Unallocated Space Table"+allocation_status_;
     }
@@ -941,6 +955,7 @@ private:
     std::ifstream file_;
     std::uint64_t size_{};
     std::uint32_t partition_{},partition_blocks_{};
+    std::uint32_t partition_access_type_{};
     std::map<std::string,File> files_;
     std::map<std::string,Fe> directory_files_;
     std::map<std::string,File> directory_links_;
@@ -2702,6 +2717,7 @@ UdfEditInspection inspect_udf_edit(
         result.parser_compatible=true;
         result.allocation_bitmap=volume.has_bitmap();
         result.allocation_table=volume.has_unallocated_table();
+        result.partition_access_type=volume.partition_access_type();
         if(!volume.has_allocation_map())
             result.reason=volume.missing_allocation_map_reason();
     }catch(const std::exception& ex) {

@@ -122,6 +122,7 @@ struct OpticalProbeInfo {
     bool joliet=false;
     bool udf_signature=false;
     bool boot_descriptor=false;
+    bool hybrid_system_area=false;
 };
 OpticalProbeInfo probe_optical(Report& report,
         const std::filesystem::path& image,std::uint64_t size) {
@@ -286,7 +287,7 @@ OpticalProbeInfo probe_optical(Report& report,
                           "unknown/unbounded ranges reject writes");
     }
     report.append("- This is NOT a write-permission check. Readability does not imply safe deletion");
-    return {pvd,joliet,nsr02||nsr03||candidate_anchor,el_torito};
+    return {pvd,joliet,nsr02||nsr03||candidate_anchor,el_torito,nonzero};
 }
 // The extent positions exposed by the common Disc API refer to the decoder's
 // backing stream. In a compressed image they are NOT necessarily byte offsets
@@ -399,6 +400,22 @@ std::string build_image_structure_report(const std::filesystem::path& image){
     }
 #endif
     const auto optical=probe_optical(report,image,bytes);
+    if(disc.format()=="Rock Ridge") {
+        report.append("");
+        report.append("ROCK RIDGE EDIT PREFLIGHT (READ ONLY)");
+        report.append_kv("RRIP/SUSP namespace","detected");
+        if(optical.hybrid_system_area && !optical.udf_signature)
+            report.append("- Existing regular files: exact-size F5 payload "
+                          "replacement may be available after independent "
+                          "extent and El Torito/MBR validation");
+        report.append("- Add new files/F7/Delete: disabled on Rock Ridge "
+                      "hybrid ISO until a boot-preserving RRIP/ISO/Joliet "
+                      "metadata writer is available");
+        report.append("- Never convert Rock Ridge names, PX/CE or POSIX "
+                      "metadata to plain ISO9660 for a successful F5");
+        report.append("- A successful same-length edit still requires a "
+                      "separate boot test on BIOS/UEFI or virtual firmware");
+    }
     // ISO/UDF Bridge discs may be selected by the ISO namespace even
     // though the UDF Type-1 writer is the F5 metadata route. Include
     // the read-only UDF allocation report for both extensions/layouts.
@@ -413,6 +430,15 @@ std::string build_image_structure_report(const std::filesystem::path& image){
                              capability.allocation_bitmap?"present":"absent");
             report.append_kv("Validated UDF Unallocated Space Table",
                              capability.allocation_table?"present":"absent");
+            const auto access=capability.partition_access_type;
+            const auto description=access==1?" (read-only)":
+                                   access==2?" (write-once)":
+                                   access==3?" (rewritable)":
+                                   access==4?" (overwritable)":
+                                   access==0?" (pseudo-overwritable)":
+                                             " (unknown)";
+            report.append_kv("UDF partition access type",
+                std::to_string(access)+description);
             report.append(capability.allocation_bitmap||
                           capability.allocation_table?
                 "- New file/F7: allocator available, subject to free space, "

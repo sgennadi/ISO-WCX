@@ -135,6 +135,7 @@ public:
     bool joliet=false;
     bool udf_bridge=false;
     bool hybrid_system_area=false; // MBR present; only byte-stable payload edits
+    bool iso_system_use=false; // RRIP/SUSP metadata must never be regenerated
     std::uint32_t declared_volume_blocks=0;
     std::uint32_t primary_volume_blocks=0;
     std::uint32_t supplementary_volume_blocks=0;
@@ -304,7 +305,8 @@ public:
             seen.clear();
             auto other=parse(Bytes(supplementary.begin()+156,
                                    supplementary.begin()+190),true,nullptr,0,seen);
-            if(primary_volume_blocks!=supplementary_volume_blocks) {
+            if(primary_volume_blocks!=supplementary_volume_blocks &&
+               !(hybrid_system_area && iso_system_use)) {
                 // A mismatched descriptor is safe to rebuild only when
                 // EACH independent namespace fits inside its OWN declared
                 // volume. Reject truncated trees and path tables rather than
@@ -345,6 +347,11 @@ public:
                 validate_view(*root,primary,primary_volume_blocks);
                 validate_view(*other,supplementary,supplementary_volume_blocks);
             }
+            // A few RRIP/isohybrid masters intentionally advertise a
+            // different Joliet Volume Space Size while their data extents
+            // remain physically bounded. On the STRICT unchanged-length
+            // patcher, that inconsistency is preserved verbatim rather
+            // than normalized or used to authorize new allocation.
             std::vector<const Node*> supplementary_nodes{other.get()};
             for(std::size_t i=0;i<supplementary_nodes.size();++i) {
                 const auto* node=supplementary_nodes[i];
@@ -356,7 +363,12 @@ public:
                 need(supplementary_nodes.size()<=200000,
                      "Joliet boot-protection extent limit exceeded");
             }
-            pair(*root,*other);
+            // SUSP/Rock Ridge names need not match Joliet's case and aliases.
+            // An MBR hybrid cannot rebuild metadata, so do not rewrite or
+            // 'normalize' the independent supplementary namespace here.
+            // Both trees were parsed, and all original bytes will be guarded.
+            if(!(hybrid_system_area && iso_system_use))
+                pair(*root,*other);
         }
         // Some genuine bootable ISO/UDF bridges set El Torito's 512-byte
         // sector count to zero or to just one boot sector. When the ISO9660
@@ -552,20 +564,31 @@ public:
         auto n=std::make_unique<Node>();n->record=r;n->directory=(r[25]&2)!=0;n->lba=le(r,2);n->size=le(r,10);n->parent=parent;
         need(std::uint64_t(n->lba)*block+n->size<=size,"ISO resource out of bounds");
         const std::size_t idlen=r[32],base=33+idlen+(idlen%2==0?1:0);need(idlen&&base<=r.size(),"bad ISO identifier");
-        need(udf_bridge ||
-             std::all_of(r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),
-                         [](auto c){return c==0;}),
-             "Rock Ridge/system-use ISO editing requires a protected UDF bridge");
+        const bool has_system_use=std::any_of(
+            r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),
+            [](auto c){return c!=0;});
+        iso_system_use|=has_system_use;
+        // Only the byte-for-byte preserving MBR hybrid payload patcher may
+        // read non-UDF SUSP/Rock Ridge records. The ordinary ISO rebuilder
+        // would otherwise silently discard PX, NM, CE and POSIX timestamps.
+        need(udf_bridge || hybrid_system_area || !has_system_use,
+             "Rock Ridge/SUSP ISO metadata needs a preserving writer; "
+             "plain ISO directory rebuild is unsafe");
         n->identifier.assign(r.begin()+33,r.begin()+33+static_cast<std::ptrdiff_t>(idlen));
         if(parent)n->name=n->logical=decode(n->identifier,j,n->directory);
         need(++items<=200000&&depth<=64,"ISO edit tree limit exceeded");
         if(n->directory){need(seen.insert(n->lba).second&&n->size<=64*1024*1024,"cyclic or oversized ISO directory");auto data=read(std::uint64_t(n->lba)*block,n->size);std::set<std::string> names;
             for(std::size_t at=0;at<data.size();){unsigned len=data[at];if(!len){at=(at/block+1)*block;continue;}need(len>=34&&len<=data.size()-at&&at%block+len<=block,"bad ISO directory record");Bytes child(data.begin()+static_cast<std::ptrdiff_t>(at),data.begin()+static_cast<std::ptrdiff_t>(at+len));at+=len;
                 if(child[32]==1&&child[33]<=1){ // Validate dot records too (Rock Ridge SP/CE can live here).
-                    auto tail=std::size_t(34);need(udf_bridge ||
-                         std::all_of(child.begin()+static_cast<std::ptrdiff_t>(tail),
-                                     child.end(),[](auto c){return c==0;}),
-                         "Rock Ridge/system-use ISO editing requires protected UDF");continue;}
+                    auto tail=std::size_t(34);
+                    const bool has_system_use=std::any_of(
+                        child.begin()+static_cast<std::ptrdiff_t>(tail),
+                        child.end(),[](auto c){return c!=0;});
+                    iso_system_use|=has_system_use;
+                    need(udf_bridge || hybrid_system_area || !has_system_use,
+                         "Rock Ridge/SUSP ISO directory metadata needs a "
+                         "preserving writer; plain ISO rebuild is unsafe");
+                    continue;}
                 auto c=parse(child,j,n.get(),depth+1,seen);need(names.insert(upper(c->logical)).second,"ambiguous ISO names");n->children.push_back(std::move(c));
             }
         }return n;
@@ -712,6 +735,17 @@ void edit_iso_hybrid_equal_length(
     need(image.boot_regions_bounded,
          "hybrid ISO has unbounded El Torito boot resources");
     need(!changes.empty(),"hybrid ISO has no replacement files");
+    // A Rock Ridge WCX path is an RRIP NM name, not necessarily the ISO
+    // primary alias (nor the Joliet name). Resolve that path through the
+    // independent reader and match its exactly bounded physical extent
+    // against a single parsed primary ISO file. All RRIP/PX/NM/CE bytes
+    // remain immutable; F5 can replace existing same-size file content,
+    // NEVER create/delete an RRIP directory record in this route.
+    const Disc rr_disc(path);
+    const bool rock_ridge=rr_disc.format()=="Rock Ridge";
+    need(!image.iso_system_use || rock_ridge,
+         "hybrid ISO has unrecognized SUSP metadata; only recognized "
+         "Rock Ridge supports verified same-size replacement");
     std::vector<const Node*> nodes{image.root.get()};
     for(std::size_t i=0;i<nodes.size();++i) {
         for(const auto& child:nodes[i]->children)nodes.push_back(child.get());
@@ -723,13 +757,48 @@ void edit_iso_hybrid_equal_length(
         need(!change.remove && !change.directory,
              "hybrid ISO supports only equal-length file replacement");
         const auto key=edit_path(change.path);
-        const Node* node=image.root.get();
-        std::istringstream parts(key);
-        std::string component;
-        while(node && std::getline(parts,component,'/')) {
-            const auto it=std::find_if(node->children.begin(),node->children.end(),
-                [&](const auto& child){return child->logical==component;});
-            node=it==node->children.end()?nullptr:it->get();
+        const Node* node=nullptr;
+        if(rock_ridge) {
+            const Item* selected=nullptr;
+            for(const auto& item:rr_disc.items()) {
+                if(item.path!=key)continue;
+                need(!selected,"ambiguous Rock Ridge file path");
+                selected=&item;
+            }
+            need(selected && !selected->directory && selected->size>0 &&
+                 selected->inline_data.empty() &&
+                 selected->direct_source.empty() &&
+                 selected->extents.size()==1 &&
+                 !selected->extents[0].sparse &&
+                 selected->extents[0].offset%block==0 &&
+                 selected->extents[0].length==selected->size,
+                 "Rock Ridge replacement requires a single physical "
+                 "extent for an existing regular file");
+            std::size_t exact_matches=0;
+            for(const Node* candidate:nodes) {
+                if(candidate->directory || !candidate->size)continue;
+                if(std::uint64_t(candidate->lba)*block==
+                       selected->extents[0].offset &&
+                   candidate->size==selected->size) {
+                    node=candidate;
+                    ++exact_matches;
+                }
+            }
+            need(exact_matches==1,
+                 "Rock Ridge file extent is missing or ambiguously "
+                 "shared in the primary ISO namespace");
+        } else {
+            node=image.root.get();
+            std::istringstream parts(key);
+            std::string component;
+            while(node && std::getline(parts,component,'/')) {
+                const auto it=std::find_if(
+                    node->children.begin(),node->children.end(),
+                    [&](const auto& child){
+                        return child->logical==component;
+                    });
+                node=it==node->children.end()?nullptr:it->get();
+            }
         }
         need(node && !node->directory && node->size>0,
              "hybrid replacement target must be an existing nonempty file");
@@ -838,6 +907,24 @@ void edit_iso_hybrid_equal_length(
              verified.boot_entries==image.boot_entries &&
              verified.boot_regions==image.boot_regions,
              "staged hybrid ISO metadata or El Torito references changed");
+        if(rock_ridge) {
+            const Disc independent(tx.output);
+            need(independent.format()=="Rock Ridge" &&
+                 independent.items().size()==rr_disc.items().size(),
+                 "staged hybrid ISO lost Rock Ridge file structure");
+            for(const auto& patch:patches) {
+                auto it=std::find_if(independent.items().begin(),
+                    independent.items().end(),[&](const Item& entry) {
+                        return entry.path==patch.path && !entry.directory;
+                    });
+                need(it!=independent.items().end() &&
+                     it->size==patch.bytes &&
+                     it->extents.size()==1 &&
+                     !it->extents[0].sparse &&
+                     it->extents[0].offset==patch.at,
+                     "Rock Ridge staged extent or namespace changed");
+            }
+        }
     }
     // Verify every byte outside the requested file extents, including MBR,
     // all ISO/Joliet metadata, hidden vendor sectors, boot data and padding.
