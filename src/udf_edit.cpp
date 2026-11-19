@@ -539,7 +539,15 @@ public:
     [[nodiscard]] Bytes directory_payload(const Fe& directory) {
         return directory_data(directory);
     }
-    [[nodiscard]] bool has_bitmap() const noexcept {return bitmap_.has_value();}
+    [[nodiscard]] bool has_bitmap() const noexcept {
+        return bitmap_.has_value() && !table_.has_value();
+    }
+    [[nodiscard]] bool has_allocation_map() const noexcept {
+        return bitmap_.has_value();
+    }
+    [[nodiscard]] bool has_unallocated_table() const noexcept {
+        return table_.has_value();
+    }
     // ISO/UDF Bridge: ISO-owned sectors may appear free in the UDF bitmap.
     // Exclude them only during this transaction, without misreporting the
     // original bitmap or the independent LVID free-block accounting.
@@ -609,7 +617,7 @@ public:
     // stay in memory until the entire image transaction is committed.
     [[nodiscard]] std::uint32_t allocate_blocks(std::uint32_t count) {
         need(bitmap_.has_value(),
-             "UDF creation requires a valid Space Bitmap Descriptor");
+             "UDF creation requires a validated bitmap or Unallocated Space Table");
         need(count>0 && count<=partition_blocks_,
              "UDF requested allocation exceeds partition");
         auto& bitmap=*bitmap_;
@@ -717,7 +725,7 @@ public:
     void release_directory_blocks(std::uint64_t owner,
                                   std::uint64_t data_at,
                                   std::uint32_t count) {
-        need(bitmap_.has_value(),"UDF directory release requires bitmap");
+        need(bitmap_.has_value(),"UDF directory release requires a validated allocation map");
         const auto start=logical_of(data_at);
         need(count>0 && count<=partition_blocks_-start,
              "UDF directory release exceeds partition");
@@ -749,7 +757,7 @@ public:
     // FID must first be tombstoned. Blocks stay unavailable in this batch.
     [[nodiscard]] std::vector<Location> reclaim_entry_blocks(
             const File& file,bool directory) {
-        need(bitmap_ && integrity_,"UDF reclamation needs a closed bitmap/LVID");
+        need(bitmap_ && integrity_,"UDF reclamation needs a closed allocation map/LVID");
         const auto owner=file.fe.at;
         const auto found=references_.find(owner);
         need(file.fe.type==(directory?4u:5u) &&
@@ -809,7 +817,39 @@ public:
         return reclaimed;
     }
     [[nodiscard]] std::pair<std::uint64_t,Bytes> updated_bitmap() const {
-        need(bitmap_.has_value(),"UDF bitmap is absent");
+        need(bitmap_.has_value(),"UDF allocation map is absent");
+        if(table_) {
+            // Only serialize the virtual bitmap back into the ORIGINAL
+            // tag-263 UnallocatedSpaceEntry ShortAD array, not tag 264.
+            // Fail closed if the updated free-run list won't fit within
+            // that descriptor's preexisting, bounded partition extent.
+            auto b=table_->bytes;
+            const auto span=table_->declared_length;
+            need(span>=40u && span<=block && b.size()==block,
+                 "UDF Unallocated Space Entry staging length changed");
+            std::fill(b.begin()+40,
+                      b.begin()+static_cast<std::ptrdiff_t>(span),
+                      std::uint8_t{0});
+            constexpr std::uint32_t max_run=0x3fffffffu/block;
+            std::size_t cursor=40;
+            for(std::uint32_t first=0;first<bitmap_->bits;) {
+                if(!bitmap_free(*bitmap_,first)){++first;continue;}
+                std::uint32_t count=0;
+                while(count<max_run && count<bitmap_->bits-first &&
+                      bitmap_free(*bitmap_,first+count))++count;
+                need(count>0 && cursor<=span && span-cursor>=8u,
+                     "UDF Unallocated Space Table has no room for a new free extent");
+                put32(b,cursor,0x40000000u|
+                    static_cast<std::uint32_t>(std::uint64_t(count)*block));
+                put32(b,cursor+4u,first);
+                cursor+=8u;
+                first+=count;
+            }
+            put32(b,36,static_cast<std::uint32_t>(cursor-40u));
+            tag_update(b,0,cursor);
+            tag_check(b,0,263);
+            return {table_->at,std::move(b)};
+        }
         auto b=bitmap_->bytes;
         // Preserve original bitmap tag's CRC coverage. The bitmap's data
         // bit changes may lie outside that descriptor CRC by design.
@@ -1512,7 +1552,7 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
                       const EditProgress& progress,bool allow_bridge,
                       const EditStageValidator& validate_stage) {
     const auto key=edit_path(change.path);
-    need(volume.has_bitmap(),"UDF create requires a validated allocation bitmap");
+    need(volume.has_allocation_map(),"UDF create requires a validated unallocated bitmap or space table");
     need(!volume.files().count(key) &&
          !volume.directories().count(key),"UDF destination already exists");
 
@@ -1871,8 +1911,8 @@ void validate_udf_existing_change(const Type1& volume,
         need(target.fe.type==(directory?4u:5u),
              "UDF existing entry type does not match namespace");
         if(directory) {
-            need(volume.has_bitmap(),
-                 "UDF empty directory deletion needs bitmap/LVID");
+            need(volume.has_allocation_map(),
+                 "UDF empty directory deletion needs allocation map/LVID");
             const auto prefix=name+"/";
             for(const auto& [key,entry]:volume.files()) {
                 (void)entry;
@@ -1936,8 +1976,8 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                             const EditProgress& progress,bool allow_bridge,
                             const EditStageValidator& validate_stage) {
     need(!changes.empty() && changes.size()<=max_items &&
-         volume.has_bitmap(),
-         "UDF transaction needs a valid bitmap and changes");
+         volume.has_allocation_map(),
+         "UDF transaction needs a valid allocation map and changes");
     struct Prepared {
         ArchiveChange change;
         std::string key,parent;
@@ -2541,12 +2581,12 @@ void edit_udf(const std::filesystem::path& image,
     need(!changes.empty(),"no UDF changes");
     for(const auto& change:changes)
         if(change.remove && volume.directory_links().count(edit_path(change.path)))
-            need(volume.has_bitmap(),
-                 "UDF directory deletion requires valid bitmap and LVID");
+            need(volume.has_allocation_map(),
+                 "UDF directory deletion requires valid allocation map and LVID");
     // A mixed creation/replacement/deletion batch shares one allocator and
     // one atomic image commit. Existing-only edits retain their original
     // bounded, non-allocating transaction path.
-    if(volume.has_bitmap() && std::any_of(changes.begin(),changes.end(),
+    if(volume.has_allocation_map() && std::any_of(changes.begin(),changes.end(),
         [&](const ArchiveChange& change) {
             const auto key=edit_path(change.path);
             return change.remove ||
@@ -2645,7 +2685,7 @@ UdfEditInspection inspect_udf_edit(
     try {
         Type1 volume(image,allow_bridge);
         result.parser_compatible=true;
-        result.allocation_bitmap=volume.has_bitmap();
+        result.allocation_bitmap=volume.has_allocation_map();
     }catch(const std::exception& ex) {
         result.reason=ex.what();
         if(result.reason.size()>600)result.reason.resize(600);
