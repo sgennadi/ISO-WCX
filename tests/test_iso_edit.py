@@ -42,6 +42,44 @@ def fixture(joliet=False, boot=False, boot_efi=False):
     return b
 
 
+def rrip_hybrid_fixture(*, joliet=False):
+    """Disposable hybrid ISO with RRIP NM, BIOS/EFI boot and optional Joliet.
+
+    The Primary ISO alias is HELLO.TXT;1 but the visible Rock Ridge path
+    is 'rr-file'.  Its payload occupies exactly five bytes at LBA 21.
+    """
+    raw=bytearray(fixture(joliet=joliet,boot=True,boot_efi=True))
+    struct.pack_into('<H',raw,24*B+38,1)
+    struct.pack_into('<H',raw,24*B+102,1)
+    if joliet:
+        raw[19*B:20*B]=bytes(B)
+        raw[19*B]=255
+        raw[19*B+1:19*B+6]=b'CD001'
+        raw[19*B+6]=1
+        # Vendor media may advertise a smaller Joliet view without
+        # invalidating a byte-preserving file payload replacement.
+        both(raw,18*B+80,21)
+    sp=b'SP'+bytes((7,1,0xbe,0xef,0))
+    er=b'ER'+bytes((18,1,10,0,0,1))+b'RRIP_1991A'
+    dot=iso_record(20,B,2,bytes([0]))+sp+er
+    dot[0]=len(dot)
+    dotdot=iso_record(20,B,2,bytes([1]))
+    name=b'rr-file'
+    nm=b'NM'+bytes((5+len(name),1,0))+name
+    target=iso_record(21,5,0,b'HELLO.TXT;1')+nm
+    target[0]=len(target)
+    directory=dot+dotdot+target
+    assert len(directory)<B
+    raw[20*B:21*B]=bytes(B)
+    raw[20*B:20*B+len(directory)]=directory
+    raw[0]=0xeb
+    raw[510:512]=bytes((0x55,0xaa))
+    raw[446]=0x80
+    raw[450]=0x17
+    struct.pack_into('<II',raw,454,0,len(raw)//512)
+    return raw
+
+
 def emulated_boot_fixture(media=2, *, visible=True, valid=True):
     """An independent, bounded floppy/HDD file referenced by El Torito.
 
@@ -511,45 +549,10 @@ def main(binary, reader=None):
         assert after_boot[24*B:27*B]==before_boot[24*B:27*B]
         assert read_image(image)['HELLO.TXT']==b'VALID'
 
-        # Real Rock Ridge (RRIP/SUSP) paths differ from primary ISO aliases.
-        # The MBR + El Torito + Joliet metadata remains byte-identical during
-        # an equal-size payload F5. Creating a new file/F7 still fails closed.
-        # This tests the independent Disc RRIP route, not a fake UDF bridge.
-        def rrip_hybrid(data):
-            raw=bytearray(data)
-            sp=b'SP'+bytes((7,1,0xbe,0xef,0))
-            er=b'ER'+bytes((18,1,10,0,0,1))+b'RRIP_1991A'
-            dot=iso_record(20,B,2,bytes([0]))+sp+er
-            dot[0]=len(dot)
-            dotdot=iso_record(20,B,2,bytes([1]))
-            name=b'rr-file'
-            nm=b'NM'+bytes((5+len(name),1,0))+name
-            target=iso_record(21,5,0,b'HELLO.TXT;1')+nm
-            target[0]=len(target)
-            directory=dot+dotdot+target
-            assert len(directory)<B
-            raw[20*B:21*B]=bytes(B)
-            raw[20*B:20*B+len(directory)]=directory
-            return hybrid_mbr(raw)
-
+        # Rock Ridge NM name != ISO9660 alias. Only same-size F5 is
+        # allowed. MBR, descriptors and BIOS/EFI boot data remain identical.
         for use_joliet in (False, True):
-            rr_fixture=fixture(joliet=use_joliet,boot=True,boot_efi=True)
-            # The fixture's ISO namespace doesn't expose the boot images;
-            # explicitly bound both BIOS/EFI El Torito load regions.
-            struct.pack_into('<H',rr_fixture,24*B+38,1)
-            struct.pack_into('<H',rr_fixture,24*B+102,1)
-            if use_joliet:
-                # The base fixture's optical record permutation shifts SVD
-                # from LBA17 to LBA18; supply the mandatory next terminator.
-                rr_fixture[19*B:20*B]=bytes(B)
-                rr_fixture[19*B]=255
-                rr_fixture[19*B+1:19*B+6]=b'CD001'
-                rr_fixture[19*B+6]=1
-                # Model vendor optical media where Joliet advertises a
-                # smaller extent than the actual image (real T560 report).
-                # Same-size patches preserve these bytes; no allocation.
-                both(rr_fixture,18*B+80,21)
-            image.write_bytes(rrip_hybrid(rr_fixture))
+            image.write_bytes(rrip_hybrid_fixture(joliet=use_joliet))
             rr_before=image.read_bytes()
             source.write_bytes(b'RENEW')
             run('add','rr-file')
