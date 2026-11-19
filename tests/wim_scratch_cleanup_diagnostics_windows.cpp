@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <stdexcept>
 namespace fs = std::filesystem;
 
 int wmain() {
