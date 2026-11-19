@@ -8,6 +8,7 @@ namespace iso_wcx {
 struct UdfEditInspection {
     bool parser_compatible = false;
     bool allocation_bitmap = false;
+    bool allocation_table = false;
     std::string reason;
 };
 // allow_bridge only changes how the parser treats ISO9660 descriptors.

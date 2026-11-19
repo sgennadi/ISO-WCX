@@ -263,7 +263,7 @@ OpticalProbeInfo probe_optical(Report& report,
         report.append("- Protected HYBRID system area: ordinary ISO rebuild refused; use specialized boot-preserving writer");
     else if(nsr02||nsr03||candidate_anchor)
         report.append(el_torito?
-            "- Bootable ISO/UDF Bridge: universal guarded UDF Type-1 writer may allow UDF-only F5/F7/Delete/resize if bitmap, FID, FE and complete boot ranges validate":
+            "- Bootable ISO/UDF Bridge: universal guarded UDF Type-1 writer may allow UDF-only F5/F7/Delete/resize if a UDF bitmap/table, FID, FE and complete boot ranges validate":
             "- ISO/UDF Bridge: guarded UDF Type-1 edits and exact-length payload replacement may work after validation");
     else
         report.append(el_torito?
@@ -279,7 +279,7 @@ OpticalProbeInfo probe_optical(Report& report,
         report.append("- ISO/UDF Bridge: ISO-visible files and paths cannot be "
                       "added/deleted/resized without synchronized ISO/UDF metadata");
         report.append("- UDF-only paths: a native Type-1 writer may change UDF "
-                      "metadata if the source bitmap and allocation schema validate");
+                      "metadata if the source free-space bitmap/table and allocation schema validate");
         if(el_torito)
             report.append("- Bootable ISO/UDF Bridge: all El Torito BIOS/UEFI "
                           "byte ranges and ISO namespace remain immutable; "
@@ -399,7 +399,10 @@ std::string build_image_structure_report(const std::filesystem::path& image){
     }
 #endif
     const auto optical=probe_optical(report,image,bytes);
-    if(disc.format().rfind("UDF",0)==0) {
+    // ISO/UDF Bridge discs may be selected by the ISO namespace even
+    // though the UDF Type-1 writer is the F5 metadata route. Include
+    // the read-only UDF allocation report for both extensions/layouts.
+    if(disc.format().rfind("UDF",0)==0 || optical.udf_signature) {
         report.append("");
         report.append("UDF NATIVE EDIT PREFLIGHT (READ ONLY)");
         const auto capability=inspect_udf_edit(image,optical.iso_primary);
@@ -408,10 +411,17 @@ std::string build_image_structure_report(const std::filesystem::path& image){
         if(capability.parser_compatible) {
             report.append_kv("Validated UDF free-space bitmap",
                              capability.allocation_bitmap?"present":"absent");
-            report.append(capability.allocation_bitmap?
+            report.append_kv("Validated UDF Unallocated Space Table",
+                             capability.allocation_table?"present":"absent");
+            report.append(capability.allocation_bitmap||
+                          capability.allocation_table?
                 "- New file/F7: allocator available, subject to free space, "
                 "per-path checks and boot/ISO overlap verification":
-                "- New file/F7: disabled without a validated allocation bitmap");
+                "- New file/F7: unavailable without a validated unallocated "
+                "bitmap or Unallocated Space Table");
+            if(!capability.reason.empty())
+                report.append_kv("UDF allocation restriction",
+                                 safe_text(capability.reason));
             report.append("- Delete/replace: may be available after per-file "
                           "and ISO/El Torito protected-range validation");
         } else {
