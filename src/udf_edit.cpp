@@ -279,6 +279,15 @@ public:
             (std::uint64_t(bitmap_length)+block-1u)/block*block;
         const auto conflicting_allocators=
             u32(pd,72)!=0 || u32(pd,80)!=0 || u32(pd,88)!=0;
+        // Only numeric partition metadata is exposed in an anonymous WCX
+        // failure. No paths, filenames, SIDs or image contents.
+        allocation_status_=
+            " (unallocated_table_bytes="+std::to_string(table_length)+
+            ", unallocated_bitmap_bytes="+std::to_string(bitmap_length)+
+            ", integrity_table_bytes="+std::to_string(u32(pd,72)&0x3fffffffu)+
+            ", freed_table_bytes="+std::to_string(u32(pd,80)&0x3fffffffu)+
+            ", freed_bitmap_bytes="+std::to_string(u32(pd,88)&0x3fffffffu)+
+            ", partition_access_type="+std::to_string(u32(pd,184))+")";
         if(table_length || bitmap_length) {
             need((u32(pd,184)==3 || u32(pd,184)==4),
                  "UDF partition is not declared rewritable/overwritable");
@@ -547,6 +556,10 @@ public:
     }
     [[nodiscard]] bool has_unallocated_table() const noexcept {
         return table_.has_value();
+    }
+    [[nodiscard]] std::string missing_allocation_map_reason() const {
+        return "UDF create needs a validated unallocated bitmap or "
+               "Unallocated Space Table"+allocation_status_;
     }
     // ISO/UDF Bridge: ISO-owned sectors may appear free in the UDF bitmap.
     // Exclude them only during this transaction, without misreporting the
@@ -934,6 +947,7 @@ private:
     std::optional<Bitmap> bitmap_;
     std::optional<UnallocatedTable> table_;
     std::optional<Integrity> integrity_;
+    std::string allocation_status_;
     // Sorted, merged half-open Type-1 partition sectors owned by ISO.
     std::vector<std::pair<std::uint32_t,std::uint32_t>> external_blocks_;
     std::map<std::uint64_t,std::size_t> references_;
@@ -1552,7 +1566,8 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
                       const EditProgress& progress,bool allow_bridge,
                       const EditStageValidator& validate_stage) {
     const auto key=edit_path(change.path);
-    need(volume.has_allocation_map(),"UDF create requires a validated unallocated bitmap or space table");
+    if(!volume.has_allocation_map())
+        throw EditUnsupported(volume.missing_allocation_map_reason());
     need(!volume.files().count(key) &&
          !volume.directories().count(key),"UDF destination already exists");
 
@@ -2685,7 +2700,10 @@ UdfEditInspection inspect_udf_edit(
     try {
         Type1 volume(image,allow_bridge);
         result.parser_compatible=true;
-        result.allocation_bitmap=volume.has_allocation_map();
+        result.allocation_bitmap=volume.has_bitmap();
+        result.allocation_table=volume.has_unallocated_table();
+        if(!volume.has_allocation_map())
+            result.reason=volume.missing_allocation_map_reason();
     }catch(const std::exception& ex) {
         result.reason=ex.what();
         if(result.reason.size()>600)result.reason.resize(600);
