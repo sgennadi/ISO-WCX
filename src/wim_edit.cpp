@@ -302,7 +302,7 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
     ProcessUserSid user;
     WimScratchAcl acl(user.sid(),NO_INHERITANCE);
     HANDLE raw_file=CreateFileW(path.c_str(),
-        WRITE_DAC|WRITE_OWNER|FILE_READ_ATTRIBUTES,
+        WRITE_DAC|WRITE_OWNER,
         FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
         OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
@@ -340,7 +340,7 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
         // FILE_FLAG_OPEN_REPARSE_POINT is mandatory; compare the actual
         // NTFS identity to prevent a file replacement between opens.
         HANDLE handle=CreateFileW(path.c_str(),
-            WRITE_DAC|FILE_READ_ATTRIBUTES,
+            WRITE_DAC|WRITE_OWNER,
             FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
             OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|
                 FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
