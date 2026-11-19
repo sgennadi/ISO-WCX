@@ -533,8 +533,14 @@ def main(binary, reader=None):
             return hybrid_mbr(raw)
 
         for use_joliet in (False, True):
-            image.write_bytes(rrip_hybrid(
-                fixture(joliet=use_joliet,boot=True,boot_efi=True)))
+            rr_fixture=fixture(joliet=use_joliet,boot=True,boot_efi=True)
+            if use_joliet:
+                # Model vendor optical media where Joliet advertises a
+                # smaller extent than the actual image (real T560 report).
+                # Same-size patches preserve these descriptor bytes, never
+                # use them as authority for allocating another sector.
+                both(rr_fixture,18*B+80,21)
+            image.write_bytes(rrip_hybrid(rr_fixture))
             rr_before=image.read_bytes()
             source.write_bytes(b'RENEW')
             run('add','rr-file')
