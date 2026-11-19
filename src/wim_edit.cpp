@@ -5,6 +5,7 @@
 #include "iso_wcx/wim_parts.hpp"
 #include "iso_wcx/wim_scratch_diagnostics.hpp"
 #include "iso_wcx/wim_scratch_delete.hpp"
+#include "iso_wcx/wim_scratch_acl.hpp"
 #include "iso_wcx/wim_edit_preflight.hpp"
 #include "iso_wcx/wim_staging_budget.hpp"
 #include <msxml6.h>
@@ -300,42 +301,74 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
     Privileges cleanup_identity;
     ProcessUserSid user;
     WimScratchAcl acl(user.sid(),NO_INHERITANCE);
-    HANDLE raw_file=CreateFileW(path.c_str(),WRITE_DAC|WRITE_OWNER,
+    HANDLE raw_file=CreateFileW(path.c_str(),
+        WRITE_DAC|WRITE_OWNER|FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
         OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr);
     checked(raw_file!=INVALID_HANDLE_VALUE,"open WIM scratch entry for ACL repair");
-    struct File {HANDLE h;~File(){CloseHandle(h);}} file{raw_file};
+    struct File {HANDLE h;~File(){if(h!=INVALID_HANDLE_VALUE)CloseHandle(h);}}
+        file{raw_file};
     // An ACL/owner update on a hard-linked inode affects every link.
     // Delete-by-privilege is tried first; fail closed rather than
     // changing security metadata for multiply linked scratch entries.
-    BY_HANDLE_FILE_INFORMATION information{};
-    checked(GetFileInformationByHandle(file.h,&information),
+    BY_HANDLE_FILE_INFORMATION original{};
+    checked(GetFileInformationByHandle(file.h,&original),
             "inspect WIM scratch links before ACL repair");
-    if(information.nNumberOfLinks>1)
+    if(original.nNumberOfLinks!=1)
         throw EditUnsupported("WIM scratch ACL repair refused on a hard-linked entry");
-    const auto set_scratch_dacl=[&]{
-        return SetSecurityInfo(file.h,SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
+    // An opened reparse point may point outside the scratch tree. We do not
+    // follow it, and refuse a security edit if the link could not be deleted
+    // with the previous privilege-only unlink attempt.
+    if(original.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)
+        throw EditUnsupported("WIM scratch ACL repair refused on a reparse point");
+
+    const auto set_dacl_on=[&](HANDLE handle,bool protect) -> DWORD {
+        return SetSecurityInfo(handle,SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION|
+                (protect?PROTECTED_DACL_SECURITY_INFORMATION:0u),
             nullptr,nullptr,acl.acl,nullptr);
     };
-    DWORD result=set_scratch_dacl();
-    if(result==ERROR_ACCESS_DENIED){
-        // The applied scratch entry may still be TrustedInstaller-owned.
-        // With SeRestorePrivilege enabled, restore ownership only for
-        // this one disposable scratch inode, then retry its DACL.
-        const DWORD owner_result=SetSecurityInfo(file.h,SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION,
-            user.sid(),
-            nullptr,nullptr,nullptr);
-        if(owner_result!=ERROR_SUCCESS)
-            throw std::runtime_error("restore WIM scratch entry ownership (Win32 "+
-                                     std::to_string(owner_result)+")");
-        result=set_scratch_dacl();
+    const auto set_owner=[&]() -> DWORD {
+        // Apply ownership to the singly linked disposable scratch inode
+        // only, never the original WIM or any other directory.
+        return SetSecurityInfo(file.h,SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,user.sid(),nullptr,nullptr,nullptr);
+    };
+    const auto fresh_dacl=[&](bool protect) -> DWORD {
+        // A fresh handle re-evaluates permissions after an owner change.
+        // FILE_FLAG_OPEN_REPARSE_POINT is mandatory; compare the actual
+        // NTFS identity to prevent a file replacement between opens.
+        HANDLE handle=CreateFileW(path.c_str(),
+            WRITE_DAC|FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
+            OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|
+                FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        if(handle==INVALID_HANDLE_VALUE)return GetLastError();
+        File refreshed{handle};
+        BY_HANDLE_FILE_INFORMATION current{};
+        if(!GetFileInformationByHandle(refreshed.h,&current))
+            return GetLastError();
+        if(current.nNumberOfLinks!=1 ||
+           (current.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) ||
+           current.dwVolumeSerialNumber!=original.dwVolumeSerialNumber ||
+           current.nFileIndexHigh!=original.nFileIndexHigh ||
+           current.nFileIndexLow!=original.nFileIndexLow)
+            return ERROR_INVALID_DATA;
+        return set_dacl_on(refreshed.h,protect);
+    };
+    const auto outcome=wim_scratch::recover_private_scratch_acl(
+        [&](bool protect){return set_dacl_on(file.h,protect);},
+        set_owner,fresh_dacl);
+    if(!outcome.ok()) {
+        const bool owner_failed=
+            outcome.owner_change!=wim_scratch::AclRecovery::unused &&
+            outcome.owner_change!=ERROR_SUCCESS;
+        throw std::runtime_error(std::string(
+            owner_failed?"restore WIM scratch entry ownership":
+                         "restore WIM scratch cleanup access")+
+            outcome.counts()+" (Win32 "+std::to_string(outcome.final_error)+")");
     }
-    if(result!=ERROR_SUCCESS)
-        throw std::runtime_error("restore WIM scratch cleanup access (Win32 "+
-                                 std::to_string(result)+")");
 }
 // An applied Windows image may contain protected folders, reparse entries
 // and many thousands of files. Never delete children while a Win32 directory
