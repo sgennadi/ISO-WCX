@@ -6,7 +6,10 @@
 #include "iso_wcx/wim_scratch_delete.hpp"
 #include "iso_wcx/wim_scratch_acl.hpp"
 #include <windows.h>
+#include <aclapi.h>
 #include <filesystem>
+#include <vector>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -366,6 +369,91 @@ int wmain() {
             [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
         if(result.ok() || result.final_error!=ERROR_ACCESS_DENIED ||
            result.max_after_protected!=ERROR_ACCESS_DENIED)return 72;
+    }
+
+    // Real Windows API integration: for a disposable scratch parent
+    // containing an already existing child, SetSecurityInfo on a handle
+    // originally opened with MAXIMUM_ALLOWED must NOT propagate the new
+    // inheritable parent ACE into that child's DACL.
+    {
+        const auto parent=root/L"max-allowed-no-inheritance";
+        if(!fs::create_directory(parent))return 73;
+        const auto protected_child=parent/L"child.txt";
+        {
+            std::ofstream out(protected_child,std::ios::binary);
+            out<<"CHILD UNCHANGED";
+            if(!out)return 74;
+        }
+        const auto child_dacl=[&]() {
+            std::vector<BYTE> descriptor(4096);
+            DWORD required=0;
+            if(!GetFileSecurityW(protected_child.c_str(),
+                    DACL_SECURITY_INFORMATION,descriptor.data(),
+                    static_cast<DWORD>(descriptor.size()),&required)) {
+                if(GetLastError()!=ERROR_INSUFFICIENT_BUFFER)
+                    throw std::runtime_error("read disposable child ACL");
+                descriptor.resize(required);
+                if(!GetFileSecurityW(protected_child.c_str(),
+                        DACL_SECURITY_INFORMATION,descriptor.data(),
+                        static_cast<DWORD>(descriptor.size()),&required))
+                    throw std::runtime_error("resize disposable child ACL");
+            }
+            BOOL present=FALSE,defaulted=FALSE;
+            PACL dacl=nullptr;
+            if(!GetSecurityDescriptorDacl(descriptor.data(),&present,
+                                          &dacl,&defaulted) ||
+               !present || !dacl)
+                throw std::runtime_error("disposable child has no DACL");
+            const auto* bytes=reinterpret_cast<const BYTE*>(dacl);
+            return std::vector<BYTE>(bytes,bytes+dacl->AclSize);
+        };
+        const auto child_before=child_dacl();
+
+        HANDLE raw_token=nullptr;
+        if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw_token))
+            return 75;
+        Held token{raw_token};
+        DWORD token_bytes=0;
+        GetTokenInformation(token.h,TokenUser,nullptr,0,&token_bytes);
+        if(!token_bytes)return 76;
+        std::vector<BYTE> token_data(token_bytes);
+        if(!GetTokenInformation(token.h,TokenUser,token_data.data(),
+                                token_bytes,&token_bytes))return 77;
+        const PSID user_sid=
+            reinterpret_cast<TOKEN_USER*>(token_data.data())->User.Sid;
+        BYTE world_data[SECURITY_MAX_SID_SIZE]{};
+        DWORD world_bytes=sizeof(world_data);
+        if(!CreateWellKnownSid(WinWorldSid,nullptr,world_data,&world_bytes))
+            return 78;
+        std::vector<BYTE> acl_buffer(1024);
+        PACL new_acl=reinterpret_cast<PACL>(acl_buffer.data());
+        if(!InitializeAcl(new_acl,static_cast<DWORD>(acl_buffer.size()),
+                          ACL_REVISION) ||
+           !AddAccessAllowedAceEx(new_acl,ACL_REVISION,0,FILE_ALL_ACCESS,user_sid) ||
+           !AddAccessAllowedAceEx(new_acl,ACL_REVISION,
+                OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE,
+                FILE_READ_ATTRIBUTES,world_data))return 79;
+        Held parent_handle{CreateFileW(parent.c_str(),MAXIMUM_ALLOWED,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+            nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|
+                FILE_FLAG_OPEN_REPARSE_POINT,nullptr)};
+        if(parent_handle.h==INVALID_HANDLE_VALUE)return 80;
+        const DWORD acl_status=SetSecurityInfo(parent_handle.h,
+            SE_FILE_OBJECT,DACL_SECURITY_INFORMATION,
+            nullptr,nullptr,new_acl,nullptr);
+        if(acl_status!=ERROR_SUCCESS) {
+            std::cerr<<"MAXIMUM_ALLOWED scratch-parent ACL update failed: "
+                     <<acl_status<<"\n";
+            return 81;
+        }
+        if(child_dacl()!=child_before) {
+            std::cerr<<"MAXIMUM_ALLOWED parent ACE reached an existing child\n";
+            return 82;
+        }
+        // The parent's directory entry is not a reparse point and its
+        // existing child remains byte-for-byte intact.
+        if(!fs::exists(protected_child) ||
+           fs::file_size(protected_child)!=15)return 83;
     }
 
     std::cout<<"PASS: private WIM scratch POSIX file/directory unlink, "
