@@ -534,6 +534,10 @@ def main(binary, reader=None):
 
         for use_joliet in (False, True):
             rr_fixture=fixture(joliet=use_joliet,boot=True,boot_efi=True)
+            # The fixture's ISO namespace doesn't expose the boot images;
+            # explicitly bound both BIOS/EFI El Torito load regions.
+            struct.pack_into('<H',rr_fixture,24*B+38,1)
+            struct.pack_into('<H',rr_fixture,24*B+102,1)
             if use_joliet:
                 # Model vendor optical media where Joliet advertises a
                 # smaller extent than the actual image (real T560 report).
