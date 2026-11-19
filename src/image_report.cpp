@@ -399,7 +399,10 @@ std::string build_image_structure_report(const std::filesystem::path& image){
     }
 #endif
     const auto optical=probe_optical(report,image,bytes);
-    if(disc.format().rfind("UDF",0)==0) {
+    // ISO/UDF Bridge discs may be selected by the ISO namespace even
+    // though the UDF Type-1 writer is the F5 metadata route. Include
+    // the read-only UDF allocation report for both extensions/layouts.
+    if(disc.format().rfind("UDF",0)==0 || optical.udf_signature) {
         report.append("");
         report.append("UDF NATIVE EDIT PREFLIGHT (READ ONLY)");
         const auto capability=inspect_udf_edit(image,optical.iso_primary);
