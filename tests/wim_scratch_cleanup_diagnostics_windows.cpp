@@ -253,7 +253,8 @@ int wmain() {
                 return protect?ERROR_ACCESS_DENIED:ERROR_SUCCESS;
             },
             [&]() -> DWORD {++owners;return ERROR_SUCCESS;},
-            [&](bool) -> DWORD {++opened;return ERROR_SUCCESS;});
+            [&](bool) -> DWORD {++opened;return ERROR_SUCCESS;},
+            [&](bool) -> DWORD {++opened;return ERROR_ACCESS_DENIED;});
         if(!outcome.ok()||outcome.protected_first!=ERROR_ACCESS_DENIED ||
            outcome.plain_first!=ERROR_SUCCESS || calls!=2 ||
            owners!=0 || opened!=0)return 63;
@@ -269,7 +270,8 @@ int wmain() {
             [&](bool protect) -> DWORD {
                 ++reopened;
                 return protect?ERROR_ACCESS_DENIED:ERROR_SUCCESS;
-            });
+            },
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
         if(!outcome.ok()||calls!=4||owners!=1||reopened!=1 ||
            outcome.owner_change!=ERROR_SUCCESS ||
            outcome.reopened_plain!=ERROR_SUCCESS)return 64;
@@ -284,7 +286,8 @@ int wmain() {
         const auto outcome=iso_wcx::wim_scratch::recover_private_scratch_acl(
             [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
             [&]() -> DWORD {++owners;return ERROR_ACCESS_DENIED;},
-            [&](bool) -> DWORD {++reopened;return ERROR_SUCCESS;});
+            [&](bool) -> DWORD {++reopened;return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
         if(outcome.ok()||owners!=1||reopened!=0 ||
            outcome.final_error!=ERROR_ACCESS_DENIED)return 66;
     }
@@ -295,6 +298,7 @@ int wmain() {
                 return protect?ERROR_INVALID_PARAMETER:ERROR_SUCCESS;
             },
             [&]() -> DWORD {++owners;return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
             [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
         if(!outcome.ok()||owners!=0)return 67;
     }
@@ -302,9 +306,66 @@ int wmain() {
         const auto outcome=iso_wcx::wim_scratch::recover_private_scratch_acl(
             [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
             []() -> DWORD {return ERROR_SUCCESS;},
-            [](bool) -> DWORD {return ERROR_INVALID_DATA;});
+            [](bool) -> DWORD {return ERROR_INVALID_DATA;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
         if(outcome.ok()||outcome.final_error!=ERROR_INVALID_DATA)
             return 68;
+    }
+
+    // Exact field failure: owner_change=0 while every ordinary (and
+    // reopened) SetSecurityInfo DACL attempt returns Win32 5. A special
+    // MAXIMUM_ALLOWED handle must recover without modifying children.
+    {
+        unsigned max_calls=0,owner_calls=0,normal_calls=0,reopens=0;
+        const auto result=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [&](bool) -> DWORD {++normal_calls;return ERROR_ACCESS_DENIED;},
+            [&]() -> DWORD {++owner_calls;return ERROR_SUCCESS;},
+            [&](bool) -> DWORD {++reopens;return ERROR_ACCESS_DENIED;},
+            [&](bool) -> DWORD {
+                ++max_calls;
+                return max_calls==3?ERROR_SUCCESS:ERROR_ACCESS_DENIED;
+            });
+        if(!result.ok() || owner_calls!=1 || normal_calls!=4 ||
+           reopens!=2 || max_calls!=3 ||
+           result.max_before_plain!=ERROR_ACCESS_DENIED ||
+           result.max_before_protected!=ERROR_ACCESS_DENIED ||
+           result.max_after_plain!=ERROR_SUCCESS)return 69;
+    }
+    {
+        // Recovered using MAXIMUM_ALLOWED BEFORE taking ownership:
+        // never alter ownership of a disposable entry unnecessarily.
+        unsigned owner_calls=0,normal_calls=0,max_calls=0;
+        const auto result=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [&](bool) -> DWORD {++normal_calls;return ERROR_ACCESS_DENIED;},
+            [&]() -> DWORD {++owner_calls;return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            [&](bool) -> DWORD {++max_calls;return ERROR_SUCCESS;});
+        if(!result.ok() || owner_calls!=0 || normal_calls!=2 ||
+           max_calls!=1 || result.owner_change!=
+           iso_wcx::wim_scratch::AclRecovery::unused)return 70;
+    }
+    {
+        // File-ID mismatch on the fresh MAXIMUM_ALLOWED handle is fatal,
+        // never followed by ownership changes or another ACL attempt.
+        unsigned owner_calls=0;
+        const auto result=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            [&]() -> DWORD {++owner_calls;return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            [](bool) -> DWORD {return ERROR_INVALID_DATA;});
+        if(result.ok() || result.final_error!=ERROR_INVALID_DATA ||
+           owner_calls!=0)return 71;
+    }
+    {
+        // A true Win32 5 on both MAXIMUM_ALLOWED handles must remain
+        // a failure. No false success even if owner_change succeeded.
+        const auto result=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            []() -> DWORD {return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
+        if(result.ok() || result.final_error!=ERROR_ACCESS_DENIED ||
+           result.max_after_protected!=ERROR_ACCESS_DENIED)return 72;
     }
 
     std::cout<<"PASS: private WIM scratch POSIX file/directory unlink, "
