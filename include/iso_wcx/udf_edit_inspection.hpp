@@ -1,6 +1,7 @@
 #pragma once
 // Read-only UDF Type-1 writer preflight, for Export Image Structure.
 // This never opens the image for writing, creates a mount, or starts DISM.
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -9,6 +10,7 @@ struct UdfEditInspection {
     bool parser_compatible = false;
     bool allocation_bitmap = false;
     bool allocation_table = false;
+    std::uint32_t partition_access_type = 0;
     std::string reason;
 };
 // allow_bridge only changes how the parser treats ISO9660 descriptors.
