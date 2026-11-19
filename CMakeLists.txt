@@ -550,6 +550,8 @@ if(WIN32)
       tests/wim_scratch_cleanup_diagnostics_windows.cpp)
     target_include_directories(wim_scratch_cleanup_diagnostics_windows_tests
       PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(wim_scratch_cleanup_diagnostics_windows_tests
+      PRIVATE advapi32)
     add_test(NAME wim_scratch_delete_pending_and_sharing_probe
       COMMAND wim_scratch_cleanup_diagnostics_windows_tests)
     set_tests_properties(wim_scratch_delete_pending_and_sharing_probe

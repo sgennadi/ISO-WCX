@@ -335,17 +335,21 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
         return SetSecurityInfo(file.h,SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION,user.sid(),nullptr,nullptr,nullptr);
     };
-    const auto fresh_dacl=[&](bool protect) -> DWORD {
-        // A fresh handle re-evaluates permissions after an owner change.
-        // FILE_FLAG_OPEN_REPARSE_POINT is mandatory; compare the actual
-        // NTFS identity to prevent a file replacement between opens.
-        HANDLE handle=CreateFileW(path.c_str(),
-            WRITE_DAC|WRITE_OWNER,
+    unsigned max_allowed_opened=0;
+    unsigned max_allowed_identity_rejected=0;
+    const auto checked_fresh_dacl=[&](DWORD access,bool protect) -> DWORD {
+        // MAXIMUM_ALLOWED is a documented special case for SetSecurityInfo:
+        // the call does NOT propagate inheritable ACEs into child files or
+        // directories, which may be TrustedInstaller-owned and protected.
+        // Never use this for the original WIM, parent directory, junctions,
+        // hardlinks, or another operation's temporary workspace.
+        HANDLE handle=CreateFileW(path.c_str(),access,
             FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
             OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|
                 FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
         if(handle==INVALID_HANDLE_VALUE)return GetLastError();
         File refreshed{handle};
+        if(access==MAXIMUM_ALLOWED)++max_allowed_opened;
         BY_HANDLE_FILE_INFORMATION current{};
         if(!GetFileInformationByHandle(refreshed.h,&current))
             return GetLastError();
@@ -353,13 +357,23 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
            (current.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) ||
            current.dwVolumeSerialNumber!=original.dwVolumeSerialNumber ||
            current.nFileIndexHigh!=original.nFileIndexHigh ||
-           current.nFileIndexLow!=original.nFileIndexLow)
+           current.nFileIndexLow!=original.nFileIndexLow) {
+            if(access==MAXIMUM_ALLOWED)++max_allowed_identity_rejected;
             return ERROR_INVALID_DATA;
+        }
         return set_dacl_on(refreshed.h,protect);
     };
     const auto outcome=wim_scratch::recover_private_scratch_acl(
         [&](bool protect){return set_dacl_on(file.h,protect);},
-        set_owner,fresh_dacl);
+        set_owner,
+        [&](bool protect) {
+            return checked_fresh_dacl(WRITE_DAC|WRITE_OWNER,protect);
+        },
+        [&](bool protect) {
+            // MUST request exactly MAXIMUM_ALLOWED; OR-ing WRITE_DAC or
+            // other access bits defeats the documented no-propagation rule.
+            return checked_fresh_dacl(MAXIMUM_ALLOWED,protect);
+        });
     if(!outcome.ok()) {
         const bool owner_failed=
             outcome.owner_change!=wim_scratch::AclRecovery::unused &&
@@ -367,7 +381,11 @@ void allow_workspace_cleanup(const std::filesystem::path& path){
         throw std::runtime_error(std::string(
             owner_failed?"restore WIM scratch entry ownership":
                          "restore WIM scratch cleanup access")+
-            outcome.counts()+" (Win32 "+std::to_string(outcome.final_error)+")");
+            outcome.counts()+
+            " (max_allowed_handles_opened="+std::to_string(max_allowed_opened)+
+            ", max_allowed_identity_rejected="+
+                std::to_string(max_allowed_identity_rejected)+
+            ") (Win32 "+std::to_string(outcome.final_error)+")");
     }
 }
 // An applied Windows image may contain protected folders, reparse entries

@@ -6,10 +6,14 @@
 #include "iso_wcx/wim_scratch_delete.hpp"
 #include "iso_wcx/wim_scratch_acl.hpp"
 #include <windows.h>
+#include <aclapi.h>
 #include <filesystem>
+#include <vector>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <stdexcept>
 namespace fs = std::filesystem;
 
 int wmain() {
@@ -253,7 +257,8 @@ int wmain() {
                 return protect?ERROR_ACCESS_DENIED:ERROR_SUCCESS;
             },
             [&]() -> DWORD {++owners;return ERROR_SUCCESS;},
-            [&](bool) -> DWORD {++opened;return ERROR_SUCCESS;});
+            [&](bool) -> DWORD {++opened;return ERROR_SUCCESS;},
+            [&](bool) -> DWORD {++opened;return ERROR_ACCESS_DENIED;});
         if(!outcome.ok()||outcome.protected_first!=ERROR_ACCESS_DENIED ||
            outcome.plain_first!=ERROR_SUCCESS || calls!=2 ||
            owners!=0 || opened!=0)return 63;
@@ -269,7 +274,8 @@ int wmain() {
             [&](bool protect) -> DWORD {
                 ++reopened;
                 return protect?ERROR_ACCESS_DENIED:ERROR_SUCCESS;
-            });
+            },
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
         if(!outcome.ok()||calls!=4||owners!=1||reopened!=1 ||
            outcome.owner_change!=ERROR_SUCCESS ||
            outcome.reopened_plain!=ERROR_SUCCESS)return 64;
@@ -284,7 +290,8 @@ int wmain() {
         const auto outcome=iso_wcx::wim_scratch::recover_private_scratch_acl(
             [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
             [&]() -> DWORD {++owners;return ERROR_ACCESS_DENIED;},
-            [&](bool) -> DWORD {++reopened;return ERROR_SUCCESS;});
+            [&](bool) -> DWORD {++reopened;return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
         if(outcome.ok()||owners!=1||reopened!=0 ||
            outcome.final_error!=ERROR_ACCESS_DENIED)return 66;
     }
@@ -295,6 +302,7 @@ int wmain() {
                 return protect?ERROR_INVALID_PARAMETER:ERROR_SUCCESS;
             },
             [&]() -> DWORD {++owners;return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
             [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
         if(!outcome.ok()||owners!=0)return 67;
     }
@@ -302,9 +310,151 @@ int wmain() {
         const auto outcome=iso_wcx::wim_scratch::recover_private_scratch_acl(
             [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
             []() -> DWORD {return ERROR_SUCCESS;},
-            [](bool) -> DWORD {return ERROR_INVALID_DATA;});
+            [](bool) -> DWORD {return ERROR_INVALID_DATA;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
         if(outcome.ok()||outcome.final_error!=ERROR_INVALID_DATA)
             return 68;
+    }
+
+    // Exact field failure: owner_change=0 while every ordinary (and
+    // reopened) SetSecurityInfo DACL attempt returns Win32 5. A special
+    // MAXIMUM_ALLOWED handle must recover without modifying children.
+    {
+        unsigned max_calls=0,owner_calls=0,normal_calls=0,reopens=0;
+        const auto result=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [&](bool) -> DWORD {++normal_calls;return ERROR_ACCESS_DENIED;},
+            [&]() -> DWORD {++owner_calls;return ERROR_SUCCESS;},
+            [&](bool) -> DWORD {++reopens;return ERROR_ACCESS_DENIED;},
+            [&](bool) -> DWORD {
+                ++max_calls;
+                return max_calls==3?ERROR_SUCCESS:ERROR_ACCESS_DENIED;
+            });
+        if(!result.ok() || owner_calls!=1 || normal_calls!=4 ||
+           reopens!=2 || max_calls!=3 ||
+           result.max_before_plain!=ERROR_ACCESS_DENIED ||
+           result.max_before_protected!=ERROR_ACCESS_DENIED ||
+           result.max_after_plain!=ERROR_SUCCESS)return 69;
+    }
+    {
+        // Recovered using MAXIMUM_ALLOWED BEFORE taking ownership:
+        // never alter ownership of a disposable entry unnecessarily.
+        unsigned owner_calls=0,normal_calls=0,max_calls=0;
+        const auto result=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [&](bool) -> DWORD {++normal_calls;return ERROR_ACCESS_DENIED;},
+            [&]() -> DWORD {++owner_calls;return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            [&](bool) -> DWORD {++max_calls;return ERROR_SUCCESS;});
+        if(!result.ok() || owner_calls!=0 || normal_calls!=2 ||
+           max_calls!=1 || result.owner_change!=
+           iso_wcx::wim_scratch::AclRecovery::unused)return 70;
+    }
+    {
+        // File-ID mismatch on the fresh MAXIMUM_ALLOWED handle is fatal,
+        // never followed by ownership changes or another ACL attempt.
+        unsigned owner_calls=0;
+        const auto result=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            [&]() -> DWORD {++owner_calls;return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            [](bool) -> DWORD {return ERROR_INVALID_DATA;});
+        if(result.ok() || result.final_error!=ERROR_INVALID_DATA ||
+           owner_calls!=0)return 71;
+    }
+    {
+        // A true Win32 5 on both MAXIMUM_ALLOWED handles must remain
+        // a failure. No false success even if owner_change succeeded.
+        const auto result=iso_wcx::wim_scratch::recover_private_scratch_acl(
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            []() -> DWORD {return ERROR_SUCCESS;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;},
+            [](bool) -> DWORD {return ERROR_ACCESS_DENIED;});
+        if(result.ok() || result.final_error!=ERROR_ACCESS_DENIED ||
+           result.max_after_protected!=ERROR_ACCESS_DENIED)return 72;
+    }
+
+    // Real Windows API integration: for a disposable scratch parent
+    // containing an already existing child, SetSecurityInfo on a handle
+    // originally opened with MAXIMUM_ALLOWED must NOT propagate the new
+    // inheritable parent ACE into that child's DACL.
+    {
+        const auto parent=root/L"max-allowed-no-inheritance";
+        if(!fs::create_directory(parent))return 73;
+        const auto protected_child=parent/L"child.txt";
+        {
+            std::ofstream out(protected_child,std::ios::binary);
+            out<<"CHILD UNCHANGED";
+            if(!out)return 74;
+        }
+        const auto child_dacl=[&]() {
+            std::vector<BYTE> descriptor(4096);
+            DWORD required=0;
+            if(!GetFileSecurityW(protected_child.c_str(),
+                    DACL_SECURITY_INFORMATION,descriptor.data(),
+                    static_cast<DWORD>(descriptor.size()),&required)) {
+                if(GetLastError()!=ERROR_INSUFFICIENT_BUFFER)
+                    throw std::runtime_error("read disposable child ACL");
+                descriptor.resize(required);
+                if(!GetFileSecurityW(protected_child.c_str(),
+                        DACL_SECURITY_INFORMATION,descriptor.data(),
+                        static_cast<DWORD>(descriptor.size()),&required))
+                    throw std::runtime_error("resize disposable child ACL");
+            }
+            BOOL present=FALSE,defaulted=FALSE;
+            PACL dacl=nullptr;
+            if(!GetSecurityDescriptorDacl(descriptor.data(),&present,
+                                          &dacl,&defaulted) ||
+               !present || !dacl)
+                throw std::runtime_error("disposable child has no DACL");
+            const auto* bytes=reinterpret_cast<const BYTE*>(dacl);
+            return std::vector<BYTE>(bytes,bytes+dacl->AclSize);
+        };
+        const auto child_before=child_dacl();
+
+        HANDLE raw_token=nullptr;
+        if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw_token))
+            return 75;
+        Held token{raw_token};
+        DWORD token_bytes=0;
+        GetTokenInformation(token.h,TokenUser,nullptr,0,&token_bytes);
+        if(!token_bytes)return 76;
+        std::vector<BYTE> token_data(token_bytes);
+        if(!GetTokenInformation(token.h,TokenUser,token_data.data(),
+                                token_bytes,&token_bytes))return 77;
+        const PSID user_sid=
+            reinterpret_cast<TOKEN_USER*>(token_data.data())->User.Sid;
+        BYTE world_data[SECURITY_MAX_SID_SIZE]{};
+        DWORD world_bytes=sizeof(world_data);
+        if(!CreateWellKnownSid(WinWorldSid,nullptr,world_data,&world_bytes))
+            return 78;
+        std::vector<BYTE> acl_buffer(1024);
+        PACL new_acl=reinterpret_cast<PACL>(acl_buffer.data());
+        if(!InitializeAcl(new_acl,static_cast<DWORD>(acl_buffer.size()),
+                          ACL_REVISION) ||
+           !AddAccessAllowedAceEx(new_acl,ACL_REVISION,0,FILE_ALL_ACCESS,user_sid) ||
+           !AddAccessAllowedAceEx(new_acl,ACL_REVISION,
+                OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE,
+                FILE_READ_ATTRIBUTES,world_data))return 79;
+        Held parent_handle{CreateFileW(parent.c_str(),MAXIMUM_ALLOWED,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+            nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|
+                FILE_FLAG_OPEN_REPARSE_POINT,nullptr)};
+        if(parent_handle.h==INVALID_HANDLE_VALUE)return 80;
+        const DWORD acl_status=SetSecurityInfo(parent_handle.h,
+            SE_FILE_OBJECT,DACL_SECURITY_INFORMATION,
+            nullptr,nullptr,new_acl,nullptr);
+        if(acl_status!=ERROR_SUCCESS) {
+            std::cerr<<"MAXIMUM_ALLOWED scratch-parent ACL update failed: "
+                     <<acl_status<<"\n";
+            return 81;
+        }
+        if(child_dacl()!=child_before) {
+            std::cerr<<"MAXIMUM_ALLOWED parent ACE reached an existing child\n";
+            return 82;
+        }
+        // The parent's directory entry is not a reparse point and its
+        // existing child remains byte-for-byte intact.
+        if(!fs::exists(protected_child) ||
+           fs::file_size(protected_child)!=15)return 83;
     }
 
     std::cout<<"PASS: private WIM scratch POSIX file/directory unlink, "
