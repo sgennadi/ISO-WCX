@@ -305,7 +305,8 @@ public:
             seen.clear();
             auto other=parse(Bytes(supplementary.begin()+156,
                                    supplementary.begin()+190),true,nullptr,0,seen);
-            if(primary_volume_blocks!=supplementary_volume_blocks) {
+            if(primary_volume_blocks!=supplementary_volume_blocks &&
+               !(hybrid_system_area && iso_system_use)) {
                 // A mismatched descriptor is safe to rebuild only when
                 // EACH independent namespace fits inside its OWN declared
                 // volume. Reject truncated trees and path tables rather than
@@ -346,6 +347,11 @@ public:
                 validate_view(*root,primary,primary_volume_blocks);
                 validate_view(*other,supplementary,supplementary_volume_blocks);
             }
+            // A few RRIP/isohybrid masters intentionally advertise a
+            // different Joliet Volume Space Size while their data extents
+            // remain physically bounded. On the STRICT unchanged-length
+            // patcher, that inconsistency is preserved verbatim rather
+            // than normalized or used to authorize new allocation.
             std::vector<const Node*> supplementary_nodes{other.get()};
             for(std::size_t i=0;i<supplementary_nodes.size();++i) {
                 const auto* node=supplementary_nodes[i];
