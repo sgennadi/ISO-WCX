@@ -2,7 +2,8 @@
 #include "iso_wcx/signed_update.hpp"
 #include <bcrypt.h>
 #include <array>
-#include <cassert>
+#include <stdexcept>
+#define assert(condition) do { if(!(condition)) throw std::runtime_error(#condition); } while(false)
 #include <cstdint>
 #include <cstring>
 #include <vector>
