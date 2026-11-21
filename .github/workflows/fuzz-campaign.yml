@@ -27,6 +27,12 @@ jobs:
             '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined'
       - name: Build parser
         run: cmake --build build-fuzz --target disc_inspect --parallel 2
+      - name: Replay previously observed UDF sanitizer failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:fast_unwind_on_malloc=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          python3 tests/test_fuzz_campaign.py build-fuzz/disc_inspect --seconds 60 --seed 0x15A0D --start-case 10990 --max-cases 1
       - name: Run bounded parser campaign
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
