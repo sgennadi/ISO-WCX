@@ -1251,7 +1251,16 @@ void copy_image_sparse(std::ifstream& in,std::fstream& out,std::uint64_t n,
 bool try_clone_udf_stage(const std::filesystem::path& original,
                          const std::filesystem::path& staged,
                          std::uint64_t size) {
+    #ifdef _WIN32
+    char* force_sparse=nullptr;
+    std::size_t force_sparse_length=0;
+    const errno_t env_status=_dupenv_s(&force_sparse,&force_sparse_length,"ISO_WCX_UDF_FORCE_SPARSE_STAGE");
+    const bool forced=(env_status==0 && force_sparse!=nullptr);
+    std::free(force_sparse);
+    if(forced)return false;
+#else
     if(std::getenv("ISO_WCX_UDF_FORCE_SPARSE_STAGE")!=nullptr)return false;
+#endif
 #ifdef __linux__
     const int source=::open(original.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
     if(source<0)return false;

@@ -1,6 +1,7 @@
 #ifdef _WIN32
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/edit_transaction.hpp"
+#include "iso_wcx/cleanup_failure.hpp"
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/wim_parts.hpp"
 #include "iso_wcx/wim_scratch_diagnostics.hpp"
@@ -202,7 +203,7 @@ void preserve_metadata(HMODULE m,HANDLE old_image,HANDLE new_image){
     Bstr text;hr(new_doc->get_xml(&text.p));std::wstring xml=L"\xfeff";xml.append(text.p,SysStringLen(text.p));
     checked(api<BOOL(WINAPI*)(HANDLE,void*,DWORD)>(m,"WIMSetImageInformation")(new_image,xml.data(),static_cast<DWORD>((xml.size()+1)*sizeof(wchar_t))),"write WIM XML");
 }
-std::filesystem::path relative_path(const std::string& text){return std::filesystem::u8path(edit_path(text));}
+std::filesystem::path relative_path(const std::string& text){const auto utf8=edit_path(text);return std::filesystem::path(std::u8string(utf8.begin(),utf8.end()));}
 void no_reparse(const std::filesystem::path& root,const std::filesystem::path& relative){
     auto path=root;for(const auto& part:relative){path/=part;DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){auto err=GetLastError();checked(err==ERROR_FILE_NOT_FOUND||err==ERROR_PATH_NOT_FOUND,"cannot inspect WIM edit path");continue;}if(attr&FILE_ATTRIBUTE_REPARSE_POINT)throw EditUnsupported("editing through WIM reparse points is not supported");}
 }
@@ -688,7 +689,7 @@ struct WimWorkspaceCleanup {
         // token and retry ACL-aware cleanup of this one private workspace.
         // Never delete unrelated/older .iso-wcx-edit-* directories.
         for(unsigned attempt=0;attempt<4;++attempt) {
-            try {remove_tree(folder,{},true);return;}catch(...){}
+            try {remove_tree(folder,{},true);cleanup_diagnostics::reset();return;}catch(...) { cleanup_diagnostics::note(cleanup_diagnostics::Stage::wim_workspace,std::current_exception(),attempt+1); }
             if(attempt<3)Sleep(150u*(attempt+1u));
         }
     }
@@ -896,7 +897,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 std::filesystem::path path;
                 bool complete=false;
                 ~Cleanup() noexcept {
-                    if(!complete)try{remove_tree(path,{},true);}catch(...){}
+                    if(!complete)try{remove_tree(path,{},true);}catch(...) { cleanup_diagnostics::note(cleanup_diagnostics::Stage::wim_expanded,std::current_exception()); }
                 }
             } cleanup{expanded};
             // Loaded/captured WIMGAPI handles must close BEFORE scratch deletion.
@@ -951,6 +952,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             }catch(const EditCancelled&) {
                 throw;
             }catch(const std::exception&) {
+                cleanup_diagnostics::note(cleanup_diagnostics::Stage::wim_expanded,std::current_exception());
                 // Private folder remains under the guarded transaction root.
                 // Never commit while any of its contents survive.
             }

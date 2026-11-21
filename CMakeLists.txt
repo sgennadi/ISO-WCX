@@ -102,6 +102,40 @@ if(ISO_WCX_CXX_STANDARD STREQUAL "26")
   message(STATUS "ISO-WCX experimental C++26 dialect enabled (not a release ABI change)")
 endif()
 
+# Public key is nonsecret and must be independently provisioned by the
+# release maintainer. No default/test key is shipped with the updater.
+set(ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX "" CACHE STRING
+    "Trusted release P-256 public key as 128 hex digits (X||Y)")
+if(NOT ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX STREQUAL "")
+  if(NOT ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX MATCHES "^[0-9a-fA-F]+$" OR
+     NOT ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX MATCHES "^.{128}$")
+    message(FATAL_ERROR "ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX must be exactly 128 hex digits")
+  endif()
+endif()
+if(WIN32)
+  add_compile_definitions(
+    ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX="${ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX}")
+endif()
+
+# Harden all in-process Windows parser code and statically linked dependencies.
+# CFG and CET compatibility are link-time opt-ins; /Qspectre requires an
+# installed Spectre-mitigated toolset and is not silently assumed available.
+option(ISO_WCX_ENABLE_SPECTRE "Enable MSVC Spectre mitigations when toolset is installed" OFF)
+option(ISO_WCX_ENABLE_CFG "Enable MSVC Control Flow Guard (disable for ASan)" ON)
+if(MSVC)
+  add_compile_options(/sdl)
+  if(ISO_WCX_ENABLE_CFG)
+    add_compile_options(/guard:cf)
+    add_link_options(/guard:cf)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+      add_link_options(/CETCOMPAT)
+    endif()
+  endif()
+  if(ISO_WCX_ENABLE_SPECTRE)
+    add_compile_options(/Qspectre)
+  endif()
+endif()
+
 # The Windows builder uses a pinned static zlib, so WCX does not depend on an
 # external DLL. Linux uses the system package when it is available.
 if(WIN32)
@@ -143,6 +177,12 @@ FetchContent_Declare(iso_wcx_bzip2
     "${iso_wcx_bzip2_SOURCE_DIR}/decompress.c"
     "${iso_wcx_bzip2_SOURCE_DIR}/bzlib.c")
   target_include_directories(iso_wcx_bzip2 PUBLIC "${iso_wcx_bzip2_SOURCE_DIR}")
+  # Upstream bzip2 1.0.8 uses historical CRT APIs; MSVC /sdl promotes
+  # C4996 warnings to errors. Suppress only for this pinned third-party
+  # target, preserving /sdl and /guard:cf for the project itself.
+  if(MSVC)
+    target_compile_definitions(iso_wcx_bzip2 PRIVATE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
+  endif()
 set(ISO_WCX_BZIP2_TARGET iso_wcx_bzip2)
 
 # Native CHD v5 decoder: all codec and container libraries are statically
@@ -731,6 +771,17 @@ if(BUILD_TESTING)
     add_test(NAME disc_descriptor_mutations
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mutations.py" "$<TARGET_FILE:disc_inspect>")
   endif()
+endif()
+
+# Validate the pinned-key verification primitive against a locally generated
+# ephemeral P-256 key; no private signing key is committed or published.
+if(BUILD_TESTING AND WIN32)
+  add_executable(signed_update_windows_tests tests/signed_update_windows.cpp)
+  target_include_directories(signed_update_windows_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(signed_update_windows_tests PRIVATE bcrypt)
+  add_test(NAME signed_update_bcrypt_valid_and_tampered
+    COMMAND signed_update_windows_tests)
 endif()
 
 # Retain the small standalone safe binary-reader regression test from main.

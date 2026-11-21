@@ -9,6 +9,7 @@
 #endif
 #include <windows.h>
 #include "iso_wcx/operation_diagnostics.hpp"
+#include "iso_wcx/cleanup_failure.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -105,6 +106,27 @@ int wmain(){
         require(!contains(read(fixture.folder/L"ISO-WCX"/L"Logs"/L"operations.jsonl"),
                           "SECRET-USER-F5"),
                 "operation journal leaked a private image name");
+        // No exception text or private path is ever exported. Capture the
+        // final cleanup failure once, then clear it for the next operation.
+        {
+            iso_wcx::diagnostics::Operation op(
+                "pack",fixture.folder/L"SECRET-WIM-CLEANUP.wim",1,1);
+            iso_wcx::cleanup_diagnostics::note(
+                iso_wcx::cleanup_diagnostics::Stage::wim_workspace,
+                std::make_error_code(std::errc::permission_denied),4);
+            op.complete(13,"WIM transaction residue cleanup exhausted");
+        }
+        const auto journal=read(fixture.folder/L"ISO-WCX"/L"Logs"/L"operations.jsonl");
+        require(contains(journal,"\"cleanup_stage\":\"wim_workspace\""),
+                "cleanup stage missing from operation journal");
+        require(contains(journal,"\"cleanup_kind\":\"filesystem_error\""),
+                "cleanup error type missing");
+        require(contains(journal,"\"cleanup_attempts\":4"),
+                "cleanup retry count missing");
+        require(!contains(journal,"SECRET-WIM-CLEANUP"),
+                "cleanup diagnostics leaked a private path");
+        require(!iso_wcx::cleanup_diagnostics::take().present,
+                "cleanup error was not consumed exactly once");
         // OpenArchive reports the exact WIM metadata stage even though
         // TC has not registered any WCX progress callback yet.
         {

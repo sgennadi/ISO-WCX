@@ -8,6 +8,7 @@
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/image_report.hpp"
 #include "iso_wcx/update_policy.hpp"
+#include "iso_wcx/signed_update.hpp"
 #include "iso_wcx/preview_update_policy.hpp"
 #include "iso_wcx/tc_registration_repair.hpp"
 #include "iso_wcx/operation_diagnostics.hpp"
@@ -331,6 +332,18 @@ std::filesystem::path save_verified_archive(const std::wstring& tag) {
     const auto base=L"https://github.com/sgennadi/ISO-WCX/releases/download/"+
                     tag+L"/";
     const auto manifest=http_get(base+L"SHA256SUMS.txt",16384);
+    // Authentication is mandatory. A checksum hosted beside the ZIP cannot
+    // authenticate the publisher. No fallback to unsigned installation.
+#ifndef ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX
+#define ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX ""
+#endif
+    std::array<std::uint8_t,64> public_key{};
+    require(signed_update::decode_public_key(
+                ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX,public_key),
+            "signed updates are not provisioned: no trusted release public key");
+    const auto signature=http_get(base+L"SHA256SUMS.txt.sig",1024);
+    require(signed_update::verify_p256_sha256(manifest,signature,public_key),
+            "release signature invalid; refusing unsigned or modified update");
     const auto expected=update::checksum(as_text(manifest),narrow(filename));
     require(bool(expected),"SHA256SUMS does not identify release ZIP");
     const auto zip=http_get(base+filename,max_package);
@@ -578,9 +591,9 @@ void check_release(HWND dlg,State& state,bool forced) {
     if(selected_update_available(state))
         put_status(dlg,tr(state.russian,
             state.preview_channel?L"New RC build available (manual GitHub download).":
-                                  L"New verified Stable release available.",
+                                  L"New checksum-checked Stable release available.",
             state.preview_channel?L"Доступен новый RC (скачивание через GitHub).":
-                                  L"Доступна новая проверенная Stable-версия."));
+                                  L"Доступна Stable-версия с проверкой контрольной суммы."));
     else if(state.preview_channel && !state.preview_checked)
         put_status(dlg,tr(state.russian,
             L"Preview/RC check failed. Retry; Stable status may still be valid.",
@@ -602,7 +615,7 @@ void download_and_offer(HWND dlg,State& state) {
             const auto url=preview_artifact_page(*state.latest_preview);
             const auto message=tr(state.russian,
                 L"The Preview/RC ZIP is a GitHub Actions artifact, not a "
-                L"SHA-256 signed Stable Release. Open the GitHub download page "
+                L"SHA-256 checksum-checked Stable Release. Open the GitHub download page "
                 L"and install the ZIP manually through Total Commander? "
                 L"The running WCX is never overwritten by this dialog.",
                 L"Архив Preview/RC находится в GitHub Actions, а не в "
@@ -636,10 +649,11 @@ void download_and_offer(HWND dlg,State& state) {
             // button) without opening any executable or installer archive.
             const bool open_installer=modern_dialog::confirm(
                 dlg,modern_dialog::Tone::success,L"ISO-WCX Update",
-                tr(state.russian,L"Stable update verified",
-                                 L"Обновление Stable проверено"),
+                tr(state.russian,L"Stable checksum matched",
+                                 L"Контрольная сумма Stable совпала"),
                 tr(state.russian,
-                   L"The Stable ZIP was downloaded and its SHA-256 verified. "
+                   L"The Stable ZIP matches its published SHA-256 checksum. "
+                   L"This does not authenticate the publisher. "
                    L"Open the archive in Total Commander now?",
                    L"Stable ZIP скачан, контрольная сумма SHA-256 проверена. "
                    L"Открыть архив в Total Commander сейчас?"),

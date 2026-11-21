@@ -1,5 +1,6 @@
 #pragma once
 #include "iso_wcx/archive_edit.hpp"
+#include "iso_wcx/cleanup_failure.hpp"
 #include <chrono>
 #include <fstream>
 #include <random>
@@ -112,9 +113,15 @@ public:
             try {
                 std::error_code ec;
                 std::filesystem::remove_all(workspace,ec);
+                if(ec)cleanup_diagnostics::note(cleanup_diagnostics::Stage::transaction,ec,attempt+1);
                 ec.clear();
-                if(!std::filesystem::exists(workspace,ec) && !ec)return;
-            }catch(...){}
+                const bool remains=std::filesystem::exists(workspace,ec);
+                if(ec)cleanup_diagnostics::note(cleanup_diagnostics::Stage::transaction,ec,attempt+1);
+                else if(!remains){cleanup_diagnostics::reset();return;}
+                else cleanup_diagnostics::note_remaining(cleanup_diagnostics::Stage::transaction,attempt+1);
+            }catch(...) {
+                cleanup_diagnostics::note(cleanup_diagnostics::Stage::transaction,std::current_exception(),attempt+1);
+            }
 #ifdef _WIN32
             if(attempt+1<attempts)Sleep(150u*(attempt+1u));
 #endif
