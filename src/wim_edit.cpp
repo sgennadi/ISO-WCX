@@ -1,6 +1,7 @@
 #ifdef _WIN32
 #include "iso_wcx/archive_edit.hpp"
 #include "iso_wcx/edit_transaction.hpp"
+#include "iso_wcx/cleanup_failure.hpp"
 #include "iso_wcx/wim_archive.hpp"
 #include "iso_wcx/wim_parts.hpp"
 #include "iso_wcx/wim_scratch_diagnostics.hpp"
@@ -688,7 +689,7 @@ struct WimWorkspaceCleanup {
         // token and retry ACL-aware cleanup of this one private workspace.
         // Never delete unrelated/older .iso-wcx-edit-* directories.
         for(unsigned attempt=0;attempt<4;++attempt) {
-            try {remove_tree(folder,{},true);return;}catch(...){}
+            try {remove_tree(folder,{},true);return;}catch(...) { cleanup_diagnostics::note(cleanup_diagnostics::Stage::wim_workspace,std::current_exception(),attempt+1); }
             if(attempt<3)Sleep(150u*(attempt+1u));
         }
     }
@@ -896,7 +897,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 std::filesystem::path path;
                 bool complete=false;
                 ~Cleanup() noexcept {
-                    if(!complete)try{remove_tree(path,{},true);}catch(...){}
+                    if(!complete)try{remove_tree(path,{},true);}catch(...) { cleanup_diagnostics::note(cleanup_diagnostics::Stage::wim_expanded,std::current_exception()); }
                 }
             } cleanup{expanded};
             // Loaded/captured WIMGAPI handles must close BEFORE scratch deletion.
@@ -951,6 +952,7 @@ void edit_wim(const std::filesystem::path& path,const std::vector<ArchiveChange>
             }catch(const EditCancelled&) {
                 throw;
             }catch(const std::exception&) {
+                cleanup_diagnostics::note(cleanup_diagnostics::Stage::wim_expanded,std::current_exception());
                 // Private folder remains under the guarded transaction root.
                 // Never commit while any of its contents survive.
             }
