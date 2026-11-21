@@ -440,7 +440,7 @@ int do_edit(const std::wstring& archive,const std::wstring& subpath,const std::w
             }
             auto relative=iso_wcx::edit_path(edit_utf8(name));
             iso_wcx::ArchiveChange c;c.path=subpath.empty()?relative:iso_wcx::edit_path(iso_wcx::edit_path(edit_utf8(subpath))+"/"+relative);c.remove=remove;
-            if(!remove){c.source=std::filesystem::path(source)/std::filesystem::u8path(relative);auto status=std::filesystem::symlink_status(c.source);
+            if(!remove){c.source=std::filesystem::path(source)/std::filesystem::path(std::u8string(relative.begin(),relative.end()));auto status=std::filesystem::symlink_status(c.source);
                 if(!std::filesystem::is_regular_file(status)&&!std::filesystem::is_directory(status))return finish(E_NOT_SUPPORTED,"source missing or unsupported");
                 const DWORD attributes=GetFileAttributesW(c.source.c_str());if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))return finish(E_NOT_SUPPORTED,"reparse point or missing source");
                 c.directory=std::filesystem::is_directory(status);
