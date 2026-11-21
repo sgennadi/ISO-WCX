@@ -117,7 +117,7 @@ public:
                 ec.clear();
                 const bool remains=std::filesystem::exists(workspace,ec);
                 if(ec)cleanup_diagnostics::note(cleanup_diagnostics::Stage::transaction,ec,attempt+1);
-                else if(!remains)return;
+                else if(!remains){cleanup_diagnostics::reset();return;}
                 else cleanup_diagnostics::note_remaining(cleanup_diagnostics::Stage::transaction,attempt+1);
             }catch(...) {
                 cleanup_diagnostics::note(cleanup_diagnostics::Stage::transaction,std::current_exception(),attempt+1);
