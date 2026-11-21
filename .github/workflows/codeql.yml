@@ -1,0 +1,26 @@
+name: CodeQL
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  analyze:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
+          build-mode: manual
+      - name: Configure
+        run: cmake -S . -B build-codeql -G "Visual Studio 18 2026" -A x64 -DISO_WCX_CXX_STANDARD=20 -DBUILD_TESTING=OFF
+      - name: Build
+        run: cmake --build build-codeql --config Release --parallel 2
+      - uses: github/codeql-action/analyze@v3
