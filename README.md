@@ -67,9 +67,9 @@ latest-draft mode enables implemented C++26 features, not a claim that
 the entire unfinished standard is supported. See
 [toolchain policy](docs/toolchains.md).
 
-Published **Stable v0.19.0 remains unchanged** on its original tested
-VS2022/C++20 toolchain. Stable v0.20.0 instead uses VS2026/C++26 after
-the full release-quality checks pass.
+Historical Stable v0.19.0 used the VS2022/C++20 toolchain; later releases
+use the toolchain specified by their release workflows. Preview builds
+must not be described as published Stable releases.
 
 ## Export Image Structure (Stable v0.21.0 and newer)
 
@@ -133,6 +133,9 @@ Total Commander after user confirmation.
   The **Check now** button still works when automatic checking is disabled.
 - **Download:** The updater obtains the official ZIP and `SHA256SUMS.txt`
   using HTTPS/WinHTTP and checks SHA-256 with built-in Windows BCrypt.
+  **This is an integrity check, not publisher authentication:** the
+  manifest and ZIP come from the same GitHub release. Do not treat this
+  mechanism as a digital signature.
   It stages the ZIP in a random temporary directory and offers to open it in
   Total Commander. It **never overwrites a loaded WCX DLL**; finish the
   install and restart Total Commander to activate the updated plugin.
