@@ -35,9 +35,15 @@ jobs:
             -DCMAKE_MODULE_LINKER_FLAGS="/INCREMENTAL:NO"
       - name: Compile instrumented WCX and test fixtures
         run: cmake --build build-asan --config RelWithDebInfo --parallel 2
-      - name: Run parser and WCX regression tests under ASan
+      - name: Diagnose WIM XPRESS-HUFF regression under ASan
         shell: pwsh
         env:
           ASAN_OPTIONS: "halt_on_error=1:detect_leaks=0"
         run: |
-          ctest --test-dir build-asan -C RelWithDebInfo --output-on-failure --timeout 420
+          ctest --test-dir build-asan -C RelWithDebInfo -R "^wim_chunk_table_bounds_and_xpress_huff_read_only$" --verbose --timeout 90
+      - name: Run remaining parser and WCX regression tests under ASan
+        shell: pwsh
+        env:
+          ASAN_OPTIONS: "halt_on_error=1:detect_leaks=0"
+        run: |
+          ctest --test-dir build-asan -C RelWithDebInfo -E "^wim_chunk_table_bounds_and_xpress_huff_read_only$" --output-on-failure --timeout 420
