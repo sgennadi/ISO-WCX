@@ -37,6 +37,14 @@ int main(){
     assert(verify_p256_sha256(message,signature,pub));
     auto changed=message;changed[0]^=1;
     assert(!verify_p256_sha256(changed,signature,pub));
+    auto wrong_public=pub;
+    wrong_public[0]^=1;
+    assert(!verify_p256_sha256(message,signature,wrong_public));
+    assert(!verify_p256_sha256(std::span<const std::uint8_t>{},signature,pub));
+    assert(!verify_p256_sha256(message,signature,
+           std::span<const std::uint8_t>(pub.data(),63)));
+    assert(!verify_p256_sha256(message,signature,
+           std::span<const std::uint8_t>{}));
     signature[0]^=1;
     assert(!verify_p256_sha256(message,signature,pub));
     assert(!verify_p256_sha256(message,std::span<const std::uint8_t>(signature.data(),63),pub));
