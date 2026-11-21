@@ -8,6 +8,7 @@
 #include "iso_wcx/wcx_updater.hpp"
 #include "iso_wcx/image_report.hpp"
 #include "iso_wcx/update_policy.hpp"
+#include "iso_wcx/signed_update.hpp"
 #include "iso_wcx/preview_update_policy.hpp"
 #include "iso_wcx/tc_registration_repair.hpp"
 #include "iso_wcx/operation_diagnostics.hpp"
@@ -331,6 +332,18 @@ std::filesystem::path save_verified_archive(const std::wstring& tag) {
     const auto base=L"https://github.com/sgennadi/ISO-WCX/releases/download/"+
                     tag+L"/";
     const auto manifest=http_get(base+L"SHA256SUMS.txt",16384);
+    // Authentication is mandatory. A checksum hosted beside the ZIP cannot
+    // authenticate the publisher. No fallback to unsigned installation.
+#ifndef ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX
+#define ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX ""
+#endif
+    std::array<std::uint8_t,64> public_key{};
+    require(signed_update::decode_public_key(
+                ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX,public_key),
+            "signed updates are not provisioned: no trusted release public key");
+    const auto signature=http_get(base+L"SHA256SUMS.txt.sig",1024);
+    require(signed_update::verify_p256_sha256(manifest,signature,public_key),
+            "release signature invalid; refusing unsigned or modified update");
     const auto expected=update::checksum(as_text(manifest),narrow(filename));
     require(bool(expected),"SHA256SUMS does not identify release ZIP");
     const auto zip=http_get(base+filename,max_package);
