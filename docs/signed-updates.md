@@ -7,10 +7,8 @@ corruption but **does not authenticate the publisher**. Do not call it signed.
 
 - Canonical message: exact raw bytes of SHA256SUMS.txt (no newline normalization).
 - Signature asset: SHA256SUMS.txt.sig, exactly 64 raw bytes.
-- Algorithm: Ed25519, with an independently distributed, pinned public key.
-  **Windows BCrypt Ed25519 availability must be established for the minimum
-  supported Windows versions**; otherwise choose a Windows-supported ECDSA
-  P-256/SHA-256 or RSA-PSS/SHA-256 format and test interop before rollout.
+- Algorithm: ECDSA P-256/SHA-256 via Windows BCrypt. Signature is raw r||s.
+  Public key is the uncompressed X||Y coordinates (without the 0x04 prefix).
 - Require an exact ZIP filename, exactly one digest entry, and a SHA-256 match.
 - Signature must be verified before trusting any checksum in the manifest.
 - No unsigned fallback when signed-update mode is enabled.
