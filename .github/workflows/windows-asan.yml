@@ -40,7 +40,25 @@ jobs:
         env:
           ASAN_OPTIONS: "halt_on_error=1:detect_leaks=0"
         run: |
-          ctest --test-dir build-asan -C RelWithDebInfo -R "^wim_chunk_table_bounds_and_xpress_huff_read_only$" --verbose --timeout 90
+          $exe = Join-Path (Get-Location) "build-asan/RelWithDebInfo/wim_chunked_resource_tests.exe"
+          $stdout = Join-Path $env:RUNNER_TEMP "wim-asan-stdout.txt"
+          $stderr = Join-Path $env:RUNNER_TEMP "wim-asan-stderr.txt"
+          $proc = Start-Process -FilePath $exe -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          try {
+            $finished = $proc.WaitForExit(90000)
+            if (-not $finished) {
+              Write-Host "WIM test exceeded 90 seconds; preserving phase markers"
+              $proc.Kill()
+              $proc.WaitForExit()
+            }
+            Get-Content $stdout -ErrorAction SilentlyContinue
+            Get-Content $stderr -ErrorAction SilentlyContinue
+            if (-not $finished) { throw "WIM XPRESS-HUFF test timed out after 90 seconds" }
+            if ($proc.ExitCode -ne 0) { throw "WIM XPRESS-HUFF test exited with $($proc.ExitCode)" }
+          } finally {
+            if (-not $proc.HasExited) { $proc.Kill() }
+            $proc.Dispose()
+          }
       - name: Run remaining parser and WCX regression tests under ASan
         shell: pwsh
         env:
