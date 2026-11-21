@@ -61,7 +61,7 @@ def main() -> int:
         ("iso", bytes(iso_image()), [(16*B, 19*B), (20*B, 22*B)]),
         ("udf", bytes(udf_image()), [(256*B, 263*B), (300*B, 304*B)]),
         ("rawcd", bytes(raw_cd_image(iso_image())),
-         [(16*2352, 19*2352), (20*2352, 22*2352)]),
+         [(16*2352+16, 19*2352), (20*2352+16, 22*2352)]),
     ]
     deadline = time.monotonic() + args.seconds
     failure_dir = Path(os.environ.get("ISO_WCX_FUZZ_ARTIFACT_DIR", "."))
