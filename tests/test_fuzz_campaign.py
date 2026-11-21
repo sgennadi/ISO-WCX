@@ -54,7 +54,7 @@ def main() -> int:
     ap.add_argument("--max-cases", type=int, default=0,
                     help="Stop after N cases; 0 means use time limit only")
     args = ap.parse_args()
-    if args.seconds < 1 or args.seconds > 3600 or args.timeout <= 0 or args.max_cases < 0:
+    if args.seconds < 1 or args.seconds > 3600 or args.timeout <= 0 or args.max_cases < 0 or args.start_case < 0:
         ap.error("invalid campaign bounds")
     rng = random.Random(args.seed)
     seeds = [
@@ -67,9 +67,16 @@ def main() -> int:
     failure_dir = Path(os.environ.get("ISO_WCX_FUZZ_ARTIFACT_DIR", "."))
     failure_dir.mkdir(parents=True, exist_ok=True)
     count = 0
+    # RNG state must advance for every earlier case to reproduce the same
+    # mutation. Do not invoke the parser for skipped cases.
+    while count < args.start_case:
+        label, original, regions = seeds[count % len(seeds)]
+        mutate(original, regions, rng)
+        count += 1
+    processed = 0
     with tempfile.TemporaryDirectory(prefix="iso-wcx-fuzz-") as tmp:
         case = Path(tmp) / "input.iso"
-        while time.monotonic() < deadline and (not args.max_cases or count < args.max_cases):
+        while time.monotonic() < deadline and (not args.max_cases or processed < args.max_cases):
             label, original, regions = seeds[count % len(seeds)]
             payload = mutate(original, regions, rng)
             case.write_bytes(payload)
@@ -96,6 +103,7 @@ def main() -> int:
                     + result.stderr.decode("utf-8", errors="replace")[-24000:])
                 return 1
             count += 1
+            processed += 1
     print(f"PASS black-box mutation campaign cases={count} seed={args.seed} seconds={args.seconds}")
     return 0
 
