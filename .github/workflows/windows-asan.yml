@@ -28,7 +28,7 @@ jobs:
         shell: pwsh
         run: |
           cmake -S . -B build-asan -G "Visual Studio 18 2026" -A ${{ matrix.arch }} `
-            -DISO_WCX_CXX_STANDARD=20 -DBUILD_TESTING=ON `
+            -DISO_WCX_CXX_STANDARD=20 -DBUILD_TESTING=ON -DISO_WCX_ENABLE_CFG=OFF `
             -DCMAKE_C_FLAGS="/fsanitize=address /Zi" `
             -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" `
             -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO" `
