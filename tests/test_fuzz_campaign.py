@@ -84,7 +84,7 @@ def main() -> int:
                 print(f"FAIL crash seed={args.seed} case={count} format={label} "
                       f"exit={result.returncode} stderr={result.stderr[-300:]!r}",
                       file=sys.stderr)
-                (Path.cwd() / "fuzz-crash.iso").write_bytes(payload)
+                (failure_dir / "fuzz-crash.iso").write_bytes(payload)
                 return 1
             count += 1
     print(f"PASS black-box mutation campaign cases={count} seed={args.seed} seconds={args.seconds}")
