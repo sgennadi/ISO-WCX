@@ -752,6 +752,17 @@ if(BUILD_TESTING)
   endif()
 endif()
 
+# Validate the pinned-key verification primitive against a locally generated
+# ephemeral P-256 key; no private signing key is committed or published.
+if(BUILD_TESTING AND WIN32)
+  add_executable(signed_update_windows_tests tests/signed_update_windows.cpp)
+  target_include_directories(signed_update_windows_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(signed_update_windows_tests PRIVATE bcrypt)
+  add_test(NAME signed_update_bcrypt_valid_and_tampered
+    COMMAND signed_update_windows_tests)
+endif()
+
 # Retain the small standalone safe binary-reader regression test from main.
 if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/binary_reader_tests.cpp")
   add_executable(binary_reader_tests tests/binary_reader_tests.cpp)
