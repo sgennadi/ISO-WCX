@@ -51,8 +51,10 @@ def main() -> int:
     ap.add_argument("--seconds", type=int, default=180)
     ap.add_argument("--seed", type=lambda x: int(x, 0), default=0x15A0D)
     ap.add_argument("--timeout", type=float, default=3.0)
+    ap.add_argument("--max-cases", type=int, default=0,
+                    help="Stop after N cases; 0 means use time limit only")
     args = ap.parse_args()
-    if args.seconds < 1 or args.seconds > 3600 or args.timeout <= 0:
+    if args.seconds < 1 or args.seconds > 3600 or args.timeout <= 0 or args.max_cases < 0:
         ap.error("invalid campaign bounds")
     rng = random.Random(args.seed)
     seeds = [
@@ -62,10 +64,12 @@ def main() -> int:
          [(16*2352, 19*2352), (20*2352, 22*2352)]),
     ]
     deadline = time.monotonic() + args.seconds
+    failure_dir = Path(os.environ.get("ISO_WCX_FUZZ_ARTIFACT_DIR", "."))
+    failure_dir.mkdir(parents=True, exist_ok=True)
     count = 0
     with tempfile.TemporaryDirectory(prefix="iso-wcx-fuzz-") as tmp:
         case = Path(tmp) / "input.iso"
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and (not args.max_cases or count < args.max_cases):
             label, original, regions = seeds[count % len(seeds)]
             payload = mutate(original, regions, rng)
             case.write_bytes(payload)
@@ -74,7 +78,7 @@ def main() -> int:
                                         capture_output=True, timeout=args.timeout)
             except subprocess.TimeoutExpired as error:
                 print(f"FAIL timeout seed={args.seed} case={count} format={label}", file=sys.stderr)
-                (Path.cwd() / "fuzz-crash.iso").write_bytes(payload)
+                (failure_dir / "fuzz-crash.iso").write_bytes(payload)
                 raise AssertionError("parser timed out; saved fuzz-crash.iso") from error
             if result.returncode not in (0, 1, 2):
                 print(f"FAIL crash seed={args.seed} case={count} format={label} "
