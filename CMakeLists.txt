@@ -102,6 +102,21 @@ if(ISO_WCX_CXX_STANDARD STREQUAL "26")
   message(STATUS "ISO-WCX experimental C++26 dialect enabled (not a release ABI change)")
 endif()
 
+# Harden all in-process Windows parser code and statically linked dependencies.
+# CFG and CET compatibility are link-time opt-ins; /Qspectre requires an
+# installed Spectre-mitigated toolset and is not silently assumed available.
+option(ISO_WCX_ENABLE_SPECTRE "Enable MSVC Spectre mitigations when toolset is installed" OFF)
+if(MSVC)
+  add_compile_options(/sdl /guard:cf)
+  add_link_options(/guard:cf)
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    add_link_options(/CETCOMPAT)
+  endif()
+  if(ISO_WCX_ENABLE_SPECTRE)
+    add_compile_options(/Qspectre)
+  endif()
+endif()
+
 # The Windows builder uses a pinned static zlib, so WCX does not depend on an
 # external DLL. Linux uses the system package when it is available.
 if(WIN32)
