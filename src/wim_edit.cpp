@@ -689,7 +689,7 @@ struct WimWorkspaceCleanup {
         // token and retry ACL-aware cleanup of this one private workspace.
         // Never delete unrelated/older .iso-wcx-edit-* directories.
         for(unsigned attempt=0;attempt<4;++attempt) {
-            try {remove_tree(folder,{},true);return;}catch(...) { cleanup_diagnostics::note(cleanup_diagnostics::Stage::wim_workspace,std::current_exception(),attempt+1); }
+            try {remove_tree(folder,{},true);cleanup_diagnostics::reset();return;}catch(...) { cleanup_diagnostics::note(cleanup_diagnostics::Stage::wim_workspace,std::current_exception(),attempt+1); }
             if(attempt<3)Sleep(150u*(attempt+1u));
         }
     }
