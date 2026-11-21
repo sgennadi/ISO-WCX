@@ -51,6 +51,8 @@ def main() -> int:
     ap.add_argument("--seconds", type=int, default=180)
     ap.add_argument("--seed", type=lambda x: int(x, 0), default=0x15A0D)
     ap.add_argument("--timeout", type=float, default=3.0)
+    ap.add_argument("--start-case", type=int, default=0,
+                    help="Skip parser invocations before this deterministic case")
     ap.add_argument("--max-cases", type=int, default=0,
                     help="Stop after N cases; 0 means use time limit only")
     args = ap.parse_args()
@@ -87,7 +89,7 @@ def main() -> int:
                 print(f"FAIL timeout seed={args.seed} case={count} format={label}", file=sys.stderr)
                 (failure_dir / "fuzz-crash.iso").write_bytes(payload)
                 (failure_dir / "fuzz-crash.txt").write_text(
-                    f"seed={args.seed} case={count} format={label} reason=timeout\\n")
+                    f"seed={args.seed} case={count} format={label} reason=timeout\n")
                 raise AssertionError("parser timed out; saved fuzz-crash.iso") from error
             sanitizer_failure = any(marker in result.stderr for marker in (
                 b"ERROR: AddressSanitizer", b"runtime error:",
@@ -99,7 +101,7 @@ def main() -> int:
                 (failure_dir / "fuzz-crash.iso").write_bytes(payload)
                 (failure_dir / "fuzz-crash.txt").write_text(
                     f"seed={args.seed} case={count} format={label} "
-                    f"exit={result.returncode}\\n"
+                    f"exit={result.returncode}\n"
                     + result.stderr.decode("utf-8", errors="replace")[-24000:])
                 return 1
             count += 1
