@@ -179,21 +179,26 @@ static void test_native_xpress() {
             original[i]=static_cast<std::uint8_t>((i/64u)%251u);
         std::vector<std::uint8_t> compressed(2u*original.size());
         SIZE_T length=0;
+        std::cerr<<"WIM chunk test: Cabinet Compress begin\n"<<std::flush;
         check(encode(handle,original.data(),original.size(),
                      compressed.data(),compressed.size(),&length)!=FALSE &&
               length>0u && length<original.size(),
               "XPRESS-HUFF did not produce a smaller raw chunk");
+        std::cerr<<"WIM chunk test: Cabinet Compress passed\n"<<std::flush;
         compressed.resize(length);
+        std::cerr<<"WIM chunk test: XPRESS decode begin\n"<<std::flush;
         const auto result=read_wim_chunked_metadata(
             compressed,original.size(),32768u,
             WimChunkAlgorithm::xpress_huff);
         check(result==original && wim_sha1(result)==wim_sha1(original),
               "Windows raw XPRESS-HUFF roundtrip differs from original SHA-1");
 
+        std::cerr<<"WIM chunk test: XPRESS decode passed\n"<<std::flush;
         // Compressed first chunk plus a raw, short last chunk.
         std::vector<std::uint8_t> mixed(4u+compressed.size()+17u,0x7bu);
         put32(mixed,0u,static_cast<std::uint32_t>(compressed.size()));
         std::copy(compressed.begin(),compressed.end(),mixed.begin()+4);
+        std::cerr<<"WIM chunk test: mixed decode begin\n"<<std::flush;
         const auto expanded=read_wim_chunked_metadata(
             mixed,32768u+17u,32768u,WimChunkAlgorithm::xpress_huff);
         check(expanded.size()==32768u+17u &&
@@ -214,10 +219,15 @@ static void test_native_xpress() {
 
 int main() {
     try {
+        std::cerr<<"WIM chunk test: layout begin\n"<<std::flush;
         test_layout_and_rejections();
+        std::cerr<<"WIM chunk test: layout passed; modified layout begin\n"<<std::flush;
         test_modified_layout_refusal();
+        std::cerr<<"WIM chunk test: modified layout passed\n"<<std::flush;
 #ifdef _WIN32
+        std::cerr<<"WIM chunk test: native XPRESS begin\n"<<std::flush;
         test_native_xpress();
+        std::cerr<<"WIM chunk test: native XPRESS passed\n"<<std::flush;
 #endif
         std::cout<<"PASS: read-only bounded WIM chunks, corruption refusal, "
                     "raw/XPRESS roundtrip, LZX refusal\n";
