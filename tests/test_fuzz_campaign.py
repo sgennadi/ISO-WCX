@@ -79,6 +79,8 @@ def main() -> int:
             except subprocess.TimeoutExpired as error:
                 print(f"FAIL timeout seed={args.seed} case={count} format={label}", file=sys.stderr)
                 (failure_dir / "fuzz-crash.iso").write_bytes(payload)
+                (failure_dir / "fuzz-crash.txt").write_text(
+                    f"seed={args.seed} case={count} format={label} reason=timeout\\n")
                 raise AssertionError("parser timed out; saved fuzz-crash.iso") from error
             sanitizer_failure = any(marker in result.stderr for marker in (
                 b"ERROR: AddressSanitizer", b"runtime error:",
@@ -88,6 +90,10 @@ def main() -> int:
                       f"exit={result.returncode} stderr={result.stderr[-300:]!r}",
                       file=sys.stderr)
                 (failure_dir / "fuzz-crash.iso").write_bytes(payload)
+                (failure_dir / "fuzz-crash.txt").write_text(
+                    f"seed={args.seed} case={count} format={label} "
+                    f"exit={result.returncode}\\n"
+                    + result.stderr.decode("utf-8", errors="replace")[-24000:])
                 return 1
             count += 1
     print(f"PASS black-box mutation campaign cases={count} seed={args.seed} seconds={args.seconds}")
