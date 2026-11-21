@@ -3,6 +3,7 @@
 #include <bcrypt.h>
 #include <array>
 #include <stdexcept>
+#include <string>
 #define assert(condition) do { if(!(condition)) throw std::runtime_error(#condition); } while(false)
 #include <cstdint>
 #include <cstring>
