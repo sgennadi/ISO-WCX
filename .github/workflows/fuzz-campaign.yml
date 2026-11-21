@@ -1,0 +1,43 @@
+name: Scheduled parser mutation fuzzing
+on:
+  schedule:
+    - cron: '43 2 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'tests/test_fuzz_campaign.py'
+      - '.github/workflows/fuzz-campaign.yml'
+permissions:
+  contents: read
+jobs:
+  fuzz:
+    name: ISO UDF raw-CD parser mutation (ASan/UBSan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure instrumented C and C++
+        run: |
+          cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            '-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -O1' \
+            '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -O1' \
+            '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined'
+      - name: Build parser
+        run: cmake --build build-fuzz --target disc_inspect --parallel 2
+      - name: Run bounded parser campaign
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: |
+          python3 tests/test_fuzz_campaign.py build-fuzz/disc_inspect --seconds 420 --seed 0x15A0D
+      - name: Preserve reproducer on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-fuzz-reproducer
+          path: fuzz-crash.iso
+          if-no-files-found: ignore
+          retention-days: 14
