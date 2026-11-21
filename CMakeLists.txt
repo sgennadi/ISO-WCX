@@ -177,6 +177,12 @@ FetchContent_Declare(iso_wcx_bzip2
     "${iso_wcx_bzip2_SOURCE_DIR}/decompress.c"
     "${iso_wcx_bzip2_SOURCE_DIR}/bzlib.c")
   target_include_directories(iso_wcx_bzip2 PUBLIC "${iso_wcx_bzip2_SOURCE_DIR}")
+  # Upstream bzip2 1.0.8 uses historical CRT APIs; MSVC /sdl promotes
+  # C4996 warnings to errors. Suppress only for this pinned third-party
+  # target, preserving /sdl and /guard:cf for the project itself.
+  if(MSVC)
+    target_compile_definitions(iso_wcx_bzip2 PRIVATE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
+  endif()
 set(ISO_WCX_BZIP2_TARGET iso_wcx_bzip2)
 
 # Native CHD v5 decoder: all codec and container libraries are statically
