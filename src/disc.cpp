@@ -982,6 +982,13 @@ class Udf {
         require(depth<64,"UDF nesting too deep");
         auto key=(std::uint64_t(map)<<32)|lba;
         require(active_.insert(key).second,"cyclic UDF directory");
+        // Keep traversal state consistent even when a malformed descriptor
+        // throws during FID parsing or while visiting a child directory.
+        struct ActiveDirectoryGuard {
+            decltype(active_)& active;
+            std::uint64_t key;
+            ~ActiveDirectoryGuard() noexcept { active.erase(key); }
+        } active_guard{active_,key};
         auto directory=fe(lba,map);require(directory.type==4,"UDF ICB is not a directory");
         auto bytes=directory_bytes(directory);
         for(std::size_t p=0;p<bytes.size();) {
@@ -1035,7 +1042,6 @@ class Udf {
             }
             p+=record_length;
         }
-        active_.erase(key);
     }
 public:
     explicit Udf(Source& src) : src_(src) {}
