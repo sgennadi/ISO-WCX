@@ -80,7 +80,10 @@ def main() -> int:
                 print(f"FAIL timeout seed={args.seed} case={count} format={label}", file=sys.stderr)
                 (failure_dir / "fuzz-crash.iso").write_bytes(payload)
                 raise AssertionError("parser timed out; saved fuzz-crash.iso") from error
-            if result.returncode not in (0, 1, 2):
+            sanitizer_failure = any(marker in result.stderr for marker in (
+                b"ERROR: AddressSanitizer", b"runtime error:",
+                b"UndefinedBehaviorSanitizer", b"LeakSanitizer"))
+            if sanitizer_failure or result.returncode not in (0, 1, 2):
                 print(f"FAIL crash seed={args.seed} case={count} format={label} "
                       f"exit={result.returncode} stderr={result.stderr[-300:]!r}",
                       file=sys.stderr)
