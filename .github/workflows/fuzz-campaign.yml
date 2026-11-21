@@ -38,6 +38,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: parser-fuzz-reproducer
-          path: fuzz-crash.iso
+          path: |
+            fuzz-crash.iso
+            fuzz-crash.txt
           if-no-files-found: ignore
           retention-days: 14
