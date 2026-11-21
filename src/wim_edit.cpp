@@ -203,7 +203,7 @@ void preserve_metadata(HMODULE m,HANDLE old_image,HANDLE new_image){
     Bstr text;hr(new_doc->get_xml(&text.p));std::wstring xml=L"\xfeff";xml.append(text.p,SysStringLen(text.p));
     checked(api<BOOL(WINAPI*)(HANDLE,void*,DWORD)>(m,"WIMSetImageInformation")(new_image,xml.data(),static_cast<DWORD>((xml.size()+1)*sizeof(wchar_t))),"write WIM XML");
 }
-std::filesystem::path relative_path(const std::string& text){return std::filesystem::u8path(edit_path(text));}
+std::filesystem::path relative_path(const std::string& text){const auto utf8=edit_path(text);return std::filesystem::path(std::u8string(utf8.begin(),utf8.end()));}
 void no_reparse(const std::filesystem::path& root,const std::filesystem::path& relative){
     auto path=root;for(const auto& part:relative){path/=part;DWORD attr=GetFileAttributesW(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){auto err=GetLastError();checked(err==ERROR_FILE_NOT_FOUND||err==ERROR_PATH_NOT_FOUND,"cannot inspect WIM edit path");continue;}if(attr&FILE_ATTRIBUTE_REPARSE_POINT)throw EditUnsupported("editing through WIM reparse points is not supported");}
 }
