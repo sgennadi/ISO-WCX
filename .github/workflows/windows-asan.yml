@@ -1,0 +1,43 @@
+name: Windows AddressSanitizer
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'tests/**'
+      - 'third_party/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/windows-asan.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-asan:
+    name: MSVC ASan - ${{ matrix.arch }}
+    runs-on: windows-2025
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [Win32, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure MSVC AddressSanitizer for C and C++
+        shell: pwsh
+        run: |
+          cmake -S . -B build-asan -G "Visual Studio 18 2026" -A ${{ matrix.arch }} `
+            -DISO_WCX_CXX_STANDARD=20 -DBUILD_TESTING=ON `
+            -DCMAKE_C_FLAGS="/fsanitize=address /Zi" `
+            -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" `
+            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO" `
+            -DCMAKE_MODULE_LINKER_FLAGS="/INCREMENTAL:NO"
+      - name: Compile instrumented WCX and test fixtures
+        run: cmake --build build-asan --config RelWithDebInfo --parallel 2
+      - name: Run parser and WCX regression tests under ASan
+        shell: pwsh
+        env:
+          ASAN_OPTIONS: "halt_on_error=1:detect_leaks=0"
+        run: |
+          ctest --test-dir build-asan -C RelWithDebInfo --output-on-failure --timeout 420
