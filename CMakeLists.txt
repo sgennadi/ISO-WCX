@@ -102,6 +102,21 @@ if(ISO_WCX_CXX_STANDARD STREQUAL "26")
   message(STATUS "ISO-WCX experimental C++26 dialect enabled (not a release ABI change)")
 endif()
 
+# Public key is nonsecret and must be independently provisioned by the
+# release maintainer. No default/test key is shipped with the updater.
+set(ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX "" CACHE STRING
+    "Trusted release P-256 public key as 128 hex digits (X||Y)")
+if(NOT ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX STREQUAL "")
+  if(NOT ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX MATCHES "^[0-9a-fA-F]+$" OR
+     NOT ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX MATCHES "^.{128}$")
+    message(FATAL_ERROR "ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX must be exactly 128 hex digits")
+  endif()
+endif()
+if(WIN32)
+  add_compile_definitions(
+    ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX="${ISO_WCX_RELEASE_P256_PUBLIC_KEY_HEX}")
+endif()
+
 # Harden all in-process Windows parser code and statically linked dependencies.
 # CFG and CET compatibility are link-time opt-ins; /Qspectre requires an
 # installed Spectre-mitigated toolset and is not silently assumed available.
