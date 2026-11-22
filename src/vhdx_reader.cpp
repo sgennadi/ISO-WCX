@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
@@ -179,8 +180,15 @@ void VhdxReader::parse() {
     const auto magic=file_read(0,8);
     require(begins(magic.data(),"vhdxfile"),"invalid VHDX signature");
 
-    const auto one=parse_header(file_read(0x10000,4096));
-    const auto two=parse_header(file_read(0x20000,4096));
+    // MSVC ASan may poison overlapping stack slots for local optionals
+    // containing a vector after one header is rejected. Keep both parsed
+    // headers in separately owned storage for the entire validation pass.
+    const auto one_holder=std::make_unique<std::optional<Header>>(
+        parse_header(file_read(0x10000,4096)));
+    const auto two_holder=std::make_unique<std::optional<Header>>(
+        parse_header(file_read(0x20000,4096)));
+    const auto& one=*one_holder;
+    const auto& two=*two_holder;
     require(one || two,"both VHDX headers invalid");
     require(!(one && two && one->seq==two->seq &&
               one->contents!=two->contents),
