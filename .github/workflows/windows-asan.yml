@@ -78,4 +78,4 @@ jobs:
         env:
           ASAN_OPTIONS: "halt_on_error=1:detect_leaks=0"
         run: |
-          ctest --test-dir build-asan -C RelWithDebInfo -E "^wim_chunk_table_bounds_and_xpress_huff_read_only$" --output-on-failure --timeout 180 --parallel 2
+          ctest --test-dir build-asan -C RelWithDebInfo -E "^wim_chunk_table_bounds_and_xpress_huff_read_only$" --output-on-failure --timeout 180 --parallel 1
