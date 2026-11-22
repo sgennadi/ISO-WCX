@@ -8,6 +8,10 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace fs=std::filesystem;
 
@@ -119,6 +123,29 @@ int main() {
                 !scan_error && it!=end;it.increment(scan_error)) {
                 remaining += " ["+it->path().filename().string()+"]";
             }
+#ifdef _WIN32
+            for(const auto& candidate : {original,staged}) {
+                const auto handle=CreateFileW(candidate.c_str(),GENERIC_READ,
+                    FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                    nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+                if(handle==INVALID_HANDLE_VALUE)
+                    std::cerr<<"OPTICAL_LOCK_PROBE "<<candidate.filename().string()
+                             <<" open_error="<<GetLastError()<<"\n";
+                else {
+                    CloseHandle(handle);
+                    const auto exclusive=CreateFileW(candidate.c_str(),GENERIC_READ,
+                        0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+                    if(exclusive==INVALID_HANDLE_VALUE)
+                        std::cerr<<"OPTICAL_LOCK_PROBE "<<candidate.filename().string()
+                                 <<" exclusive_error="<<GetLastError()<<"\n";
+                    else {
+                        std::cerr<<"OPTICAL_LOCK_PROBE "<<candidate.filename().string()
+                                 <<" exclusive_open=OK\n";
+                        CloseHandle(exclusive);
+                    }
+                }
+            }
+#endif
             throw std::runtime_error("optical fixture cleanup failed: "+
                                      cleanup_error.message()+
                                      "; remaining entries:"+remaining+
