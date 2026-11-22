@@ -318,7 +318,9 @@ void edit_fixed_vhdx(const std::filesystem::path& image,
                      const std::vector<ArchiveChange>& changes,
                      const EditProgress& progress) {
     if(changes.empty())return;
-    TemporaryLogicalRaw flat(image);
+    // Reject invalid or unsupported containers before creating scratch files.
+    // A rejected write must not leave even an empty logical RAW behind.
+    std::unique_ptr<TemporaryLogicalRaw> flat;
     std::unique_ptr<FatMappedImage> physical_stage;
     {
         VirtualDiskReader original(image);
@@ -345,19 +347,20 @@ void edit_fixed_vhdx(const std::filesystem::path& image,
                     "insufficient disk space to stage fixed VHDX FAT edit");
         }
         check_progress(progress);
-        copy_logical(original,flat.path(),progress);
+        flat=std::make_unique<TemporaryLogicalRaw>(image);
+        copy_logical(original,flat->path(),progress);
         try {
-            edit_fat(flat.path(),changes,progress);
+            edit_fat(flat->path(),changes,progress);
         } catch(const EditUnsupported& e) {
             throw EditUnsupported(std::string("fixed VHDX logical FAT edit: ")+e.what());
         }
         check_progress(progress);
         physical_stage=std::make_unique<FatMappedImage>(image,true);
         physical_stage->flush_and_close();
-        transfer_modified_sectors(original,layout,flat.path(),
+        transfer_modified_sectors(original,layout,flat->path(),
                                   physical_stage->stage_path(),progress);
         verify_independent_readback(physical_stage->stage_path(),
-                                    flat.path(),original.size(),progress);
+                                    flat->path(),original.size(),progress);
     } // Close original and staged validation handles before Windows rename.
     check_progress(progress);
     try {
