@@ -261,7 +261,16 @@ static void remove_fixture(const fs::path& path) {
     for (unsigned attempt=0;attempt<20;++attempt) {
         ec.clear();
         if (fs::remove(path,ec) || !fs::exists(path)) return;
-        // Windows ERROR_SHARING_VIOLATION (32) is not consistently mapped\n        // to std::errc::device_or_resource_busy by std::filesystem.\n        // Retry this transient case too; do not swallow other I/O failures.\n        bool retryable=ec==std::errc::permission_denied ||\n                       ec==std::errc::device_or_resource_busy;\n#ifdef _WIN32\n        retryable=retryable || (ec.category()==std::system_category() &&\n                                ec.value()==32);\n#endif\n        if (!retryable) break;
+        // Windows ERROR_SHARING_VIOLATION (32) is not consistently mapped
+        // to std::errc::device_or_resource_busy by std::filesystem.
+        // Retry this transient case too; do not swallow other I/O failures.
+        bool retryable=ec==std::errc::permission_denied ||
+                       ec==std::errc::device_or_resource_busy;
+#ifdef _WIN32
+        retryable=retryable || (ec.category()==std::system_category() &&
+                                ec.value()==32);
+#endif
+        if (!retryable) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     throw fs::filesystem_error("cannot remove WIM audit fixture",path,ec);
