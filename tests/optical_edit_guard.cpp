@@ -97,8 +97,18 @@ int main() {
         std::cerr<<"OPTICAL_ASAN_PHASE: fixture cleanup\n"<<std::flush;
         std::error_code cleanup_error;
         const auto removed=fs::remove_all(folder,cleanup_error);
-        if(cleanup_error)
-            throw std::runtime_error("optical fixture cleanup failed: "+cleanup_error.message());
+        if(cleanup_error) {
+            std::string remaining;
+            std::error_code scan_error;
+            for(fs::directory_iterator it(folder,scan_error),end;
+                !scan_error && it!=end;it.increment(scan_error)) {
+                remaining += " ["+it->path().filename().string()+"]";
+            }
+            throw std::runtime_error("optical fixture cleanup failed: "+
+                                     cleanup_error.message()+
+                                     "; remaining entries:"+remaining+
+                                     (scan_error ? "; enumeration: "+scan_error.message() : ""));
+        }
         std::cerr<<"OPTICAL_ASAN_PHASE: cleanup complete, entries removed="
                  <<removed<<"\n"<<std::flush;
         std::cout<<"PASS: universal optical immutable spans, rollback, bounds, cancel\n";
