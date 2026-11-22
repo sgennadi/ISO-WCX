@@ -12,6 +12,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 using namespace iso_wcx::wim_detail;
 namespace fs=std::filesystem;
@@ -273,6 +277,24 @@ static void remove_fixture(const fs::path& path) {
         if (!retryable) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
+#ifdef _WIN32
+    const auto shared=CreateFileW(path.c_str(),GENERIC_READ,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(shared==INVALID_HANDLE_VALUE)
+        std::cerr<<"WIM_LOCK_PROBE shared_error="<<GetLastError()<<"\n";
+    else {
+        CloseHandle(shared);
+        const auto exclusive=CreateFileW(path.c_str(),GENERIC_READ,
+            0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(exclusive==INVALID_HANDLE_VALUE)
+            std::cerr<<"WIM_LOCK_PROBE exclusive_error="<<GetLastError()<<"\n";
+        else {
+            std::cerr<<"WIM_LOCK_PROBE exclusive_open=OK\n";
+            CloseHandle(exclusive);
+        }
+    }
+#endif
     throw fs::filesystem_error("cannot remove WIM audit fixture",path,ec);
 }
 int main(){
