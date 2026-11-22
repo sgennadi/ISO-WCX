@@ -35,6 +35,7 @@ int main() {
         guard.protect(0,4096);
         guard.protect(8192,2048);
         guard.protect(10240,1024); // Adjacent regions merge
+        std::cerr<<"OPTICAL_ASAN_PHASE: initial verification\n"<<std::flush;
         guard.verify(original,staged);
 
         // ISO9660 append-only writer grows the file, but all original boot
@@ -42,18 +43,21 @@ int main() {
         altered=bytes+std::string(2048,'N');
         altered[4500]='X'; // unprotected original-prefix metadata
         put(staged,altered);
+        std::cerr<<"OPTICAL_ASAN_PHASE: append verification\n"<<std::flush;
         guard.verify_appended(original,staged);
         altered[8192]='B'; // protected boot payload within original prefix
         put(staged,altered);
         bool append_refused=false;
         try{guard.verify_appended(original,staged);}
         catch(const iso_wcx::EditUnsupported&){append_refused=true;}
+        std::cerr<<"OPTICAL_ASAN_PHASE: boot mutation refusal\n"<<std::flush;
         require(append_refused,"append-only guard accepted changed boot image");
         altered=bytes.substr(0,bytes.size()-1);
         put(staged,altered);
         append_refused=false;
         try{guard.verify_appended(original,staged);}
         catch(const iso_wcx::EditUnsupported&){append_refused=true;}
+        std::cerr<<"OPTICAL_ASAN_PHASE: truncation refusal\n"<<std::flush;
         require(append_refused,"append-only guard accepted truncated original");
 
         altered=bytes;
@@ -63,6 +67,7 @@ int main() {
         bool refused=false;
         try{guard.verify(original,staged);}
         catch(const iso_wcx::EditUnsupported&){refused=true;}
+        std::cerr<<"OPTICAL_ASAN_PHASE: protected mutation refusal\n"<<std::flush;
         require(refused,"protected boot-region mutation was accepted");
 
         altered=bytes;
@@ -70,11 +75,13 @@ int main() {
         refused=false;
         try{guard.protect(bytes.size()-2,4);}
         catch(const iso_wcx::EditUnsupported&){refused=true;}
+        std::cerr<<"OPTICAL_ASAN_PHASE: range validation\n"<<std::flush;
         require(refused,"out-of-bounds protected region accepted");
 
         refused=false;
         try{guard.verify(original,staged,[]{return false;});}
         catch(const iso_wcx::EditCancelled&){refused=true;}
+        std::cerr<<"OPTICAL_ASAN_PHASE: cancellation\n"<<std::flush;
         require(refused,"cancellation ignored");
 
         altered.pop_back();
@@ -82,10 +89,12 @@ int main() {
         refused=false;
         try{guard.verify(original,staged);}
         catch(const iso_wcx::EditUnsupported&){refused=true;}
+        std::cerr<<"OPTICAL_ASAN_PHASE: stage truncation\n"<<std::flush;
         require(refused,"truncated stage accepted");
 
         require(fs::file_size(original)==bytes.size(),
                 "original fixture was damaged");
+        std::cerr<<"OPTICAL_ASAN_PHASE: fixture cleanup\n"<<std::flush;
         fs::remove_all(folder);
         std::cout<<"PASS: universal optical immutable spans, rollback, bounds, cancel\n";
         return 0;
