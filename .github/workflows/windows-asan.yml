@@ -17,13 +17,13 @@ jobs:
   windows-asan:
     name: MSVC ASan - ${{ matrix.arch }}
     runs-on: windows-2025
-    timeout-minutes: 80
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         arch: [Win32, x64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure MSVC AddressSanitizer for C and C++
         shell: pwsh
         run: |
@@ -48,6 +48,7 @@ jobs:
           $runtime = @($asanDlls | Where-Object { $_.Name -eq "clang_rt.asan_dynamic-$suffix.dll" } | Sort-Object FullName -Descending | Select-Object -First 1)
           if ($runtime.Count -eq 0) { throw "MSVC ASan runtime clang_rt.asan_dynamic-$suffix.dll not found" }
           $env:PATH = "$($runtime[0].DirectoryName);$env:PATH"
+          $runtime[0].DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           Write-Host "ASan runtime for $arch : $($runtime[0].FullName)"
           Write-Host "ASan candidates:"
           $asanDlls | Where-Object { $_.Name -eq "clang_rt.asan_dynamic-$suffix.dll" } | ForEach-Object { Write-Host $_.FullName }
@@ -77,4 +78,4 @@ jobs:
         env:
           ASAN_OPTIONS: "halt_on_error=1:detect_leaks=0"
         run: |
-          ctest --test-dir build-asan -C RelWithDebInfo -E "^wim_chunk_table_bounds_and_xpress_huff_read_only$" --output-on-failure --timeout 420
+          ctest --test-dir build-asan -C RelWithDebInfo -E "^wim_chunk_table_bounds_and_xpress_huff_read_only$" --output-on-failure --timeout 180 --parallel 2
