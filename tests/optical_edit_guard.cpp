@@ -2,6 +2,7 @@
 // external tools, no Total Commander). No source files are modified.
 #include "iso_wcx/optical_edit_guard.hpp"
 #include <chrono>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -96,7 +97,21 @@ int main() {
                 "original fixture was damaged");
         std::cerr<<"OPTICAL_ASAN_PHASE: fixture cleanup\n"<<std::flush;
         std::error_code cleanup_error;
-        const auto removed=fs::remove_all(folder,cleanup_error);
+        std::uintmax_t removed=0;
+        // A Windows file scanner can briefly hold newly written ISO fixtures.
+        // Retry sharing violations, but never treat persistent locks as success.
+        for(unsigned attempt=0;attempt<20;++attempt) {
+            cleanup_error.clear();
+            removed+=fs::remove_all(folder,cleanup_error);
+            if(!cleanup_error) break;
+            bool retryable=cleanup_error==std::errc::permission_denied ||
+                           cleanup_error==std::errc::device_or_resource_busy;
+#ifdef _WIN32
+            retryable=retryable || cleanup_error.value()==32;
+#endif
+            if(!retryable) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
         if(cleanup_error) {
             std::string remaining;
             std::error_code scan_error;
