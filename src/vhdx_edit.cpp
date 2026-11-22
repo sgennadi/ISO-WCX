@@ -15,6 +15,8 @@
 #include "iso_wcx/virtual_disk.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -176,9 +178,24 @@ public:
         throw EditUnsupported("cannot securely reserve logical VHDX scratch path");
     }
     ~TemporaryLogicalRaw() noexcept {
-        if(!path_.empty()) {
-            std::error_code ignored;
-            std::filesystem::remove(path_,ignored);
+        if(path_.empty()) return;
+        // Windows scanners may briefly open the just-created RAW after its
+        // writer has closed. Retry transient sharing violations; never touch
+        // the original VHDX and never throw from a destructor.
+        std::error_code error;
+        for(unsigned attempt=0;attempt<20;++attempt) {
+            error.clear();
+            if(std::filesystem::remove(path_,error) || !error) return;
+#ifdef _WIN32
+            if(error!=std::errc::permission_denied &&
+               error.value()!=ERROR_SHARING_VIOLATION &&
+               error.value()!=ERROR_LOCK_VIOLATION) break;
+            Sleep(50);
+#else
+            if(error!=std::errc::device_or_resource_busy &&
+               error!=std::errc::permission_denied) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+#endif
         }
     }
     TemporaryLogicalRaw(const TemporaryLogicalRaw&)=delete;
