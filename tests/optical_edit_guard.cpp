@@ -95,12 +95,21 @@ int main() {
         require(fs::file_size(original)==bytes.size(),
                 "original fixture was damaged");
         std::cerr<<"OPTICAL_ASAN_PHASE: fixture cleanup\n"<<std::flush;
-        fs::remove_all(folder);
+        std::error_code cleanup_error;
+        const auto removed=fs::remove_all(folder,cleanup_error);
+        if(cleanup_error)
+            throw std::runtime_error("optical fixture cleanup failed: "+cleanup_error.message());
+        std::cerr<<"OPTICAL_ASAN_PHASE: cleanup complete, entries removed="
+                 <<removed<<"\n"<<std::flush;
         std::cout<<"PASS: universal optical immutable spans, rollback, bounds, cancel\n";
         return 0;
     }catch(const std::exception& e){
-        fs::remove_all(folder);
-        std::cerr<<"FAIL: "<<e.what()<<"\n";
+        std::error_code cleanup_error;
+        fs::remove_all(folder,cleanup_error);
+        std::cerr<<"FAIL: "<<e.what();
+        if(cleanup_error)
+            std::cerr<<" (cleanup: "<<cleanup_error.message()<<")";
+        std::cerr<<"\n";
         return 1;
     }
 }
