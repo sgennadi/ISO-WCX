@@ -269,7 +269,7 @@ static void remove_fixture(const fs::path& path) {
 int main(){
     const auto path=fs::temp_directory_path()/
         ("iso-wcx-wim-resource-audit-readonly-fixture-"+
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".wim");
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".fixture");
     try {
         const auto empty=wim_sha1(std::span<const std::uint8_t>{});
         require(hex(empty)=="da39a3ee5e6b4b0d3255bfef95601890afd80709",
