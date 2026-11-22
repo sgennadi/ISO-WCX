@@ -45,10 +45,14 @@ jobs:
           $asanDlls = @(Get-ChildItem -Path (Join-Path $vsroot "VC/Tools/MSVC") -Filter "clang_rt.asan_dynamic-*.dll" -Recurse -File -ErrorAction SilentlyContinue)
           $arch = "${{ matrix.arch }}"
           $suffix = if ($arch -eq "x64") { "x86_64" } else { "i386" }
-          $runtime = @($asanDlls | Where-Object { $_.Name -eq "clang_rt.asan_dynamic-$suffix.dll" } | Select-Object -First 1)
+          $runtime = @($asanDlls | Where-Object { $_.Name -eq "clang_rt.asan_dynamic-$suffix.dll" } | Sort-Object FullName -Descending | Select-Object -First 1)
           if ($runtime.Count -eq 0) { throw "MSVC ASan runtime clang_rt.asan_dynamic-$suffix.dll not found" }
           $env:PATH = "$($runtime[0].DirectoryName);$env:PATH"
-          Write-Host "ASan runtime directory added for $arch"
+          Write-Host "ASan runtime for $arch : $($runtime[0].FullName)"
+          Write-Host "ASan candidates:"
+          $asanDlls | Where-Object { $_.Name -eq "clang_rt.asan_dynamic-$suffix.dll" } | ForEach-Object { Write-Host $_.FullName }
+          $dumpbin = Get-ChildItem -Path (Join-Path $vsroot "VC/Tools/MSVC") -Filter dumpbin.exe -Recurse -File | Where-Object { $_.FullName -match [regex]::Escape($arch) -or ($arch -eq "Win32" -and $_.FullName -match "Hostx64\\x86") } | Select-Object -First 1
+          if ($dumpbin) { & $dumpbin.FullName /dependents (Join-Path (Get-Location) "build-asan/RelWithDebInfo/wim_chunked_resource_tests.exe") }
           $exe = Join-Path (Get-Location) "build-asan/RelWithDebInfo/wim_chunked_resource_tests.exe"
           $stdout = Join-Path $env:RUNNER_TEMP "wim-asan-stdout.txt"
           $stderr = Join-Path $env:RUNNER_TEMP "wim-asan-stderr.txt"
