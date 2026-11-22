@@ -1,6 +1,8 @@
 #include "iso_wcx/wim_resource_audit.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <thread>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -254,9 +256,20 @@ static void write(const fs::path& path,
               static_cast<std::streamsize>(input.size()));
     require(bool(out),"cannot finish disposable WIM fixture");
 }
+static void remove_fixture(const fs::path& path) {
+    std::error_code ec;
+    for (unsigned attempt=0;attempt<20;++attempt) {
+        ec.clear();
+        if (fs::remove(path,ec) || !fs::exists(path)) return;
+        if (ec!=std::errc::permission_denied && ec!=std::errc::device_or_resource_busy) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    throw fs::filesystem_error("cannot remove WIM audit fixture",path,ec);
+}
 int main(){
     const auto path=fs::temp_directory_path()/
-        "iso-wcx-wim-resource-audit-readonly-fixture.wim";
+        ("iso-wcx-wim-resource-audit-readonly-fixture-"+
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".wim");
     try {
         const auto empty=wim_sha1(std::span<const std::uint8_t>{});
         require(hex(empty)=="da39a3ee5e6b4b0d3255bfef95601890afd80709",
@@ -411,7 +424,7 @@ int main(){
         write(path,broken);
         require(!audit_wim_resource_links(path).limited_audit_complete,
                 "truncated lookup entry accepted");
-        fs::remove(path);
+        remove_fixture(path);
         std::cout<<"PASS: WIM SHA-1, normal streams, ADS, missing links, "
                     "truncation and compressed-resource refusal\n";
     }catch(const std::exception& e) {
