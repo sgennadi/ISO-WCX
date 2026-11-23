@@ -147,8 +147,20 @@ int main() {
                     std::cerr<<"OPTICAL_RESTART_MANAGER result="<<rm_list
                              <<" owner_count="<<(rm_list==ERROR_SUCCESS?provided:0)<<"\\n";
                     if(rm_list==ERROR_SUCCESS)
-                        for(UINT i=0;i<provided;++i)
-                            std::cerr<<"OPTICAL_LOCK_OWNER pid="<<owners[i].Process.dwProcessId<<"\\n";
+                        for(UINT i=0;i<provided;++i) {
+                            const DWORD pid=owners[i].Process.dwProcessId;
+                            std::cerr<<"OPTICAL_LOCK_OWNER pid="<<pid
+                                     <<" self="<<(pid==GetCurrentProcessId())<<"\\n";
+                            HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+                            if(process) {
+                                WCHAR name[32768]{};
+                                DWORD length=32768;
+                                if(QueryFullProcessImageNameW(process,0,name,&length))
+                                    std::wcerr<<L"OPTICAL_LOCK_OWNER_IMAGE "<<name<<L"\\n";
+                                else std::cerr<<"OPTICAL_LOCK_OWNER_IMAGE error="<<GetLastError()<<"\\n";
+                                CloseHandle(process);
+                            } else std::cerr<<"OPTICAL_LOCK_OWNER_OPEN error="<<GetLastError()<<"\\n";
+                        }
                 } else std::cerr<<"OPTICAL_RESTART_MANAGER register_error="<<rm_register<<"\\n";
                 RmEndSession(rm_handle);
             } else std::cerr<<"OPTICAL_RESTART_MANAGER start_error="<<rm_start<<"\\n";
