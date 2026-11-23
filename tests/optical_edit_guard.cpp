@@ -30,6 +30,18 @@ void put(const fs::path& path,const std::string& content) {
     out.close();
     require(bool(out),"cannot close optical fixture");
 }
+#ifdef _WIN32
+static void probe_exclusive(const fs::path& path,const char* phase) {
+    const HANDLE handle=CreateFileW(path.c_str(),GENERIC_READ,0,nullptr,
+                                    OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    const DWORD error=handle==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
+    if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);
+    std::cerr<<"OPTICAL_EXCLUSIVE_PHASE "<<phase<<" "<<path.filename().string()
+             <<" error="<<error<<"\\n";
+}
+#else
+static void probe_exclusive(const fs::path&,const char*) {}
+#endif
 int main() {
     const auto stamp=std::chrono::steady_clock::now().time_since_epoch().count();
     const auto folder=fs::temp_directory_path()/
@@ -43,12 +55,16 @@ int main() {
         auto altered=bytes;
         altered[4500]='X'; // Unprotected UDF-only data
         put(staged,altered);
+        probe_exclusive(original,"after-fixture-write");
+        probe_exclusive(staged,"after-fixture-write");
         iso_wcx::OpticalEditGuard guard(bytes.size());
         guard.protect(0,4096);
         guard.protect(8192,2048);
         guard.protect(10240,1024); // Adjacent regions merge
         std::cerr<<"OPTICAL_ASAN_PHASE: initial verification\n"<<std::flush;
         guard.verify(original,staged);
+        probe_exclusive(original,"after-first-verify");
+        probe_exclusive(staged,"after-first-verify");
 
         // ISO9660 append-only writer grows the file, but all original boot
         // descriptor/catalog/image bytes must remain identical.
@@ -106,6 +122,8 @@ int main() {
 
         require(fs::file_size(original)==bytes.size(),
                 "original fixture was damaged");
+        probe_exclusive(original,"before-cleanup");
+        probe_exclusive(staged,"before-cleanup");
         std::cerr<<"OPTICAL_ASAN_PHASE: fixture cleanup\n"<<std::flush;
         std::error_code cleanup_error;
         std::uintmax_t removed=0;
