@@ -15,6 +15,10 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <RestartManager.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "Rstrtmgr.lib")
+#endif
 #endif
 
 using namespace iso_wcx::wim_detail;
@@ -278,6 +282,30 @@ static void remove_fixture(const fs::path& path) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 #ifdef _WIN32
+    DWORD rm_handle=0;
+    WCHAR rm_key[CCH_RM_SESSION_KEY+1]{};
+    const DWORD rm_start=RmStartSession(&rm_handle,0,rm_key);
+    if(rm_start==ERROR_SUCCESS) {
+        LPCWSTR files[]={path.c_str()};
+        const DWORD registered=RmRegisterResources(rm_handle,1,files,0,nullptr,0,nullptr);
+        if(registered==ERROR_SUCCESS) {
+            UINT needed=0,provided=0;
+            DWORD reboot=0;
+            DWORD result=RmGetList(rm_handle,&needed,&provided,nullptr,&reboot);
+            std::vector<RM_PROCESS_INFO> owners(needed);
+            if(result==ERROR_MORE_DATA && needed) {
+                provided=needed;
+                result=RmGetList(rm_handle,&needed,&provided,owners.data(),&reboot);
+            }
+            std::cerr<<"WIM_RESTART_MANAGER result="<<result
+                     <<" owners="<<(result==ERROR_SUCCESS?provided:0)<<"\n";
+            if(result==ERROR_SUCCESS)
+                for(UINT i=0;i<provided;++i)
+                    std::cerr<<"WIM_LOCK_OWNER pid="<<owners[i].Process.dwProcessId
+                             <<" self="<<(owners[i].Process.dwProcessId==GetCurrentProcessId())<<"\n";
+        } else std::cerr<<"WIM_RESTART_MANAGER register_error="<<registered<<"\n";
+        RmEndSession(rm_handle);
+    } else std::cerr<<"WIM_RESTART_MANAGER start_error="<<rm_start<<"\n";
     const auto shared=CreateFileW(path.c_str(),GENERIC_READ,
         FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
         nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
