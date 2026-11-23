@@ -71,6 +71,8 @@ int main() {
         altered=bytes+std::string(2048,'N');
         altered[4500]='X'; // unprotected original-prefix metadata
         put(staged,altered);
+        probe_exclusive(original,"append verification");
+        probe_exclusive(staged,"append verification");
         std::cerr<<"OPTICAL_ASAN_PHASE: append verification\n"<<std::flush;
         guard.verify_appended(original,staged);
         altered[8192]='B'; // protected boot payload within original prefix
@@ -78,6 +80,8 @@ int main() {
         bool append_refused=false;
         try{guard.verify_appended(original,staged);}
         catch(const iso_wcx::EditUnsupported&){append_refused=true;}
+        probe_exclusive(original,"boot mutation refusal");
+        probe_exclusive(staged,"boot mutation refusal");
         std::cerr<<"OPTICAL_ASAN_PHASE: boot mutation refusal\n"<<std::flush;
         require(append_refused,"append-only guard accepted changed boot image");
         altered=bytes.substr(0,bytes.size()-1);
@@ -85,6 +89,8 @@ int main() {
         append_refused=false;
         try{guard.verify_appended(original,staged);}
         catch(const iso_wcx::EditUnsupported&){append_refused=true;}
+        probe_exclusive(original,"truncation refusal");
+        probe_exclusive(staged,"truncation refusal");
         std::cerr<<"OPTICAL_ASAN_PHASE: truncation refusal\n"<<std::flush;
         require(append_refused,"append-only guard accepted truncated original");
 
@@ -95,6 +101,8 @@ int main() {
         bool refused=false;
         try{guard.verify(original,staged);}
         catch(const iso_wcx::EditUnsupported&){refused=true;}
+        probe_exclusive(original,"protected mutation refusal");
+        probe_exclusive(staged,"protected mutation refusal");
         std::cerr<<"OPTICAL_ASAN_PHASE: protected mutation refusal\n"<<std::flush;
         require(refused,"protected boot-region mutation was accepted");
 
@@ -103,12 +111,16 @@ int main() {
         refused=false;
         try{guard.protect(bytes.size()-2,4);}
         catch(const iso_wcx::EditUnsupported&){refused=true;}
+        probe_exclusive(original,"range validation");
+        probe_exclusive(staged,"range validation");
         std::cerr<<"OPTICAL_ASAN_PHASE: range validation\n"<<std::flush;
         require(refused,"out-of-bounds protected region accepted");
 
         refused=false;
         try{guard.verify(original,staged,[]{return false;});}
         catch(const iso_wcx::EditCancelled&){refused=true;}
+        probe_exclusive(original,"cancellation");
+        probe_exclusive(staged,"cancellation");
         std::cerr<<"OPTICAL_ASAN_PHASE: cancellation\n"<<std::flush;
         require(refused,"cancellation ignored");
 
@@ -117,6 +129,8 @@ int main() {
         refused=false;
         try{guard.verify(original,staged);}
         catch(const iso_wcx::EditUnsupported&){refused=true;}
+        probe_exclusive(original,"stage truncation");
+        probe_exclusive(staged,"stage truncation");
         std::cerr<<"OPTICAL_ASAN_PHASE: stage truncation\n"<<std::flush;
         require(refused,"truncated stage accepted");
 
