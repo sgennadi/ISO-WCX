@@ -266,7 +266,19 @@ static void write(const fs::path& path,
     out.close();
     require(bool(out),"cannot close disposable WIM fixture");
 }
+#ifdef _WIN32
+static void probe_fixture_lock(const fs::path& path,const char* phase) {
+    const HANDLE handle=CreateFileW(path.c_str(),GENERIC_READ,0,nullptr,
+                                    OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    const DWORD error=handle==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
+    if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);
+    std::cerr<<"WIM_EXCLUSIVE_PHASE "<<phase<<" error="<<error<<"\n";
+}
+#else
+static void probe_fixture_lock(const fs::path&,const char*) {}
+#endif
 static void remove_fixture(const fs::path& path) {
+    probe_fixture_lock(path,"before-cleanup");
     std::error_code ec;
     for (unsigned attempt=0;attempt<20;++attempt) {
         ec.clear();
@@ -344,7 +356,9 @@ int main(){
                 "SHA-1 multi-block vector mismatch");
         auto original=image();
         write(path,original);
+        probe_fixture_lock(path,"after-first-write");
         auto good=audit_wim_resource_links(path);
+        probe_fixture_lock(path,"after-first-audit");
         if(!good.limited_audit_complete)
             std::cerr<<"Unexpected incomplete audit: "<<good.reason<<"\n";
         require(good.metadata_verified && good.references_resolved &&
