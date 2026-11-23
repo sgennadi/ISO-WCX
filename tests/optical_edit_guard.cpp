@@ -8,9 +8,14 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <RestartManager.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "Rstrtmgr.lib")
+#endif
 #endif
 
 namespace fs=std::filesystem;
@@ -124,6 +129,29 @@ int main() {
                 remaining += " ["+it->path().filename().string()+"]";
             }
 #ifdef _WIN32
+            DWORD rm_handle=0;
+            WCHAR rm_key[CCH_RM_SESSION_KEY+1]{};
+            const DWORD rm_start=RmStartSession(&rm_handle,0,rm_key);
+            if(rm_start==ERROR_SUCCESS) {
+                const LPCWSTR rm_files[]={original.c_str(),staged.c_str()};
+                const DWORD rm_register=RmRegisterResources(rm_handle,2,rm_files,0,nullptr,0,nullptr);
+                if(rm_register==ERROR_SUCCESS) {
+                    UINT needed=0,provided=0;
+                    DWORD reboot_reasons=0;
+                    DWORD rm_list=RmGetList(rm_handle,&needed,&provided,nullptr,&reboot_reasons);
+                    std::vector<RM_PROCESS_INFO> owners(needed);
+                    if(rm_list==ERROR_MORE_DATA && needed) {
+                        provided=needed;
+                        rm_list=RmGetList(rm_handle,&needed,&provided,owners.data(),&reboot_reasons);
+                    }
+                    std::cerr<<"OPTICAL_RESTART_MANAGER result="<<rm_list
+                             <<" owner_count="<<(rm_list==ERROR_SUCCESS?provided:0)<<"\\n";
+                    if(rm_list==ERROR_SUCCESS)
+                        for(UINT i=0;i<provided;++i)
+                            std::cerr<<"OPTICAL_LOCK_OWNER pid="<<owners[i].Process.dwProcessId<<"\\n";
+                } else std::cerr<<"OPTICAL_RESTART_MANAGER register_error="<<rm_register<<"\\n";
+                RmEndSession(rm_handle);
+            } else std::cerr<<"OPTICAL_RESTART_MANAGER start_error="<<rm_start<<"\\n";
             for(const auto& candidate : {original,staged}) {
                 const auto handle=CreateFileW(candidate.c_str(),GENERIC_READ,
                     FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
