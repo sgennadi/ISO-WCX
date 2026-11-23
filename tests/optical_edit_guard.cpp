@@ -27,6 +27,8 @@ void put(const fs::path& path,const std::string& content) {
     std::ofstream out(path,std::ios::binary|std::ios::trunc);
     out.write(content.data(),static_cast<std::streamsize>(content.size()));
     require(bool(out),"cannot write optical fixture");
+    out.close();
+    require(bool(out),"cannot close optical fixture");
 }
 int main() {
     const auto stamp=std::chrono::steady_clock::now().time_since_epoch().count();
