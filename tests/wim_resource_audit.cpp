@@ -263,6 +263,8 @@ static void write(const fs::path& path,
     out.write(reinterpret_cast<const char*>(input.data()),
               static_cast<std::streamsize>(input.size()));
     require(bool(out),"cannot finish disposable WIM fixture");
+    out.close();
+    require(bool(out),"cannot close disposable WIM fixture");
 }
 static void remove_fixture(const fs::path& path) {
     std::error_code ec;
