@@ -497,8 +497,10 @@ int main(){
         // Truncated lookup entry must be rejected before metadata traversal.
         broken.resize(broken.size()-1);
         write(path,broken);
+        probe_fixture_lock(path,"after-final-write");
         require(!audit_wim_resource_links(path).limited_audit_complete,
                 "truncated lookup entry accepted");
+        probe_fixture_lock(path,"after-final-audit");
         remove_fixture(path);
         std::cout<<"PASS: WIM SHA-1, normal streams, ADS, missing links, "
                     "truncation and compressed-resource refusal\n";
