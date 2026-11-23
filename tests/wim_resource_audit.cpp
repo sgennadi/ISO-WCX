@@ -356,6 +356,7 @@ int main(){
                 "SHA-1 multi-block vector mismatch");
         auto original=image();
         write(path,original);
+        probe_fixture_lock(path,"write-1");
         probe_fixture_lock(path,"after-first-write");
         auto good=audit_wim_resource_links(path);
         probe_fixture_lock(path,"after-first-audit");
@@ -377,10 +378,12 @@ int main(){
         auto broken=original;
         broken[208+184]^=0x80u; // metadata child file stream hash
         write(path,broken);
+        probe_fixture_lock(path,"write-2");
         require(!audit_wim_resource_links(path).metadata_verified,
                 "metadata resource SHA-1 corruption accepted");
         broken=image(0,2,true);
         write(path,broken);
+        probe_fixture_lock(path,"write-3");
         const auto missing=audit_wim_resource_links(path);
         require(missing.metadata_verified && !missing.references_resolved &&
                 !missing.limited_audit_complete,
@@ -388,6 +391,7 @@ int main(){
         broken=original;
         broken[208+320]^=0x01u; // corrupt plain file payload, not lookup
         write(path,broken);
+        probe_fixture_lock(path,"write-4");
         const auto payload=audit_wim_resource_links(path);
         require(payload.metadata_verified && payload.references_resolved &&
                 !payload.limited_audit_complete &&
@@ -395,6 +399,7 @@ int main(){
                 "payload SHA-1 corruption accepted");
         broken=image(4); // content is marked compressed: refuse full hash claim
         write(path,broken);
+        probe_fixture_lock(path,"write-5");
         const auto compressed=audit_wim_resource_links(path);
         require(compressed.metadata_verified && compressed.references_resolved &&
                 compressed.requires_decompression &&
@@ -407,6 +412,7 @@ int main(){
             std::vector<std::uint8_t>(
                 original.begin()+208,original.begin()+208+320));
         write(path,chunked_raw);
+        probe_fixture_lock(path,"write-6");
         const auto raw_result=audit_wim_resource_links(path);
         if(!raw_result.limited_audit_complete)
             std::cerr<<"Chunked raw WIM audit: "<<raw_result.reason<<"\n";
@@ -424,6 +430,7 @@ int main(){
                 original.begin()+208,original.begin()+208+320),
             0x00040002u);
         write(path,lzx);
+        probe_fixture_lock(path,"write-7");
         const auto lzx_result=audit_wim_resource_links(path);
         require(lzx_result.requires_decompression &&
                 !lzx_result.metadata_verified &&
@@ -440,6 +447,7 @@ int main(){
         const auto compressed_wim=chunked_metadata_image(
             original,compressed_bytes,0x00020002u,expanded.size());
         write(path,compressed_wim);
+        probe_fixture_lock(path,"write-8");
         const auto compressed_metadata=audit_wim_resource_links(path);
         if(!compressed_metadata.limited_audit_complete)
             std::cerr<<"Genuine XPRESS WIM metadata audit: "
@@ -460,6 +468,7 @@ int main(){
         auto corrupt=compressed_wim;
         corrupt[208u+compressed_bytes.size()/2u]^=0x40u;
         write(path,corrupt);
+        probe_fixture_lock(path,"write-9");
         const auto bad_xpress=audit_wim_resource_links(path);
         require(!bad_xpress.limited_audit_complete &&
                 !bad_xpress.metadata_verified &&
@@ -473,6 +482,7 @@ int main(){
         const auto payload_wim=chunked_file_image(
             original,large_payload,compressed_payload);
         write(path,payload_wim);
+        probe_fixture_lock(path,"write-10");
         const auto audited_payload=audit_wim_resource_links(path);
         if(!audited_payload.limited_audit_complete)
             std::cerr<<"XPRESS file/ADS audit: "
@@ -486,6 +496,7 @@ int main(){
         auto corrupt_file=payload_wim;
         corrupt_file[208u+320u+compressed_payload.size()/2u]^=0x80u;
         write(path,corrupt_file);
+        probe_fixture_lock(path,"write-11");
         const auto failed_file=audit_wim_resource_links(path);
         require(!failed_file.limited_audit_complete &&
                 failed_file.metadata_verified &&
@@ -497,6 +508,7 @@ int main(){
         // Truncated lookup entry must be rejected before metadata traversal.
         broken.resize(broken.size()-1);
         write(path,broken);
+        probe_fixture_lock(path,"write-12");
         probe_fixture_lock(path,"after-final-write");
         require(!audit_wim_resource_links(path).limited_audit_complete,
                 "truncated lookup entry accepted");
