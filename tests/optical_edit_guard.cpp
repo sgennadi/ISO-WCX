@@ -133,7 +133,7 @@ int main() {
             WCHAR rm_key[CCH_RM_SESSION_KEY+1]{};
             const DWORD rm_start=RmStartSession(&rm_handle,0,rm_key);
             if(rm_start==ERROR_SUCCESS) {
-                const LPCWSTR rm_files[]={original.c_str(),staged.c_str()};
+                LPCWSTR rm_files[]={original.c_str(),staged.c_str()};
                 const DWORD rm_register=RmRegisterResources(rm_handle,2,rm_files,0,nullptr,0,nullptr);
                 if(rm_register==ERROR_SUCCESS) {
                     UINT needed=0,provided=0;
