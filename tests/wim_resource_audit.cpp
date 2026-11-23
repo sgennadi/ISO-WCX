@@ -381,6 +381,7 @@ int main(){
         probe_fixture_lock(path,"write-2");
         require(!audit_wim_resource_links(path).metadata_verified,
                 "metadata resource SHA-1 corruption accepted");
+        probe_fixture_lock(path,"after-corrupt-metadata-audit");
         broken=image(0,2,true);
         write(path,broken);
         probe_fixture_lock(path,"write-3");
