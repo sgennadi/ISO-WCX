@@ -554,6 +554,76 @@ def main(binary, reader=None):
         run('add','HELLO.TXT',False)
         source.write_bytes(b'new content'*1000)
 
+        # Strict, standard 512-byte GPT: valid protective MBR, CRC32
+        # headers and matching entry arrays, one independently bounded ESP.
+        # The GPT backup deliberately lies beyond the original ISO volume.
+        import zlib
+        def gpt_fixture(payload):
+            raw=bytearray(payload)
+            raw.extend(bytes(80*B-len(raw)))
+            n=len(raw)//512
+            raw[510:512]=b'\x55\xaa'
+            raw[450]=0xee
+            struct.pack_into('<II',raw,454,1,n-1)
+            entries=bytearray(128*128)
+            entries[:16]=bytes.fromhex('28732ac11ff8d211ba4b00a0c93ec93b')
+            entries[16:32]=bytes(range(1,17))
+            struct.pack_into('<QQ',entries,32,120,127)
+            entries_crc=zlib.crc32(entries)
+            disk_guid=bytes(range(16,32))
+            backup_table=n-33
+            for self_lba,alternate,table in ((1,n-1,2),(n-1,1,backup_table)):
+                raw[table*512:table*512+len(entries)]=entries
+                header=bytearray(512)
+                header[:8]=b'EFI PART'
+                struct.pack_into('<III',header,8,0x10000,92,0)
+                struct.pack_into('<QQQQ',header,24,self_lba,alternate,34,n-34)
+                header[56:72]=disk_guid
+                struct.pack_into('<QIII',header,72,table,128,128,entries_crc)
+                struct.pack_into('<I',header,16,zlib.crc32(header[:92]))
+                raw[self_lba*512:(self_lba+1)*512]=header
+            raw[120*512:128*512]=b'E'*(8*512)
+            return raw
+        gpt=gpt_fixture(fixture())
+        image.write_bytes(gpt)
+        source.write_bytes(b'RENEW')
+        run('add','HELLO.TXT')
+        current=image.read_bytes()
+        assert current[21*B:21*B+5]==b'RENEW'
+        assert current[:21*B]==gpt[:21*B]
+        assert current[21*B+5:]==gpt[21*B+5:]
+        assert read_image(image)['HELLO.TXT']==b'RENEW'
+        run('add','NEW.TXT',False)
+        run('delete','HELLO.TXT',False)
+        run('mkdir','NEWFOLDER',False)
+        source.write_bytes(b'TOO LONG')
+        run('add','HELLO.TXT',False)
+        source.write_bytes(b'RENEW')
+        # Malformed primary/backup headers or tables must fail closed.
+        for offset in (512+16,len(gpt)-512+16,2*512+48,
+                       len(gpt)-33*512+48):
+            corrupt=bytearray(gpt)
+            corrupt[offset]^=1
+            image.write_bytes(corrupt)
+            run('add','HELLO.TXT',False)
+        # A file can maliciously alias a separately addressed ESP.
+        # Valid GPT CRCs do NOT authorize changing the ESP's contents.
+        alias=bytearray(gpt)
+        at=20*B
+        at+=alias[at]
+        at+=alias[at]
+        both(alias,at+2,30)
+        image.write_bytes(alias)
+        run('add','HELLO.TXT',False)
+        # Protect an extra MBR partition as well, even if the legacy
+        # whole-image container itself is a normal isohybrid entry.
+        mbr=hybrid_mbr(fixture())
+        mbr[466]=0xef
+        struct.pack_into('<II',mbr,470,84,4)
+        image.write_bytes(mbr)
+        run('add','HELLO.TXT',False)
+        source.write_bytes(b'new content'*1000)
+
         # A conventional ISO with newly generated path tables must remain
         # replaceable after gaining an MBR. The path tables must not move.
         image.write_bytes(fixture())

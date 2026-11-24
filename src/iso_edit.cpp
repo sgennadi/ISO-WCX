@@ -24,6 +24,19 @@ std::uint32_t le(const Bytes& b,std::size_t p,unsigned n=4) {
     for(unsigned i=0;i<n;++i)v|=std::uint32_t(b[p+i])<<(8*i);
     return v;
 }
+std::uint64_t le64(const Bytes& b,std::size_t p) {
+    return std::uint64_t(le(b,p))|(std::uint64_t(le(b,p+4))<<32);
+}
+// UEFI GPT uses the IEEE CRC32 polynomial, not the UDF tag CRC16.
+std::uint32_t gpt_crc32(const Bytes& bytes) {
+    std::uint32_t crc=0xffffffffu;
+    for(const auto value:bytes) {
+        crc^=value;
+        for(unsigned i=0;i<8;++i)
+            crc=(crc>>1)^((crc&1u)?0xedb88320u:0u);
+    }
+    return ~crc;
+}
 void put(Bytes& b,std::size_t p,std::uint32_t v,unsigned n=4,bool big=false) {
     for(unsigned i=0;i<n;++i)b.at(p+i)=static_cast<unsigned char>(v>>(8*(big?n-1-i:i)));
 }
@@ -146,6 +159,8 @@ public:
     std::vector<std::pair<std::uint64_t,std::uint64_t>> udf_metadata_regions;
     std::set<std::uint64_t> udf_anchor_lbas;
     EditProtectedRanges iso_auxiliary_regions;
+    EditProtectedRanges hybrid_protected_regions;
+    bool gpt_hybrid=false;
     std::optional<std::uint8_t> susp_skip;
     // Joliet directories may occupy different sectors from Primary ISO.
     // Retain both namespaces' extents when protecting hidden boot media.
@@ -154,7 +169,7 @@ public:
     std::unique_ptr<Node> root;
     bool joliet=false;
     bool udf_bridge=false;
-    bool hybrid_system_area=false; // MBR present; only byte-stable payload edits
+    bool hybrid_system_area=false; // MBR/GPT present; only byte-stable payload edits
     bool iso_system_use=false; // RRIP/SUSP metadata must never be discarded
     bool rr_rebuild=false;
     std::uint32_t declared_volume_blocks=0;
@@ -168,38 +183,52 @@ public:
         hybrid_system_area=std::any_of(system.begin(),system.end(),
                                      [](auto c){return c!=0;});
         if(hybrid_system_area) {
-            // A conventional isohybrid MBR can coexist with UDF descriptors.
-            // Permit ONLY an unchanged-size UDF file payload replacement:
-            // never move its partitions, boot records or ISO descriptors.
-            // Unknown system areas and protective GPT are strictly excluded.
+            // Partition-bearing media may only use the equal-length
+            // payload writer. No partition resizing or GPT relocation.
             need(system[510]==0x55 && system[511]==0xaa,
                  "nonzero ISO system area is not a recognized MBR");
-            // GPT headers may be stored at 512-byte, 2048-byte optical
-            // or 4096-byte sector offsets. Never mistake a GPT-bearing
-            // hybrid for a plain MBR image, even if its MBR type is unusual.
-            for(const std::size_t offset:{512u,2048u,4096u})
+            gpt_hybrid=std::memcmp(system.data()+512,"EFI PART",8)==0;
+            for(const std::size_t offset:{2048u,4096u})
                 need(std::memcmp(system.data()+offset,"EFI PART",8)!=0,
-                     "hybrid ISO with GPT needs a partition-aware writer");
+                     "GPT with non-512-byte logical sectors is not yet writable");
             const auto limit=size/512u;
-            bool has_partition=false;
+            bool has_partition=false,protective=false;
             for(std::size_t i=0;i<4;++i) {
                 const auto at=446u+i*16u;
                 const auto type=system[at+4];
                 need(system[at]==0 || system[at]==0x80,
                      "isohybrid MBR has an invalid boot status");
-                need(type!=0xee,"hybrid ISO with protective GPT cannot be edited");
                 const auto begin=le(system,at+8);
                 const auto length=le(system,at+12);
                 if(type) {
                     need(length && begin<limit && length<=limit-begin,
                          "isohybrid MBR partition exceeds the image");
                     has_partition=true;
+                    if(type==0xee) {
+                        need(!protective && gpt_hybrid && system[at]==0 &&
+                             begin==1 &&
+                             length==std::min<std::uint64_t>(limit-1,0xffffffffull),
+                             "invalid protective MBR for GPT hybrid ISO");
+                        protective=true;
+                    } else if(begin!=0) {
+                        // A partition starting at disk LBA 0 is the
+                        // traditional whole-ISO isohybrid container.
+                        // Every separately addressed MBR partition,
+                        // including an ESP or extended container, stays
+                        // byte-for-byte immutable.
+                        hybrid_protected_regions.emplace_back(
+                            std::uint64_t(begin)*512u,std::uint64_t(length)*512u);
+                    }
                 }else{
                     need(!begin && !length,
                          "isohybrid MBR contains an inconsistent empty partition");
                 }
             }
             need(has_partition,"nonzero ISO system area has no valid MBR partition");
+            if(gpt_hybrid) {
+                need(protective,"GPT hybrid ISO lacks a protective MBR");
+                validate_gpt();
+            }
         }
         // Detect UDF bridges. General directory rebuilding is still
         // forbidden: only a separately validated equal-length data edit
@@ -305,7 +334,9 @@ public:
         // partitions, boot payloads or other data after the declared volume.
         // A detected ISO/UDF bridge takes the separate equal-size-only path,
         // which validates both filesystem namespaces and never moves extents.
-        if(!udf_bridge && declared_volume_blocks<sectors) {
+        // A validated GPT backup header and entry array may be outside
+        // the ISO volume. The hybrid writer never changes that trailer.
+        if(!udf_bridge && !gpt_hybrid && declared_volume_blocks<sectors) {
             const auto trailer_bytes=(sectors-declared_volume_blocks)*block;
             constexpr std::uint64_t max_padding=256ull*1024*1024;
             need(trailer_bytes<=max_padding,
@@ -622,8 +653,102 @@ public:
     // Follow only SUSP continuation records here. Unlike RR name decoding,
     // this also supports dot/parent entries and unknown SUSP extensions.
     // Every continuation byte is part of the immutable ISO namespace.
+    void validate_gpt() {
+        constexpr std::uint64_t sector=512;
+        const auto count=size/sector;
+        need(count>=68,"GPT image too small for primary and backup metadata");
+        const auto final_lba=count-1;
+        struct Header {
+            Bytes bytes,entries;
+            std::uint64_t first{},last{},table{},table_sectors{};
+            std::uint32_t number{},entry_size{};
+        };
+        auto parse_header=[&](std::uint64_t lba,std::uint64_t alternate) {
+            Header h;
+            h.bytes=read(lba*sector,sector);
+            need(std::memcmp(h.bytes.data(),"EFI PART",8)==0 &&
+                 le(h.bytes,8)==0x00010000u && le(h.bytes,20)==0,
+                 "invalid or unsupported GPT header");
+            const auto header_size=le(h.bytes,12);
+            need(header_size>=92 && header_size<=sector,
+                 "GPT header size is out of bounds");
+            auto crc_data=Bytes(h.bytes.begin(),h.bytes.begin()+header_size);
+            const auto crc=le(crc_data,16);
+            put(crc_data,16,0);
+            need(gpt_crc32(crc_data)==crc,"GPT header CRC32 mismatch");
+            need(le64(h.bytes,24)==lba && le64(h.bytes,32)==alternate,
+                 "GPT header locations disagree");
+            h.first=le64(h.bytes,40);
+            h.last=le64(h.bytes,48);
+            h.table=le64(h.bytes,72);
+            h.number=le(h.bytes,80);
+            h.entry_size=le(h.bytes,84);
+            need(h.first>=2 && h.first<=h.last && h.last<final_lba &&
+                 h.number>0 && h.number<=16384 &&
+                 h.entry_size>=128 && h.entry_size<=4096 &&
+                 h.entry_size%128u==0,
+                 "unsupported GPT usable range or entry geometry");
+            const auto bytes=std::uint64_t(h.number)*h.entry_size;
+            need(bytes<=16ull*1024*1024,"GPT entry array exceeds safety budget");
+            h.table_sectors=(bytes+sector-1)/sector;
+            need(h.table>=2 && h.table<count &&
+                 h.table_sectors<=count-h.table,
+                 "GPT entry array is outside the image");
+            if(lba==1)need(h.table+h.table_sectors<=h.first,
+                           "primary GPT entry array overlaps usable sectors");
+            else need(h.table>h.last && h.table+h.table_sectors<=lba,
+                      "backup GPT entry array overlaps usable sectors or header");
+            h.entries=read(h.table*sector,static_cast<std::size_t>(bytes));
+            need(gpt_crc32(h.entries)==le(h.bytes,88),
+                 "GPT partition entry array CRC32 mismatch");
+            return h;
+        };
+        const auto primary=parse_header(1,final_lba);
+        const auto backup=parse_header(final_lba,1);
+        need(primary.first==backup.first && primary.last==backup.last &&
+             primary.number==backup.number &&
+             primary.entry_size==backup.entry_size &&
+             std::equal(primary.bytes.begin()+56,primary.bytes.begin()+72,
+                        backup.bytes.begin()+56) &&
+             std::any_of(primary.bytes.begin()+56,primary.bytes.begin()+72,
+                         [](auto c){return c!=0;}) &&
+             primary.entries==backup.entries,
+             "primary and backup GPT metadata disagree");
+        hybrid_protected_regions.emplace_back(sector,sector);
+        hybrid_protected_regions.emplace_back(final_lba*sector,sector);
+        for(const auto* h:{&primary,&backup})
+            hybrid_protected_regions.emplace_back(
+                h->table*sector,h->table_sectors*sector);
+        std::vector<std::pair<std::uint64_t,std::uint64_t>> partitions;
+        std::set<Bytes> unique_guids;
+        for(std::uint32_t i=0;i<primary.number;++i) {
+            const auto at=std::size_t(i)*primary.entry_size;
+            const auto* type=primary.entries.data()+at;
+            if(std::all_of(type,type+16,[](auto c){return c==0;}))continue;
+            Bytes guid(type+16,type+32);
+            need(std::any_of(guid.begin(),guid.end(),[](auto c){return c!=0;}) &&
+                 unique_guids.insert(std::move(guid)).second,
+                 "GPT partition has a zero or duplicate unique GUID");
+            const auto first=le64(primary.entries,at+32);
+            const auto last=le64(primary.entries,at+40);
+            need(first>=primary.first && first<=last && last<=primary.last,
+                 "GPT partition exceeds the usable sector range");
+            partitions.emplace_back(first,last);
+        }
+        need(!partitions.empty(),"GPT hybrid contains no partitions");
+        std::sort(partitions.begin(),partitions.end());
+        for(std::size_t i=0;i<partitions.size();++i) {
+            const auto [first,last]=partitions[i];
+            need(i==0 || partitions[i-1].second<first,
+                 "overlapping GPT partitions are not writable");
+            // Never guess whether an ISO file is also live partition
+            // payload. Protect ALL GPT partitions, including EFI and data.
+            hybrid_protected_regions.emplace_back(
+                first*sector,(last-first+1)*sector);
+        }
+    }
     void protect_susp(const Bytes& record,bool* uneditable=nullptr) {
-        if((!udf_bridge && !rr_rebuild) || !susp_skip)return;
+        if((!udf_bridge && !rr_rebuild && !hybrid_system_area) || !susp_skip)return;
         const auto idlen=std::size_t(record[32]);
         const auto base=33+idlen+(idlen%2==0?1u:0u);
         need(base<=record.size(),"invalid ISO SUSP record");
@@ -1050,7 +1175,7 @@ void edit_iso_hybrid_equal_length(
     const std::filesystem::path& path,Image& image,
     const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
     need(image.hybrid_system_area && !image.udf_bridge,
-         "hybrid replacement requires a non-UDF MBR image");
+         "hybrid replacement requires a non-UDF partitioned ISO image");
     need(image.boot_regions_bounded,
          "hybrid ISO has unbounded El Torito boot resources");
     need(!changes.empty(),"hybrid ISO has no replacement files");
@@ -1132,6 +1257,16 @@ void edit_iso_hybrid_equal_length(
         need(offset>=16ull*block && offset<=volume && bytes<=volume-offset,
              "hybrid ISO target lies outside the declared volume");
         protect_boot(*node,image.boot_lbas);
+        for(const auto& [start,length]:image.hybrid_protected_regions)
+            need(!intersect(offset,bytes,start,length),
+                 "hybrid replacement overlaps a protected MBR/GPT partition or table");
+        for(const auto& [start,length]:image.iso_auxiliary_regions)
+            need(!intersect(offset,bytes,start,length),
+                 "hybrid replacement overlaps SUSP continuation metadata");
+        for(const auto& [start,length]:image.joliet_regions)
+            need((offset==start && bytes==length) ||
+                 !intersect(offset,bytes,start,length),
+                 "hybrid replacement overlaps an independent Joliet extent");
         for(const auto& [start,length]:image.boot_regions)
             need(!intersect(offset,bytes,start,length),
                  "hybrid replacement overlaps an El Torito resource");
@@ -1219,6 +1354,8 @@ void edit_iso_hybrid_equal_length(
     {
         Image verified(tx.output,true);
         need(verified.hybrid_system_area && !verified.udf_bridge &&
+             verified.gpt_hybrid==image.gpt_hybrid &&
+             verified.hybrid_protected_regions==image.hybrid_protected_regions &&
              verified.size==image.size &&
              verified.descriptors==image.descriptors &&
              verified.boot_descriptor_lbas==image.boot_descriptor_lbas &&
@@ -1355,6 +1492,16 @@ void edit_iso_udf_bridge_equal_length(
         for(const auto& [start,length]:iso.udf_metadata_regions)
             need(!intersect(offset,entry.size,start,length),
                  "replacement intersects UDF anchor or descriptor sequence");
+        for(const auto& [start,length]:iso.hybrid_protected_regions)
+            need(!intersect(offset,entry.size,start,length),
+                 "bridge replacement intersects protected MBR/GPT metadata or partition");
+        for(const auto& [start,length]:iso.iso_auxiliary_regions)
+            need(!intersect(offset,entry.size,start,length),
+                 "bridge replacement intersects ISO path table or SUSP metadata");
+        for(const auto& [start,length]:iso.joliet_regions)
+            need((offset==start && entry.size==length) ||
+                 !intersect(offset,entry.size,start,length),
+                 "bridge replacement intersects independent Joliet extent");
         for(const auto* other:iso_nodes) {
             if(other==node || other->size==0)continue;
             need(!intersect(offset,entry.size,
@@ -1416,8 +1563,10 @@ void edit_iso_udf_bridge_equal_length(
     // compare every requested replacement, byte for byte.
     {
         Image primary(tx.output,true);
-        need(primary.udf_bridge && primary.size==iso.size,
-             "staged image lost its ISO/UDF bridge descriptors");
+        need(primary.udf_bridge && primary.size==iso.size &&
+             primary.gpt_hybrid==iso.gpt_hybrid &&
+             primary.hybrid_protected_regions==iso.hybrid_protected_regions,
+             "staged image lost its ISO/UDF bridge or partition descriptors");
         const Disc checked(tx.output);
         need(checked.format()=="UDF","staged UDF could not be validated");
         std::ifstream staged(tx.output,std::ios::binary);
@@ -1453,6 +1602,20 @@ void edit_iso_udf_bridge_equal_length(
             }
         }
     }
+    // Independently compare all bytes outside the replacement payloads.
+    // This includes GPT backups beyond the declared ISO volume.
+    std::sort(patches.begin(),patches.end(),[](const auto& a,const auto& b){
+        return a.at<b.at;
+    });
+    OpticalEditGuard unchanged(iso.size);
+    std::uint64_t end=0;
+    for(const auto& patch:patches) {
+        need(end<=patch.at,"overlapping bridge patches");
+        unchanged.protect(end,patch.at-end);
+        end=patch.at+patch.bytes;
+    }
+    unchanged.protect(end,iso.size-end);
+    unchanged.verify(path,tx.output,progress);
     tx.commit(progress);
 }
 // Native Universal Optical Edit Guard.  ISO9660/Joliet and boot data are
