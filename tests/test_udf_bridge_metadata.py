@@ -112,6 +112,31 @@ def main(editor, inspector):
         assert image.read_bytes()==again
         assert not list(root.glob('.iso-wcx-edit-*'))
 
+        # Replace an existing embedded file with a payload larger than
+        # its original FE. The old ICB identity remains, but the contents
+        # move into new appended ShortAD runs. Also exercise a mixed batch.
+        before=image.read_bytes()
+        replacement=root/'larger.bin'
+        replacement.write_bytes(bytes(range(256))*43+b'grow')
+        run(editor,image,'batch','add','hello',replacement,
+            'add','MIXED.BIN',payload,'delete','ADDED.BIN')
+        grown=image.read_bytes()
+        assert len(grown)>len(before)
+        assert grown[:256*B]==readonly[:256*B]
+        assert read_image(image)==old_iso
+        out=root/'remastered-mixed'
+        run(inspector,image,'--extract',out)
+        assert (out/'hello').read_bytes()==replacement.read_bytes()
+        assert (out/'MIXED.BIN').read_bytes()==payload.read_bytes()
+        assert not (out/'ADDED.BIN').exists()
+        run(editor,image,'delete','newfolder')
+        out=root/'remastered-delete-folder'
+        run(inspector,image,'--extract',out)
+        assert not (out/'newfolder').exists()
+        assert (out/'hello').read_bytes()==replacement.read_bytes()
+        assert image.read_bytes()[:256*B]==readonly[:256*B]
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
         # Standalone read-only UDF has no ISO descriptor or ISO guard.
         # It must nevertheless remaster both physical-end anchor copies
         # and preserve original data on repeat edits.
@@ -139,6 +164,15 @@ def main(editor, inspector):
         assert (out/'FIRST.BIN').read_bytes()==payload.read_bytes()
         assert (out/'SUB'/'SECOND.BIN').read_bytes()==payload.read_bytes()
         assert (out/'hello').read_bytes()==b'world'
+        run(editor,native,'add','hello',replacement)
+        run(editor,native,'delete','SUB',success=False)
+        run(editor,native,'delete','SUB/SECOND.BIN')
+        run(editor,native,'delete','SUB')
+        out=root/'standalone-resized'
+        run(inspector,native,'--extract',out)
+        assert (out/'hello').read_bytes()==replacement.read_bytes()
+        assert not (out/'SUB').exists()
+        assert (out/'FIRST.BIN').read_bytes()==payload.read_bytes()
         before=native.read_bytes()
         run(editor,native,'cancel','cancelled.bin',payload,success=False)
         assert native.read_bytes()==before
