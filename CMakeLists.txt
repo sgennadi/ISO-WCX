@@ -614,6 +614,12 @@ if(WIN32)
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_iso_edit.py"
               "$<TARGET_FILE:ISO-WCX>" "$<TARGET_FILE:wcx_iso_edit_runner>")
     set_tests_properties(wcx_iso_f5_padded_add_replace_delete PROPERTIES TIMEOUT 90)
+    # Test the exact WCX DLL ABI on Windows, not just the core editor.
+    add_test(NAME wcx_readonly_udf_bridge_f5_reopen_extract
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_wcx_readonly_udf_bridge.py"
+              "$<TARGET_FILE:ISO-WCX>" "$<TARGET_FILE:wcx_iso_edit_runner>"
+              "$<TARGET_FILE:wcx_packed_smoke>" "$<TARGET_FILE:disc_inspect>")
+    set_tests_properties(wcx_readonly_udf_bridge_f5_reopen_extract PROPERTIES TIMEOUT 180)
     add_test(NAME wcx_load_list_extract COMMAND wcx_smoke "$<TARGET_FILE:ISO-WCX>")
   endif()
 endif()
