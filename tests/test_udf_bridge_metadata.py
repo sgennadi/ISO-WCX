@@ -112,6 +112,37 @@ def main(editor, inspector):
         assert image.read_bytes()==again
         assert not list(root.glob('.iso-wcx-edit-*'))
 
+        # Standalone read-only UDF has no ISO descriptor or ISO guard.
+        # It must nevertheless remaster both physical-end anchor copies
+        # and preserve original data on repeat edits.
+        standalone=bitmap_image()
+        struct.pack_into('<I',standalone,260*B+184,1)
+        standalone[260*B+56:260*B+96]=bytes(40)
+        update_tag(standalone,260*B,512)
+        struct.pack_into('<I',standalone,270*B+80,0)
+        update_tag(standalone,270*B,88)
+        standalone[599*B:600*B]=standalone[256*B:257*B]
+        update_tag(standalone,599*B,512,599)
+        native=root/'standalone.udf'
+        native.write_bytes(standalone)
+        payload.write_bytes(b'STANDALONE UDF ROM'*500)
+        run(editor,native,'add','FIRST.BIN',payload)
+        grown=native.read_bytes()
+        main=struct.unpack_from('<I',grown,256*B+20)[0]
+        assert len(grown)>len(standalone)
+        assert struct.unpack_from('<I',grown,599*B+20)[0]==main
+        assert grown[:256*B]==standalone[:256*B]
+        run(editor,native,'mkdir','SUB')
+        run(editor,native,'add','SUB/SECOND.BIN',payload)
+        out=root/'standalone-readback'
+        run(inspector,native,'--extract',out)
+        assert (out/'FIRST.BIN').read_bytes()==payload.read_bytes()
+        assert (out/'SUB'/'SECOND.BIN').read_bytes()==payload.read_bytes()
+        assert (out/'hello').read_bytes()==b'world'
+        before=native.read_bytes()
+        run(editor,native,'cancel','cancelled.bin',payload,success=False)
+        assert native.read_bytes()==before
+
         # Unknown boot length cannot authorize writes, even though the
         # synthetic UDF partition has a working allocator.
         image.write_bytes(bootable_bridge_bitmap(bounded=False))

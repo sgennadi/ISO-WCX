@@ -1029,7 +1029,7 @@ public:
                 const auto n=u32(d,432),at=u32(d,436);
                 need(n>=block && n%block==0 && n<=16u*1024u*1024u &&
                      at<old_sectors && n/block<=old_sectors-at,
-                     "read-only UDF mastering requires a bounded integrity sequence");
+                     "read-only UDF access type 1 mastering requires a bounded integrity sequence");
                 lvid=read(std::uint64_t(at)*block,block);
                 tag_check(lvid,0,9);
                 need(u32(lvid,12)==at && u32(lvid,28)==1 &&
@@ -1041,15 +1041,20 @@ public:
                      (u32(lvid,84)==partition_blocks_ ||
                       u32(lvid,84)==0xffffffffu),
                      "invalid read-only UDF integrity counters");
-                if(n>block) {
-                    auto tail=read((std::uint64_t(at)+1)*block,block);
-                    if(u16(tail,0)!=0) {
-                        tag_check(tail,0,8);
-                        need(u32(tail,12)==std::uint64_t(at)+1,
-                             "invalid UDF integrity terminator location");
-                    } else need(std::all_of(tail.begin(),tail.end(),
-                            [](std::uint8_t c){return c==0;}),
-                            "invalid UDF integrity padding");
+                bool ended=false;
+                for(std::uint64_t j=1;j<n/block;++j) {
+                    auto tail=read((std::uint64_t(at)+j)*block,block);
+                    if(std::all_of(tail.begin(),tail.end(),
+                            [](std::uint8_t c){return c==0;})) {
+                        ended=true;
+                        continue;
+                    }
+                    need(!ended && u16(tail,0)==8,
+                         "unsupported chained read-only UDF integrity sequence");
+                    tag_check(tail,0,8);
+                    need(u32(tail,12)==std::uint64_t(at)+j,
+                         "invalid UDF integrity terminator location");
+                    ended=true;
                 }
                 lvd_found=true;
             } else if(type==7) {
@@ -1093,16 +1098,27 @@ public:
         // The main/reserve copies are both reachable from all original
         // valid anchors, as well as the new physical-end anchor pair.
         std::set<std::uint64_t> anchors{256,last-256,last};
-        for(const auto& [at,length]:protected_ranges) {
-            if(length!=block || at%block || at<256*block ||
-               at>=plan.original_size)continue;
+        // Physical-end discovery is independent of any ISO namespace.
+        // Standalone UDF and padded bridge volumes share this backend.
+        std::set<std::uint64_t> candidates{256,512,old_sectors-1,
+                                           old_sectors-257,old_sectors-256};
+        for(const auto& [at,length]:protected_ranges)
+            if(length==block && at%block==0 && at>=256*block &&
+               at<plan.original_size)candidates.insert(at/block);
+        for(const auto lba:candidates) {
+            if(lba>=old_sectors)continue;
+            const auto at=lba*block;
             auto d=read(at,block);
-            if(u16(d,0)!=2 || u32(d,12)!=at/block)continue;
+            if(u16(d,0)!=2 || u32(d,12)!=lba)continue;
             tag_check(d,0,2);
             need(u32(d,16)==u32(anchor,16) && u32(d,20)==u32(anchor,20) &&
                  u32(d,24)==u32(anchor,24) && u32(d,28)==u32(anchor,28),
                  "inconsistent UDF anchor copies");
-            anchors.insert(at/block);
+            for(const auto& occupied:reserved_)
+                need(!occupied.owner ||
+                     !intersects({at,block},occupied.range),
+                     "UDF mastering anchor overlaps a referenced file or directory");
+            anchors.insert(lba);
         }
         for(const auto at:anchors) {
             auto d=anchor;
@@ -2857,7 +2873,7 @@ void edit_udf(const std::filesystem::path& image,
          "ISO/UDF Bridge metadata writes need protected ISO ranges");
     volume.protect_external_ranges(protected_ranges);
     need(!changes.empty(),"no UDF changes");
-    if(allow_bridge && volume.partition_access_type()==1 &&
+    if(volume.partition_access_type()==1 &&
        !volume.has_allocation_map() &&
        std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c) {
            const auto key=edit_path(c.path);
@@ -2865,7 +2881,7 @@ void edit_udf(const std::filesystem::path& image,
                   !volume.directories().count(key);
        })) {
         auto plan=volume.prepare_readonly_append(changes,protected_ranges);
-        create_udf_type1_batch(image,volume,changes,progress,true,
+        create_udf_type1_batch(image,volume,changes,progress,allow_bridge,
                                validate_stage,&plan);
         return;
     }
