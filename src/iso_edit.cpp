@@ -720,14 +720,19 @@ public:
             hybrid_protected_regions.emplace_back(
                 h->table*sector,h->table_sectors*sector);
         std::vector<std::pair<std::uint64_t,std::uint64_t>> partitions;
-        std::set<Bytes> unique_guids;
+        // A GUID is exactly 128 bits. Use two fixed-width words as the
+        // identity key instead of comparing variable-length byte vectors.
+        // GCC 13/14 can misdiagnose the vector spaceship operator's
+        // optimized memcmp bound as -Wstringop-overread under -Werror.
+        std::set<std::pair<std::uint64_t,std::uint64_t>> unique_guids;
         for(std::uint32_t i=0;i<primary.number;++i) {
             const auto at=std::size_t(i)*primary.entry_size;
             const auto* type=primary.entries.data()+at;
             if(std::all_of(type,type+16,[](auto c){return c==0;}))continue;
-            Bytes guid(type+16,type+32);
-            need(std::any_of(guid.begin(),guid.end(),[](auto c){return c!=0;}) &&
-                 unique_guids.insert(std::move(guid)).second,
+            const auto guid=std::pair{le64(primary.entries,at+16),
+                                      le64(primary.entries,at+24)};
+            need((guid.first!=0 || guid.second!=0) &&
+                 unique_guids.insert(guid).second,
                  "GPT partition has a zero or duplicate unique GUID");
             const auto first=le64(primary.entries,at+32);
             const auto last=le64(primary.entries,at+40);
