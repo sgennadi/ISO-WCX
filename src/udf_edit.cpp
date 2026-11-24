@@ -2745,6 +2745,28 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     need(bool(out),"cannot flush staged UDF batch image");
     out.close();
 
+    if(mastering) {
+        // Type1 validates the main sequence and namespace, but the
+        // read-only parser does not consume the LVID or reserve VDS.
+        // Independently read back all newly written mastering metadata.
+        std::ifstream check(tx.output,std::ios::binary);
+        need(bool(check),"cannot reopen mastered UDF metadata");
+        auto verify=[&](std::uint64_t at,const Bytes& expected) {
+            edit_tick(progress);
+            Bytes actual(expected.size());
+            check.clear();
+            check.seekg(static_cast<std::streamoff>(at));
+            check.read(reinterpret_cast<char*>(actual.data()),
+                       static_cast<std::streamsize>(actual.size()));
+            need(bool(check) && actual==expected,
+                 "UDF mastering metadata readback differs");
+            tag_check(actual,0,u16(expected,0));
+        };
+        for(const auto& [at,bytes]:mastering->descriptors)verify(at,bytes);
+        verify(lvid_at,lvid_bytes);
+        check.close();
+    }
+
     // A strict second parse detects invalid tag CRC/location, FE/FID aliases,
     // bitmap/LVID mismatches and parent allocation errors. Read every new
     // file through Disc extents and compare its complete source stream.

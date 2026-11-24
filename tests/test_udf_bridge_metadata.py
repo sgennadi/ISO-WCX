@@ -92,6 +92,8 @@ def main(editor, inspector):
         assert struct.unpack_from('<I',grown,main*B+184)[0]==1
         assert grown[main*B+56:main*B+96]==bytes(40)
         assert struct.unpack_from('<I',grown,len(grown)-B+20)[0]==main
+        assert struct.unpack_from('<I',grown,len(grown)-257*B+20)[0]==main
+        first_end=len(grown)//B-1
         run(inspector,image,'--extract',root/'mastered')
         assert (root/'mastered'/'ADDED.BIN').read_bytes()==payload.read_bytes()
         assert (root/'mastered'/'hello').read_bytes()==b'world'
@@ -100,6 +102,15 @@ def main(editor, inspector):
         run(inspector,image,'--extract',root/'mastered-twice')
         assert (root/'mastered-twice'/'newfolder').is_dir()
         assert (root/'mastered-twice'/'ADDED.BIN').read_bytes()==payload.read_bytes()
+        again=image.read_bytes()
+        main2=struct.unpack_from('<I',again,256*B+20)[0]
+        assert main2>=len(grown)//B
+        assert struct.unpack_from('<I',again,first_end*B+20)[0]==main2
+        assert struct.unpack_from('<I',again,(first_end-256)*B+20)[0]==main2
+        assert again[:256*B]==readonly[:256*B]
+        run(editor,image,'cancel','cancelled.bin',payload,success=False)
+        assert image.read_bytes()==again
+        assert not list(root.glob('.iso-wcx-edit-*'))
 
         # Unknown boot length cannot authorize writes, even though the
         # synthetic UDF partition has a working allocator.

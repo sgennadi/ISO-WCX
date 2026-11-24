@@ -2,6 +2,7 @@
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/edit_transaction.hpp"
 #include "iso_wcx/optical_edit_guard.hpp"
+#include "iso_wcx/rock_ridge.hpp"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -128,6 +129,8 @@ public:
     std::set<std::uint32_t> unbounded_boot_lbas;
     std::vector<std::pair<std::uint64_t,std::uint64_t>> udf_metadata_regions;
     std::set<std::uint64_t> udf_anchor_lbas;
+    EditProtectedRanges iso_auxiliary_regions;
+    std::optional<std::uint8_t> susp_skip;
     // Joliet directories may occupy different sectors from Primary ISO.
     // Retain both namespaces' extents when protecting hidden boot media.
     std::vector<std::pair<std::uint64_t,std::uint64_t>> joliet_regions;
@@ -230,6 +233,9 @@ public:
         // so backup anchor and descriptor extents stay protected too.
         if(add_udf_anchor(256))udf_bridge=true;
         if(sectors>512 && add_udf_anchor(512))udf_bridge=true;
+        // ECMA-167 N is the last logical sector, not the sector count.
+        // Accept both N-256 and the legacy count-256 probe.
+        if(sectors>257 && add_udf_anchor(sectors-257))udf_bridge=true;
         if(sectors>256 && add_udf_anchor(sectors-256))udf_bridge=true;
         if(sectors && add_udf_anchor(sectors-1))udf_bridge=true;
         need(allow_udf_bridge || !udf_bridge,
@@ -264,6 +270,8 @@ public:
         for(const auto volume_blocks:
             {primary_volume_blocks,supplementary_volume_blocks}) {
             if(!volume_blocks || volume_blocks>=sectors)continue;
+            if(volume_blocks>257)
+                udf_bridge=add_udf_anchor(volume_blocks-257) || udf_bridge;
             if(volume_blocks>256)
                 udf_bridge=add_udf_anchor(volume_blocks-256) || udf_bridge;
             udf_bridge=add_udf_anchor(volume_blocks-1) || udf_bridge;
@@ -299,6 +307,26 @@ public:
                     [](char c){return c==0;}),
                     "nonzero data beyond ISO volume (possible boot/partition metadata)");
                 remaining-=static_cast<std::uint64_t>(n);
+            }
+        }
+        if(udf_bridge) {
+            // A path table is a separate extent, not a directory record.
+            // Its original bytes must survive all UDF-only edits.
+            for(const auto& [lba,vd]:descriptors) {
+                (void)lba;
+                const auto table_bytes=le(vd,132);
+                if(!table_bytes)continue;
+                for(const std::size_t at:{140u,144u,148u,152u}) {
+                    const auto table_lba=(at<148u)?le(vd,at):
+                        ((std::uint32_t(vd[at])<<24)|
+                         (std::uint32_t(vd[at+1])<<16)|
+                         (std::uint32_t(vd[at+2])<<8)|vd[at+3]);
+                    if(!table_lba)continue;
+                    const auto offset=std::uint64_t(table_lba)*block;
+                    need(offset<=size && table_bytes<=size-offset,
+                         "ISO/UDF path table exceeds image bounds");
+                    iso_auxiliary_regions.emplace_back(offset,table_bytes);
+                }
             }
         }
         std::set<std::uint32_t> seen;root=parse(Bytes(primary.begin()+156,primary.begin()+190),false,nullptr,0,seen);
@@ -560,6 +588,58 @@ public:
         entry(32);std::size_t at=64;
         while(at<block&&b[at]){need(b[at]==0x90||b[at]==0x91,"unsupported boot catalog extension");bool last=b[at]==0x91;unsigned count=le(b,at+2,2);at+=32;need(count<=(block-at)/32,"large boot catalog unsupported");for(unsigned i=0;i<count;++i,at+=32)entry(at);if(last)break;}
     }
+    // Follow only SUSP continuation records here. Unlike RR name decoding,
+    // this also supports dot/parent entries and unknown SUSP extensions.
+    // Every continuation byte is part of the immutable ISO namespace.
+    void protect_susp(const Bytes& record) {
+        if(!udf_bridge || !susp_skip)return;
+        const auto idlen=std::size_t(record[32]);
+        const auto base=33+idlen+(idlen%2==0?1u:0u);
+        need(base<=record.size(),"invalid ISO SUSP record");
+        if(record.size()==base)return;
+        need(*susp_skip<=record.size()-base,"invalid ISO SUSP skip");
+        Bytes area(record.begin()+static_cast<std::ptrdiff_t>(base+*susp_skip),
+                   record.end());
+        std::set<std::pair<std::uint64_t,std::uint64_t>> visited;
+        std::uint64_t total=0;
+        for(unsigned hop=0;;++hop) {
+            std::optional<std::pair<std::uint64_t,std::uint64_t>> next;
+            for(std::size_t p=0;p+4<=area.size();) {
+                if(!area[p])break;
+                const auto n=std::size_t(area[p+2]);
+                need(n>=4 && n<=area.size()-p && area[p+3]==1,
+                     "invalid ISO SUSP extension");
+                if(area[p]=='S' && area[p+1]=='T')break;
+                if(area[p]=='C' && area[p+1]=='E') {
+                    need(n>=28 && !next,"invalid ISO SUSP continuation");
+                    const auto mirrored=[&](std::size_t q) {
+                        const auto value=le(area,q);
+                        const auto big=(std::uint32_t(area[q+4])<<24)|
+                            (std::uint32_t(area[q+5])<<16)|
+                            (std::uint32_t(area[q+6])<<8)|area[q+7];
+                        need(value==big,"ISO SUSP continuation byte orders differ");
+                        return value;
+                    };
+                    const auto lba=mirrored(p+4),offset=mirrored(p+12),
+                               bytes=mirrored(p+20);
+                    need(offset<block && bytes>0 && bytes<=65536,
+                         "invalid ISO SUSP continuation bounds");
+                    next=std::pair<std::uint64_t,std::uint64_t>{
+                        std::uint64_t(lba)*block+offset,bytes};
+                }
+                p+=n;
+            }
+            if(!next)break;
+            need(hop<8 && next->second<=65536-total &&
+                 visited.insert(*next).second,
+                 "cyclic or oversized ISO SUSP continuation");
+            need(iso_auxiliary_regions.size()<200000,
+                 "ISO auxiliary metadata count exceeds safety limit");
+            iso_auxiliary_regions.push_back(*next);
+            total+=next->second;
+            area=read(next->first,static_cast<std::size_t>(next->second));
+        }
+    }
     std::unique_ptr<Node> parse(const Bytes& r,bool j,Node* parent,unsigned depth,std::set<std::uint32_t>& seen) {
         need(r.size()>=34&&r[0]==r.size()&&r[1]==0&&r[26]==0&&r[27]==0&&le(r,28,2)==1,"unsupported ISO record");
         need((r[25]&~3u)==0,"multi-extent/associated ISO records are read-only");
@@ -570,6 +650,7 @@ public:
             r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),
             [](auto c){return c!=0;});
         iso_system_use|=has_system_use;
+        if(!j && parent && has_system_use)protect_susp(r);
         // Only the byte-for-byte preserving MBR hybrid payload patcher may
         // read non-UDF SUSP/Rock Ridge records. The ordinary ISO rebuilder
         // would otherwise silently discard PX, NM, CE and POSIX timestamps.
@@ -587,6 +668,11 @@ public:
                         child.begin()+static_cast<std::ptrdiff_t>(tail),
                         child.end(),[](auto c){return c!=0;});
                     iso_system_use|=has_system_use;
+                    if(!j && udf_bridge) {
+                        if(!parent && child[33]==0)
+                            susp_skip=rock_ridge_skip(child);
+                        if(has_system_use)protect_susp(child);
+                    }
                     need(udf_bridge || hybrid_system_area || !has_system_use,
                          "Rock Ridge/SUSP ISO directory metadata needs a "
                          "preserving writer; plain ISO rebuild is unsafe");
@@ -1189,13 +1275,32 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
         guard.protect(start,length);
     }
     if(mastering) {
-        for(const auto at:before.udf_anchor_lbas)
-            need(after.udf_anchor_lbas.count(at)!=0,
-                 "UDF mastering lost an original anchor");
+        // A previous physical-end anchor is no longer a discovery
+        // candidate after another append. Verify it directly at its
+        // original LBA rather than requiring the parser to rediscover it.
+        const auto primary=after.read(256ull*block,block);
+        auto verify_anchor=[&](std::uint64_t lba) {
+            const auto anchor=after.read(lba*block,block);
+            unsigned checksum=0;
+            for(std::size_t p=0;p<16;++p)if(p!=4)checksum+=anchor[p];
+            need(le(anchor,0,2)==2 && le(anchor,12)==lba &&
+                 static_cast<unsigned char>(checksum)==anchor[4] &&
+                 std::equal(anchor.begin()+16,anchor.end(),primary.begin()+16) &&
+                 le(anchor,8,2)==le(primary,8,2) &&
+                 le(anchor,10,2)==le(primary,10,2),
+                 "UDF mastering anchor copies disagree");
+        };
+        for(const auto at:before.udf_anchor_lbas)verify_anchor(at);
+        verify_anchor(stage_size/block-1);
+        verify_anchor(stage_size/block-257);
         need(after.udf_anchor_lbas.count(stage_size/block-1)!=0 &&
              after.udf_anchor_lbas.count(stage_size/block-257)!=0,
              "UDF mastering lost new end anchors");
     }
+    for(const auto& [start,length]:before.joliet_regions)
+        guard.protect(start,length);
+    for(const auto& [start,length]:before.iso_auxiliary_regions)
+        guard.protect(start,length);
     std::vector<const Node*> nodes{before.root.get()};
     for(std::size_t at=0;at<nodes.size();++at) {
         const auto* node=nodes[at];
@@ -1250,6 +1355,10 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                      image.boot_regions.end());
     immutable.insert(immutable.end(),image.udf_metadata_regions.begin(),
                      image.udf_metadata_regions.end());
+    immutable.insert(immutable.end(),image.joliet_regions.begin(),
+                     image.joliet_regions.end());
+    immutable.insert(immutable.end(),image.iso_auxiliary_regions.begin(),
+                     image.iso_auxiliary_regions.end());
     std::vector<const Node*> nodes{image.root.get()};
     for(std::size_t at=0;at<nodes.size();++at) {
         const auto* node=nodes[at];

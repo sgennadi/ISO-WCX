@@ -1052,8 +1052,11 @@ public:
             2048,512,1024,4096,8192,16384,32768};
         for(auto sector:candidates) {
             auto count=src_.size()/sector;
-            std::array<std::uint64_t,4> anchors={
-                256,count>=256?count-256:0,count?count-1:0,512};
+            // N denotes the final LBA. Retain the historical count-256
+            // candidate as a compatibility fallback for older masters.
+            std::array<std::uint64_t,5> anchors={
+                256,count>=257?count-257:0,
+                count>=256?count-256:0,count?count-1:0,512};
             for(auto anchor:anchors) {
                 if(anchor>=count)continue;
                 try {
