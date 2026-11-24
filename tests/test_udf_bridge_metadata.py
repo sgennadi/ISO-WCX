@@ -166,7 +166,18 @@ def main(editor, inspector):
         assert (out/'hello').read_bytes()==b'world'
         run(editor,native,'add','hello',replacement)
         run(editor,native,'delete','SUB',success=False)
-        run(editor,native,'delete','SUB/SECOND.BIN')
+        # Delete two siblings in one legacy (no bitmap) batch.
+        # Both FIDs are CRC-covered by the same embedded parent FE.
+        run(editor,native,'add','SUB/THIRD.BIN',payload)
+        run(editor,native,'add','SUB/KEEP.BIN',payload)
+        run(editor,native,'batch','delete','SUB/SECOND.BIN',
+            'delete','SUB/THIRD.BIN')
+        partial=root/'standalone-partial-delete'
+        run(inspector,native,'--extract',partial)
+        assert not (partial/'SUB'/'SECOND.BIN').exists()
+        assert not (partial/'SUB'/'THIRD.BIN').exists()
+        assert (partial/'SUB'/'KEEP.BIN').read_bytes()==payload.read_bytes()
+        run(editor,native,'delete','SUB/KEEP.BIN')
         run(editor,native,'delete','SUB')
         out=root/'standalone-resized'
         run(inspector,native,'--extract',out)

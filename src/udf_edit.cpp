@@ -3035,16 +3035,34 @@ void edit_udf(const std::filesystem::path& image,
             need(!(fid[18]&0x0cu),"UDF directory entry is already deleted");
             fid[18]|=0x04; // UDF FID deleted characteristic.
             tag_update(fid,0,fid.size());
-            staged_write(out,target.fid_at,fid);
             if(target.parent_embedded) {
+                // The FID is part of the parent's allocation descriptor
+                // bytes and therefore covered by the FE/EFE CRC. Validate
+                // the OLD descriptor before mutating its payload; writing
+                // the FID separately first would invalidate that CRC.
                 auto parent=staged_read(out,target.parent_at,block);
                 const auto tag=u16(parent,0);
+                need(tag==261 || tag==266,"invalid UDF embedded parent descriptor");
                 tag_check(parent,0,tag);
                 const auto base=tag==261?176u:216u;
                 const auto ea=u32(parent,tag==261?168:208);
                 const auto ad=u32(parent,tag==261?172:212);
+                need((u16(parent,34)&7u)==3 && parent[27]==4 &&
+                     ea<=block-base && ad<=block-base-ea &&
+                     target.fid_at>=target.parent_at,
+                     "invalid UDF embedded parent allocation bounds");
+                const auto start=std::uint64_t(base)+ea;
+                const auto offset=target.fid_at-target.parent_at;
+                need(offset>=start && offset<=start+ad &&
+                     fid.size()<=start+ad-offset,
+                     "deleted UDF FID lies outside embedded parent payload");
+                std::copy(fid.begin(),fid.end(),
+                          parent.begin()+static_cast<std::ptrdiff_t>(offset));
                 tag_update(parent,0,base+ea+ad);
+                tag_check(parent,0,tag);
                 staged_write(out,target.parent_at,parent);
+            } else {
+                staged_write(out,target.fid_at,fid);
             }
             continue;
         }
