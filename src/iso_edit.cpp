@@ -106,6 +106,9 @@ struct FileSection {
 struct Node {
     std::string name,logical;
     Bytes record,identifier,joliet_identifier;
+    Bytes rr_record,rr_dot,rr_parent;
+    bool rr=false,rr_uneditable=false;
+    std::size_t old_subdirs=0;
     bool directory=false;
     std::uint32_t lba=0;
     std::uint64_t size=0;
@@ -152,7 +155,8 @@ public:
     bool joliet=false;
     bool udf_bridge=false;
     bool hybrid_system_area=false; // MBR present; only byte-stable payload edits
-    bool iso_system_use=false; // RRIP/SUSP metadata must never be regenerated
+    bool iso_system_use=false; // RRIP/SUSP metadata must never be discarded
+    bool rr_rebuild=false;
     std::uint32_t declared_volume_blocks=0;
     std::uint32_t primary_volume_blocks=0;
     std::uint32_t supplementary_volume_blocks=0;
@@ -618,8 +622,8 @@ public:
     // Follow only SUSP continuation records here. Unlike RR name decoding,
     // this also supports dot/parent entries and unknown SUSP extensions.
     // Every continuation byte is part of the immutable ISO namespace.
-    void protect_susp(const Bytes& record) {
-        if(!udf_bridge || !susp_skip)return;
+    void protect_susp(const Bytes& record,bool* uneditable=nullptr) {
+        if((!udf_bridge && !rr_rebuild) || !susp_skip)return;
         const auto idlen=std::size_t(record[32]);
         const auto base=33+idlen+(idlen%2==0?1u:0u);
         need(base<=record.size(),"invalid ISO SUSP record");
@@ -636,8 +640,33 @@ public:
                 const auto n=std::size_t(area[p+2]);
                 need(n>=4 && n<=area.size()-p && area[p+3]==1,
                      "invalid ISO SUSP extension");
-                if(area[p]=='S' && area[p+1]=='T')break;
-                if(area[p]=='C' && area[p+1]=='E') {
+                const std::string_view signature(
+                    reinterpret_cast<const char*>(area.data()+p),2);
+                if(rr_rebuild) {
+                    // Relocation, compression, sparse-file and unknown
+                    // extensions may contain geometry-dependent metadata.
+                    // Preserve only records whose semantics are understood.
+                    need(signature=="SP" || signature=="ST" ||
+                         signature=="CE" || signature=="ER" ||
+                         signature=="ES" || signature=="PD" ||
+                         signature=="RR" || signature=="PX" ||
+                         signature=="NM" || signature=="TF" ||
+                         signature=="SL" || signature=="PN",
+                         "Rock Ridge extension needs a specialized writer");
+                    if(uneditable) {
+                        if(signature=="SL" || signature=="PN")*uneditable=true;
+                        if(signature=="PX") {
+                            need(n==36 || n==44,"invalid Rock Ridge PX");
+                            const auto mode=le(area,p+4);
+                            const auto kind=mode&0170000u;
+                            if((kind!=0 && kind!=0100000u && kind!=0040000u) ||
+                               (kind!=0040000u && le(area,p+12)>1))
+                                *uneditable=true;
+                        }
+                    }
+                }
+                if(signature=="ST")break;
+                if(signature=="CE") {
                     need(n>=28 && !next,"invalid ISO SUSP continuation");
                     const auto mirrored=[&](std::size_t q) {
                         const auto value=le(area,q);
@@ -687,15 +716,36 @@ public:
             r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),
             [](auto c){return c!=0;});
         iso_system_use|=has_system_use;
-        if(!j && parent && has_system_use)protect_susp(r);
-        // Only the byte-for-byte preserving MBR hybrid payload patcher may
-        // read non-UDF SUSP/Rock Ridge records. The ordinary ISO rebuilder
-        // would otherwise silently discard PX, NM, CE and POSIX timestamps.
-        need(udf_bridge || hybrid_system_area || !has_system_use,
-             "Rock Ridge/SUSP ISO metadata needs a preserving writer; "
-             "plain ISO directory rebuild is unsafe");
+        if(!j && parent && has_system_use)
+            protect_susp(r,rr_rebuild?&n->rr_uneditable:nullptr);
+        need(udf_bridge || hybrid_system_area ||
+             (!j && rr_rebuild) || !has_system_use,
+             "unrecognized ISO System Use metadata requires a preserving writer");
         n->identifier.assign(r.begin()+33,r.begin()+33+static_cast<std::ptrdiff_t>(idlen));
         if(parent)n->name=n->logical=decode(n->identifier,j,n->directory);
+        if(!j && rr_rebuild) {
+            n->rr=true;
+            n->rr_record=r;
+            need(!(r[25]&0x80u),
+                 "Rock Ridge multi-extent metadata needs a specialized writer");
+            if(parent && has_system_use) {
+                const auto rr=rock_ridge_entry(r,*susp_skip,
+                    [&](std::uint64_t offset,std::size_t length) {
+                        return read(offset,length);
+                    });
+                if(rr.alternate_name)n->logical=edit_path(*rr.alternate_name);
+                need(n->logical.find('/')==std::string::npos,
+                     "invalid Rock Ridge filename component");
+                n->rr_uneditable|=rr.symlink;
+                if(rr.posix_mode) {
+                    const auto kind=*rr.posix_mode&0170000u;
+                    need(kind==0 || kind!=0040000u || n->directory,
+                         "Rock Ridge directory type disagrees with ISO record");
+                    if(kind && kind!=0040000u && kind!=0100000u)
+                        n->rr_uneditable=true;
+                }
+            }
+        }
         need(++items<=200000&&depth<=64,"ISO edit tree limit exceeded");
         if(n->directory){need(seen.insert(n->lba).second&&n->size<=64*1024*1024,"cyclic or oversized ISO directory");auto data=read(std::uint64_t(n->lba)*block,static_cast<std::size_t>(n->size));std::set<std::string> names;
             Node* pending=nullptr;
@@ -707,14 +757,29 @@ public:
                         child.begin()+static_cast<std::ptrdiff_t>(tail),
                         child.end(),[](auto c){return c!=0;});
                     iso_system_use|=has_system_use;
-                    if(!j && udf_bridge) {
-                        if(!parent && child[33]==0)
+                    if(!j) {
+                        if(!parent && child[33]==0) {
                             susp_skip=rock_ridge_skip(child);
+                            if(!udf_bridge && !hybrid_system_area && susp_skip) {
+                                need(*susp_skip==0,
+                                     "Rock Ridge with nonzero SUSP skip is not yet writable");
+                                rr_rebuild=rock_ridge_entry(child,*susp_skip,
+                                    [&](std::uint64_t offset,std::size_t length) {
+                                        return read(offset,length);
+                                    }).extension;
+                                n->rr=rr_rebuild;
+                            }
+                        }
                         if(has_system_use)protect_susp(child);
+                        if(rr_rebuild) {
+                            auto& dot=child[33]==0?n->rr_dot:n->rr_parent;
+                            need(dot.empty(),"duplicate Rock Ridge dot record");
+                            dot=child;
+                        }
                     }
-                    need(udf_bridge || hybrid_system_area || !has_system_use,
-                         "Rock Ridge/SUSP ISO directory metadata needs a "
-                         "preserving writer; plain ISO rebuild is unsafe");
+                    need(udf_bridge || hybrid_system_area ||
+                         (!j && rr_rebuild) || !has_system_use,
+                         "unrecognized ISO directory System Use metadata");
                     continue;}
                 auto c=parse(child,j,n.get(),depth+1,seen);
                 const bool more=(child[25]&0x80u)!=0;
@@ -735,17 +800,28 @@ public:
                 }
             }
             need(!pending,"unterminated ISO multi-extent file");
+            if(n->rr) {
+                need(!n->rr_dot.empty() && !n->rr_parent.empty(),
+                     "Rock Ridge directory lacks dot or parent record");
+                for(const auto& child:n->children)
+                    if(child->directory)++n->old_subdirs;
+            }
         }return n;
     }
     void pair(Node& a,const Node& b) {
-        a.joliet_identifier=b.identifier;a.logical=b.logical;
+        a.joliet_identifier=b.identifier;
+        if(!rr_rebuild)a.logical=b.logical;
         need(a.children.size()==b.children.size(),"ISO and Joliet trees differ");std::set<const Node*> used;
         for(auto& x:a.children){std::vector<const Node*> found;
-            for(const auto& y:b.children)if(!used.count(y.get())&&x->directory==y->directory&&x->size==y->size&&(x->directory||x->sections==y->sections))found.push_back(y.get());
+            for(const auto& y:b.children)if(!used.count(y.get())&&x->directory==y->directory&&
+                    (x->directory?(rr_rebuild||x->size==y->size):
+                     (x->size==y->size&&x->sections==y->sections)))found.push_back(y.get());
             if(found.size()>1) {
                 std::vector<const Node*> named;
                 for(const auto* y:found)
-                    if(upper(x->name)==upper(y->name))named.push_back(y);
+                    if(upper(x->name)==upper(y->name) ||
+                       (rr_rebuild && upper(x->logical)==upper(y->logical)))
+                        named.push_back(y);
                 // A generated ISO alias is never equal to the Unicode
                 // name. Preserve candidates to attempt exact hash pairing.
                 if(named.size()==1)found=std::move(named);
@@ -829,8 +905,56 @@ void protect_boot(const Node& n,const std::set<std::uint32_t>& boot) {
     });
     for(const auto& child:n.children) protect_boot(*child,boot);
 }
+// Existing SUSP bytes, including CE pointers, stay in the original
+// prefix. Only inline directory PX link counts change with topology.
+// A continuation containing an unknown PX location cannot be rewritten
+// in place: refuse that topology change instead of corrupting metadata.
+std::size_t rr_subdirs(const Node& n) {
+    return static_cast<std::size_t>(std::count_if(n.children.begin(),n.children.end(),
+        [](const auto& child){return child->directory;}));
+}
+Bytes rr_px(const Node& directory) {
+    const auto& dot=directory.rr_dot;
+    if(dot.size()>=34) {
+        for(std::size_t at=34;at+4<=dot.size() && dot[at];) {
+            const auto bytes=std::size_t(dot[at+2]);
+            need(bytes>=4 && bytes<=dot.size()-at,"invalid Rock Ridge dot metadata");
+            if(dot[at]=='P' && dot[at+1]=='X')
+                return Bytes(dot.begin()+static_cast<std::ptrdiff_t>(at),
+                             dot.begin()+static_cast<std::ptrdiff_t>(at+bytes));
+            if(dot[at]=='S' && dot[at+1]=='T')break;
+            at+=bytes;
+        }
+    }
+    Bytes px(36,0);
+    px[0]='P';px[1]='X';px[2]=36;px[3]=1;
+    both(px,4,directory.directory?0040755u:0100644u);
+    both(px,12,directory.directory?2u:1u);
+    return px;
+}
+void rr_link_count(Bytes& r,const Node& directory,bool generated) {
+    const auto count=rr_subdirs(directory);
+    if(!generated && count==directory.old_subdirs)return;
+    const auto id=std::size_t(r[32]);
+    auto at=33+id+(id%2==0?1u:0u);
+    bool px=false,ce=false;
+    for(;at+4<=r.size() && r[at];) {
+        const auto bytes=std::size_t(r[at+2]);
+        need(bytes>=4 && bytes<=r.size()-at,"invalid Rock Ridge PX record");
+        if(r[at]=='P' && r[at+1]=='X') {
+            need(!px && (bytes==36 || bytes==44),"invalid Rock Ridge PX link count");
+            both(r,at+12,static_cast<std::uint32_t>(2+count));
+            px=true;
+        }
+        if(r[at]=='C' && r[at+1]=='E')ce=true;
+        if(r[at]=='S' && r[at+1]=='T')break;
+        at+=bytes;
+    }
+    need(px || !ce,"Rock Ridge directory link count in continuation requires relocation");
+}
 Bytes record(const Node& n,const Bytes& id,unsigned view,const Node* directory=nullptr,
-             const FileSection* section=nullptr,bool more=false) {
+             const FileSection* section=nullptr,bool more=false,
+             const Bytes* preserved_rr=nullptr,bool rr_dot_record=false) {
     Bytes b(33+id.size()+(id.size()%2==0?1:0),0);need(b.size()<=255,"ISO record too long");
     std::copy_n(n.record.begin(),std::min<std::size_t>(33,n.record.size()),b.begin());b[0]=static_cast<unsigned char>(b.size());b[32]=static_cast<unsigned char>(id.size());
     const auto& loc=directory?*directory:n;
@@ -841,12 +965,44 @@ Bytes record(const Node& n,const Bytes& id,unsigned view,const Node* directory=n
     b[25]=static_cast<unsigned char>((n.record.empty()?0:n.record[25])&1u);
     if(loc.directory)b[25]|=2;
     if(more)b[25]|=0x80u;
-    both(b,28,1,2);std::copy(id.begin(),id.end(),b.begin()+33);return b;
+    both(b,28,1,2);std::copy(id.begin(),id.end(),b.begin()+33);
+    if(view==0 && preserved_rr) {
+        const auto base=b.size();
+        const bool generated=preserved_rr->empty();
+        if(!generated) {
+            need(preserved_rr->size()>=base &&
+                 (*preserved_rr)[32]==id.size() &&
+                 std::equal(id.begin(),id.end(),preserved_rr->begin()+33),
+                 "Rock Ridge original identifier changed");
+            b.insert(b.end(),preserved_rr->begin()+static_cast<std::ptrdiff_t>(base),
+                     preserved_rr->end());
+        } else {
+            auto px=rr_px(loc);
+            b.insert(b.end(),px.begin(),px.end());
+            if(!rr_dot_record) {
+                const auto& name=n.logical;
+                (void)utf16(name); // validate UTF-8 before encoding RRIP NM
+                need(name.size()<=250 && b.size()+5+name.size()<=255,
+                     "Rock Ridge new filename requires a continuation area");
+                b.push_back('N');b.push_back('M');
+                b.push_back(static_cast<unsigned char>(5+name.size()));
+                b.push_back(1);b.push_back(0);
+                b.insert(b.end(),name.begin(),name.end());
+            }
+        }
+        need(b.size()<=255,"Rock Ridge directory record exceeds 255 bytes");
+        b[0]=static_cast<unsigned char>(b.size());
+        if(loc.directory)rr_link_count(b,loc,generated);
+    }
+    return b;
 }
 Bytes directory_data(Node& n,unsigned view) {
     Bytes b;
     auto append=[&](const Bytes& r){if(b.size()%block+r.size()>block)b.resize((b.size()/block+1)*block);b.insert(b.end(),r.begin(),r.end());};
-    append(record(n,Bytes{0},view,&n));append(record(n,Bytes{1},view,n.parent?n.parent:&n));
+    append(record(n,Bytes{0},view,&n,nullptr,false,
+                  n.rr?&n.rr_dot:nullptr,true));
+    append(record(n,Bytes{1},view,n.parent?n.parent:&n,nullptr,false,
+                  n.rr?&n.rr_parent:nullptr,true));
     std::vector<Node*> sorted;for(auto& x:n.children)sorted.push_back(x.get());std::sort(sorted.begin(), sorted.end(), [&](const Node* a, const Node* c) {
         // Avoid the GCC 13/14 -Wstringop-overread false positive in the
         // optimized libstdc++ vector three-way comparison (with -Werror).
@@ -860,10 +1016,12 @@ Bytes directory_data(Node& n,unsigned view) {
     });
     for(auto* x:sorted) {
         const auto& id=view?x->joliet_identifier:x->identifier;
-        if(x->directory || x->sections.empty())append(record(*x,id,view));
+        const auto* rr=x->rr?&x->rr_record:nullptr;
+        if(x->directory || x->sections.empty())
+            append(record(*x,id,view,nullptr,nullptr,false,rr));
         else for(std::size_t part=0;part<x->sections.size();++part)
             append(record(*x,id,view,nullptr,&x->sections[part],
-                          part+1<x->sections.size()));
+                          part+1<x->sections.size(),rr));
     }
     b.resize((b.size()+block-1)/block*block);return b;
 }
@@ -1514,15 +1672,26 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     for(const auto& change:changes){auto p=edit_path(change.path);std::istringstream split(p);std::string name;Node* parent=image.root.get();
         std::vector<std::string> parts;while(std::getline(split,name,'/'))parts.push_back(name);
         for(std::size_t i=0;i<parts.size();++i){const bool last=i+1==parts.size();const auto key=upper(parts[i]);auto it=std::find_if(parent->children.begin(),parent->children.end(),[&](const auto& n){return upper(n->logical)==key;});
-            if(last&&change.remove){if(it!=parent->children.end()){protect_boot(**it,image.boot_lbas);parent->children.erase(it);}break;}
+            if(last&&change.remove){if(it!=parent->children.end()){
+                if(image.rr_rebuild) {
+                    std::vector<const Node*> removed{it->get()};
+                    for(std::size_t j=0;j<removed.size();++j) {
+                        need(!removed[j]->rr_uneditable,
+                             "Rock Ridge hard-linked or special entry cannot be deleted");
+                        for(const auto& child:removed[j]->children)removed.push_back(child.get());
+                    }
+                }
+                protect_boot(**it,image.boot_lbas);parent->children.erase(it);}break;}
             if(it==parent->children.end()){
                 if(change.remove)break;
-                auto n=std::make_unique<Node>();n->parent=parent;n->logical=parts[i];n->name=upper(parts[i]);n->directory=!last||change.directory;n->record.resize(34,0);n->record[18]=126;n->record[19]=1;n->record[20]=1;
+                auto n=std::make_unique<Node>();n->parent=parent;n->logical=parts[i];n->name=upper(parts[i]);n->directory=!last||change.directory;n->rr=image.rr_rebuild;n->record.resize(34,0);n->record[18]=126;n->record[19]=1;n->record[20]=1;
                 // For new Joliet names, generate a deterministic short ISO alias when necessary.
                 try {
                     n->identifier=identifier(parts[i],false,n->directory);
+                    if(n->rr && 33+n->identifier.size()+1+36+5+parts[i].size()>255)
+                        throw EditUnsupported("Rock Ridge needs a shorter primary alias");
                 } catch(const EditUnsupported&) {
-                    need(image.joliet,"name cannot be represented in ISO9660");
+                    need(image.joliet || image.rr_rebuild,"name cannot be represented in ISO9660");
                     bool unique=false;
                     for(unsigned salt=0;salt<128 && !unique;++salt) {
                         n->name=iso_alias(parts[i],n->directory,salt);
@@ -1540,7 +1709,11 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
             auto& n=**it;
             if(!last){need(n.directory,"parent is not a directory");parent=&n;continue;}
             need(n.directory==change.directory,"file/directory replacement is not supported");
-            if(!n.directory){protect_boot(n,image.boot_lbas);need(std::filesystem::is_regular_file(std::filesystem::symlink_status(change.source)),"edit source must be a regular file");auto size=std::filesystem::file_size(change.source);need(size<0xffffffffull*block,"ISO file exceeds volume address space");n.size=size;n.sections.clear();n.source=change.source;}
+            if(!n.directory){
+                need(!n.rr_uneditable,"Rock Ridge hard-linked or special entry cannot be replaced");
+                protect_boot(n,image.boot_lbas);need(std::filesystem::is_regular_file(std::filesystem::symlink_status(change.source)),"edit source must be a regular file");auto size=std::filesystem::file_size(change.source);need(size<0xffffffffull*block,"ISO file exceeds volume address space");need(!image.rr_rebuild || size<=0xfffff800ull,
+                     "Rock Ridge multi-extent writing is not yet supported");
+                n.size=size;n.sections.clear();n.source=change.source;}
         }
     }
     EditTransaction tx(path);std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary|std::ios::trunc);need(bool(out),"cannot create staged ISO");image.file.clear();image.file.seekg(0);copy_bytes(image.file,out,image.size,progress);
@@ -1606,6 +1779,8 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     {
         Image verified(tx.output);
         need(verified.size==next*block,"staged ISO size mismatch");
+        need(verified.rr_rebuild==image.rr_rebuild,
+             "Rock Ridge extension lost in staged ISO");
         need(verified.boot_descriptor_lbas==image.boot_descriptor_lbas &&
              verified.boot_entries==image.boot_entries &&
              verified.boot_lbas==image.boot_lbas &&
@@ -1683,6 +1858,8 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     for(const auto lba:image.boot_descriptor_lbas)
         guard.protect(std::uint64_t(lba)*block,block);
     for(const auto& [offset,length]:image.boot_regions)
+        guard.protect(offset,length);
+    for(const auto& [offset,length]:image.iso_auxiliary_regions)
         guard.protect(offset,length);
     guard.verify_appended(path,tx.output,progress);
     tx.commit(progress);

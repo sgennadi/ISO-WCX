@@ -152,18 +152,26 @@ def main(editor: str, xorriso: str) -> None:
             ])
             execute(*command)
 
-        # Never weaken the ISO editor to make its positive test pass.
-        # Default xorriso uses Rock Ridge; this layout must be refused
-        # without modifying any byte or leaving a transaction directory.
+        # Independently authored Rock Ridge + Joliet with CE/PX/NM
+        # metadata and dual El Torito boot entries. Verify both old and
+        # new data through xorriso rather than trusting our own parser.
         rock_ridge_image = root / "rockridge-dual-boot.iso"
         master(rock_ridge_image, disable_rock_ridge=False)
-        rr_bytes = rock_ridge_image.read_bytes()
+        rr_catalog = boot_catalog(rock_ridge_image)
         rr_payload = root / "rr-incoming.bin"
-        rr_payload.write_bytes(b"not permitted in Rock Ridge")
-        execute(editor, rock_ridge_image, "add", "REJECTED.TXT", rr_payload,
-                expect_success=False)
-        assert rock_ridge_image.read_bytes() == rr_bytes, (
-            "Rock Ridge ISO changed despite refusing metadata rewrite")
+        rr_payload.write_bytes(b"Rock Ridge replacement payload")
+        execute(editor, rock_ridge_image, "add", "new-file.txt", rr_payload)
+        assert extract(xorriso, rock_ridge_image, "new-file.txt", root) == rr_payload.read_bytes()
+        execute(editor, rock_ridge_image, "add", "ORIGINAL.TXT", rr_payload)
+        assert extract(xorriso, rock_ridge_image, "ORIGINAL.TXT", root) == rr_payload.read_bytes()
+        execute(editor, rock_ridge_image, "delete", "new-file.txt")
+        assert extract(xorriso, rock_ridge_image, "new-file.txt", root) is None
+        assert boot_catalog(rock_ridge_image)==rr_catalog
+        assert extract(xorriso, rock_ridge_image, "BOOT/BIOS.IMG", root)==bios
+        assert extract(xorriso, rock_ridge_image, "BOOT/EFI.IMG", root)==efi
+        before=rock_ridge_image.read_bytes()
+        execute(editor, rock_ridge_image, "delete", "BOOT/BIOS.IMG", expect_success=False)
+        assert rock_ridge_image.read_bytes()==before
         no_workspace_leak(root)
 
         # Independently master a non-RR dual-boot ISO; safe bounded edits

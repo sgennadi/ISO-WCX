@@ -614,6 +614,32 @@ def main(binary, reader=None):
             assert not list(root.glob('.iso-wcx-edit-*'))
         source.write_bytes(b'new content'*1000)
 
+        # Ordinary (non-MBR) Rock Ridge with RRIP NM names: keep original
+        # SUSP records while appending replacement data and directory trees.
+        rr=rrip_hybrid_fixture(joliet=False)
+        rr[:16*B]=bytes(16*B)
+        image.write_bytes(rr)
+        source.write_bytes(b'longer RRIP replacement')
+        run('add','rr-file')
+        assert read_image(image)['HELLO.TXT']==source.read_bytes()
+        run('add','new-file.txt')
+        run('mkdir','New-Directory')
+        run('add','New-Directory/nested-file.txt')
+        if reader:
+            out=root/'rr-native-readback'
+            result=subprocess.run([reader,str(image),'--extract',str(out)],
+                                  capture_output=True)
+            assert result.returncode==0,(result.stdout,result.stderr)
+            assert (out/'rr-file').read_bytes()==source.read_bytes()
+            assert (out/'new-file.txt').read_bytes()==source.read_bytes()
+            assert (out/'New-Directory'/'nested-file.txt').read_bytes()==source.read_bytes()
+        assert image.read_bytes()[24*B:27*B]==rr[24*B:27*B]
+        run('delete','rr-file')
+        run('delete','New-Directory')
+        assert 'HELLO.TXT' not in read_image(image)
+        assert image.read_bytes()[24*B:27*B]==rr[24*B:27*B]
+        source.write_bytes(b'new content'*1000)
+
         # Never accept direct replacement of an emulated El Torito floppy,
         # even when its source has the exact original image length.
         protected=hybrid_mbr(emulated_boot_fixture(2))
