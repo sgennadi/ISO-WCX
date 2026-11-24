@@ -216,6 +216,11 @@ void bitmap_reserve(Bitmap& bitmap,std::uint32_t logical) {
         static_cast<std::uint8_t>(~(1u<<(logical%8)));
 }
 
+struct ReadonlyAppendPlan {
+    std::uint64_t original_size{};
+    std::vector<std::pair<std::uint64_t,Bytes>> descriptors;
+};
+
 class Type1 {
 public:
     explicit Type1(const std::filesystem::path& path,bool allow_bridge=false)
@@ -648,7 +653,7 @@ public:
         need(count>0 && count<=partition_blocks_,
              "UDF requested allocation exceeds partition");
         auto& bitmap=*bitmap_;
-        for(std::uint32_t start=0;start<bitmap.bits;) {
+        for(std::uint32_t start=allocation_start_;start<bitmap.bits;) {
             if(!allocatable_block(start)){++start;continue;}
             std::uint32_t run=0;
             while(run<count && run<bitmap.bits-start &&
@@ -689,7 +694,7 @@ public:
         std::priority_queue<Candidate,std::vector<Candidate>,
                             std::greater<Candidate>> best;
         const auto& bitmap=*bitmap_;
-        for(std::uint32_t at=0;at<bitmap.bits;) {
+        for(std::uint32_t at=allocation_start_;at<bitmap.bits;) {
             if(!allocatable_block(at)) {++at;continue;}
             const auto start=at;
             do {++at;} while(at<bitmap.bits && allocatable_block(at));
@@ -950,12 +955,209 @@ public:
         return static_cast<std::uint32_t>(
             (at-std::uint64_t(partition_)*block)/block);
     }
+    // Read-only mastering: only newly appended sectors are allocatable.
+    // The virtual bitmap is never serialized into a read-only partition.
+    // Relocate descriptor sequences and integrity data beyond the expanded
+    // partition, preserving every original payload offset and ISO boot LBA.
+    ReadonlyAppendPlan prepare_readonly_append(
+            const std::vector<ArchiveChange>& changes,
+            const EditProtectedRanges& protected_ranges) {
+        need(partition_access_type_==1 && !bitmap_ && !changes.empty() &&
+             changes.size()<=max_items,"unsupported read-only UDF mastering");
+        ReadonlyAppendPlan plan;
+        plan.original_size=size_;
+        const auto old_sectors=size_/block;
+        std::uint64_t extra=1;
+        std::set<std::string> parents;
+        for(const auto& change:changes) {
+            const auto key=edit_path(change.path);
+            need(!change.remove && !files_.count(key) &&
+                 !directory_files_.count(key),
+                 "read-only UDF mastering supports new files/directories only");
+            const auto slash=key.rfind('/');
+            const auto parent=slash==std::string::npos?
+                std::string{}:key.substr(0,slash);
+            if(parents.insert(parent).second) {
+                const auto it=directory_files_.find(parent);
+                if(it!=directory_files_.end())
+                    extra+=(it->second.size+block-1)/block+1;
+            }
+            // One FE, plus a conservative allowance for new FIDs and
+            // directory relocation. File bytes are allocated separately.
+            extra+=3;
+            if(!change.directory) {
+                need(std::filesystem::is_regular_file(
+                        std::filesystem::symlink_status(change.source)),
+                     "UDF mastering source must be a regular file");
+                const auto bytes=std::filesystem::file_size(change.source);
+                need(bytes<max_image,"UDF mastering source too large");
+                extra+=(bytes+block-1)/block;
+            }
+            need(extra<max_image/block-old_sectors,
+                 "UDF mastering exceeds optical address space");
+        }
+        const auto new_end=old_sectors+extra;
+        const auto new_blocks=new_end-partition_;
+        need(24+(new_blocks+7)/8<=max_dir,
+             "UDF mastering virtual allocation map exceeds safety budget");
+        auto anchor=read(256*block,block);
+        const auto vds_bytes=u32(anchor,16);
+        const auto vds_start=u32(anchor,20);
+        need(vds_bytes%block==0 && vds_bytes>=3*block &&
+             vds_bytes<=16u*1024u*1024u,
+             "unsupported read-only UDF descriptor sequence");
+        std::vector<Bytes> sequence;
+        Bytes lvid;
+        bool pd_found=false,lvd_found=false,terminated=false;
+        for(std::uint64_t j=0;j<vds_bytes/block;++j) {
+            auto d=read((std::uint64_t(vds_start)+j)*block,block);
+            const auto type=u16(d,0);
+            tag_check(d,0,type);
+            need(u32(d,12)==vds_start+j,
+                 "UDF mastering descriptor location mismatch");
+            if(type==5) {
+                need(!pd_found && u32(d,184)==1 &&
+                     u32(d,188)==partition_ && u32(d,192)==partition_blocks_,
+                     "ambiguous read-only UDF partition");
+                for(std::size_t p=56;p<96;p+=4)
+                    need(u32(d,p)==0,
+                         "read-only UDF has conflicting partition allocation data");
+                put32(d,192,static_cast<std::uint32_t>(new_blocks));
+                pd_found=true;
+            } else if(type==6) {
+                need(!lvd_found,"multiple UDF mastering logical volumes");
+                const auto n=u32(d,432),at=u32(d,436);
+                need(n>=block && n%block==0 && n<=16u*1024u*1024u &&
+                     at<old_sectors && n/block<=old_sectors-at,
+                     "read-only UDF mastering requires a bounded integrity sequence");
+                lvid=read(std::uint64_t(at)*block,block);
+                tag_check(lvid,0,9);
+                need(u32(lvid,12)==at && u32(lvid,28)==1 &&
+                     u32(lvid,32)==0 && u32(lvid,36)==0 &&
+                     u32(lvid,72)==1,
+                     "read-only UDF mastering requires closed single-partition integrity");
+                const auto impl=u32(lvid,76);
+                need((impl==0 || impl>=40) && 88ull+impl<=block &&
+                     (u32(lvid,84)==partition_blocks_ ||
+                      u32(lvid,84)==0xffffffffu),
+                     "invalid read-only UDF integrity counters");
+                if(n>block) {
+                    auto tail=read((std::uint64_t(at)+1)*block,block);
+                    if(u16(tail,0)!=0) {
+                        tag_check(tail,0,8);
+                        need(u32(tail,12)==std::uint64_t(at)+1,
+                             "invalid UDF integrity terminator location");
+                    } else need(std::all_of(tail.begin(),tail.end(),
+                            [](std::uint8_t c){return c==0;}),
+                            "invalid UDF integrity padding");
+                }
+                lvd_found=true;
+            } else if(type==7) {
+                // No volume-space free extents are advertised after mastering.
+                const auto count=u32(d,20);
+                need(count<=(block-24)/8,
+                     "unsupported UDF unallocated volume space descriptor");
+                put32(d,20,0);
+                std::fill(d.begin()+24,d.end(),std::uint8_t{0});
+            } else need(type==1 || type==4 || type==8,
+                        "unsupported UDF mastering volume descriptor");
+            sequence.push_back(std::move(d));
+            if(type==8) {terminated=true;break;}
+        }
+        need(pd_found && lvd_found && terminated,
+             "incomplete UDF mastering descriptor sequence");
+        const auto main=new_end;
+        const auto reserve=main+vds_bytes/block;
+        const auto integrity_lba=reserve+vds_bytes/block;
+        const auto last=integrity_lba+2+256;
+        need(last+1<max_image/block,
+             "UDF mastering descriptor addresses exceed optical limit");
+        for(std::size_t j=0;j<sequence.size();++j) {
+            auto d=sequence[j];
+            const auto type=u16(d,0);
+            auto crc_bytes=std::size_t(16u+u16(d,10));
+            if(type==5)crc_bytes=std::max<std::size_t>(crc_bytes,512);
+            if(type==6) {
+                put32(d,432,2*block);
+                put32(d,436,static_cast<std::uint32_t>(integrity_lba));
+                crc_bytes=std::max<std::size_t>(crc_bytes,446);
+            }
+            if(type==7)crc_bytes=24;
+            for(const auto start:{main,reserve}) {
+                auto copy=d;
+                put32(copy,12,static_cast<std::uint32_t>(start+j));
+                tag_update(copy,0,crc_bytes);
+                plan.descriptors.emplace_back((start+j)*block,std::move(copy));
+            }
+        }
+        // The main/reserve copies are both reachable from all original
+        // valid anchors, as well as the new physical-end anchor pair.
+        std::set<std::uint64_t> anchors{256,last-256,last};
+        for(const auto& [at,length]:protected_ranges) {
+            if(length!=block || at%block || at<256*block ||
+               at>=plan.original_size)continue;
+            auto d=read(at,block);
+            if(u16(d,0)!=2 || u32(d,12)!=at/block)continue;
+            tag_check(d,0,2);
+            need(u32(d,16)==u32(anchor,16) && u32(d,20)==u32(anchor,20) &&
+                 u32(d,24)==u32(anchor,24) && u32(d,28)==u32(anchor,28),
+                 "inconsistent UDF anchor copies");
+            anchors.insert(at/block);
+        }
+        for(const auto at:anchors) {
+            auto d=anchor;
+            put32(d,12,static_cast<std::uint32_t>(at));
+            put32(d,16,vds_bytes);
+            put32(d,20,static_cast<std::uint32_t>(main));
+            put32(d,24,vds_bytes);
+            put32(d,28,static_cast<std::uint32_t>(reserve));
+            tag_update(d,0,std::max<std::size_t>(512,16u+u16(d,10)));
+            plan.descriptors.emplace_back(at*block,std::move(d));
+        }
+        Bytes td(block,0);
+        put16(td,0,8);put16(td,2,u16(lvid,2));
+        put32(td,12,static_cast<std::uint32_t>(integrity_lba+1));
+        tag_update(td,0,512);
+        plan.descriptors.emplace_back((integrity_lba+1)*block,std::move(td));
+        Integrity integrity;
+        integrity.at=integrity_lba*block;
+        integrity.impl_bytes=u32(lvid,76);
+        auto next=std::max<std::uint64_t>(16,u64(lvid,40));
+        auto consider=[&](const Fe& fe) {
+            const auto id=u64(fe.bytes,u16(fe.bytes,0)==266?200u:160u);
+            need(id<std::numeric_limits<std::uint64_t>::max(),
+                 "UDF mastering unique-ID overflow");
+            next=std::max(next,id+1);
+        };
+        for(const auto& [key,file]:files_) {(void)key;consider(file.fe);}
+        for(const auto& [key,dir]:directory_files_) {(void)key;consider(dir);}
+        need(next<std::numeric_limits<std::uint64_t>::max(),
+             "UDF mastering unique-ID overflow");
+        integrity.next_id=next;
+        put64(lvid,40,next);
+        put32(lvid,12,static_cast<std::uint32_t>(integrity_lba));
+        put32(lvid,80,static_cast<std::uint32_t>(extra));
+        put32(lvid,84,static_cast<std::uint32_t>(new_blocks));
+        integrity.bytes=std::move(lvid);
+        integrity_=std::move(integrity);
+        Bitmap virtual_map;
+        virtual_map.bits=static_cast<std::uint32_t>(new_blocks);
+        virtual_map.byte_count=(virtual_map.bits+7u)/8u;
+        virtual_map.bytes.assign(24u+virtual_map.byte_count,0);
+        allocation_start_=static_cast<std::uint32_t>(old_sectors-partition_);
+        for(auto j=allocation_start_;j<virtual_map.bits;++j)
+            virtual_map.bytes[24u+j/8u]|=static_cast<std::uint8_t>(1u<<(j%8u));
+        bitmap_=std::move(virtual_map);
+        partition_blocks_=static_cast<std::uint32_t>(new_blocks);
+        size_=(last+1)*block;
+        return plan;
+    }
     void close() {file_.close();}
 private:
     std::ifstream file_;
     std::uint64_t size_{};
     std::uint32_t partition_{},partition_blocks_{};
-    std::uint32_t partition_access_type_{};
+    std::uint32_t partition_access_type_{},allocation_start_{};
     std::map<std::string,File> files_;
     std::map<std::string,Fe> directory_files_;
     std::map<std::string,File> directory_links_;
@@ -1579,7 +1781,8 @@ std::optional<ReusedFid> choose_reused_fid(
 void create_udf_type1_batch(const std::filesystem::path& image,Type1& volume,
                             const std::vector<ArchiveChange>& changes,
                             const EditProgress& progress,bool allow_bridge,
-                            const EditStageValidator& validate_stage);
+                            const EditStageValidator& validate_stage,
+                            const ReadonlyAppendPlan* mastering=nullptr);
 
 // Allocate one FE and optionally a contiguous ShortAD run for file data.
 // Embedded or external parent directories may grow to a larger contiguous
@@ -2013,7 +2216,8 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                             Type1& volume,
                             const std::vector<ArchiveChange>& changes,
                             const EditProgress& progress,bool allow_bridge,
-                            const EditStageValidator& validate_stage) {
+                            const EditStageValidator& validate_stage,
+                            const ReadonlyAppendPlan* mastering) {
     need(!changes.empty() && changes.size()<=max_items &&
          volume.has_allocation_map(),
          "UDF transaction needs a valid allocation map and changes");
@@ -2468,7 +2672,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     released+=deleted_blocks;
 
     EditTransaction tx(image);
-    prepare_udf_stage(image,tx.output,volume.image_size(),progress);
+    prepare_udf_stage(image,tx.output,
+                      mastering?mastering->original_size:volume.image_size(),progress);
+    if(mastering)std::filesystem::resize_file(tx.output,volume.image_size());
     std::fstream out(tx.output,std::ios::binary|std::ios::in|
                      std::ios::out);
     need(bool(out),"cannot open prepared UDF transaction stage");
@@ -2519,10 +2725,21 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     // these blocks in the current transaction.
     for(const auto& region:deleted_regions)
         staged_zero(out,region.at,region.bytes,progress);
-    const auto [bitmap_at,bitmap_bytes]=volume.updated_bitmap();
-    staged_write(out,bitmap_at,bitmap_bytes);
-    const auto [lvid_at,lvid_bytes]=volume.updated_integrity_delta(
+    if(mastering) {
+        for(const auto& [at,bytes]:mastering->descriptors) {
+            edit_tick(progress);
+            staged_write(out,at,bytes);
+        }
+    } else {
+        const auto [bitmap_at,bitmap_bytes]=volume.updated_bitmap();
+        staged_write(out,bitmap_at,bitmap_bytes);
+    }
+    auto [lvid_at,lvid_bytes]=volume.updated_integrity_delta(
         files_added,dirs_added,deleted_files,deleted_dirs,allocated,released);
+    if(mastering) {
+        put32(lvid_bytes,80,0); // read-only: no advertised writable space
+        tag_update(lvid_bytes,0,16u+u16(lvid_bytes,10));
+    }
     staged_write(out,lvid_at,lvid_bytes);
     out.flush();
     need(bool(out),"cannot flush staged UDF batch image");
@@ -2618,6 +2835,18 @@ void edit_udf(const std::filesystem::path& image,
          "ISO/UDF Bridge metadata writes need protected ISO ranges");
     volume.protect_external_ranges(protected_ranges);
     need(!changes.empty(),"no UDF changes");
+    if(allow_bridge && volume.partition_access_type()==1 &&
+       !volume.has_allocation_map() &&
+       std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c) {
+           const auto key=edit_path(c.path);
+           return !c.remove && !volume.files().count(key) &&
+                  !volume.directories().count(key);
+       })) {
+        auto plan=volume.prepare_readonly_append(changes,protected_ranges);
+        create_udf_type1_batch(image,volume,changes,progress,true,
+                               validate_stage,&plan);
+        return;
+    }
     for(const auto& change:changes)
         if(change.remove && volume.directory_links().count(edit_path(change.path)))
             need(volume.has_allocation_map(),

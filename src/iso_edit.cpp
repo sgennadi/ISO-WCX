@@ -127,6 +127,7 @@ public:
     bool boot_regions_bounded=true;
     std::set<std::uint32_t> unbounded_boot_lbas;
     std::vector<std::pair<std::uint64_t,std::uint64_t>> udf_metadata_regions;
+    std::set<std::uint64_t> udf_anchor_lbas;
     // Joliet directories may occupy different sectors from Primary ISO.
     // Retain both namespaces' extents when protecting hidden boot media.
     std::vector<std::pair<std::uint64_t,std::uint64_t>> joliet_regions;
@@ -206,6 +207,7 @@ public:
         };
         auto add_udf_anchor=[&](std::uint64_t lba) {
             if(!avdp(lba))return false;
+            udf_anchor_lbas.insert(lba);
             udf_metadata_regions.emplace_back(lba*block,block);
             // Both descriptor sequences described by the AVDP are immutable
             // when the payload-only bridge patcher is active.
@@ -1144,12 +1146,14 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
                            const Image& before,const EditProgress& progress) {
     need(before.udf_bridge && before.boot_regions_bounded,
          "bootable ISO/UDF validation needs bounded boot extents");
+    const auto stage_size=std::filesystem::file_size(staged);
+    const bool mastering=stage_size>before.size;
     need(std::filesystem::file_size(original)==before.size &&
-         std::filesystem::file_size(staged)==before.size,
+         stage_size>=before.size,
          "ISO/UDF image size changed during UDF edit");
     Image after(staged,true);
     need(after.udf_bridge && after.boot_regions_bounded &&
-         after.size==before.size &&
+         after.size==stage_size &&
          after.descriptors==before.descriptors &&
          after.boot_regions==before.boot_regions &&
          after.boot_lbas==before.boot_lbas,
@@ -1177,8 +1181,21 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
     guard.protect(0,256ull*block); // ISO PVD, VRS, boot/system area
     for(const auto& [start,length]:before.boot_regions)
         guard.protect(start,length);
-    for(const auto& [start,length]:before.udf_metadata_regions)
+    for(const auto& [start,length]:before.udf_metadata_regions) {
+        // Only anchor sectors may change during append mastering. The old
+        // main/reserve descriptor sequences remain byte-for-byte intact.
+        if(mastering && length==block &&
+           before.udf_anchor_lbas.count(start/block))continue;
         guard.protect(start,length);
+    }
+    if(mastering) {
+        for(const auto at:before.udf_anchor_lbas)
+            need(after.udf_anchor_lbas.count(at)!=0,
+                 "UDF mastering lost an original anchor");
+        need(after.udf_anchor_lbas.count(stage_size/block-1)!=0 &&
+             after.udf_anchor_lbas.count(stage_size/block-257)!=0,
+             "UDF mastering lost new end anchors");
+    }
     std::vector<const Node*> nodes{before.root.get()};
     for(std::size_t at=0;at<nodes.size();++at) {
         const auto* node=nodes[at];
@@ -1190,7 +1207,8 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
     }
     // The common verifier coalesces protected spans and checks every byte
     // after staged UDF metadata/payload verification, before atomic commit.
-    guard.verify(original,staged,progress);
+    if(mastering)guard.verify_appended(original,staged,progress);
+    else guard.verify(original,staged,progress);
 }
 void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                                   Image& image,

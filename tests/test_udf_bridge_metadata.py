@@ -13,7 +13,7 @@ import tempfile
 
 from test_images import B
 from test_iso_edit import both, fixture, read_image
-from test_udf_allocator import bitmap_image, run
+from test_udf_allocator import bitmap_image, run, update_tag
 
 
 def bootable_bridge_bitmap(*, bounded=True):
@@ -68,6 +68,38 @@ def main(editor, inspector):
         assert not (root/'extracted-done'/'EXTRA.TXT').exists()
         assert (root/'extracted-done'/'newfolder').is_dir()
         verify_boot()
+
+        # Read-only DVD-ROM-style UDF bridge: no on-disc free map.
+        # Appended allocations must not overwrite old ISO/boot sectors.
+        readonly=bootable_bridge_bitmap()
+        pd=260*B
+        struct.pack_into('<I',readonly,pd+184,1)
+        readonly[pd+56:pd+96]=bytes(40)
+        update_tag(readonly,pd,512)
+        struct.pack_into('<I',readonly,270*B+80,0)
+        update_tag(readonly,270*B,88)
+        image.write_bytes(readonly)
+        old_iso=read_image(image)
+        payload.write_bytes(b'APPENDED UDF CONTENT'*600)
+        run(editor,image,'add','ADDED.BIN',payload)
+        grown=image.read_bytes()
+        assert len(grown)>len(readonly)
+        assert grown[:256*B]==readonly[:256*B]
+        assert grown[260*B:264*B]==readonly[260*B:264*B]
+        assert read_image(image)==old_iso
+        main=struct.unpack_from('<I',grown,256*B+20)[0]
+        assert main>=len(readonly)//B
+        assert struct.unpack_from('<I',grown,main*B+184)[0]==1
+        assert grown[main*B+56:main*B+96]==bytes(40)
+        assert struct.unpack_from('<I',grown,len(grown)-B+20)[0]==main
+        run(inspector,image,'--extract',root/'mastered')
+        assert (root/'mastered'/'ADDED.BIN').read_bytes()==payload.read_bytes()
+        assert (root/'mastered'/'hello').read_bytes()==b'world'
+        # Repeat mastering on the same image, preserving the first addition.
+        run(editor,image,'mkdir','newfolder')
+        run(inspector,image,'--extract',root/'mastered-twice')
+        assert (root/'mastered-twice'/'newfolder').is_dir()
+        assert (root/'mastered-twice'/'ADDED.BIN').read_bytes()==payload.read_bytes()
 
         # Unknown boot length cannot authorize writes, even though the
         # synthetic UDF partition has a working allocator.
