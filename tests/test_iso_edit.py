@@ -131,7 +131,7 @@ def read_image(path, joliet=False):
             if r[25]&2:out[name+'/']=None;visit(r,name+'/')
             else:
                 start=struct.unpack_from('<I',r,2)[0]*B;length=struct.unpack_from('<I',r,10)[0]
-                out[name]=data[start:start+length]
+                out[name]=out.get(name,b'')+data[start:start+length]
     visit(root)
     return out
 
@@ -242,6 +242,50 @@ def main(binary, reader=None):
               'add','DOCS/RECREATED.TXT',source,ok=False)
         batch('delete','DOCS/ONE.TXT',
               'add','DOCS/ONE.TXT',source,ok=False)
+
+        # Level-3 multi-extent file: noncontiguous sections and a
+        # terminal partial sector. Preserve the original stream in both
+        # views while editing unrelated files, then replace and delete it.
+        for j in (False, True):
+            multi=fixture(joliet=j)
+            first=b'A'*B
+            last=b'MULTI-EXTENT-TAIL'
+            multi[21*B:22*B]=first
+            multi[27*B:27*B+len(last)]=last
+            for lba in ((20,22) if j else (20,)):
+                label=('SPLIT.BIN;1'.encode('utf-16-be') if lba==22
+                       else b'SPLIT.BIN;1')
+                records=(iso_record(lba,B,2,b'\0')+
+                         iso_record(lba,B,2,b'\1')+
+                         iso_record(21,B,0x80,label)+
+                         iso_record(27,len(last),0,label))
+                multi[lba*B:(lba+1)*B]=records.ljust(B,b'\0')
+            image.write_bytes(multi)
+            source.write_bytes(b'level3-new-file')
+            run('add','NEW.TXT')
+            assert read_image(image)['SPLIT.BIN']==first+last
+            if j: assert read_image(image,True)['SPLIT.BIN']==first+last
+            if reader:
+                extracted=root/('multi-readback-'+str(j))
+                result=subprocess.run([reader,str(image),'--extract',str(extracted)],
+                                      capture_output=True)
+                assert result.returncode==0,(result.stdout,result.stderr)
+                assert (extracted/'SPLIT.BIN').read_bytes()==first+last
+            source.write_bytes(b'replacement of a multi-extent file')
+            run('add','SPLIT.BIN')
+            assert read_image(image)['SPLIT.BIN']==source.read_bytes()
+            if j: assert read_image(image,True)['SPLIT.BIN']==source.read_bytes()
+            run('delete','SPLIT.BIN')
+            assert 'SPLIT.BIN' not in read_image(image)
+            if j: assert 'SPLIT.BIN' not in read_image(image,True)
+            # Remove the terminating record, leaving an unterminated chain.
+            bad=bytearray(multi)
+            at=20*B
+            for _ in range(3): at+=bad[at]
+            bad[at:21*B]=bytes(21*B-at)
+            image.write_bytes(bad)
+            run('add','FAIL.TXT',False)
+        source.write_bytes(b'new content'*1000)
 
         # The physical ISO may contain a sector-aligned zero trailer not
         # included in the ISO9660 descriptor's Volume Space Size. This is

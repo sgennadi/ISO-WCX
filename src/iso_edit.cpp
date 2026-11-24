@@ -99,16 +99,29 @@ std::string decode(const Bytes& name,bool joliet,bool directory) {
     if(!directory && s.ends_with(";1"))s.resize(s.size()-2);
     return edit_path(s);
 }
+struct FileSection {
+    std::uint32_t lba{},length{};
+    bool operator==(const FileSection&) const = default;
+};
 struct Node {
     std::string name,logical;
     Bytes record,identifier,joliet_identifier;
     bool directory=false;
-    std::uint32_t lba=0,size=0;
+    std::uint32_t lba=0;
+    std::uint64_t size=0;
+    std::vector<FileSection> sections;
     std::filesystem::path source;
     Node* parent=nullptr;
     std::vector<std::unique_ptr<Node>> children;
     std::array<std::uint32_t,2> new_lba{},new_size{};
 };
+// File sections need not be adjacent on the medium.
+template<class F> void each_extent(const Node& n,F&& visit) {
+    if(n.directory || n.sections.empty())
+        visit(std::uint64_t(n.lba)*block,n.size);
+    else for(const auto& part:n.sections)
+        visit(std::uint64_t(part.lba)*block,std::uint64_t(part.length));
+}
 std::string iso_alias(const std::string& name,bool directory,unsigned salt=0);
 class Image {
 public:
@@ -347,9 +360,10 @@ public:
                     std::vector<const Node*> nodes{&view};
                     for(std::size_t i=0;i<nodes.size();++i) {
                         const auto* node=nodes[i];
-                        const auto at=std::uint64_t(node->lba)*block;
-                        need(at<=limit && node->size<=limit-at,
-                             "ISO/Joliet view extent exceeds its own declared volume");
+                        each_extent(*node,[&](std::uint64_t at,std::uint64_t length) {
+                            need(at<=limit && length<=limit-at,
+                                 "ISO/Joliet view extent exceeds its own declared volume");
+                        });
                         for(const auto& child:node->children)
                             nodes.push_back(child.get());
                         need(nodes.size()<=200000,"ISO/Joliet view entry limit exceeded");
@@ -385,9 +399,9 @@ public:
             std::vector<const Node*> supplementary_nodes{other.get()};
             for(std::size_t i=0;i<supplementary_nodes.size();++i) {
                 const auto* node=supplementary_nodes[i];
-                if(node->size)
-                    joliet_regions.emplace_back(
-                        std::uint64_t(node->lba)*block,node->size);
+                each_extent(*node,[&](std::uint64_t at,std::uint64_t length) {
+                    if(length)joliet_regions.emplace_back(at,length);
+                });
                 for(const auto& child:node->children)
                     supplementary_nodes.push_back(child.get());
                 need(supplementary_nodes.size()<=200000,
@@ -415,6 +429,19 @@ public:
             for(const auto& child:node->children)
                 boot_nodes.push_back(child.get());
             if(node->directory || !node->size)continue;
+            if(node->sections.size()>1) {
+                // El Torito consumes physical sectors, not logical
+                // multi-extent streams. Refuse ambiguous boot aliases.
+                each_extent(*node,[&](std::uint64_t at,std::uint64_t length) {
+                    for(const auto lba:boot_lbas)
+                        need(!intersect(at,length,std::uint64_t(lba)*block,block),
+                             "multi-extent file contains an El Torito reference");
+                    for(const auto& [offset,bytes]:boot_regions)
+                        need(!intersect(at,length,offset,bytes),
+                             "multi-extent file overlaps El Torito data");
+                });
+                continue;
+            }
             const auto start=std::uint64_t(node->lba)*block;
             const auto end=start+node->size;
             for(const auto lba:boot_lbas) {
@@ -500,10 +527,10 @@ public:
                  start<=volume && bytes<=volume-start,
                  "hidden El Torito floppy extent exceeds ISO volume");
             for(const auto* node:all_boot_nodes) {
-                if(!node->size)continue;
-                need(!intersect(start,bytes,
-                                std::uint64_t(node->lba)*block,node->size),
-                     "hidden El Torito floppy overlaps an ISO file or directory");
+                each_extent(*node,[&](std::uint64_t at,std::uint64_t length) {
+                    need(!intersect(start,bytes,at,length),
+                         "hidden El Torito floppy overlaps an ISO file or directory");
+                });
             }
             for(const auto& [offset,length]:joliet_regions)
                 need(!intersect(start,bytes,offset,length),
@@ -642,9 +669,19 @@ public:
     }
     std::unique_ptr<Node> parse(const Bytes& r,bool j,Node* parent,unsigned depth,std::set<std::uint32_t>& seen) {
         need(r.size()>=34&&r[0]==r.size()&&r[1]==0&&r[26]==0&&r[27]==0&&le(r,28,2)==1,"unsupported ISO record");
-        need((r[25]&~3u)==0,"multi-extent/associated ISO records are read-only");
+        need((r[25]&~0x83u)==0 && !((r[25]&0x80u) && (r[25]&2u)),
+             "associated or unsupported ISO record flags");
+        if(r[25]&0x80u)
+            need(!udf_bridge && !hybrid_system_area,
+                 "multi-extent hybrid ISO requires partition-aware editing");
         auto n=std::make_unique<Node>();n->record=r;n->directory=(r[25]&2)!=0;n->lba=le(r,2);n->size=le(r,10);n->parent=parent;
         need(std::uint64_t(n->lba)*block+n->size<=size,"ISO resource out of bounds");
+        if(!n->directory) {
+            n->sections.push_back({n->lba,static_cast<std::uint32_t>(n->size)});
+            if(r[25]&0x80u)
+                need(n->size>0 && n->size%block==0,
+                     "nonfinal ISO file section must be block-aligned");
+        }
         const std::size_t idlen=r[32],base=33+idlen+(idlen%2==0?1:0);need(idlen&&base<=r.size(),"bad ISO identifier");
         const bool has_system_use=std::any_of(
             r.begin()+static_cast<std::ptrdiff_t>(base),r.end(),
@@ -660,9 +697,11 @@ public:
         n->identifier.assign(r.begin()+33,r.begin()+33+static_cast<std::ptrdiff_t>(idlen));
         if(parent)n->name=n->logical=decode(n->identifier,j,n->directory);
         need(++items<=200000&&depth<=64,"ISO edit tree limit exceeded");
-        if(n->directory){need(seen.insert(n->lba).second&&n->size<=64*1024*1024,"cyclic or oversized ISO directory");auto data=read(std::uint64_t(n->lba)*block,n->size);std::set<std::string> names;
+        if(n->directory){need(seen.insert(n->lba).second&&n->size<=64*1024*1024,"cyclic or oversized ISO directory");auto data=read(std::uint64_t(n->lba)*block,static_cast<std::size_t>(n->size));std::set<std::string> names;
+            Node* pending=nullptr;
             for(std::size_t at=0;at<data.size();){unsigned len=data[at];if(!len){at=(at/block+1)*block;continue;}need(len>=34&&len<=data.size()-at&&at%block+len<=block,"bad ISO directory record");Bytes child(data.begin()+static_cast<std::ptrdiff_t>(at),data.begin()+static_cast<std::ptrdiff_t>(at+len));at+=len;
                 if(child[32]==1&&child[33]<=1){ // Validate dot records too (Rock Ridge SP/CE can live here).
+                    need(!pending,"ISO multi-extent sequence interrupted by dot record");
                     auto tail=std::size_t(34);
                     const bool has_system_use=std::any_of(
                         child.begin()+static_cast<std::ptrdiff_t>(tail),
@@ -677,15 +716,32 @@ public:
                          "Rock Ridge/SUSP ISO directory metadata needs a "
                          "preserving writer; plain ISO rebuild is unsafe");
                     continue;}
-                auto c=parse(child,j,n.get(),depth+1,seen);need(names.insert(upper(c->logical)).second,"ambiguous ISO names");n->children.push_back(std::move(c));
+                auto c=parse(child,j,n.get(),depth+1,seen);
+                const bool more=(child[25]&0x80u)!=0;
+                if(pending) {
+                    need(!c->directory && pending->identifier==c->identifier &&
+                         (pending->record[25]&0x7fu)==(child[25]&0x7fu) &&
+                         c->size>0 && pending->sections.size()<65536u,
+                         "invalid ISO multi-extent continuation");
+                    need(c->size<=size-pending->size,
+                         "ISO multi-extent size exceeds image");
+                    pending->sections.push_back(c->sections.front());
+                    pending->size+=c->size;
+                    if(!more)pending=nullptr;
+                } else {
+                    need(names.insert(upper(c->logical)).second,"ambiguous ISO names");
+                    if(more)pending=c.get();
+                    n->children.push_back(std::move(c));
+                }
             }
+            need(!pending,"unterminated ISO multi-extent file");
         }return n;
     }
     void pair(Node& a,const Node& b) {
         a.joliet_identifier=b.identifier;a.logical=b.logical;
         need(a.children.size()==b.children.size(),"ISO and Joliet trees differ");std::set<const Node*> used;
         for(auto& x:a.children){std::vector<const Node*> found;
-            for(const auto& y:b.children)if(!used.count(y.get())&&x->directory==y->directory&&x->size==y->size&&(x->directory||x->lba==y->lba))found.push_back(y.get());
+            for(const auto& y:b.children)if(!used.count(y.get())&&x->directory==y->directory&&x->size==y->size&&(x->directory||x->sections==y->sections))found.push_back(y.get());
             if(found.size()>1) {
                 std::vector<const Node*> named;
                 for(const auto* y:found)
@@ -765,16 +821,27 @@ void protect_boot(const Node& n,const std::set<std::uint32_t>& boot) {
     // El Torito image/catalog locations can be contained inside an extent
     // whose first sector precedes the referenced LBA. Protect the entire
     // original file extent, not only a matching first-sector address.
-    const auto sectors=(std::uint64_t(n.size)+block-1)/block;
-    for(const auto lba:boot)
-        need(!(lba>=n.lba && std::uint64_t(lba)-n.lba<sectors),
-             "editing an extent containing an El Torito boot image/catalog is not supported");
+    each_extent(n,[&](std::uint64_t at,std::uint64_t length) {
+        const auto sectors=(length+block-1)/block;
+        for(const auto lba:boot)
+            need(!(lba>=at/block && std::uint64_t(lba)-at/block<sectors),
+                 "editing an extent containing an El Torito boot image/catalog is not supported");
+    });
     for(const auto& child:n.children) protect_boot(*child,boot);
 }
-Bytes record(const Node& n,const Bytes& id,unsigned view,const Node* directory=nullptr) {
+Bytes record(const Node& n,const Bytes& id,unsigned view,const Node* directory=nullptr,
+             const FileSection* section=nullptr,bool more=false) {
     Bytes b(33+id.size()+(id.size()%2==0?1:0),0);need(b.size()<=255,"ISO record too long");
     std::copy_n(n.record.begin(),std::min<std::size_t>(33,n.record.size()),b.begin());b[0]=static_cast<unsigned char>(b.size());b[32]=static_cast<unsigned char>(id.size());
-    const auto& loc=directory?*directory:n;both(b,2,loc.directory?loc.new_lba[view]:loc.lba);both(b,10,loc.directory?loc.new_size[view]:loc.size);b[25]=static_cast<unsigned char>((n.record.empty()?0:n.record[25])&1u);if(loc.directory)b[25]|=2;both(b,28,1,2);std::copy(id.begin(),id.end(),b.begin()+33);return b;
+    const auto& loc=directory?*directory:n;
+    need(loc.directory || section || loc.size<=0xffffffffu,
+         "ISO file needs explicit multi-extent sections");
+    both(b,2,loc.directory?loc.new_lba[view]:section?section->lba:loc.lba);
+    both(b,10,loc.directory?loc.new_size[view]:section?section->length:static_cast<std::uint32_t>(loc.size));
+    b[25]=static_cast<unsigned char>((n.record.empty()?0:n.record[25])&1u);
+    if(loc.directory)b[25]|=2;
+    if(more)b[25]|=0x80u;
+    both(b,28,1,2);std::copy(id.begin(),id.end(),b.begin()+33);return b;
 }
 Bytes directory_data(Node& n,unsigned view) {
     Bytes b;
@@ -791,7 +858,13 @@ Bytes directory_data(Node& n,unsigned view) {
         }
         return lhs.size() < rhs.size();
     });
-    for(auto* x:sorted)append(record(*x,view?x->joliet_identifier:x->identifier,view));
+    for(auto* x:sorted) {
+        const auto& id=view?x->joliet_identifier:x->identifier;
+        if(x->directory || x->sections.empty())append(record(*x,id,view));
+        else for(std::size_t part=0;part<x->sections.size();++part)
+            append(record(*x,id,view,nullptr,&x->sections[part],
+                          part+1<x->sections.size()));
+    }
     b.resize((b.size()+block-1)/block*block);return b;
 }
 void write(std::fstream& out,const Bytes& b){out.write(reinterpret_cast<const char*>(b.data()),static_cast<std::streamsize>(b.size()));if(!out)throw std::runtime_error("ISO output write failed");}
@@ -1253,6 +1326,7 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
            first.joliet_identifier!=second.joliet_identifier ||
            first.directory!=second.directory ||
            first.lba!=second.lba || first.size!=second.size ||
+           first.sections!=second.sections ||
            first.record!=second.record ||
            first.children.size()!=second.children.size())
             return false;
@@ -1466,14 +1540,34 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
             auto& n=**it;
             if(!last){need(n.directory,"parent is not a directory");parent=&n;continue;}
             need(n.directory==change.directory,"file/directory replacement is not supported");
-            if(!n.directory){protect_boot(n,image.boot_lbas);need(std::filesystem::is_regular_file(std::filesystem::symlink_status(change.source)),"edit source must be a regular file");auto size=std::filesystem::file_size(change.source);need(size<=0xffffffffu,"files over 4GiB require unsupported multi-extent writing");n.size=static_cast<std::uint32_t>(size);n.source=change.source;}
+            if(!n.directory){protect_boot(n,image.boot_lbas);need(std::filesystem::is_regular_file(std::filesystem::symlink_status(change.source)),"edit source must be a regular file");auto size=std::filesystem::file_size(change.source);need(size<0xffffffffull*block,"ISO file exceeds volume address space");n.size=size;n.sections.clear();n.source=change.source;}
         }
     }
     EditTransaction tx(path);std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary|std::ios::trunc);need(bool(out),"cannot create staged ISO");image.file.clear();image.file.seekg(0);copy_bytes(image.file,out,image.size,progress);
     std::uint64_t next=image.size/block;
     std::vector<Node*> all{image.root.get()},dirs{image.root.get()};
     for(std::size_t i=0;i<all.size();++i){for(auto& c:all[i]->children){all.push_back(c.get());if(c->directory)dirs.push_back(c.get());}need(all.size()<=200000&&dirs.size()<=65535,"ISO edit tree too large");}
-    for(auto* n:all)if(!n->source.empty()){need(next+(std::uint64_t(n->size)+block-1)/block<0xffffffffu,"ISO size limit");n->lba=static_cast<std::uint32_t>(next);std::ifstream source(n->source,std::ios::binary);copy_bytes(source,out,n->size,progress);auto pad=(block-n->size%block)%block;write(out,Bytes(pad));next+=(std::uint64_t(n->size)+block-1)/block;}
+    for(auto* n:all)if(!n->source.empty()) {
+        need(next+(n->size+block-1)/block<0xffffffffu,"ISO size limit");
+        n->lba=static_cast<std::uint32_t>(next);
+        std::ifstream source(n->source,std::ios::binary);
+        need(bool(source),"cannot open ISO replacement source");
+        // ECMA-119 Level 3 permits multiple records per file. Every
+        // nonfinal section is aligned and fits the 32-bit data length.
+        constexpr std::uint64_t max_section=0xfffff800ull;
+        auto left=n->size;
+        do {
+            const auto bytes=static_cast<std::uint32_t>(
+                std::min(left,max_section));
+            n->sections.push_back({static_cast<std::uint32_t>(next),bytes});
+            copy_bytes(source,out,bytes,progress);
+            write(out,Bytes((block-bytes%block)%block));
+            next+=(std::uint64_t(bytes)+block-1)/block;
+            left-=bytes;
+        } while(left);
+        need(source.peek()==std::char_traits<char>::eof(),
+             "ISO replacement source grew during write");
+    }
     for(unsigned view=0;view<(image.joliet?2u:1u);++view){
         for(auto* d:dirs){d->new_size[view]=static_cast<std::uint32_t>(directory_data(*d,view).size());need(next+d->new_size[view]/block<0xffffffffu,"ISO size limit");d->new_lba[view]=static_cast<std::uint32_t>(next);next+=d->new_size[view]/block;}
         for(auto* d:dirs){edit_tick(progress);write(out,directory_data(*d,view));}
@@ -1545,17 +1639,23 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
             const auto expected=std::filesystem::file_size(change.source);
             need(expected==entry->size,
                  "staged ISO file length differs from F5 source");
-            const auto at=std::uint64_t(entry->lba)*block;
-            need(at<=verified.size && expected<=verified.size-at,
-                 "staged ISO file extent is outside image");
+            need(!entry->sections.empty(),
+                 "staged ISO file has no section records");
             std::ifstream input(change.source,std::ios::binary);
             std::ifstream output(tx.output,std::ios::binary);
             need(bool(input) && bool(output),
                  "cannot open ISO file for independent F5 verification");
-            output.seekg(static_cast<std::streamoff>(at));
-            need(bool(output),"cannot locate ISO file during verification");
             std::array<char,64*1024> source_chunk{},stage_chunk{};
-            for(std::uint64_t left=expected;left;) {
+            std::uint64_t checked=0;
+            for(const auto& section:entry->sections) {
+                const auto at=std::uint64_t(section.lba)*block;
+                need(at<=verified.size && section.length<=verified.size-at &&
+                     section.length<=expected-checked,
+                     "staged ISO section outside image or file bounds");
+                output.clear();
+                output.seekg(static_cast<std::streamoff>(at));
+                need(bool(output),"cannot locate ISO file during verification");
+                for(std::uint64_t left=section.length;left;) {
                 edit_tick(progress);
                 const auto n=static_cast<std::streamsize>(
                     std::min<std::uint64_t>(left,source_chunk.size()));
@@ -1565,8 +1665,11 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                      std::memcmp(source_chunk.data(),stage_chunk.data(),
                                  static_cast<std::size_t>(n))==0,
                      "staged ISO F5 data differs from original source");
-                left-=static_cast<std::uint64_t>(n);
+                    left-=static_cast<std::uint64_t>(n);
+                }
+                checked+=section.length;
             }
+            need(checked==expected,"staged ISO section lengths differ from source");
             need(input.peek()==std::char_traits<char>::eof(),
                  "ISO F5 source grew during staging");
         }
