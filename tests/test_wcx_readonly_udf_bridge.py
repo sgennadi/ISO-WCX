@@ -45,8 +45,8 @@ def main(plugin, packer, extractor, inspector):
             return subprocess.run([str(arg) for arg in args],
                                   capture_output=True, env=env, timeout=45)
 
-        def pack(name, success=True):
-            result = call(packer, plugin, image, 'pack', src, name)
+        def pack(*names, success=True):
+            result = call(packer, plugin, image, 'pack', src, *names)
             assert result.returncode == 0, (result.stdout, result.stderr)
             code = int(result.stdout.strip())
             if code:
@@ -54,11 +54,11 @@ def main(plugin, packer, extractor, inspector):
                 if log.exists():
                     print(log.read_text(errors='replace').splitlines()[-8:],
                           file=sys.stderr)
-            assert (code == 0) == success, (name, code, result.stderr)
+            assert (code == 0) == success, (names, code, result.stderr)
             assert not list(root.glob('.iso-wcx-edit-*')), 'transaction leaked'
 
         def verify_file(name, expected):
-            out = root / ('extracted-' + name)
+            out = root / ('extracted-' + name.replace('\\', '-').replace('/', '-'))
             if out.exists():
                 out.unlink()
             result = call(extractor, plugin, image, out, name, expected)
@@ -101,14 +101,20 @@ def main(plugin, packer, extractor, inspector):
         folder = src / 'DATA'
         folder.mkdir()
         (folder/'NESTED.BIN').write_bytes(b'nested WCX payload'*317)
-        pack(folder.name)
+        # The SDK passes the directory AND its selected child paths in
+        # AddList. A directory-only entry is used by TC for F7/mkdir.
+        pack(folder.name + '\\', 'DATA\\NESTED.BIN')
         previous = check_image(previous)
         verify_file(first.name, first)
         verify_file(second.name, second)
+        verify_file('DATA\\NESTED.BIN', folder/'NESTED.BIN')
         # Independent core parser also verifies the recursively packed tree.
         extracted = root / 'full-extract'
         result = call(inspector, image, '--extract', extracted)
         assert result.returncode == 0, (result.stdout, result.stderr)
+        assert (extracted/'DATA'/'NESTED.BIN').is_file(), (
+            'Missing nested payload', sorted(str(p.relative_to(extracted))
+                                             for p in extracted.rglob('*')))
         assert (extracted/'DATA'/'NESTED.BIN').read_bytes() == (
             folder/'NESTED.BIN').read_bytes()
         assert (extracted/'hello').read_bytes() == b'world'

@@ -12,8 +12,8 @@ using PackFn = int (__stdcall*)(wchar_t*,wchar_t*,wchar_t*,wchar_t*,int);
 using DeleteFn = int (__stdcall*)(wchar_t*,wchar_t*);
 
 int wmain(int argc,wchar_t** argv) {
-    if(argc!=5 && argc!=6) {
-        std::cerr<<"Usage: wcx_iso_edit_runner DLL ISO pack|delete SOURCE_DIR [ENTRY_NAME]\n";
+    if(argc<5) {
+        std::cerr<<"Usage: wcx_iso_edit_runner DLL ISO pack|delete SOURCE_DIR [ENTRY_NAME ...]\n";
         return 2;
     }
     HMODULE plugin=LoadLibraryW(argv[1]);
@@ -28,15 +28,23 @@ int wmain(int argc,wchar_t** argv) {
         FreeLibrary(plugin);
         return 4;
     }
-    const std::wstring wanted=argc==6?argv[5]:L"EDIT.TXT";
-    if(wanted.empty() || wanted.find_first_of(L"\\/:*?<>|")!=std::wstring::npos) {
-        std::cerr<<"Invalid fixture entry name\n";
-        FreeLibrary(plugin);
-        return 6;
+    // Match the WCX SDK AddList contract: the host enumerates relative
+    // entries (including nested filenames), separated by NULs. Passing
+    // only a directory entry represents mkdir, not recursive packing.
+    std::wstring names;
+    const int count=argc==5?1:argc-5;
+    for(int i=0;i<count;++i) {
+        std::wstring wanted=argc==5?L"EDIT.TXT":argv[i+5];
+        if(wanted.empty() || wanted.front()==L'\\' ||
+           wanted.front()==L'/' ||
+           wanted.find_first_of(L":*?<>|")!=std::wstring::npos) {
+            std::cerr<<"Invalid fixture entry name\n";
+            FreeLibrary(plugin);
+            return 6;
+        }
+        names+=wanted;
+        names.push_back(L'\0');
     }
-    // WCX filenames are terminated with an extra NUL in a multi-string.
-    std::wstring names=wanted;
-    names.push_back(L'\0');
     names.push_back(L'\0');
     wchar_t sub[]=L"";
     int rc=0;
