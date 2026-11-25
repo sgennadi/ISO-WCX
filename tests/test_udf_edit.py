@@ -125,6 +125,125 @@ def run(exe,*args,success=True):
 def check_disc(exe,image,folder):
     run(exe,image,'--extract',folder)
 
+
+def vat_append_image():
+    """Independent UDF 2.01 open sequential fixture with capacity beyond EOF."""
+    import binascii
+    from test_images import udf_vat_image
+    raw=udf_vat_image()[:550*B]
+    def seal(buf, pos, size, logical):
+        p16(buf,pos+2,2)
+        p32(buf,pos+12,logical)
+        p16(buf,pos+10,size-16)
+        p16(buf,pos+8,binascii.crc_hqx(buf[pos+16:pos+size],0))
+        checksum(buf,pos)
+    def embedded(logical, typ, payload):
+        b=bytearray(B)
+        p16(b,0,261);p16(b,20,4);p16(b,24,1)
+        b[27]=typ;p16(b,34,3);p16(b,48,1)
+        p64(b,56,len(payload));p32(b,172,len(payload))
+        b[176:176+len(payload)]=payload
+        seal(b,0,176+len(payload),logical)
+        return b
+    volume=bytearray(128)
+    volume[:7]=b'\x08VATVOL';volume[-1]=7
+    pd=260*B;lvd=261*B
+    raw[pd+25:pd+31]=b'+NSR03'
+    p32(raw,pd+184,2);p32(raw,pd+192,300)
+    raw[lvd+84:lvd+212]=volume
+    raw[lvd+217:lvd+236]=b'*OSTA UDF Compliant'
+    p16(raw,lvd+240,0x0201);p16(raw,lvd+442,1)
+    p32(raw,lvd+432,2*B);p32(raw,lvd+436,270)
+    seal(raw,pd,512,260);seal(raw,lvd,510,261)
+    seal(raw,262*B,512,262)
+    for i in range(3):
+        at=(264+i)*B
+        raw[at:at+B]=raw[(260+i)*B:(261+i)*B]
+        seal(raw,at,510 if i==1 else 512,264+i)
+    anchor=256*B
+    p32(raw,anchor+16,3*B);p32(raw,anchor+24,3*B);p32(raw,anchor+28,264)
+    seal(raw,anchor,512,256)
+    lvid=270*B
+    p16(raw,lvid,9);p32(raw,lvid+28,0);p32(raw,lvid+72,2)
+    p32(raw,lvid+80,0xffffffff);p32(raw,lvid+84,0xffffffff)
+    p32(raw,lvid+88,300);p32(raw,lvid+92,0xffffffff)
+    seal(raw,lvid,96,270)
+    p16(raw,271*B,8);seal(raw,271*B,512,271)
+    fsd=300*B
+    p32(raw,fsd+400,B);p16(raw,fsd+408,1)
+    seal(raw,fsd,512,0)
+    parent=bytearray(40)
+    p16(parent,0,257);p16(parent,16,1);parent[18]=10
+    p32(parent,20,B);p32(parent,24,1);p16(parent,28,1)
+    seal(parent,0,len(parent),1)
+    directory=parent
+    for number,label in ((2,'hello'),(3,'keep')):
+        record=fid(PARTITION+number,label)
+        p16(record,16,1);p16(record,28,1)
+        seal(record,0,len(record),1)
+        directory+=record
+    raw[301*B:302*B]=embedded(1,4,directory)
+    raw[302*B:303*B]=embedded(2,5,b'world')
+    raw[303*B:304*B]=embedded(3,5,b'keep me')
+    vat=bytearray(168)
+    p16(vat,0,152);vat[4:132]=volume
+    p32(vat,132,0xffffffff);p32(vat,136,2)
+    for at in (144,146,148):p16(vat,at,0x0201)
+    for i in range(4):p32(vat,152+4*i,i)
+    raw[549*B:550*B]=embedded(249,248,vat)
+    return raw
+
+
+def test_vat_append(editor,inspector,root,image,replacement):
+    raw=vat_append_image()
+    image.write_bytes(raw)
+    original=root/'vat-before'
+    check_disc(inspector,image,original)
+    assert (original/'hello').read_bytes()==b'world'
+    assert (original/'keep').read_bytes()==b'keep me'
+    for i,body in enumerate((b'new VAT data',b'',b'Z'*(B-176))):
+        before=image.read_bytes()
+        replacement.write_bytes(body)
+        run(editor,image,'add','hello',replacement)
+        after=image.read_bytes()
+        assert after[:len(before)]==before
+        assert len(after)==len(before)+2*B
+        old_vat=len(before)//B-PARTITION-1
+        assert struct.unpack_from('<I',after,len(after)-B+12)[0]==old_vat+2
+        assert struct.unpack_from('<I',after,len(after)-B+176+132)[0]==old_vat
+        assert struct.unpack_from('<I',after,len(after)-B+176+152+8)[0]==old_vat+1
+        assert struct.unpack_from('<I',after,len(after)-2*B+12)[0]==2
+        out=root/f'vat-append-{i}'
+        check_disc(inspector,image,out)
+        assert (out/'hello').read_bytes()==body
+        assert (out/'keep').read_bytes()==b'keep me'
+    committed=image.read_bytes()
+    replacement.write_bytes(b'cancelled')
+    run(editor,image,'cancel','hello',replacement,success=False)
+    assert image.read_bytes()==committed
+    for args in (('add','missing',replacement),('delete','hello'),('mkdir','DIR')):
+        run(editor,image,*args,success=False)
+        assert image.read_bytes()==committed
+    replacement.write_bytes(b'X'*(B-175))
+    run(editor,image,'add','hello',replacement,success=False)
+    assert image.read_bytes()==committed
+    replacement.write_bytes(b'valid size')
+    damaged=bytearray(committed)
+    damaged[-B+4]^=1
+    image.write_bytes(damaged)
+    run(editor,image,'add','hello',replacement,success=False)
+    assert image.read_bytes()==damaged
+    # Historical VAT remains readable but may not be used for a write.
+    alias=bytearray(raw)
+    p32(alias,549*B+176+152+12,2)
+    import binascii
+    p16(alias,549*B+8,binascii.crc_hqx(alias[549*B+16:549*B+344],0))
+    checksum(alias,549*B)
+    image.write_bytes(alias)
+    run(editor,image,'add','hello',replacement,success=False)
+    assert image.read_bytes()==alias
+    assert not list(root.glob('.iso-wcx-edit-*'))
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
         root=pathlib.Path(temp)
@@ -149,6 +268,7 @@ def main(editor,inspector):
                 assert family in detail, detail
                 assert image.read_bytes()==raw
                 assert not list(root.glob('.iso-wcx-edit-*'))
+        test_vat_append(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),

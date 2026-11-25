@@ -200,11 +200,29 @@ before accepting a table. A damaged VAT candidate may still be skipped
 during **read-only** recovery. Tests cover embedded and external tables,
 noncontiguous physical data, prior VAT recovery and malformed candidates.
 
-The edit preflight reports VAT, Sparable and Metadata partitions
-separately. These Type-2 maps remain **read-only**: no Type-1 allocator
-fallback is permitted. A VAT append transaction must eventually create
-a new VAT ICB, preserve the preceding transaction, and verify all
-referenced blocks before committing. This reader groundwork alone does
-not authorize writes.
+The Type-1 edit preflight reports VAT, Sparable and Metadata partitions
+separately. No Type-1 allocator fallback is permitted.
+
+### Initial VAT append writer (standalone UDF 2.x)
+
+The standalone dispatcher supports one existing ordinary embedded root
+file replacement, with an embedded VAT 2.x FE at the last recorded
+sector of a write-once image, an open integrity sequence and capacity
+already declared by the physical partition descriptor. It appends a
+replacement FE with the unchanged virtual TagLocation, then a new VAT
+ICB referring to the old VAT and remapping only the selected virtual
+block. The original prefix and all independently parsed root payloads
+are verified before atomic commit. Neither damaged historical-VAT
+fallback nor zero-filled space authorizes a write.
+
+This is intentionally a narrow first backend. VAT 1.50 writing,
+external VAT tables, external file data, EFE, nested directories,
+creation/deletion, multiple changes, full/closed sessions, partition
+growth and ISO/UDF bridge VAT writing remain unsupported. Sparable and
+Metadata partition writers are still read-only. Synthetic regression
+fixtures exercise repeated append, original-prefix preservation,
+independent extraction, cancellation and malformed-table rejection.
+Physical disc recording and external-reader interoperability are not
+established by these tests.
 
 References: OSTA UDF 1.50 §2.2.10 and UDF 2.60 §2.2.11.
