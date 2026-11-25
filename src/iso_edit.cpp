@@ -2839,15 +2839,32 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
              "final shared ISO/Joliet/UDF mapping differs");
     }
 }
-void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
-                                  Image& image,
-                                  const std::vector<ArchiveChange>& changes,
-                                  const EditProgress& progress) {
+// The synchronous UDF transaction may call back into the ISO coordinator.
+// Own its complete plan independently of the planning stack frame. Keep
+// partition preflight, protected-range enumeration and staged verification
+// in separate functions. MSVC x64 ASan reported use-after-poison at the
+// edit_udf call in the previously monolithic function. Do not suppress
+// instrumentation or weaken any original readback/protection checks.
+struct BridgeMetadataEdit {
+    IsoNodeIndex iso_files;
+    CoordinatedIsoUpdate plan;
+    SharedIsoDeleteSectors deletion_sectors;
+    SharedTreePlan add_tree;
+    IsoNodeIndex shared;
+    std::optional<MbrGrowthPlan> mbr_append;
+    std::optional<GptGrowthPlan> gpt_append;
+    bool adding_shared=false;
+};
+
+std::unique_ptr<BridgeMetadataEdit> prepare_bridge_metadata_edit(
+        const std::filesystem::path& path,Image& image,
+        const std::vector<ArchiveChange>& changes) {
+    auto edit=std::make_unique<BridgeMetadataEdit>();
     need(image.udf_bridge && image.boot_regions_bounded,
          "ISO/UDF metadata edit requires bounded El Torito boot images");
     // Shared regular files can be remastered or unlinked from both
     // namespaces; ISO-only and ambiguous aliases remain protected.
-    std::map<std::string,const Node*> iso_files;
+    auto& iso_files=edit->iso_files;
     auto gather=[&](auto&& self,const Node& node,const std::string& prefix)->void {
         for(const auto& child:node.children) {
             const auto key=prefix.empty()?child->logical:prefix+"/"+child->logical;
@@ -2860,12 +2877,13 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     if(image.hybrid_system_area)
         need(!image.iso_system_use,
              "partitioned UDF metadata edits require plain ISO/Joliet");
-    CoordinatedIsoUpdate plan;
-    SharedIsoDeleteSectors deletion_sectors;
-    SharedTreePlan add_tree;
-    std::map<std::string,const Node*> shared;
-    const bool adding_shared=plan_shared_additions(path,image,iso_files,changes,
-                                                   plan,add_tree);
+    auto& plan=edit->plan;
+    auto& deletion_sectors=edit->deletion_sectors;
+    auto& add_tree=edit->add_tree;
+    auto& shared=edit->shared;
+    edit->adding_shared=plan_shared_additions(path,image,iso_files,changes,
+                                              plan,add_tree);
+    const bool adding_shared=edit->adding_shared;
     const bool existing_shared=std::any_of(changes.begin(),changes.end(),
         [&](const ArchiveChange& c){
             return iso_files.count(upper(edit_path(c.path)))!=0;
@@ -2965,8 +2983,8 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     }
     // ROM mastering may grow a validated MBR or protective-only GPT.
     // Do not alter the fixed-size allocator route on rewritable media.
-    std::optional<MbrGrowthPlan> mbr_append;
-    std::optional<GptGrowthPlan> gpt_append;
+    auto& mbr_append=edit->mbr_append;
+    auto& gpt_append=edit->gpt_append;
     if(image.hybrid_system_area) {
         const auto info=inspect_udf_edit(path,true,true);
         if(info.parser_compatible && info.partition_access_type==1 &&
@@ -3005,65 +3023,75 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
             }
         }
     }
-    // Release the original input handle so Windows can atomically replace
-    // the image after the staged UDF writer and boot validator succeed.
-    image.file.close();
-    const EditStageValidator validate=
-        [&path,&image,&progress,&shared,&plan,&deletion_sectors,
-         &iso_files,&add_tree,&mbr_append,&gpt_append,adding_shared](const std::filesystem::path& staged) {
-            std::optional<GptGrowthPlan> gpt_growth;
-            std::optional<MbrGrowthPlan> mbr_growth;
-            if(gpt_append && std::filesystem::file_size(staged)>image.size) {
-                gpt_growth=*gpt_append;
-                auto& growth=*gpt_growth;
-                const auto bytes=std::filesystem::file_size(staged);
-                need(bytes%block==0,"GPT/UDF mastering produced unaligned volume");
-                set_gpt_growth_size(growth,bytes/block);
-                {
-                    std::fstream out(staged,std::ios::in|std::ios::out|std::ios::binary);
-                    need(bool(out),"cannot update staged GPT/UDF metadata");
-                    write_gpt_growth(out,growth,image.size,bytes/block,progress);
-                    out.flush();
-                    need(bool(out),"staged GPT/UDF flush failed");
-                }
-            } else if(mbr_append && std::filesystem::file_size(staged)>image.size) {
-                // UDF already verified the staged filesystem. Update only
-                // the MBR container CHS/length before the independent ISO
-                // validator authorizes the single atomic commit.
-                mbr_growth=*mbr_append;
-                auto& growth=*mbr_growth;
-                growth.physical_size=std::filesystem::file_size(staged);
-                const auto sectors=growth.physical_size/512u;
-                need(growth.physical_size%block==0 &&
-                     sectors<=0xffffffffull &&
-                     (growth.physical_size/block)%growth.alignment_blocks==0,
-                     "UDF mastering did not honor MBR geometry");
-                const auto cylinder=std::min<std::uint64_t>(
-                     sectors/growth.geometry_sectors-1,1023);
-                auto& header=growth.mbr;
-                header[growth.end_chs_at+1]=static_cast<unsigned char>(
-                    (header[growth.end_chs_at+1]&0x3fu)|((cylinder>>2)&0xc0u));
-                header[growth.end_chs_at+2]=static_cast<unsigned char>(cylinder&0xffu);
-                put(header,growth.length_at,static_cast<std::uint32_t>(sectors));
-                edit_tick(progress);
-                {
-                    std::fstream out(staged,std::ios::in|std::ios::out|std::ios::binary);
-                    need(bool(out),"cannot update staged MBR/UDF header");
-                    write(out,header);
-                    out.flush();
-                    need(bool(out),"staged MBR/UDF header flush failed");
-                }
-            }
-            const auto* mbr=mbr_growth?&*mbr_growth:nullptr;
-            const auto* gpt=gpt_growth?&*gpt_growth:nullptr;
-            if(adding_shared)
-                coordinate_shared_add_stage(path,staged,image,iso_files,plan,
-                                            add_tree,progress,mbr,gpt);
-            else if(shared.empty())
-                protect_iso_udf_stage(path,staged,image,progress,mbr,gpt);
-            else coordinate_shared_bridge_stage(path,staged,image,shared,plan,
-                                                deletion_sectors,progress,mbr,gpt);
-        };
+    return edit;
+}
+
+void validate_bridge_metadata_stage(
+        const std::filesystem::path& path,const std::filesystem::path& staged,
+        const Image& image,BridgeMetadataEdit& edit,const EditProgress& progress) {
+    const auto& gpt_append=edit.gpt_append;
+    const auto& mbr_append=edit.mbr_append;
+    const auto& plan=edit.plan;
+    const auto& shared=edit.shared;
+    const auto& iso_files=edit.iso_files;
+    auto& add_tree=edit.add_tree;
+    const auto& deletion_sectors=edit.deletion_sectors;
+    const bool adding_shared=edit.adding_shared;
+    std::optional<GptGrowthPlan> gpt_growth;
+    std::optional<MbrGrowthPlan> mbr_growth;
+    if(gpt_append && std::filesystem::file_size(staged)>image.size) {
+        gpt_growth=*gpt_append;
+        auto& growth=*gpt_growth;
+        const auto bytes=std::filesystem::file_size(staged);
+        need(bytes%block==0,"GPT/UDF mastering produced unaligned volume");
+        set_gpt_growth_size(growth,bytes/block);
+        {
+            std::fstream out(staged,std::ios::in|std::ios::out|std::ios::binary);
+            need(bool(out),"cannot update staged GPT/UDF metadata");
+            write_gpt_growth(out,growth,image.size,bytes/block,progress);
+            out.flush();
+            need(bool(out),"staged GPT/UDF flush failed");
+        }
+    } else if(mbr_append && std::filesystem::file_size(staged)>image.size) {
+        // UDF already verified the staged filesystem. Update only
+        // the MBR container CHS/length before the independent ISO
+        // validator authorizes the single atomic commit.
+        mbr_growth=*mbr_append;
+        auto& growth=*mbr_growth;
+        growth.physical_size=std::filesystem::file_size(staged);
+        const auto sectors=growth.physical_size/512u;
+        need(growth.physical_size%block==0 &&
+             sectors<=0xffffffffull &&
+             (growth.physical_size/block)%growth.alignment_blocks==0,
+             "UDF mastering did not honor MBR geometry");
+        const auto cylinder=std::min<std::uint64_t>(
+             sectors/growth.geometry_sectors-1,1023);
+        auto& header=growth.mbr;
+        header[growth.end_chs_at+1]=static_cast<unsigned char>(
+            (header[growth.end_chs_at+1]&0x3fu)|((cylinder>>2)&0xc0u));
+        header[growth.end_chs_at+2]=static_cast<unsigned char>(cylinder&0xffu);
+        put(header,growth.length_at,static_cast<std::uint32_t>(sectors));
+        edit_tick(progress);
+        {
+            std::fstream out(staged,std::ios::in|std::ios::out|std::ios::binary);
+            need(bool(out),"cannot update staged MBR/UDF header");
+            write(out,header);
+            out.flush();
+            need(bool(out),"staged MBR/UDF header flush failed");
+        }
+    }
+    const auto* mbr=mbr_growth?&*mbr_growth:nullptr;
+    const auto* gpt=gpt_growth?&*gpt_growth:nullptr;
+    if(adding_shared)
+        coordinate_shared_add_stage(path,staged,image,iso_files,plan,
+                                    add_tree,progress,mbr,gpt);
+    else if(shared.empty())
+        protect_iso_udf_stage(path,staged,image,progress,mbr,gpt);
+    else coordinate_shared_bridge_stage(path,staged,image,shared,plan,
+                                        deletion_sectors,progress,mbr,gpt);
+}
+
+EditProtectedRanges bridge_metadata_protected_ranges(const Image& image) {
     // UDF may advertise free blocks that ISO9660 owns exclusively, e.g.
     // boot.catalog, BIOS/EFI image extents or a shared old ISO filename.
     // Exclude them *before* UDF's allocation scan so a new file uses a
@@ -3094,11 +3122,36 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
             nodes.push_back(child.get());
         need(nodes.size()<=200000,"ISO/UDF immutable namespace exceeds limit");
     }
-    edit_udf(path,changes,progress,true,validate,immutable,
-             shared.empty() && !adding_shared?nullptr:&plan,
-             image.hybrid_system_area,
-             mbr_append?mbr_append->alignment_blocks:0,
-             gpt_append?gpt_append->trailer_blocks:0);
+    return immutable;
+}
+
+void execute_bridge_metadata_edit(const std::filesystem::path& path,
+        Image& image,const std::vector<ArchiveChange>& changes,
+        const EditProgress& progress,BridgeMetadataEdit& edit) {
+    const auto immutable=bridge_metadata_protected_ranges(image);
+    const CoordinatedIsoUpdate* coordinated=nullptr;
+    if(edit.adding_shared || !edit.shared.empty())coordinated=&edit.plan;
+    std::uint64_t mbr_alignment=0,gpt_trailer=0;
+    if(edit.mbr_append)mbr_alignment=edit.mbr_append->alignment_blocks;
+    if(edit.gpt_append)gpt_trailer=edit.gpt_append->trailer_blocks;
+    const bool partitioned=image.hybrid_system_area;
+    // The callback is invoked synchronously by edit_udf before commit.
+    // The owning edit plan outlives this entire call, including rollback.
+    const EditStageValidator validate=
+        [&path,&image,&edit,&progress](const std::filesystem::path& staged) {
+            validate_bridge_metadata_stage(path,staged,image,edit,progress);
+        };
+    image.file.close();
+    edit_udf(path,changes,progress,true,validate,immutable,coordinated,
+             partitioned,mbr_alignment,gpt_trailer);
+}
+
+void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
+                                  Image& image,
+                                  const std::vector<ArchiveChange>& changes,
+                                  const EditProgress& progress) {
+    auto edit=prepare_bridge_metadata_edit(path,image,changes);
+    execute_bridge_metadata_edit(path,image,changes,progress,*edit);
 }
 }
 // Keep the write and independent readback phases in separate stack frames.
