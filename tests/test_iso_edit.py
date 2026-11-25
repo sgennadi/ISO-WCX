@@ -654,6 +654,66 @@ def main(binary, reader=None):
                 raw[self_lba*512:(self_lba+1)*512]=header
             raw[120*512:128*512]=b'E'*(8*512)
             return raw
+        # Level-3 hybrid remaster: existing sections need not be adjacent.
+        # Same-length split-file F5 uses the guarded rebuild instead of
+        # the one-extent payload patcher.
+        def split_hybrid_base():
+            raw=bytearray(fixture())
+            raw[21*B:22*B]=b'A'*B
+            raw[27*B:27*B+4]=b'TAIL'
+            records=(iso_record(20,B,2,b'\0')+
+                     iso_record(20,B,2,b'\1')+
+                     iso_record(21,B,0x80,b'SPLIT.BIN;1')+
+                     iso_record(27,4,0,b'SPLIT.BIN;1'))
+            raw[20*B:21*B]=records.ljust(B,b'\0')
+            return raw
+        for kind in ('MBR','GPT'):
+            base=split_hybrid_base()
+            if kind=='MBR':
+                base.extend(bytes(120*B-len(base)))
+                base=hybrid_mbr(base)
+            else:
+                base=gpt_fixture(base)
+            image.write_bytes(base)
+            source.write_bytes(b'new unrelated payload')
+            run('add','EXTRA.TXT')
+            assert read_image(image)['SPLIT.BIN']==b'A'*B+b'TAIL'
+            source.write_bytes(b'R'*(B+4))
+            run('add','SPLIT.BIN')
+            assert read_image(image)['SPLIT.BIN']==source.read_bytes()
+            run('delete','SPLIT.BIN')
+            assert read_image(image)=={'EXTRA.TXT':b'new unrelated payload'}
+            rebuilt=image.read_bytes()
+            assert len(rebuilt)==len(base)
+            assert rebuilt[:16*B]==base[:16*B]
+            assert rebuilt[21*B:22*B]==base[21*B:22*B]
+            assert rebuilt[27*B:27*B+4]==b'TAIL'
+            if kind=='GPT':
+                assert rebuilt[120*512:128*512]==base[120*512:128*512]
+                assert rebuilt[-33*512:]==base[-33*512:]
+            validate_path_tables(image)
+            # A single-extent target that aliases a later split section
+            # must never be patched in place.
+            alias=bytearray(base)
+            at=20*B
+            while alias[at]:at+=alias[at]
+            r=iso_record(27,4,0,b'ALIAS.BIN;1')
+            alias[at:at+len(r)]=r
+            image.write_bytes(alias)
+            source.write_bytes(b'NOPE')
+            run('add','ALIAS.BIN',False)
+            # The second section may be a malicious alias of a protected
+            # partition, even if the first section is harmless.
+            blocked=bytearray(base)
+            if kind=='MBR':
+                blocked[466]=0xef
+                struct.pack_into('<II',blocked,470,30*4,4)
+            at=20*B
+            for _ in range(3):at+=blocked[at]
+            both(blocked,at+2,30)
+            image.write_bytes(blocked)
+            run('delete','SPLIT.BIN',False)
+
         gpt=gpt_fixture(fixture())
         image.write_bytes(gpt)
         source.write_bytes(b'RENEW')

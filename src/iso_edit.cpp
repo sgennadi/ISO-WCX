@@ -172,7 +172,8 @@ public:
     std::unique_ptr<Node> root;
     bool joliet=false;
     bool udf_bridge=false;
-    bool hybrid_system_area=false; // MBR/GPT present; only byte-stable payload edits
+    bool hybrid_system_area=false; // MBR/GPT present; partition-aware edits only
+    bool has_multi_extent=false;
     bool iso_system_use=false; // RRIP/SUSP metadata must never be discarded
     bool rr_rebuild=false;
     std::uint32_t declared_volume_blocks=0;
@@ -452,6 +453,10 @@ public:
             if(!(hybrid_system_area && iso_system_use))
                 pair(*root,*other);
         }
+        // Do not permit multi-extent hybrid Rock Ridge/SUSP metadata
+        // to enter the plain ISO/Joliet rebuild or single-extent patcher.
+        need(!(hybrid_system_area && has_multi_extent && iso_system_use),
+             "multi-extent hybrid SUSP metadata requires a specialized writer");
         // Some genuine bootable ISO/UDF bridges set El Torito's 512-byte
         // sector count to zero or to just one boot sector. When the ISO9660
         // namespace independently describes the full boot image extent,
@@ -835,13 +840,13 @@ public:
         need(r.size()>=34&&r[0]==r.size()&&r[1]==0&&r[26]==0&&r[27]==0&&le(r,28,2)==1,"unsupported ISO record");
         need((r[25]&~0x83u)==0 && !((r[25]&0x80u) && (r[25]&2u)),
              "associated or unsupported ISO record flags");
-        // A nonpartitioned ISO/UDF bridge can retain multi-extent
-        // ISO files as immutable resources. The bridge writers protect
-        // each physical section separately and only coordinate shared
-        // single-extent targets. Partitioned hybrids remain restricted.
-        if(r[25]&0x80u)
-            need(!hybrid_system_area,
-                 "multi-extent hybrid ISO requires partition-aware editing");
+        if(r[25]&0x80u) {
+            has_multi_extent=true;
+            // The synchronized partitioned UDF bridge writer is not yet
+            // available. Plain MBR/GPT ISO/Joliet is rebuilt separately.
+            need(!(hybrid_system_area && udf_bridge),
+                 "multi-extent partitioned ISO/UDF requires a specialized writer");
+        }
         auto n=std::make_unique<Node>();n->record=r;n->directory=(r[25]&2)!=0;n->lba=le(r,2);n->size=le(r,10);n->parent=parent;
         need(std::uint64_t(n->lba)*block+n->size<=size,"ISO resource out of bounds");
         if(!n->directory) {
@@ -1591,8 +1596,10 @@ void edit_iso_hybrid_equal_length(
                 node=it==node->children.end()?nullptr:it->get();
             }
         }
-        need(node && !node->directory && node->size>0,
-             "hybrid replacement target must be an existing nonempty file");
+        need(node && !node->directory && node->size>0 &&
+             node->sections.size()==1 &&
+             node->sections.front().length==node->size,
+             "hybrid payload patch requires one nonempty physical extent");
         need(std::filesystem::is_regular_file(
                  std::filesystem::symlink_status(change.source)),
              "hybrid replacement must be a regular non-symlink file");
@@ -1660,9 +1667,10 @@ void edit_iso_hybrid_equal_length(
         }
         for(const Node* other:nodes) {
             if(other==node || !other->size)continue;
-            need(!intersect(offset,bytes,
-                            std::uint64_t(other->lba)*block,other->size),
-                 "hybrid replacement overlaps another ISO entry or alias");
+            each_extent(*other,[&](auto start,auto length) {
+                need(!intersect(offset,bytes,start,length),
+                     "hybrid replacement overlaps another ISO entry or alias");
+            });
         }
         for(const auto& previous:patches)
             need(!intersect(offset,bytes,previous.at,previous.bytes),
@@ -2911,6 +2919,7 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
 // full ISO authoring function. MSVC x64 ASan reported use-after-poison
 // at its invocation in ordinary multi-file F5 batches. No sanitizer
 // instrumentation or validation is disabled.
+static constexpr std::uint64_t iso_max_section=0xfffff800ull;
 static void check_iso_capacity(std::uint64_t next,std::uint64_t blocks,
                                const std::optional<HybridTailPlan>& hybrid_tail) {
     need(next<0xffffffffu && blocks<0xffffffffull-next,"ISO size limit");
@@ -2937,11 +2946,11 @@ static std::uint64_t write_iso_rebuild(
         need(bool(source),"cannot open ISO replacement source");
         // ECMA-119 Level 3 permits multiple records per file. Every
         // nonfinal section is aligned and fits the 32-bit data length.
-        constexpr std::uint64_t max_section=0xfffff800ull;
+        n->sections.clear(); // discard preflight-only section addresses
         auto left=n->size;
         do {
             const auto bytes=static_cast<std::uint32_t>(
-                std::min(left,max_section));
+                std::min(left,iso_max_section));
             n->sections.push_back({static_cast<std::uint32_t>(next),bytes});
             copy_bytes(source,out,bytes,progress);
             write(out,Bytes((block-bytes%block)%block));
@@ -3169,6 +3178,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                        std::filesystem::symlink_status(c.source)))return false;
                 const auto found=index.find(upper(edit_path(c.path)));
                 return found!=index.end() && !found->second->directory &&
+                       found->second->sections.size()==1 &&
                        found->second->size==std::filesystem::file_size(c.source);
             });
         if(same_size || image.iso_system_use) {
@@ -3277,10 +3287,18 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     std::optional<MbrGrowthPlan> mbr_growth;
     if(hybrid_tail) {
         std::uint64_t required=0;
-        for(const auto* n:all)if(!n->source.empty()) {
-            // Hybrid parsing still rejects multi-extent directory records.
-            need(n->size<=0xfffff800ull,
-                 "hybrid multi-extent file writing is not yet supported");
+        for(auto* n:all)if(!n->source.empty()) {
+            // Directory preflight must serialize exactly as many records
+            // as the eventual Level-3 payload. Dummy LBAs are used only
+            // for sizing; the original extent snapshot is already sealed.
+            auto left=n->size;
+            n->sections.clear();
+            do {
+                const auto bytes=static_cast<std::uint32_t>(
+                    std::min(left,iso_max_section));
+                n->sections.push_back({0,bytes});
+                left-=bytes;
+            } while(left);
             required+=(n->size+block-1)/block;
         }
         const unsigned views=image.joliet?2u:1u;
