@@ -287,6 +287,33 @@ def main(editor,inspector):
                 jr+=iso_record(305,5,0,'keep;1'.encode('utf-16-be'))
                 common[22*B:23*B]=jr.ljust(B,b'\0')
             image.write_bytes(common)
+            # An independently mirrored namespace receives new files
+            # in all views, including small files that normally embed.
+            source.write_bytes(b'new mirrored payload')
+            second=root/'second-shared.bin'
+            second.write_bytes(b'BIGGER SHARED PAYLOAD'*500)
+            run([editor,str(image),'batch','add','ADDED.TXT',str(source),
+                 'add','EXTRA.BIN',str(second)])
+            expected={'hello':b'world','keep':b'KEEP!',
+                      'ADDED.TXT':source.read_bytes(),
+                      'EXTRA.BIN':second.read_bytes()}
+            assert read_image(image)==expected
+            if j: assert read_image(image,True)==expected
+            target=root/f'coordinated-add-{j}'
+            run([inspector,str(image),'--extract',str(target)])
+            assert (target/'ADDED.TXT').read_bytes()==source.read_bytes()
+            assert (target/'EXTRA.BIN').read_bytes()==second.read_bytes()
+            assert image.read_bytes()[24*B:26*B]==common[24*B:26*B]
+            before=image.read_bytes()
+            too_many=[editor,str(image),'batch']
+            for i in range(80):
+                too_many+=['add',f'FILE{i:03d}.TXT',str(source)]
+            run(too_many,expected=1)
+            assert image.read_bytes()==before
+            run([editor,str(image),'batch','delete','ADDED.TXT',
+                 'delete','EXTRA.BIN'])
+            assert read_image(image)=={'hello':b'world','keep':b'KEEP!'}
+            if j: assert read_image(image,True)=={'hello':b'world','keep':b'KEEP!'}
             for i,body in enumerate((b'SHARED FILE'*1200,b'shorter')):
                 source.write_bytes(body)
                 original=image.read_bytes()

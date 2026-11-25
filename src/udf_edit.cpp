@@ -2417,7 +2417,12 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         child.length=p.length;
         child.lba=volume.allocate_block();
         record_allocation(1);
-        const auto embedded=p.length<=block-fe_header;
+        const bool shared=coordinated &&
+            coordinated->shared_additions.count(p.key)!=0;
+        need(!shared || (mastering && !p.change.directory &&
+                         p.length>0 && p.length<=0xffffffffull),
+             "shared ISO/UDF creation requires external ISO-compatible data");
+        const auto embedded=!shared && p.length<=block-fe_header;
         const auto file_blocks=embedded?
             0ull:(p.length+block-1u)/block;
         need(file_blocks<=std::numeric_limits<std::uint32_t>::max(),
@@ -2994,14 +2999,19 @@ void edit_udf(const std::filesystem::path& image,
         need(allow_bridge && validate_stage &&
              volume.partition_access_type()==1 && !volume.has_allocation_map() &&
              coordinated->shared_replacements.size()+
-                 coordinated->shared_deletions.size()==changes.size() &&
+                 coordinated->shared_deletions.size()+
+                 coordinated->shared_additions.size()==changes.size() &&
              !coordinated->metadata_writes.empty(),
              "shared ISO/UDF edit requires read-only Type-1 mastering");
         for(const auto& change:changes) {
             const auto key=edit_path(change.path);
-            need(!change.directory && volume.files().count(key) &&
-                 (change.remove?coordinated->shared_deletions.count(key):
-                                coordinated->shared_replacements.count(key)),
+            const bool existing=volume.files().count(key)!=0;
+            need(!change.directory &&
+                 (existing?
+                    (change.remove?coordinated->shared_deletions.count(key):
+                                   coordinated->shared_replacements.count(key)):
+                    (!change.remove && !volume.directories().count(key) &&
+                     coordinated->shared_additions.count(key))),
                  "invalid coordinated edit target");
         }
         for(const auto& [at,bytes]:coordinated->metadata_writes) {

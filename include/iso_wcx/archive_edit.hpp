@@ -31,6 +31,7 @@ using EditProtectedRanges =
 struct CoordinatedIsoUpdate {
     std::set<std::string> shared_replacements;
     std::set<std::string> shared_deletions;
+    std::set<std::string> shared_additions;
     EditProtectedRanges metadata_writes;
 };
 // UDF Type-1 Preview: plain-UDF writes by default. Bridge writes are opt-in
