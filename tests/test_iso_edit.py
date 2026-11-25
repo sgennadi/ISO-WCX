@@ -554,6 +554,32 @@ def main(binary, reader=None):
         run('add','HELLO.TXT',False)
         source.write_bytes(b'new content'*1000)
 
+        # Bounded tail authoring: a recognized whole-ISO MBR with
+        # independently verified zero padding can add/delete/resize files
+        # and create directories without changing the disk geometry.
+        padded=bytearray(fixture(boot=True,boot_efi=True))
+        struct.pack_into('<H',padded,24*B+38,4)
+        struct.pack_into('<H',padded,24*B+102,4)
+        padded.extend(bytes(120*B-len(padded)))
+        padded=hybrid_mbr(padded)
+        image.write_bytes(padded)
+        source.write_bytes(b'LONGER HYBRID DATA'*150)
+        run('add','HELLO.TXT')
+        assert read_image(image)['HELLO.TXT']==source.read_bytes()
+        run('mkdir','DATA')
+        run('add','DATA/NEW.TXT')
+        run('delete','HELLO.TXT')
+        assert read_image(image)=={'DATA/':None,'DATA/NEW.TXT':source.read_bytes()}
+        rebuilt=image.read_bytes()
+        assert len(rebuilt)==len(padded)
+        assert rebuilt[:16*B]==padded[:16*B]
+        assert rebuilt[17*B:36*B]==padded[17*B:36*B]
+        validate_path_tables(image)
+        source.write_bytes(bytes(120*B))
+        run('add','NO_SPACE.BIN',False)
+        assert image.read_bytes()==rebuilt
+        source.write_bytes(b'new content'*1000)
+
         # Strict, standard 512-byte GPT: valid protective MBR, CRC32
         # headers and matching entry arrays, one independently bounded ESP.
         # The GPT backup deliberately lies beyond the original ISO volume.
@@ -593,11 +619,32 @@ def main(binary, reader=None):
         assert current[:21*B]==gpt[:21*B]
         assert current[21*B+5:]==gpt[21*B+5:]
         assert read_image(image)['HELLO.TXT']==b'RENEW'
-        run('add','NEW.TXT',False)
-        run('delete','HELLO.TXT',False)
-        run('mkdir','NEWFOLDER',False)
+        # With verified padding before the backup GPT, the COW writer
+        # may safely rebuild the ISO without moving any partitions.
         source.write_bytes(b'TOO LONG')
-        run('add','HELLO.TXT',False)
+        run('add','HELLO.TXT')
+        run('add','NEW.TXT')
+        run('mkdir','NEWFOLDER')
+        run('delete','HELLO.TXT')
+        assert read_image(image)=={'NEW.TXT':b'TOO LONG','NEWFOLDER/':None}
+        rebuilt=image.read_bytes()
+        assert len(rebuilt)==len(gpt)
+        assert rebuilt[:16*B]==gpt[:16*B]
+        assert rebuilt[120*512:128*512]==gpt[120*512:128*512]
+        assert rebuilt[-33*512:]==gpt[-33*512:]
+        validate_path_tables(image)
+        # An unallocated but nonzero tail is NOT safe free space.
+        blocked=bytearray(gpt)
+        blocked[36*B+12]=1
+        image.write_bytes(blocked)
+        run('add','NEW.TXT',False)
+        assert image.read_bytes()==blocked
+        # A fully declared ISO volume has no tail allocation budget.
+        full=bytearray(gpt)
+        both(full,16*B+80,len(full)//B)
+        image.write_bytes(full)
+        run('add','NEW.TXT',False)
+        assert image.read_bytes()==full
         source.write_bytes(b'RENEW')
         # Malformed primary/backup headers or tables must fail closed.
         for offset in (512+16,len(gpt)-512+16,2*512+48,
