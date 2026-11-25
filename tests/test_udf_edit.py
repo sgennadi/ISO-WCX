@@ -180,11 +180,17 @@ def vat_append_image(*, capacity=300, external_table=False):
     for number,label in ((2,'hello'),(3,'keep')):
         record=fid(PARTITION+number,label)
         p16(record,16,1);p16(record,28,1)
+        p32(record,32,14+number)
         seal(record,0,len(record),1)
         directory+=record
     raw[301*B:302*B]=embedded(1,4,directory)
     raw[302*B:303*B]=embedded(2,5,b'world')
     raw[303*B:304*B]=embedded(3,5,b'keep me')
+    for logical in (2,3):
+        at=(PARTITION+logical)*B
+        p64(raw,at+160,14+logical)
+        length=struct.unpack_from('<I',raw,at+172)[0]
+        seal(raw,at,176+length,logical)
     vat=bytearray(152+4*(600 if external_table else 4))
     p16(vat,0,152);vat[4:132]=volume
     p32(vat,132,0xffffffff);p32(vat,136,2)
@@ -197,10 +203,13 @@ def vat_append_image(*, capacity=300, external_table=False):
         entry=embedded(249,248,b'')
         p16(entry,34,0);p64(entry,56,len(vat));p64(entry,64,2)
         p32(entry,172,8);p32(entry,176,len(vat));p32(entry,180,247)
+        p64(entry,160,18)
         seal(entry,0,184,249)
         raw[549*B:550*B]=entry
     else:
         raw[549*B:550*B]=embedded(249,248,vat)
+        p64(raw,549*B+160,18)
+        seal(raw,549*B,176+len(vat),249)
     return raw
 
 
@@ -231,7 +240,7 @@ def test_vat_append(editor,inspector,root,image,replacement):
     replacement.write_bytes(b'cancelled')
     run(editor,image,'cancel','hello',replacement,success=False)
     assert image.read_bytes()==committed
-    for args in (('add','missing',replacement),('delete','hello'),('mkdir','DIR')):
+    for args in (('add','HELLO',replacement),('delete','missing'),('mkdir','DIR')):
         run(editor,image,*args,success=False)
         assert image.read_bytes()==committed
     replacement.write_bytes(b'X'*(60*B))
@@ -321,6 +330,106 @@ def test_vat_external(editor,inspector,root,image,replacement):
         assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def test_vat_root_mutations(editor,inspector,root,image,replacement):
+    # Independent raw VAT/FE/FID assertions as well as Disc extraction.
+    # Force the small VAT to become external on first creation.
+    import binascii
+    for external in (False,True):
+        raw=vat_append_image(capacity=8192,external_table=external)
+        if not external:
+            at=549*B
+            vat=bytearray(raw[at+176:at+176+168])
+            vat.extend(b'\xff'*(B-176-len(vat)))
+            raw[at+176:at+B]=vat
+            p64(raw,at+56,len(vat));p32(raw,at+172,len(vat))
+            p16(raw,at+10,B-16)
+            p16(raw,at+8,binascii.crc_hqx(raw[at+16:at+B],0))
+            checksum(raw,at)
+        image.write_bytes(raw)
+        def table(data):
+            fe=len(data)-B
+            mode=struct.unpack_from('<H',data,fe+34)[0]
+            size=struct.unpack_from('<Q',data,fe+56)[0]
+            if mode==3:
+                vat=data[fe+176:fe+176+size]
+            else:
+                length,lba=struct.unpack_from('<II',data,fe+176)
+                assert mode==0 and size==length
+                vat=data[(PARTITION+lba)*B:(PARTITION+lba)*B+length]
+            header=struct.unpack_from('<H',vat,0)[0]
+            mapping=list(struct.unpack_from('<'+'I'*((len(vat)-header)//4),vat,header))
+            return vat,mapping,struct.unpack_from('<Q',data,fe+160)[0]
+        def root_fids(data,mapping):
+            at=(PARTITION+mapping[1])*B
+            end=at+176+struct.unpack_from('<I',data,at+172)[0]
+            pos=at+176
+            names={}
+            while pos<end:
+                n=data[pos+19]
+                size=(38+n+3)&~3
+                assert struct.unpack_from('<I',data,pos+12)[0]==1
+                assert struct.unpack_from('<H',data,pos+8)[0]==binascii.crc_hqx(data[pos+16:pos+size],0)
+                if n:
+                    name=data[pos+39:pos+38+n].decode('ascii')
+                    names[name]=(struct.unpack_from('<I',data,pos+24)[0],
+                                 struct.unpack_from('<I',data,pos+32)[0])
+                pos+=size
+            assert pos==end
+            return names
+        expected={'hello':b'world','keep':b'keep me'}
+        retired=set()
+        for i,(action,name,body) in enumerate((
+            ('add','NEW.TXT',b'new'),
+            ('add','BULK.BIN',b'physical data'*1000),
+            ('delete','hello',None),
+            ('delete','NEW.TXT',None),
+            ('add','NEW.TXT',b'recreated'),
+            ('delete','BULK.BIN',None),
+            ('delete','keep',None))):
+            before=image.read_bytes()
+            old_table,old_mapping,old_uid=table(before)
+            old_fids=root_fids(before,old_mapping)
+            if action=='add':
+                replacement.write_bytes(body)
+                run(editor,image,'add',name,replacement)
+                expected[name]=body
+            else:
+                run(editor,image,'delete',name)
+                del expected[name]
+                retired.add(old_fids[name][0])
+            after=image.read_bytes()
+            vat,mapping,uid=table(after)
+            assert after[:len(before)]==before
+            assert struct.unpack_from('<I',vat,132)[0]==len(before)//B-PARTITION-1
+            assert struct.unpack_from('<II',vat,136)==(len(expected),0)
+            assert uid>old_uid
+            assert mapping[1]!=old_mapping[1]
+            fids=root_fids(after,mapping)
+            assert set(fids)==set(expected)
+            for key,value in old_fids.items():
+                if key in expected and key!=name:assert fids[key]==value
+            assert all(mapping[lba]==0xffffffff for lba in retired)
+            if action=='add':
+                lba,unique=fids[name]
+                assert lba==len(old_mapping) and len(mapping)==lba+1
+                assert unique==old_uid+1 and uid==unique+1
+                fe=(PARTITION+mapping[lba])*B
+                assert struct.unpack_from('<I',after,fe+12)[0]==lba
+                assert struct.unpack_from('<Q',after,fe+160)[0]==unique
+            else:
+                assert len(mapping)==len(old_mapping)
+            out=root/f'vat-root-{external}-{i}'
+            check_disc(inspector,image,out)
+            assert {p.name:p.read_bytes() for p in out.iterdir()}==expected
+        committed=image.read_bytes()
+        run(editor,image,'delete','DOES-NOT-EXIST',success=False)
+        assert image.read_bytes()==committed
+        replacement.write_bytes(b'cancel')
+        run(editor,image,'cancel','ABORT.TXT',replacement,success=False)
+        assert image.read_bytes()==committed
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
         root=pathlib.Path(temp)
@@ -347,6 +456,7 @@ def main(editor,inspector):
                 assert not list(root.glob('.iso-wcx-edit-*'))
         test_vat_append(editor,inspector,root,image,replacement)
         test_vat_external(editor,inspector,root,image,replacement)
+        test_vat_root_mutations(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),

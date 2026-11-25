@@ -3059,7 +3059,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
 
 
 // Conservative first VAT writer: a standalone, open write-once UDF 2.x
-// image with a clean embedded VAT ICB at its actual EOF. The declared
+// image with a clean VAT ICB at its actual EOF. The declared
 // physical partition already reserves the unrecorded capacity. No sector
 // of the original is overwritten; no free-space bitmap is manufactured.
 // Root directory metadata is still embedded, but regular file data
@@ -3231,24 +3231,23 @@ std::unique_ptr<VatInlinePlan> prepare_vat_inline_append(
         const std::filesystem::path& image,
         const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
     edit_tick(progress);
-    vat_need(changes.size()==1 && !changes.front().remove &&
-             !changes.front().directory,
-             "only one existing regular file replacement is supported");
+    vat_need(changes.size()==1 && !changes.front().directory,
+             "only one ordinary root file operation is supported");
     const auto& change=changes.front();
     auto plan=std::make_unique<VatInlinePlan>();
     plan->target=edit_path(change.path);
     vat_need(plan->target.find('/')==std::string::npos &&
-             std::filesystem::is_regular_file(
-                 std::filesystem::symlink_status(change.source)),
-             "requires a regular source and a root file");
-    const auto incoming_size=std::filesystem::file_size(change.source);
+             (change.remove || std::filesystem::is_regular_file(
+                 std::filesystem::symlink_status(change.source))),
+             "requires a root file and a regular source for addition/replacement");
+    const auto incoming_size=change.remove?0:std::filesystem::file_size(change.source);
     plan->source_size=incoming_size;
     vat_need(incoming_size<=vat_max_ad*((block-176)/16),
              "replacement exceeds FE long_ad capacity");
     const bool embedded=incoming_size<=block-176;
     plan->payload_blocks=embedded?0:(incoming_size+block-1)/block;
     Bytes incoming;
-    if(embedded) {
+    if(embedded && !change.remove) {
         incoming.resize(static_cast<std::size_t>(incoming_size));
         std::ifstream source(change.source,std::ios::binary);
         vat_need(bool(source),"cannot open replacement");
@@ -3366,11 +3365,20 @@ std::unique_ptr<VatInlinePlan> prepare_vat_inline_append(
              fsd[442]==0,"unsupported virtual root or system-stream geometry");
     const auto root_lba=u32(fsd,404);
     vat_need(root_lba!=fsd_lba,"virtual root aliases file set");
-    const auto root=vat_embedded_fe(read_virtual(root_lba),root_lba,4);
+    auto root=vat_embedded_fe(read_virtual(root_lba),root_lba,4);
     const auto end=176u+u32(root,172);
     std::set<std::uint32_t> children;
     Bytes target;
     std::uint32_t target_lba=0;
+    std::size_t target_fid=0,target_fid_bytes=0;
+    const auto vat_uid=u64(vat_fe,160);
+    auto max_uid=u64(root,160);
+    std::set<std::uint64_t> live_ids;
+    std::set<std::string> folded_names;
+    auto fold=[](std::string key) {
+        for(auto& c:key)if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
+        return key;
+    };
     bool parent=false;
     for(std::size_t pos=176;pos<end;) {
         vat_need(end-pos>=38,"truncated embedded directory");
@@ -3396,18 +3404,34 @@ std::unique_ptr<VatInlinePlan> prepare_vat_inline_append(
                      children.insert(child).second,
                      "only distinct ordinary root files are supported");
             const auto filename=name(root,pos+38,n);
+            vat_need(folded_names.insert(fold(filename)).second,
+                     "case-insensitive root name collision");
             auto file=read_virtual(child);
+            const auto unique=u64(file,160);
+            max_uid=std::max(max_uid,unique);
+            vat_need(unique>=16 && unique<vat_uid &&
+                     live_ids.insert(unique).second &&
+                     u32(root,pos+32)==static_cast<std::uint32_t>(unique),
+                     "root file has invalid or duplicate UDF unique ID");
             auto layout=vat_physical_file(file,child,5,partition,old_vat);
             vat_reserve_physical(layout,partition,used,previous,allocated);
             vat_need(plan->expected.emplace(filename,std::move(layout)).second,
                 "duplicate root filename");
             if(filename==plan->target) {
                 target_lba=child;target=std::move(file);
+                target_fid=pos;target_fid_bytes=fid_size;
             }
         }
         pos+=fid_size;
     }
-    vat_need(parent && !target.empty(),"replacement target not an existing root file");
+    vat_need(parent && vat_uid>=16 && vat_uid>max_uid &&
+             u32(vat,136)==plan->expected.size() && u32(vat,140)==0,
+             "VAT unique ID or file/directory counts disagree with root namespace");
+    const bool creating=target.empty();
+    vat_need(!change.remove || !creating,"deletion target does not exist");
+    if(creating)
+        vat_need(!folded_names.count(fold(plan->target)),
+                 "new VAT filename collides case-insensitively");
     // Independent public reader must agree with every strict input entry.
     // No hidden special files, physical payload references or fallback
     // interpretation may silently become a writable namespace.
@@ -3423,17 +3447,84 @@ std::unique_ptr<VatInlinePlan> prepare_vat_inline_append(
         }
     }
     in.close();
-    // Bulk file contents are recorded in physical space, not the
-    // virtual partition. Only the target FE receives a new VAT mapping.
-    // The VAT ICB itself is the last physical sector of this transaction.
+    // Create a new virtual address rather than reusing an address from
+    // a deleted object. The prior transaction remains independently
+    // readable. VAT ICB UniqueID is the sequential volume's ID counter.
+    auto next_uid=[](std::uint64_t id) {
+        vat_need(id<std::numeric_limits<std::uint64_t>::max(),
+                 "VAT UniqueID exhausted");
+        ++id;
+        if(static_cast<std::uint32_t>(id)<16u) {
+            vat_need(id<=std::numeric_limits<std::uint64_t>::max()-16u,
+                     "VAT UniqueID exhausted");
+            id+=16u-static_cast<std::uint32_t>(id);
+        }
+        return id;
+    };
+    auto new_uid=next_uid(vat_uid);
+    if(creating) {
+        vat_need(vat.size()+4<=vat_max_table && mapping.size()<0xffffffffu,
+                 "VAT virtual address space exhausted");
+        target_lba=static_cast<std::uint32_t>(mapping.size());
+        vat.resize(vat.size()+4,0xff);
+        const auto encoded=encode_udf_cs0(plan->target);
+        const auto fid_bytes=(38u+encoded.size()+3u)&~std::size_t(3);
+        vat_need(fid_bytes<=block-end,"embedded VAT root directory is full");
+        Bytes fid(fid_bytes,0);
+        put16(fid,0,257);put16(fid,2,u16(root,2));
+        put16(fid,6,u16(root,6));put32(fid,12,root_lba);
+        put16(fid,16,1);fid[19]=static_cast<std::uint8_t>(encoded.size());
+        put32(fid,20,static_cast<std::uint32_t>(block));
+        put32(fid,24,target_lba);put16(fid,28,1);
+        put32(fid,32,static_cast<std::uint32_t>(new_uid));
+        std::copy(encoded.begin(),encoded.end(),fid.begin()+38);
+        tag_update(fid,0,fid.size());
+        std::fill(root.begin()+end,root.end(),std::uint8_t{0});
+        std::copy(fid.begin(),fid.end(),root.begin()+end);
+        put64(root,56,u32(root,172)+fid_bytes);
+        put32(root,172,static_cast<std::uint32_t>(u64(root,56)));
+        tag_update(root,0,176u+u32(root,172));
+        // Inherit the validated descriptor version, serial and
+        // implementation identifier, but never copy file-specific ADs.
+        target.assign(block,0);
+        put16(target,0,261);put16(target,2,u16(root,2));
+        put16(target,6,u16(root,6));put32(target,12,target_lba);
+        put16(target,20,4);put16(target,24,1);target[27]=5;
+        put32(target,28,root_lba);put16(target,32,1);
+        put32(target,36,0xffffffffu);put32(target,40,0xffffffffu);
+        put32(target,44,0x000001b6u);put16(target,48,1);
+        // Use the parent volume's recorded timestamps and implementation
+        // identifier; no fabricated time zone or unknown vendor ID.
+        std::copy(root.begin()+72,root.begin()+108,target.begin()+72);
+        put32(target,108,1);
+        std::copy(root.begin()+128,root.begin()+160,target.begin()+128);
+        put64(target,160,new_uid);
+        new_uid=next_uid(new_uid);
+    } else if(change.remove) {
+        // Compact the embedded directory; all surviving FIDs retain
+        // their virtual TagLocation and complete CRC-covered bytes.
+        std::move(root.begin()+target_fid+target_fid_bytes,root.begin()+end,
+                  root.begin()+target_fid);
+        const auto new_end=end-target_fid_bytes;
+        std::fill(root.begin()+new_end,root.end(),std::uint8_t{0});
+        put64(root,56,new_end-176);put32(root,172,static_cast<std::uint32_t>(new_end-176));
+        tag_update(root,0,new_end);
+        put32(vat,header+std::size_t(target_lba)*4,0xffffffffu);
+        plan->expected.erase(plan->target);
+    }
+    const bool rewrite_root=creating || change.remove;
     const auto vat_blocks=vat.size()<=block-176?0:(vat.size()+block-1)/block;
-    const auto required=plan->payload_blocks+1+vat_blocks+1;
+    const auto required=plan->payload_blocks+(change.remove?0u:1u)+
+                        (rewrite_root?1u:0u)+vat_blocks+1u;
     vat_need(sectors-partition<=capacity && required<=capacity-(sectors-partition) &&
              required<(max_image-plan->original_size)/block,
              "insufficient unrecorded partition capacity for VAT append");
     const auto new_file=std::uint64_t(old_vat)+1+plan->payload_blocks;
-    const auto new_vat=new_file+1+vat_blocks;
+    const auto new_root=new_file+(change.remove?0u:1u);
+    const auto new_table=new_root+(rewrite_root?1u:0u);
+    const auto new_vat=new_table+vat_blocks;
     plan->final_size=plan->original_size+required*block;
+    if(!change.remove) {
     VatFileLayout output;
     output.size=incoming_size;
     std::fill(target.begin()+176,target.end(),std::uint8_t{0});
@@ -3463,16 +3554,24 @@ std::unique_ptr<VatInlinePlan> prepare_vat_inline_append(
         tag_update(target,0,at);
     }
     put32(vat,header+std::size_t(target_lba)*4,static_cast<std::uint32_t>(new_file));
+    plan->append.push_back(std::move(target));
+    plan->expected.insert_or_assign(plan->target,std::move(output));
+    }
+    if(rewrite_root) {
+        put32(vat,header+std::size_t(root_lba)*4,static_cast<std::uint32_t>(new_root));
+        plan->append.push_back(std::move(root));
+    }
     put32(vat,132,old_vat);
+    put32(vat,136,static_cast<std::uint32_t>(plan->expected.size()));
+    put64(vat_fe,160,new_uid);
     std::fill(vat_fe.begin()+176,vat_fe.end(),std::uint8_t{0});
     put64(vat_fe,56,vat.size());
     put32(vat_fe,12,static_cast<std::uint32_t>(new_vat));
-    plan->append.push_back(std::move(target));
     if(vat_blocks) {
         put16(vat_fe,34,0);put64(vat_fe,64,vat_blocks);
         put32(vat_fe,172,8);
         put32(vat_fe,176,static_cast<std::uint32_t>(vat.size()));
-        put32(vat_fe,180,static_cast<std::uint32_t>(new_file+1));
+        put32(vat_fe,180,static_cast<std::uint32_t>(new_table));
         tag_update(vat_fe,0,184);
         vat.resize(static_cast<std::size_t>(vat_blocks*block),0);
         plan->append.push_back(std::move(vat));
@@ -3483,7 +3582,6 @@ std::unique_ptr<VatInlinePlan> prepare_vat_inline_append(
         tag_update(vat_fe,0,176+vat.size());
     }
     plan->append.push_back(std::move(vat_fe));
-    plan->expected.at(plan->target)=std::move(output);
     return plan;
 }
 void edit_vat_inline_append(const std::filesystem::path& image,
@@ -3541,7 +3639,7 @@ void edit_vat_inline_append(const std::filesystem::path& image,
             vat_need(found!=plan->expected.end() && seen.insert(item.path).second &&
                      vat_layout_matches(item,found->second),
                      "staged VAT payload differs");
-            if(item.path==plan->target)
+            if(!changes.front().remove && item.path==plan->target)
                 vat_need(same_staged_item(tx.output,item,changes.front().source,progress),
                          "replacement changed during VAT transaction");
         }

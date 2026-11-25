@@ -205,8 +205,8 @@ separately. No Type-1 allocator fallback is permitted.
 
 ### Initial VAT append writer (standalone UDF 2.x)
 
-The standalone dispatcher supports one existing ordinary root file
-replacement, with a VAT 2.x FE at the last recorded sector of a
+The standalone dispatcher supports one ordinary root file
+creation, replacement or deletion, with a VAT 2.x FE at the last recorded sector of a
 write-once image, an open integrity sequence and capacity already
 declared by the physical partition descriptor. Embedded or external
 physical VAT storage is supported (16 MiB table limit). File data
@@ -220,7 +220,7 @@ are verified before atomic commit. Neither damaged historical-VAT
 fallback nor zero-filled space authorizes a write.
 
 This is intentionally a narrow backend. VAT 1.50 writing, EFE,
-external allocation continuations, nested directories, creation/deletion,
+external allocation continuations, nested directories,
 multiple changes, full/closed sessions, partition growth and ISO/UDF
 bridge VAT writing remain unsupported. Physical data runs that alias
 VAT entries, the previous VAT, other files, or the table storage are
@@ -234,3 +234,22 @@ Physical disc recording and external-reader interoperability are not
 established by these tests.
 
 References: OSTA UDF 1.50 §2.2.10 and UDF 2.60 §2.2.11.
+
+
+### VAT root namespace updates
+
+Single-file creation and deletion are supported within the validated
+embedded root-directory profile. Creation appends a virtual address
+rather than recycling a deleted address; the directory and new FE
+are appended, the VAT mapping is updated, and the previous session
+remains byte-identical. Deletion compacts the root FIDs, marks the
+removed virtual address unmapped, and preserves the retired file's
+physical data in earlier sessions. File counts and the VAT ICB
+UniqueID counter are maintained (OSTA UDF 2.x, section 2.3.4.3 and
+the UniqueID rules). The strict input requires consistent live IDs,
+FID IDs, file counts and no subdirectories. A full embedded root
+directory is rejected rather than relocated. Tests cover creation,
+deletion, re-creation, non-reuse of retired virtual addresses,
+transition to external VAT, cancellation and complete old-session
+preservation. Nested directories, multiple changes in one request,
+legacy VAT 1.50 writing and physical recording remain unsupported.
