@@ -126,7 +126,7 @@ def check_disc(exe,image,folder):
     run(exe,image,'--extract',folder)
 
 
-def vat_append_image():
+def vat_append_image(*, capacity=300, external_table=False):
     """Independent UDF 2.01 open sequential fixture with capacity beyond EOF."""
     import binascii
     from test_images import udf_vat_image
@@ -149,7 +149,7 @@ def vat_append_image():
     volume[:7]=b'\x08VATVOL';volume[-1]=7
     pd=260*B;lvd=261*B
     raw[pd+25:pd+31]=b'+NSR03'
-    p32(raw,pd+184,2);p32(raw,pd+192,300)
+    p32(raw,pd+184,2);p32(raw,pd+192,capacity)
     raw[lvd+84:lvd+212]=volume
     raw[lvd+217:lvd+236]=b'*OSTA UDF Compliant'
     p16(raw,lvd+240,0x0201);p16(raw,lvd+442,1)
@@ -166,7 +166,7 @@ def vat_append_image():
     lvid=270*B
     p16(raw,lvid,9);p32(raw,lvid+28,0);p32(raw,lvid+72,2)
     p32(raw,lvid+80,0xffffffff);p32(raw,lvid+84,0xffffffff)
-    p32(raw,lvid+88,300);p32(raw,lvid+92,0xffffffff)
+    p32(raw,lvid+88,capacity);p32(raw,lvid+92,0xffffffff)
     seal(raw,lvid,96,270)
     p16(raw,271*B,8);seal(raw,271*B,512,271)
     fsd=300*B
@@ -185,12 +185,22 @@ def vat_append_image():
     raw[301*B:302*B]=embedded(1,4,directory)
     raw[302*B:303*B]=embedded(2,5,b'world')
     raw[303*B:304*B]=embedded(3,5,b'keep me')
-    vat=bytearray(168)
+    vat=bytearray(152+4*(600 if external_table else 4))
     p16(vat,0,152);vat[4:132]=volume
     p32(vat,132,0xffffffff);p32(vat,136,2)
     for at in (144,146,148):p16(vat,at,0x0201)
     for i in range(4):p32(vat,152+4*i,i)
-    raw[549*B:550*B]=embedded(249,248,vat)
+    if external_table:
+        for i in range(4,600):p32(vat,152+4*i,0xffffffff)
+        # Physical short_ad VAT file, two recorded sectors.
+        raw[547*B:549*B]=vat.ljust(2*B,b'\0')
+        entry=embedded(249,248,b'')
+        p16(entry,34,0);p64(entry,56,len(vat));p64(entry,64,2)
+        p32(entry,172,8);p32(entry,176,len(vat));p32(entry,180,247)
+        seal(entry,0,184,249)
+        raw[549*B:550*B]=entry
+    else:
+        raw[549*B:550*B]=embedded(249,248,vat)
     return raw
 
 
@@ -224,7 +234,7 @@ def test_vat_append(editor,inspector,root,image,replacement):
     for args in (('add','missing',replacement),('delete','hello'),('mkdir','DIR')):
         run(editor,image,*args,success=False)
         assert image.read_bytes()==committed
-    replacement.write_bytes(b'X'*(B-175))
+    replacement.write_bytes(b'X'*(60*B))
     run(editor,image,'add','hello',replacement,success=False)
     assert image.read_bytes()==committed
     replacement.write_bytes(b'valid size')
@@ -243,6 +253,73 @@ def test_vat_append(editor,inspector,root,image,replacement):
     run(editor,image,'add','hello',replacement,success=False)
     assert image.read_bytes()==alias
     assert not list(root.glob('.iso-wcx-edit-*'))
+
+def test_vat_external(editor,inspector,root,image,replacement):
+    for external_table in (False,True):
+        image.write_bytes(vat_append_image(capacity=4096,external_table=external_table))
+        initial=image.read_bytes()
+        # First exercise inline-to-external, then external-to-external,
+        # followed by shrink to embedded data. Each old session remains.
+        for i,body in enumerate((b'FIRST'*180003,b'NEXT'*300007,b'SMALL')):
+            before=image.read_bytes()
+            replacement.write_bytes(body)
+            run(editor,image,'add','hello',replacement)
+            after=image.read_bytes()
+            payload_blocks=(len(body)+B-1)//B if len(body)>B-176 else 0
+            vat_blocks=2 if external_table else 0
+            assert after[:len(before)]==before
+            assert len(after)==len(before)+(payload_blocks+vat_blocks+2)*B
+            old_vat=len(before)//B-PARTITION-1
+            new_fe=len(before)+payload_blocks*B
+            assert struct.unpack_from('<I',after,new_fe+12)[0]==2
+            assert struct.unpack_from('<Q',after,new_fe+56)[0]==len(body)
+            if payload_blocks:
+                assert struct.unpack_from('<H',after,new_fe+34)[0]==1
+                assert struct.unpack_from('<Q',after,new_fe+64)[0]==payload_blocks
+                assert struct.unpack_from('<IIH',after,new_fe+176)==(len(body),old_vat+1,0)
+                assert after[len(before):len(before)+len(body)]==body
+                assert not any(after[len(before)+len(body):new_fe])
+            else:
+                assert struct.unpack_from('<H',after,new_fe+34)[0]==3
+            vat_fe=len(after)-B
+            assert struct.unpack_from('<I',after,vat_fe+12)[0]==len(after)//B-PARTITION-1
+            if external_table:
+                assert struct.unpack_from('<H',after,vat_fe+34)[0]==0
+                length,logical=struct.unpack_from('<II',after,vat_fe+176)
+                assert length==2552 and logical==new_fe//B-PARTITION+1
+                vat_at=(PARTITION+logical)*B
+            else:
+                vat_at=vat_fe+176
+            assert struct.unpack_from('<I',after,vat_at+132)[0]==old_vat
+            assert struct.unpack_from('<I',after,vat_at+152+8)[0]==new_fe//B-PARTITION
+            if external_table:
+                assert struct.unpack_from('<I',after,vat_at+152+599*4)[0]==0xffffffff
+            out=root/f'vat-physical-{external_table}-{i}'
+            check_disc(inspector,image,out)
+            assert (out/'hello').read_bytes()==body
+            assert (out/'keep').read_bytes()==b'keep me'
+        committed=image.read_bytes()
+        replacement.write_bytes(b'CANCEL'*300000)
+        run(editor,image,'cancel','hello',replacement,success=False)
+        assert image.read_bytes()==committed
+        assert committed[:len(initial)]==initial
+        # Refuse a table/data alias: physical data cannot refer to a
+        # virtual FE block, even if the public reader can read its bytes.
+        bad=bytearray(initial)
+        fe_at=302*B
+        p16(bad,fe_at+34,1);p64(bad,fe_at+56,B);p64(bad,fe_at+64,1)
+        p32(bad,fe_at+172,16);p32(bad,fe_at+176,B)
+        p32(bad,fe_at+180,3);p16(bad,fe_at+184,0)
+        bad[fe_at+186:fe_at+192]=bytes(6)
+        import binascii
+        p16(bad,fe_at+10,176)
+        p16(bad,fe_at+8,binascii.crc_hqx(bad[fe_at+16:fe_at+192],0))
+        checksum(bad,fe_at)
+        image.write_bytes(bad)
+        run(editor,image,'add','hello',replacement,success=False)
+        assert image.read_bytes()==bad
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
 
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
@@ -269,6 +346,7 @@ def main(editor,inspector):
                 assert image.read_bytes()==raw
                 assert not list(root.glob('.iso-wcx-edit-*'))
         test_vat_append(editor,inspector,root,image,replacement)
+        test_vat_external(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),

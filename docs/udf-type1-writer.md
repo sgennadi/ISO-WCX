@@ -205,20 +205,28 @@ separately. No Type-1 allocator fallback is permitted.
 
 ### Initial VAT append writer (standalone UDF 2.x)
 
-The standalone dispatcher supports one existing ordinary embedded root
-file replacement, with an embedded VAT 2.x FE at the last recorded
-sector of a write-once image, an open integrity sequence and capacity
-already declared by the physical partition descriptor. It appends a
-replacement FE with the unchanged virtual TagLocation, then a new VAT
-ICB referring to the old VAT and remapping only the selected virtual
-block. The original prefix and all independently parsed root payloads
+The standalone dispatcher supports one existing ordinary root file
+replacement, with a VAT 2.x FE at the last recorded sector of a
+write-once image, an open integrity sequence and capacity already
+declared by the physical partition descriptor. Embedded or external
+physical VAT storage is supported (16 MiB table limit). File data
+larger than the embedded FE area is streamed into physical space using
+long_ad with partition map 0, as required by UDF 2.01 section 2.3.10.
+The replacement FE keeps its virtual TagLocation. The new VAT ICB,
+recorded last, refers to the old VAT and remaps only the selected
+virtual block. Multiple physical long_ad runs are bounded by the FE
+descriptor area and available capacity. The original prefix and all independently parsed root payloads
 are verified before atomic commit. Neither damaged historical-VAT
 fallback nor zero-filled space authorizes a write.
 
-This is intentionally a narrow first backend. VAT 1.50 writing,
-external VAT tables, external file data, EFE, nested directories,
-creation/deletion, multiple changes, full/closed sessions, partition
-growth and ISO/UDF bridge VAT writing remain unsupported. Sparable and
+This is intentionally a narrow backend. VAT 1.50 writing, EFE,
+external allocation continuations, nested directories, creation/deletion,
+multiple changes, full/closed sessions, partition growth and ISO/UDF
+bridge VAT writing remain unsupported. Physical data runs that alias
+VAT entries, the previous VAT, other files, or the table storage are
+rejected. Tests cover embedded-to-external replacement, repeat external
+replacement and shrink, including external VAT storage. Multi-GiB VAT
+write interoperability still needs dedicated tests. Sparable and
 Metadata partition writers are still read-only. Synthetic regression
 fixtures exercise repeated append, original-prefix preservation,
 independent extraction, cancellation and malformed-table rejection.
