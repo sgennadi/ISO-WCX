@@ -1,0 +1,53 @@
+name: ISO Level-3 over-4-GiB hybrid authoring
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/iso_edit.cpp'
+      - 'src/disc.cpp'
+      - 'src/archive_edit.cpp'
+      - 'include/iso_wcx/**'
+      - 'tests/test_iso_over4gb.py'
+      - 'tools/archive_edit_fixture.cpp'
+      - 'CMakeLists.txt'
+      - '.github/workflows/iso-over4gb.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/iso_edit.cpp'
+      - 'src/disc.cpp'
+      - 'src/archive_edit.cpp'
+      - 'include/iso_wcx/**'
+      - 'tests/test_iso_over4gb.py'
+      - 'tools/archive_edit_fixture.cpp'
+      - 'CMakeLists.txt'
+      - '.github/workflows/iso-over4gb.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  iso-over-4gib:
+    name: MBR/GPT ISO and Joliet >4 GiB with independent xorriso SHA256
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check disk capacity and install independent ISO reader
+        run: |
+          df -h .
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xorriso
+          command -v xorriso
+      - name: Build native editor and inspector
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target archive_edit_fixture disc_inspect --parallel 2
+      - name: Real >4 GiB Level-3 MBR/GPT growth and independent readback
+        run: python3 tests/test_iso_over4gb.py build/archive_edit_fixture build/disc_inspect xorriso
