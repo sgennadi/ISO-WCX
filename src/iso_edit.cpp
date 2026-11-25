@@ -1285,9 +1285,8 @@ HybridTailPlan plan_hybrid_tail(Image& image,const EditProgress& progress) {
         need(at>=volume,"ISO tail begins inside protected partition metadata");
         plan.limit=std::min(plan.limit,at/block);
     }
-    need(plan.first<=plan.limit &&
-         (image.gpt_hybrid || plan.first<plan.limit),
-         "hybrid ISO has no verified tail capacity");
+    need(plan.first<=plan.limit,
+         "hybrid ISO exceeds its validated container");
     constexpr std::uint64_t max_padding=256ull*1024*1024;
     need((plan.limit-plan.first)*block<=max_padding,
          "hybrid ISO padding exceeds 256 MiB inspection budget");
@@ -1407,6 +1406,98 @@ void write_gpt_growth(std::fstream& out,const GptGrowthPlan& plan,
     write_at(next*block,Bytes(static_cast<std::size_t>(plan.new_table-next*block),0));
     write_at(plan.new_table,plan.entries);
     write_at(plan.new_header,plan.backup);
+}
+// Grow a conventional isohybrid container without relocating independent
+// EFI partitions. Only explicit, consistent CHS geometry is accepted.
+struct MbrGrowthPlan {
+    std::uint64_t logical_blocks{},physical_size{};
+    std::size_t end_chs_at{},length_at{};
+    Bytes mbr;
+};
+MbrGrowthPlan plan_mbr_growth(Image& image,const HybridTailPlan& tail,
+                             std::uint64_t required) {
+    need(!image.gpt_hybrid && !image.udf_bridge &&
+         !image.iso_system_use && image.boot_regions_bounded,
+         "unsupported MBR growth layout");
+    MbrGrowthPlan plan;
+    plan.mbr=image.read(0,512);
+    const auto original_sectors=image.size/512u;
+    std::optional<std::size_t> container;
+    EditProtectedRanges esp;
+    for(std::size_t i=0;i<4;++i) {
+        const auto at=446u+i*16u;
+        const auto type=plan.mbr[at+4];
+        if(!type) {
+            need(std::all_of(plan.mbr.begin()+at,plan.mbr.begin()+at+16,
+                            [](auto c){return c==0;}),
+                 "MBR growth requires empty unused entries");
+            continue;
+        }
+        const auto start=std::uint64_t(le(plan.mbr,at+8));
+        const auto count=std::uint64_t(le(plan.mbr,at+12));
+        if(type==0x17 && !start) {
+            need(!container && plan.mbr[at]==0x80 &&
+                 count==original_sectors && plan.mbr[at+1]==0 &&
+                 plan.mbr[at+2]==1 && plan.mbr[at+3]==0,
+                 "MBR growth requires a complete active LBA-zero ISO container");
+            container=at;
+        } else {
+            need(type==0xef && plan.mbr[at]==0 &&
+                 start>=16ull*block/512u && count &&
+                 start<original_sectors && count<=original_sectors-start,
+                 "MBR growth cannot relocate unknown independent partitions");
+            for(const auto& [first,length]:esp)
+                need(!intersect(start,count,first,length),"overlapping MBR EFI partitions");
+            esp.emplace_back(start,count);
+        }
+    }
+    need(container.has_value(),"MBR growth lacks a validated ISO container");
+    const auto at=*container;
+    const auto heads=std::uint64_t(plan.mbr[at+5])+1;
+    const auto sectors=std::uint64_t(plan.mbr[at+6]&0x3fu);
+    const auto cylinder=std::uint64_t(plan.mbr[at+7]) |
+                        (std::uint64_t(plan.mbr[at+6]&0xc0u)<<2u);
+    need(heads>=2 && heads<=255 && sectors>=1 && sectors<=63,
+         "MBR growth requires explicit end CHS geometry");
+    const auto geometry=heads*sectors;
+    need(original_sectors%geometry==0 && original_sectors/geometry>0 &&
+         cylinder==std::min<std::uint64_t>(original_sectors/geometry-1,1023),
+         "MBR container length and end CHS disagree");
+    // Align both to a cylinder and to an optical sector.
+    const auto alignment=geometry*(geometry%4==0?1u:geometry%2==0?2u:4u);
+    const auto original=image.size/block;
+    need(required && required<0xffffffffull-original,
+         "MBR growth exceeds ISO addressing limit");
+    plan.logical_blocks=original+required;
+    const auto minimum=plan.logical_blocks*4u;
+    const auto rounded=((minimum+alignment-1)/alignment)*alignment;
+    need(rounded<=0xffffffffull,"MBR growth exceeds 32-bit partition length");
+    plan.physical_size=rounded*512u;
+    plan.end_chs_at=at+5;plan.length_at=at+12;
+    for(const auto& [begin,length]:tail.original_extents)
+        need(!intersect(begin,length,plan.end_chs_at,3) &&
+             !intersect(begin,length,plan.length_at,4),
+             "MBR growth fields alias live ISO data");
+    const auto last=std::min<std::uint64_t>(rounded/geometry-1,1023);
+    plan.mbr[at+6]=static_cast<unsigned char>(sectors|((last>>2)&0xc0u));
+    plan.mbr[at+7]=static_cast<unsigned char>(last&0xffu);
+    put(plan.mbr,plan.length_at,static_cast<std::uint32_t>(rounded));
+    return plan;
+}
+void write_mbr_growth(std::fstream& out,const MbrGrowthPlan& plan,
+                      std::uint64_t next,const EditProgress& progress) {
+    need(next==plan.logical_blocks && next*block<=plan.physical_size,
+         "MBR allocation differs from preflight");
+    out.clear();out.seekp(static_cast<std::streamoff>(next*block));
+    need(bool(out),"cannot seek MBR alignment padding");
+    for(auto left=plan.physical_size-next*block;left;) {
+        edit_tick(progress);
+        const auto amount=static_cast<std::size_t>(
+            std::min<std::uint64_t>(left,256u*1024u));
+        write(out,Bytes(amount,0));left-=amount;
+    }
+    out.clear();out.seekp(0);need(bool(out),"cannot seek MBR header");
+    write(out,plan.mbr);
 }
 void protect_hybrid_target(const Node& node,const Image& image) {
     each_extent(node,[&](std::uint64_t at,std::uint64_t bytes) {
@@ -2935,6 +3026,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     std::vector<Node*> all{image.root.get()},dirs{image.root.get()};
     for(std::size_t i=0;i<all.size();++i){for(auto& c:all[i]->children){all.push_back(c.get());if(c->directory)dirs.push_back(c.get());}need(all.size()<=200000&&dirs.size()<=65535,"ISO edit tree too large");}
     std::optional<GptGrowthPlan> gpt_growth;
+    std::optional<MbrGrowthPlan> mbr_growth;
     if(hybrid_tail) {
         std::uint64_t required=0;
         for(const auto* n:all)if(!n->source.empty()) {
@@ -2957,11 +3049,14 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         for(unsigned view=0;view<views;++view)
             required+=2*((table_bytes[view]+block-1)/block);
         if(required>hybrid_tail->limit-hybrid_tail->first) {
-            need(image.gpt_hybrid,
-                 "hybrid ISO has insufficient verified padding; partition resize required");
-            gpt_growth=plan_gpt_growth(image,*hybrid_tail,required);
+            if(image.gpt_hybrid) {
+                gpt_growth=plan_gpt_growth(image,*hybrid_tail,required);
+                hybrid_tail->limit=gpt_growth->logical_blocks;
+            } else {
+                mbr_growth=plan_mbr_growth(image,*hybrid_tail,required);
+                hybrid_tail->limit=mbr_growth->logical_blocks;
+            }
             hybrid_tail->first=image.size/block;
-            hybrid_tail->limit=gpt_growth->logical_blocks;
         }
     }
     EditTransaction tx(path);std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary|std::ios::trunc);need(bool(out),"cannot create staged ISO");image.file.clear();image.file.seekg(0);copy_bytes(image.file,out,image.size,progress);
@@ -3049,12 +3144,14 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     }
     for(auto& [lba,vd]:image.descriptors){both(vd,80,static_cast<std::uint32_t>(next));out.seekp(std::uint64_t(lba)*block);write(out,vd);}
     if(gpt_growth)write_gpt_growth(out,*gpt_growth,image.size,next,progress);
+    if(mbr_growth)write_mbr_growth(out,*mbr_growth,next,progress);
     out.flush();need(bool(out),"ISO flush failed");out.close();image.file.close();
     // Reparse the staged namespaces and reject changed El Torito references
     // even if the ISO directory metadata itself remains parseable.
     {
         Image verified(tx.output);
         need(verified.size==(gpt_growth?gpt_growth->physical_size:
+                                 mbr_growth?mbr_growth->physical_size:
                                  hybrid_tail?image.size:next*block) &&
              verified.declared_volume_blocks==next,
              "staged ISO physical or logical size mismatch");
@@ -3077,6 +3174,14 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                     static_cast<std::size_t>(image.size-g.old_backup));
                 need(std::all_of(old.begin(),old.end(),[](auto c){return c==0;}),
                      "obsolete GPT backup was not cleared");
+            }
+            if(mbr_growth) {
+                need(verified.read(0,512)==mbr_growth->mbr,
+                     "grown MBR header differs from plan");
+                const auto bytes=verified.read(next*block,
+                    static_cast<std::size_t>(verified.size-next*block));
+                need(std::all_of(bytes.begin(),bytes.end(),[](auto c){return c==0;}),
+                     "grown MBR alignment padding is not zero");
             }
             need(verified.hybrid_system_area && verified.gpt_hybrid==image.gpt_hybrid &&
                  verified.hybrid_protected_regions==expected_regions &&
@@ -3173,7 +3278,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     // boot catalog or full boot-image byte, including emulated floppy/HDD
     // payloads. Only protected ranges in the original prefix are compared.
     OpticalEditGuard guard(image.size);
-    if(!gpt_growth)guard.protect(0,16ull*block);
+    if(!gpt_growth && !mbr_growth)guard.protect(0,16ull*block);
     for(const auto lba:image.boot_descriptor_lbas)
         guard.protect(std::uint64_t(lba)*block,block);
     for(const auto& [offset,length]:image.boot_regions)
@@ -3189,6 +3294,9 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
             writes.emplace_back(gpt_growth->mbr_length_at,4);
             writes.emplace_back(512,512);
             writes.emplace_back(gpt_growth->old_backup,image.size-gpt_growth->old_backup);
+        } else if(mbr_growth) {
+            writes.emplace_back(mbr_growth->end_chs_at,3);
+            writes.emplace_back(mbr_growth->length_at,4);
         } else writes.emplace_back(hybrid_tail->first*block,
                                    (next-hybrid_tail->first)*block);
         std::sort(writes.begin(),writes.end());
@@ -3200,7 +3308,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
             cursor=at+bytes;
         }
         guard.protect(cursor,image.size-cursor);
-        if(gpt_growth) {
+        if(gpt_growth || mbr_growth) {
             // All original bytes outside the explicitly authorized
             // metadata fields are protected, including every partition.
             guard.verify_appended(path,tx.output,progress);

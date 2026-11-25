@@ -580,6 +580,50 @@ def main(binary, reader=None):
         assert image.read_bytes()==rebuilt
         source.write_bytes(b'new content'*1000)
 
+        # Real CHS geometry (64 heads, 32 sectors) and an EFI entry.
+        cylinder_iso=bytearray(fixture(boot=True,boot_efi=True))
+        struct.pack_into('<H',cylinder_iso,24*B+38,4)
+        struct.pack_into('<H',cylinder_iso,24*B+102,4)
+        cylinder_iso.extend(bytes(512*B-len(cylinder_iso)))
+        both(cylinder_iso,16*B+80,len(cylinder_iso)//B)
+        cylinder_iso=hybrid_mbr(cylinder_iso)
+        cylinder_iso[447:450]=bytes((0,1,0))
+        cylinder_iso[451:454]=bytes((63,32,0))
+        cylinder_iso[466]=0xef
+        struct.pack_into('<II',cylinder_iso,470,26*4,4)
+        def verify_grown_mbr(old,raw):
+            assert len(raw)>len(old) and len(raw)%(512*B)==0
+            assert raw[:451]==old[:451]
+            assert raw[454:458]==old[454:458]
+            assert raw[462:16*B]==old[462:16*B]
+            assert raw[17*B:len(old)]==old[17*B:len(old)]
+            assert struct.unpack_from('<I',raw,458)[0]==len(raw)//512
+            c=len(raw)//512//(64*32)-1
+            assert raw[451:454]==bytes((63,32|((c>>2)&0xc0),c&255))
+            end=struct.unpack_from('<I',raw,16*B+80)[0]*B
+            assert end<=len(raw) and raw[end:]==bytes(len(raw)-end)
+        image.write_bytes(cylinder_iso)
+        source.write_bytes(b'MBR PAYLOAD'*1500)
+        run('add','HELLO.TXT')
+        first=image.read_bytes()
+        verify_grown_mbr(cylinder_iso,first)
+        assert read_image(image)['HELLO.TXT']==source.read_bytes()
+        validate_path_tables(image)
+        source.write_bytes(b'MBR SECOND PAYLOAD'*70000)
+        run('add','SECOND.BIN')
+        second=image.read_bytes()
+        verify_grown_mbr(first,second)
+        assert read_image(image)['SECOND.BIN']==source.read_bytes()
+        validate_path_tables(image)
+        run('cancel','THIRD.BIN',False)
+        assert image.read_bytes()==second
+        malformed=bytearray(cylinder_iso)
+        malformed[453]=1
+        image.write_bytes(malformed)
+        run('add','THIRD.BIN',False)
+        assert image.read_bytes()==malformed
+        source.write_bytes(b'new content'*1000)
+
         # Strict, standard 512-byte GPT: valid protective MBR, CRC32
         # headers and matching entry arrays, one independently bounded ESP.
         # The GPT backup deliberately lies beyond the original ISO volume.
