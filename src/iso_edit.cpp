@@ -118,7 +118,8 @@ struct FileSection {
 };
 struct Node {
     std::string name,logical;
-    Bytes record,identifier,joliet_identifier;
+    Bytes record,identifier,joliet_identifier,joliet_record;
+    std::uint64_t record_at=0,joliet_record_at=0;
     Bytes rr_record,rr_dot,rr_parent;
     bool rr=false,rr_uneditable=false;
     std::size_t old_subdirs=0;
@@ -912,6 +913,7 @@ public:
                          "unrecognized ISO directory System Use metadata");
                     continue;}
                 auto c=parse(child,j,n.get(),depth+1,seen);
+                c->record_at=std::uint64_t(n->lba)*block+at-len;
                 const bool more=(child[25]&0x80u)!=0;
                 if(pending) {
                     need(!c->directory && pending->identifier==c->identifier &&
@@ -940,6 +942,8 @@ public:
     }
     void pair(Node& a,const Node& b) {
         a.joliet_identifier=b.identifier;
+        a.joliet_record=b.record;
+        a.joliet_record_at=b.record_at;
         if(!rr_rebuild)a.logical=b.logical;
         need(a.children.size()==b.children.size(),"ISO and Joliet trees differ");std::set<const Node*> used;
         for(auto& x:a.children){std::vector<const Node*> found;
@@ -1715,6 +1719,125 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
     if(mastering)guard.verify_appended(original,staged,progress);
     else guard.verify(original,staged,progress);
 }
+// UDF verifies its replacement first. Verify the unmodified ISO view,
+// then retarget its exact existing file records, not its directory tree.
+void coordinate_shared_bridge_stage(
+        const std::filesystem::path& path,const std::filesystem::path& staged,
+        const Image& image,const std::map<std::string,const Node*>& targets,
+        const CoordinatedIsoUpdate& plan,const EditProgress& progress) {
+    protect_iso_udf_stage(path,staged,image,progress);
+    const auto size=std::filesystem::file_size(staged);
+    need(size>image.size && size%block==0 && size/block<0xffffffffu,
+         "shared ISO/UDF resize did not produce bounded append mastering");
+    std::map<const Node*,FileSection> sections;
+    {
+        const Disc udf(staged);
+        need(udf.format()=="UDF","cannot read staged coordinated UDF");
+        for(const auto& [key,node]:targets) {
+            const auto item=std::find_if(udf.items().begin(),udf.items().end(),
+                [&](const Item& v){return v.path==key && !v.directory;});
+            need(item!=udf.items().end() && item->size>0 &&
+                 item->size<=0xffffffffull && item->inline_data.empty() &&
+                 !item->extents.empty(),
+                 "staged shared UDF file lacks an ISO-compatible extent");
+            const auto start=item->extents.front().offset;
+            need(start>=image.size && start%block==0 &&
+                 start<=size && item->size<=size-start,
+                 "shared replacement must occupy newly appended blocks");
+            auto next=start;
+            for(const auto& extent:item->extents) {
+                need(!extent.sparse && extent.offset==next &&
+                     extent.length<=start+item->size-next,
+                     "shared replacement is not contiguous");
+                next+=extent.length;
+            }
+            need(next-start==item->size,"shared replacement size mismatch");
+            sections.emplace(node,FileSection{
+                static_cast<std::uint32_t>(start/block),
+                static_cast<std::uint32_t>(item->size)});
+        }
+    }
+    std::fstream out(staged,std::ios::binary|std::ios::in|std::ios::out);
+    need(bool(out),"cannot open coordinated ISO stage");
+    auto patch=[&](std::uint64_t at,Bytes old,Bytes replacement) {
+        edit_tick(progress);
+        need(old.size()==replacement.size() &&
+             std::find(plan.metadata_writes.begin(),plan.metadata_writes.end(),
+                std::pair<std::uint64_t,std::uint64_t>{at,old.size()})!=
+                     plan.metadata_writes.end(),"unplanned shared ISO metadata write");
+        Bytes actual(old.size());
+        out.clear();out.seekg(static_cast<std::streamoff>(at));
+        out.read(reinterpret_cast<char*>(actual.data()),
+                 static_cast<std::streamsize>(actual.size()));
+        need(bool(out) && actual==old,"ISO field changed during UDF staging");
+        out.clear();out.seekp(static_cast<std::streamoff>(at));
+        write(out,replacement);
+    };
+    auto updated_record=[&](Bytes record,const Node& node) {
+        const auto found=sections.find(&node);
+        if(found!=sections.end() && !record.empty()) {
+            both(record,2,found->second.lba);
+            both(record,10,found->second.length);
+        }
+        return record;
+    };
+    for(const auto& [node,section]:sections) {
+        (void)section;
+        auto patch_record=[&](std::uint64_t at,const Bytes& record) {
+            auto updated=updated_record(record,*node);
+            patch(at+2,Bytes(record.begin()+2,record.begin()+18),
+                       Bytes(updated.begin()+2,updated.begin()+18));
+        };
+        patch_record(node->record_at,node->record);
+        if(image.joliet)patch_record(node->joliet_record_at,node->joliet_record);
+    }
+    auto expected=image.descriptors;
+    for(auto& [lba,vd]:expected) {
+        Bytes old(vd.begin()+80,vd.begin()+88);
+        both(vd,80,static_cast<std::uint32_t>(size/block));
+        patch(std::uint64_t(lba)*block+80,std::move(old),
+              Bytes(vd.begin()+80,vd.begin()+88));
+    }
+    out.flush();need(bool(out),"cannot flush coordinated ISO stage");out.close();
+    Image checked(staged,true);
+    need(checked.udf_bridge && checked.size==size &&
+         checked.descriptors==expected &&
+         checked.boot_regions==image.boot_regions &&
+         checked.boot_entries==image.boot_entries &&
+         checked.boot_lbas==image.boot_lbas &&
+         checked.boot_descriptor_lbas==image.boot_descriptor_lbas,
+         "coordinated ISO descriptors or boot resources changed");
+    auto verify=[&](auto&& self,const Node& a,const Node& b)->void {
+        const auto found=sections.find(&a);
+        const auto lba=found==sections.end()?a.lba:found->second.lba;
+        const auto length=found==sections.end()?a.size:found->second.length;
+        auto parts=a.sections;
+        if(found!=sections.end())parts={found->second};
+        need(a.name==b.name && a.logical==b.logical &&
+             a.directory==b.directory && lba==b.lba && length==b.size &&
+             a.identifier==b.identifier && a.joliet_identifier==b.joliet_identifier &&
+             a.record_at==b.record_at && a.joliet_record_at==b.joliet_record_at &&
+             parts==b.sections && updated_record(a.record,a)==b.record &&
+             updated_record(a.joliet_record,a)==b.joliet_record &&
+             a.children.size()==b.children.size(),
+             "coordinated ISO/Joliet namespace differs from edit plan");
+        for(std::size_t i=0;i<a.children.size();++i)
+            self(self,*a.children[i],*b.children[i]);
+    };
+    verify(verify,*image.root,*checked.root);
+    checked.file.close();
+    const Disc final_udf(staged);
+    need(final_udf.format()=="UDF","coordinated image lost its UDF namespace");
+    for(const auto& [key,node]:targets) {
+        const auto& section=sections.at(node);
+        const auto item=std::find_if(final_udf.items().begin(),final_udf.items().end(),
+            [&](const Item& v){return v.path==key && !v.directory;});
+        need(item!=final_udf.items().end() && item->size==section.length &&
+             !item->extents.empty() &&
+             item->extents.front().offset==std::uint64_t(section.lba)*block,
+             "final ISO/Joliet/UDF file mapping differs");
+    }
+}
 void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                                   Image& image,
                                   const std::vector<ArchiveChange>& changes,
@@ -1723,26 +1846,88 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
          "ISO/UDF metadata edit requires bounded El Torito boot images");
     // ISO-visible objects are immutable in this mode. Shared ISO/UDF file
     // replacements are handled exclusively by the equal-length patcher.
-    std::vector<std::string> iso_files;
+    std::map<std::string,const Node*> iso_files;
     auto gather=[&](auto&& self,const Node& node,const std::string& prefix)->void {
         for(const auto& child:node.children) {
             const auto key=prefix.empty()?child->logical:prefix+"/"+child->logical;
-            iso_files.push_back(upper(key));
+            need(iso_files.emplace(upper(key),child.get()).second,
+                 "ambiguous ISO/UDF path");
             if(child->directory)self(self,*child,key);
         }
     };
     gather(gather,*image.root,"");
-    for(const auto& change:changes) {
-        const auto key=upper(edit_path(change.path));
-        need(std::find(iso_files.begin(),iso_files.end(),key)==iso_files.end(),
-             "ISO-visible path requires coordinated ISO/UDF metadata editing");
+    CoordinatedIsoUpdate plan;
+    std::map<std::string,const Node*> shared;
+    if(std::any_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
+            return iso_files.count(upper(edit_path(c.path)))!=0;
+        })) {
+        need(!image.hybrid_system_area && !image.iso_system_use,
+             "shared ISO/UDF resize needs a plain ISO/Joliet bridge");
+        const Disc udf(path);
+        for(const auto& change:changes) {
+            const auto key=edit_path(change.path);
+            const auto found=iso_files.find(upper(key));
+            need(found!=iso_files.end() && !found->second->directory &&
+                 !change.remove && !change.directory &&
+                 std::filesystem::is_regular_file(
+                     std::filesystem::symlink_status(change.source)),
+                 "shared ISO/UDF edits require existing regular files");
+            const auto* node=found->second;
+            const auto item=std::find_if(udf.items().begin(),udf.items().end(),
+                [&](const Item& v){return v.path==key && !v.directory;});
+            need(item!=udf.items().end() && item->size==node->size &&
+                 item->size>0 && item->inline_data.empty() &&
+                 item->extents.size()==1 && !item->extents[0].sparse &&
+                 item->extents[0].offset==std::uint64_t(node->lba)*block &&
+                 item->extents[0].length==node->size,
+                 "ISO and UDF original shared extents disagree");
+            const auto length=std::filesystem::file_size(change.source);
+            need(length>0 && length<=0xffffffffull,
+                 "shared replacement exceeds single ISO extent bounds");
+            protect_boot(*node,image.boot_lbas);
+            for(const auto& [at,bytes]:image.boot_regions)
+                need(!intersect(item->extents[0].offset,item->size,at,bytes),
+                     "shared replacement overlaps boot data");
+            need(node->record_at && (!image.joliet || node->joliet_record_at),
+                 "missing shared ISO directory record location");
+            plan.shared_replacements.insert(key);
+            shared.emplace(key,node);
+            plan.metadata_writes.emplace_back(node->record_at+2,16);
+            if(image.joliet)plan.metadata_writes.emplace_back(node->joliet_record_at+2,16);
+        }
+        for(const auto& [lba,vd]:image.descriptors) {
+            (void)vd;
+            plan.metadata_writes.emplace_back(std::uint64_t(lba)*block+80,8);
+        }
+        // Verify every planned record field is disjoint from immutable
+        // payload, boot resources, path tables and existing UDF anchors.
+        std::sort(plan.metadata_writes.begin(),plan.metadata_writes.end());
+        std::uint64_t end=0;
+        for(const auto& [at,bytes]:plan.metadata_writes) {
+            need(at>=end && at<=image.size && bytes<=image.size-at,
+                 "overlapping or invalid shared ISO metadata fields");
+            end=at+bytes;
+            for(const auto* ranges:{&image.boot_regions,&image.udf_metadata_regions,
+                                   &image.iso_auxiliary_regions})
+                for(const auto& [start,length]:*ranges)
+                    need(!intersect(at,bytes,start,length),
+                         "shared ISO metadata field overlaps protected data");
+            for(const auto& [key,node]:iso_files) {
+                (void)key;
+                if(!node->directory)each_extent(*node,[&](auto start,auto length) {
+                    need(!intersect(at,bytes,start,length),
+                         "shared ISO metadata field overlaps a file payload");
+                });
+            }
+        }
     }
     // Release the original input handle so Windows can atomically replace
     // the image after the staged UDF writer and boot validator succeed.
     image.file.close();
     const EditStageValidator validate=
-        [&path,&image,&progress](const std::filesystem::path& staged) {
-            protect_iso_udf_stage(path,staged,image,progress);
+        [&path,&image,&progress,&shared,&plan](const std::filesystem::path& staged) {
+            if(shared.empty())protect_iso_udf_stage(path,staged,image,progress);
+            else coordinate_shared_bridge_stage(path,staged,image,shared,plan,progress);
         };
     // UDF may advertise free blocks that ISO9660 owns exclusively, e.g.
     // boot.catalog, BIOS/EFI image extents or a shared old ISO filename.
@@ -1769,7 +1954,8 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
             nodes.push_back(child.get());
         need(nodes.size()<=200000,"ISO/UDF immutable namespace exceeds limit");
     }
-    edit_udf(path,changes,progress,true,validate,immutable);
+    edit_udf(path,changes,progress,true,validate,immutable,
+             shared.empty()?nullptr:&plan);
 }
 }
 void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {

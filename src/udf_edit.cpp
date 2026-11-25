@@ -1802,7 +1802,8 @@ void create_udf_type1_batch(const std::filesystem::path& image,Type1& volume,
                             const std::vector<ArchiveChange>& changes,
                             const EditProgress& progress,bool allow_bridge,
                             const EditStageValidator& validate_stage,
-                            const ReadonlyAppendPlan* mastering=nullptr);
+                            const ReadonlyAppendPlan* mastering=nullptr,
+                            const CoordinatedIsoUpdate* coordinated=nullptr);
 
 // Allocate one FE and optionally a contiguous ShortAD run for file data.
 // Embedded or external parent directories may grow to a larger contiguous
@@ -2173,7 +2174,8 @@ std::uint64_t replacement_capacity(const Fe& fe) {
 
 void validate_udf_existing_change(const Type1& volume,
                                   const ArchiveChange& change,
-                                  bool allow_relocation=false) {
+                                  bool allow_relocation=false,
+                                  bool preserve_shared_payload=false) {
         const auto name=edit_path(change.path);
         const auto file_it=volume.files().find(name);
         const auto dir_it=volume.directory_links().find(name);
@@ -2205,7 +2207,7 @@ void validate_udf_existing_change(const Type1& volume,
         need(!volume.overlaps_external(target.fe.at,block),
              "UDF file descriptor intersects immutable ISO/boot metadata");
         for(const auto& run:target.fe.runs)
-            need(!volume.overlaps_external(
+            need(preserve_shared_payload || !volume.overlaps_external(
                      run.at,std::uint64_t(run.blocks)*block),
                  "UDF file data intersects immutable ISO/boot extent");
         if(!change.remove) {
@@ -2239,7 +2241,8 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                             const std::vector<ArchiveChange>& changes,
                             const EditProgress& progress,bool allow_bridge,
                             const EditStageValidator& validate_stage,
-                            const ReadonlyAppendPlan* mastering) {
+                            const ReadonlyAppendPlan* mastering,
+                            const CoordinatedIsoUpdate* coordinated) {
     need(!changes.empty() && changes.size()<=max_items &&
          volume.has_allocation_map(),
          "UDF transaction needs a valid allocation map and changes");
@@ -2276,7 +2279,11 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         need(changed_names.insert(fold(key)).second,
              "UDF batch contains duplicate or case-colliding changes");
         if(volume.files().count(key) || volume.directory_links().count(key)) {
-            validate_udf_existing_change(volume,change,mastering!=nullptr);
+            const bool shared=coordinated &&
+                coordinated->shared_replacements.count(key)!=0;
+            need(!shared || (mastering && !change.remove && !change.directory),
+                 "shared ISO/UDF replacement needs append mastering");
+            validate_udf_existing_change(volume,change,mastering!=nullptr,shared);
             existing_changes.push_back(change);
             continue;
         }
@@ -2507,7 +2514,11 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         need(header<=block,"UDF replacement FE allocation header exceeds sector");
         std::fill(plan.fe.begin()+static_cast<std::ptrdiff_t>(header),
                   plan.fe.end(),std::uint8_t{0});
-        const bool embedded=plan.length<=block-header;
+        const bool shared=coordinated &&
+            coordinated->shared_replacements.count(edit_path(change.path))!=0;
+        need(!shared || (plan.length>0 && plan.length<=0xffffffffull),
+             "shared replacement exceeds single ISO record size");
+        const bool embedded=!shared && plan.length<=block-header;
         const auto blocks=embedded?0ull:(plan.length+block-1u)/block;
         if(!embedded) {
             need(header+8u<=block,"UDF replacement FE has no ShortAD slots");
@@ -2955,7 +2966,8 @@ void edit_udf(const std::filesystem::path& image,
               const std::vector<ArchiveChange>& changes,
               const EditProgress& progress,bool allow_bridge,
               const EditStageValidator& validate_stage,
-              const EditProtectedRanges& protected_ranges) {
+              const EditProtectedRanges& protected_ranges,
+              const CoordinatedIsoUpdate* coordinated) {
     edit_tick(progress);
     need(!allow_bridge || bool(validate_stage),
          "ISO/UDF Bridge writes require a staged ISO/boot validator");
@@ -2969,6 +2981,30 @@ void edit_udf(const std::filesystem::path& image,
          "ISO/UDF Bridge metadata writes need protected ISO ranges");
     volume.protect_external_ranges(protected_ranges);
     need(!changes.empty(),"no UDF changes");
+    if(coordinated) {
+        need(allow_bridge && validate_stage &&
+             volume.partition_access_type()==1 && !volume.has_allocation_map() &&
+             coordinated->shared_replacements.size()==changes.size() &&
+             !coordinated->metadata_writes.empty(),
+             "shared ISO/UDF resize requires read-only Type-1 mastering");
+        for(const auto& change:changes)
+            need(!change.remove && !change.directory &&
+                 volume.files().count(edit_path(change.path)) &&
+                 coordinated->shared_replacements.count(edit_path(change.path)),
+                 "invalid coordinated replacement target");
+        for(const auto& [at,bytes]:coordinated->metadata_writes) {
+            need(bytes && at<=volume.image_size() &&
+                 bytes<=volume.image_size()-at,
+                 "coordinated ISO field outside source image");
+            for(const auto& object:volume.intervals())
+                need(!intersects({at,bytes},object.range),
+                     "coordinated ISO field overlaps a live UDF object");
+        }
+        auto plan=volume.prepare_readonly_append(changes,protected_ranges);
+        create_udf_type1_batch(image,volume,changes,progress,true,
+                               validate_stage,&plan,coordinated);
+        return;
+    }
     if(volume.partition_access_type()==1 &&
        !volume.has_allocation_map() &&
        std::any_of(changes.begin(),changes.end(),[&](const ArchiveChange& c) {

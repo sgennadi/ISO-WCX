@@ -4,6 +4,7 @@
 #include <utility>
 #include <functional>
 #include <string>
+#include <set>
 #include <vector>
 #include <stdexcept>
 namespace iso_wcx {
@@ -26,12 +27,18 @@ using EditStageValidator = std::function<void(const std::filesystem::path&)>;
 // image validator remains mandatory independently of this preflight.
 using EditProtectedRanges =
     std::vector<std::pair<std::uint64_t,std::uint64_t>>;
+// Explicit coordinator contract: old shared data remains immutable.
+struct CoordinatedIsoUpdate {
+    std::set<std::string> shared_replacements;
+    EditProtectedRanges metadata_writes;
+};
 // UDF Type-1 Preview: plain-UDF writes by default. Bridge writes are opt-in
 // and MUST supply an ISO/El Torito protection validator.
 void edit_udf(const std::filesystem::path&, const std::vector<ArchiveChange>&,
               const EditProgress& = {}, bool allow_bridge = false,
               const EditStageValidator& = {},
-              const EditProtectedRanges& = {});
+              const EditProtectedRanges& = {},
+              const CoordinatedIsoUpdate* = nullptr);
 // Transactional native FAT12/16/32 editor: exact raw/fixed VHD filesystems.
 void edit_dynamic_vhd(const std::filesystem::path&,
                       const std::vector<ArchiveChange>&,

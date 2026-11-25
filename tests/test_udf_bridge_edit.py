@@ -239,6 +239,56 @@ def main(editor,inspector):
         assert image.read_bytes()==before, (
             'unknown El Torito boot extent allowed a UDF metadata edit')
 
+        # Read-only shared extent with a real closed LVID. Exercise
+        # both growth and shrink while retaining the original boot bytes.
+        from test_iso_edit import fixture
+        for j in (False,True):
+            common=descriptor_bridge(boot=True,boot_count=4,writable=True)
+            struct.pack_into('<I',common,260*B+184,1)
+            common[260*B+56:260*B+96]=bytes(40)
+            update_tag(common,260*B,512)
+            struct.pack_into('<I',common,INTEGRITY_LBA*B+80,0)
+            update_tag(common,INTEGRITY_LBA*B,88,INTEGRITY_LBA)
+            fe=302*B
+            struct.pack_into('<H',common,fe+34,0)
+            struct.pack_into('<III',common,fe+172,8,5,3)
+            struct.pack_into('<Q',common,fe+64,1)
+            update_tag(common,fe,184,2)
+            common[303*B:303*B+5]=b'world'
+            if j:
+                common[23*B:24*B]=common[19*B:20*B]
+                common[19*B:20*B]=common[18*B:19*B]
+                common[18*B:19*B]=common[17*B:18*B]
+                common[17*B:18*B]=fixture(joliet=True)[17*B:18*B]
+                both(common,17*B+80,len(common)//B)
+                jr=iso_record(22,B,2,b'\0')+iso_record(22,B,2,b'\1')
+                jr+=iso_record(303,5,0,'hello;1'.encode('utf-16-be'))
+                common[22*B:23*B]=jr.ljust(B,b'\0')
+            image.write_bytes(common)
+            for i,body in enumerate((b'SHARED FILE'*1200,b'shorter')):
+                source.write_bytes(body)
+                original=image.read_bytes()
+                run([editor,str(image),'add','hello',str(source)])
+                changed=image.read_bytes()
+                assert len(changed)>len(original)
+                assert changed[:16*B]==common[:16*B]
+                assert changed[24*B:26*B]==common[24*B:26*B]
+                assert changed[303*B:303*B+5]==b'world'
+                assert read_image(image)['hello']==body
+                if j: assert read_image(image,True)['hello']==body
+                target=root/f'coordinated-{j}-{i}'
+                run([inspector,str(image),'--extract',str(target)])
+                assert (target/'hello').read_bytes()==body
+                assert struct.unpack_from('<I',changed,16*B+80)[0]==len(changed)//B
+                if j:
+                    assert struct.unpack_from('<I',changed,17*B+80)[0]==len(changed)//B
+            before=image.read_bytes()
+            run([editor,str(image),'delete','hello'],expected=1)
+            assert image.read_bytes()==before
+            run([editor,str(image),'cancel','hello',str(source)],expected=1)
+            assert image.read_bytes()==before
+            assert not list(root.glob('.iso-wcx-edit-*'))
+
         def rejected(operation,name,content=b'EARTH',boot=False,shared=True):
             image.write_bytes(descriptor_bridge(boot=boot,shared=shared))
             source.write_bytes(content)
