@@ -1281,7 +1281,9 @@ HybridTailPlan plan_hybrid_tail(Image& image,const EditProgress& progress) {
         need(at>=volume,"ISO tail begins inside protected partition metadata");
         plan.limit=std::min(plan.limit,at/block);
     }
-    need(plan.first<plan.limit,"hybrid ISO has no verified tail capacity");
+    need(plan.first<=plan.limit &&
+         (image.gpt_hybrid || plan.first<plan.limit),
+         "hybrid ISO has no verified tail capacity");
     constexpr std::uint64_t max_padding=256ull*1024*1024;
     need((plan.limit-plan.first)*block<=max_padding,
          "hybrid ISO padding exceeds 256 MiB inspection budget");
@@ -1295,6 +1297,116 @@ HybridTailPlan plan_hybrid_tail(Image& image,const EditProgress& progress) {
         at+=count;
     }
     return plan;
+}
+// Grow a standard GPT disk only by appending new ISO data beyond the
+// entire original image. Existing partitions are never resized or moved.
+// The old backup GPT is removed after its exact replacement is prepared.
+struct GptGrowthPlan {
+    std::uint64_t old_backup{},new_table{},new_header{},physical_size{};
+    std::uint64_t logical_blocks{},mbr_length_at{};
+    Bytes mbr,primary,backup,entries;
+};
+GptGrowthPlan plan_gpt_growth(Image& image,std::uint64_t required) {
+    need(image.gpt_hybrid && !image.udf_bridge && !image.iso_system_use &&
+         image.boot_regions_bounded,
+         "GPT growth requires a plain, bounded ISO/Joliet hybrid");
+    GptGrowthPlan plan;
+    plan.mbr=image.read(0,512);
+    unsigned protective=0;
+    for(std::size_t i=0;i<4;++i) {
+        const auto at=446u+i*16u;
+        if(plan.mbr[at+4]==0xee) {
+            need(++protective==1,"duplicate protective MBR entry");
+            plan.mbr_length_at=at+12;
+        } else need(std::all_of(plan.mbr.begin()+static_cast<std::ptrdiff_t>(at),
+                                plan.mbr.begin()+static_cast<std::ptrdiff_t>(at+16),
+                                [](auto c){return c==0;}),
+                    "GPT growth cannot resize a hybrid MBR container");
+    }
+    need(protective==1,"GPT growth requires a protective-only MBR");
+    plan.primary=image.read(512,512);
+    plan.backup=image.read(image.size-512,512);
+    need(le(plan.primary,12)==92 && le(plan.backup,12)==92,
+         "GPT growth requires standard 92-byte headers");
+    const auto entries_bytes=std::uint64_t(le(plan.primary,80))*le(plan.primary,84);
+    const auto table_sectors=(entries_bytes+511)/512;
+    const auto old_table=le64(plan.backup,72);
+    const auto old_last=image.size/512-1;
+    need(table_sectors && table_sectors<=32768 &&
+         old_table<old_last && table_sectors==old_last-old_table &&
+         image.gpt_last_usable==old_table-1 &&
+         old_table*512>=std::uint64_t(image.declared_volume_blocks)*block,
+         "GPT backup is not a standard, separate trailing array");
+    plan.old_backup=old_table*512;
+    plan.entries=image.read(plan.old_backup,static_cast<std::size_t>(table_sectors*512));
+    // Only the MBR size and primary GPT header may change in the system
+    // area. Ensure no named ISO resource or boot data aliases them.
+    auto check=[&](std::uint64_t at,std::uint64_t bytes) {
+        need(!intersect(at,bytes,plan.mbr_length_at,4) &&
+             !intersect(at,bytes,512,512) &&
+             !intersect(at,bytes,plan.old_backup,image.size-plan.old_backup),
+             "GPT growth metadata aliases live ISO or boot data");
+    };
+    std::vector<const Node*> nodes{image.root.get()};
+    for(std::size_t i=0;i<nodes.size();++i) {
+        each_extent(*nodes[i],check);
+        for(const auto& child:nodes[i]->children)nodes.push_back(child.get());
+        need(nodes.size()<=200000,"GPT growth namespace exceeds validation limit");
+    }
+    for(const auto* ranges:{&image.joliet_regions,&image.boot_regions,
+                           &image.iso_auxiliary_regions})
+        for(const auto& [at,bytes]:*ranges)check(at,bytes);
+    const auto original=image.size/block;
+    const auto trailer=(table_sectors+1+3)/4;
+    need(required && original<0xffffffffull &&
+         required<0xffffffffull-original &&
+         trailer<0xffffffffull-original-required,
+         "GPT growth exceeds ISO address space");
+    plan.logical_blocks=original+required;
+    plan.physical_size=(plan.logical_blocks+trailer)*block;
+    const auto final_lba=plan.physical_size/512-1;
+    plan.new_header=final_lba*512;
+    plan.new_table=(final_lba-table_sectors)*512;
+    need(plan.new_table>=plan.logical_blocks*block,
+         "new GPT backup overlaps remastered ISO volume");
+    auto put64le=[](Bytes& b,std::size_t at,std::uint64_t v) {
+        put(b,at,static_cast<std::uint32_t>(v));
+        put(b,at+4,static_cast<std::uint32_t>(v>>32));
+    };
+    auto refresh=[](Bytes& header) {
+        put(header,16,0);
+        put(header,16,gpt_crc32(Bytes(header.begin(),header.begin()+92)));
+    };
+    put(plan.mbr,static_cast<std::size_t>(plan.mbr_length_at),
+        static_cast<std::uint32_t>(std::min<std::uint64_t>(final_lba,0xffffffffull)));
+    put64le(plan.primary,32,final_lba);
+    put64le(plan.primary,48,plan.new_table/512-1);
+    refresh(plan.primary);
+    put64le(plan.backup,24,final_lba);
+    put64le(plan.backup,48,plan.new_table/512-1);
+    put64le(plan.backup,72,plan.new_table/512);
+    refresh(plan.backup);
+    return plan;
+}
+void write_gpt_growth(std::fstream& out,const GptGrowthPlan& plan,
+                      std::uint64_t original_size,std::uint64_t next,
+                      const EditProgress& progress) {
+    need(next==plan.logical_blocks,"GPT growth allocation differs from preflight");
+    auto write_at=[&](std::uint64_t at,const Bytes& bytes) {
+        edit_tick(progress);
+        out.clear();out.seekp(static_cast<std::streamoff>(at));
+        need(bool(out),"cannot seek GPT growth metadata");
+        write(out,bytes);
+    };
+    write_at(0,plan.mbr);
+    write_at(512,plan.primary);
+    // The old table/header are outside all original ISO and partition
+    // extents. Do not leave an obsolete backup claiming the old disk end.
+    write_at(plan.old_backup,Bytes(static_cast<std::size_t>(
+                                  original_size-plan.old_backup),0));
+    write_at(next*block,Bytes(static_cast<std::size_t>(plan.new_table-next*block),0));
+    write_at(plan.new_table,plan.entries);
+    write_at(plan.new_header,plan.backup);
 }
 void protect_hybrid_target(const Node& node,const Image& image) {
     each_extent(node,[&](std::uint64_t at,std::uint64_t bytes) {
@@ -2820,6 +2932,38 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
                 n.size=size;n.sections.clear();n.source=change.source;}
         }
     }
+    std::vector<Node*> all{image.root.get()},dirs{image.root.get()};
+    for(std::size_t i=0;i<all.size();++i){for(auto& c:all[i]->children){all.push_back(c.get());if(c->directory)dirs.push_back(c.get());}need(all.size()<=200000&&dirs.size()<=65535,"ISO edit tree too large");}
+    std::optional<GptGrowthPlan> gpt_growth;
+    if(hybrid_tail) {
+        std::uint64_t required=0;
+        for(const auto* n:all)if(!n->source.empty()) {
+            // Hybrid parsing still rejects multi-extent directory records.
+            need(n->size<=0xfffff800ull,
+                 "hybrid multi-extent file writing is not yet supported");
+            required+=(n->size+block-1)/block;
+        }
+        const unsigned views=image.joliet?2u:1u;
+        std::array<std::uint64_t,2> table_bytes{};
+        for(auto* d:dirs) {
+            std::size_t max_directory=0;
+            for(unsigned view=0;view<views;++view) {
+                max_directory=std::max(max_directory,directory_data(*d,view).size());
+                const auto id=d==image.root.get()?1u:view_id(*d,view).size();
+                table_bytes[view]+=8+id+(id%2);
+            }
+            required+=views*(max_directory/block);
+        }
+        for(unsigned view=0;view<views;++view)
+            required+=2*((table_bytes[view]+block-1)/block);
+        if(required>hybrid_tail->limit-hybrid_tail->first) {
+            need(image.gpt_hybrid,
+                 "hybrid ISO has insufficient verified padding; partition resize required");
+            gpt_growth=plan_gpt_growth(image,required);
+            hybrid_tail->first=image.size/block;
+            hybrid_tail->limit=gpt_growth->logical_blocks;
+        }
+    }
     EditTransaction tx(path);std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary|std::ios::trunc);need(bool(out),"cannot create staged ISO");image.file.clear();image.file.seekg(0);copy_bytes(image.file,out,image.size,progress);
     std::uint64_t next=hybrid_tail?hybrid_tail->first:image.size/block;
     const auto capacity=[&](std::uint64_t blocks) {
@@ -2832,8 +2976,6 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         out.seekp(static_cast<std::streamoff>(next*block));
         need(bool(out),"cannot seek verified hybrid ISO tail");
     }
-    std::vector<Node*> all{image.root.get()},dirs{image.root.get()};
-    for(std::size_t i=0;i<all.size();++i){for(auto& c:all[i]->children){all.push_back(c.get());if(c->directory)dirs.push_back(c.get());}need(all.size()<=200000&&dirs.size()<=65535,"ISO edit tree too large");}
     for(auto* n:all)if(!n->source.empty()) {
         capacity((n->size+block-1)/block);
         n->lba=static_cast<std::uint32_t>(next);
@@ -2906,17 +3048,38 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         for(auto& [lba,vd]:image.descriptors)if((vd[0]==2)==(view==1)){both(vd,132,table_size);put(vd,140,table_lba[0]);put(vd,144,0);put(vd,148,table_lba[1],4,true);put(vd,152,0);auto r=record(*image.root,Bytes{0},view);std::copy(r.begin(),r.end(),vd.begin()+156);(void)lba;}
     }
     for(auto& [lba,vd]:image.descriptors){both(vd,80,static_cast<std::uint32_t>(next));out.seekp(std::uint64_t(lba)*block);write(out,vd);}
+    if(gpt_growth)write_gpt_growth(out,*gpt_growth,image.size,next,progress);
     out.flush();need(bool(out),"ISO flush failed");out.close();image.file.close();
     // Reparse the staged namespaces and reject changed El Torito references
     // even if the ISO directory metadata itself remains parseable.
     {
         Image verified(tx.output);
-        need(verified.size==(hybrid_tail?image.size:next*block) &&
+        need(verified.size==(gpt_growth?gpt_growth->physical_size:
+                                 hybrid_tail?image.size:next*block) &&
              verified.declared_volume_blocks==next,
              "staged ISO physical or logical size mismatch");
         if(hybrid_tail) {
+            auto expected_regions=image.hybrid_protected_regions;
+            if(gpt_growth) {
+                const auto& g=*gpt_growth;
+                for(auto& [at,length]:expected_regions) {
+                    if(at==image.size-512 && length==512)at=g.new_header;
+                    else if(at==g.old_backup && length==g.entries.size())at=g.new_table;
+                }
+                need(verified.gpt_first_usable==image.gpt_first_usable &&
+                     verified.gpt_last_usable==g.new_table/512-1 &&
+                     verified.read(0,512)==g.mbr &&
+                     verified.read(512,512)==g.primary &&
+                     verified.read(g.new_table,g.entries.size())==g.entries &&
+                     verified.read(g.new_header,512)==g.backup,
+                     "relocated GPT metadata differs from growth plan");
+                const auto old=verified.read(g.old_backup,
+                    static_cast<std::size_t>(image.size-g.old_backup));
+                need(std::all_of(old.begin(),old.end(),[](auto c){return c==0;}),
+                     "obsolete GPT backup was not cleared");
+            }
             need(verified.hybrid_system_area && verified.gpt_hybrid==image.gpt_hybrid &&
-                 verified.hybrid_protected_regions==image.hybrid_protected_regions &&
+                 verified.hybrid_protected_regions==expected_regions &&
                  verified.descriptors==image.descriptors,
                  "hybrid partition geometry or ISO descriptor readback changed");
             const auto wanted=index_iso_tree(*image.root);
@@ -3010,7 +3173,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     // boot catalog or full boot-image byte, including emulated floppy/HDD
     // payloads. Only protected ranges in the original prefix are compared.
     OpticalEditGuard guard(image.size);
-    guard.protect(0,16ull*block);
+    if(!gpt_growth)guard.protect(0,16ull*block);
     for(const auto lba:image.boot_descriptor_lbas)
         guard.protect(std::uint64_t(lba)*block,block);
     for(const auto& [offset,length]:image.boot_regions)
@@ -3022,8 +3185,12 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         // PVD/SVD fields and used zero tail. Old metadata, payloads,
         // MBR, GPT (including its backup), ESP and unused pad are immutable.
         auto writes=hybrid_tail->descriptor_fields;
-        writes.emplace_back(hybrid_tail->first*block,
-                            (next-hybrid_tail->first)*block);
+        if(gpt_growth) {
+            writes.emplace_back(gpt_growth->mbr_length_at,4);
+            writes.emplace_back(512,512);
+            writes.emplace_back(gpt_growth->old_backup,image.size-gpt_growth->old_backup);
+        } else writes.emplace_back(hybrid_tail->first*block,
+                                   (next-hybrid_tail->first)*block);
         std::sort(writes.begin(),writes.end());
         std::uint64_t cursor=0;
         for(const auto& [at,bytes]:writes) {
@@ -3033,9 +3200,15 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
             cursor=at+bytes;
         }
         guard.protect(cursor,image.size-cursor);
-        for(const auto& [at,bytes]:image.hybrid_protected_regions)
-            guard.protect(at,bytes);
-        guard.verify(path,tx.output,progress);
+        if(gpt_growth) {
+            // All original bytes outside the explicitly authorized
+            // metadata fields are protected, including every partition.
+            guard.verify_appended(path,tx.output,progress);
+        } else {
+            for(const auto& [at,bytes]:image.hybrid_protected_regions)
+                guard.protect(at,bytes);
+            guard.verify(path,tx.output,progress);
+        }
     } else guard.verify_appended(path,tx.output,progress);
     tx.commit(progress);
 }

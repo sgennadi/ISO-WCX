@@ -646,6 +646,53 @@ def main(binary, reader=None):
         run('add','NEW.TXT',False)
         assert image.read_bytes()==full
         source.write_bytes(b'RENEW')
+        # Exhaust the bounded tail on a standard protective-only GPT.
+        # Growth must relocate the backup but preserve partition entries,
+        # boot code, ESP payload, disk identity and all original ISO data.
+        image.write_bytes(gpt)
+        old_table=len(gpt)//512-33
+        old_entries=gpt[old_table*512:old_table*512+128*128]
+        big_payload=b'G'*(120*B+37)
+        source.write_bytes(big_payload)
+        run('add','GROW.BIN')
+        def verify_grown_gpt(raw,previous):
+            n=len(raw)//512
+            assert len(raw)>len(previous)
+            assert raw[:454]==previous[:454]
+            assert struct.unpack_from('<I',raw,458)[0]==n-1
+            assert raw[462:512]==previous[462:512]
+            assert raw[120*512:128*512]==gpt[120*512:128*512]
+            assert raw[2*512:2*512+128*128]==old_entries
+            for at,own,other in ((512,1,n-1),((n-1)*512,n-1,1)):
+                h=bytearray(raw[at:at+512])
+                assert h[:8]==b'EFI PART'
+                assert struct.unpack_from('<QQ',h,24)==(own,other)
+                assert h[56:72]==gpt[512+56:512+72]
+                crc=struct.unpack_from('<I',h,16)[0]
+                struct.pack_into('<I',h,16,0)
+                assert zlib.crc32(h[:92])==crc
+                table,num,entry_size,array_crc=struct.unpack_from('<QIII',h,72)
+                entries=raw[table*512:table*512+num*entry_size]
+                assert entries==old_entries and zlib.crc32(entries)==array_crc
+                assert struct.unpack_from('<Q',h,48)[0]==n-34
+            assert raw[len(previous)-33*512:len(previous)]==bytes(33*512)
+            assert struct.unpack_from('<I',raw,16*B+80)[0]*B<=len(raw)-33*512
+        first_growth=image.read_bytes()
+        verify_grown_gpt(first_growth,gpt)
+        assert read_image(image)=={'HELLO.TXT':b'world','GROW.BIN':big_payload}
+        validate_path_tables(image)
+        # A second edit has no usable ISO-block gap before the backup,
+        # so exercises growth again instead of relying on the first pad.
+        run('mkdir','GROW_DIR')
+        second_growth=image.read_bytes()
+        verify_grown_gpt(second_growth,first_growth)
+        assert read_image(image)=={'HELLO.TXT':b'world','GROW.BIN':big_payload,
+                                   'GROW_DIR/':None}
+        validate_path_tables(image)
+        before=image.read_bytes()
+        run('cancel','GROW.BIN',False)
+        assert image.read_bytes()==before
+        source.write_bytes(b'RENEW')
         # Malformed primary/backup headers or tables must fail closed.
         for offset in (512+16,len(gpt)-512+16,2*512+48,
                        len(gpt)-33*512+48):
