@@ -1431,12 +1431,13 @@ void write_gpt_growth(std::fstream& out,const GptGrowthPlan& plan,
 // EFI partitions. Only explicit, consistent CHS geometry is accepted.
 struct MbrGrowthPlan {
     std::uint64_t logical_blocks{},physical_size{};
+    std::uint64_t alignment_blocks{},geometry_sectors{};
     std::size_t end_chs_at{},length_at{};
     Bytes mbr;
 };
 MbrGrowthPlan plan_mbr_growth(Image& image,const HybridTailPlan& tail,
-                             std::uint64_t required) {
-    need(!image.gpt_hybrid && !image.udf_bridge &&
+                             std::uint64_t required,bool udf_mastering=false) {
+    need(!image.gpt_hybrid && image.udf_bridge==udf_mastering &&
          (!image.iso_system_use || (image.hybrid_rr_strict && image.rr_rebuild)) &&
          image.boot_regions_bounded,
          "unsupported MBR growth layout");
@@ -1486,6 +1487,8 @@ MbrGrowthPlan plan_mbr_growth(Image& image,const HybridTailPlan& tail,
          "MBR container length and end CHS disagree");
     // Align both to a cylinder and to an optical sector.
     const auto alignment=geometry*(geometry%4==0?1u:geometry%2==0?2u:4u);
+    plan.alignment_blocks=alignment/4;
+    plan.geometry_sectors=geometry;
     const auto original=image.size/block;
     need(required && required<0xffffffffull-original,
          "MBR growth exceeds ISO addressing limit");
@@ -1993,13 +1996,16 @@ void edit_iso_udf_bridge_equal_length(
 // A single staged-image validator handles create, delete and resize.
 void protect_iso_udf_stage(const std::filesystem::path& original,
                            const std::filesystem::path& staged,
-                           const Image& before,const EditProgress& progress) {
+                           const Image& before,const EditProgress& progress,
+                           const MbrGrowthPlan* mbr_growth=nullptr) {
     need(before.udf_bridge && before.boot_regions_bounded,
          "bootable ISO/UDF validation needs bounded boot extents");
     const auto stage_size=std::filesystem::file_size(staged);
     const bool mastering=stage_size>before.size;
-    need(!before.hybrid_system_area || stage_size==before.size,
-         "partitioned ISO/UDF transaction must not grow or shrink the image");
+    need(!before.hybrid_system_area || stage_size==before.size ||
+         (mastering && mbr_growth && !before.gpt_hybrid &&
+          mbr_growth->physical_size==stage_size),
+         "partitioned ISO/UDF transaction has unplanned physical growth");
     need(std::filesystem::file_size(original)==before.size &&
          stage_size>=before.size,
          "ISO/UDF image size changed during UDF edit");
@@ -2036,7 +2042,11 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
     need(tree_same(tree_same,*before.root,*after.root),
          "ISO9660 namespace changed during UDF-only editing");
     OpticalEditGuard guard(before.size);
-    guard.protect(0,256ull*block); // ISO PVD, VRS, boot/system area
+    if(mbr_growth) {
+        need(mastering && after.read(0,512)==mbr_growth->mbr,
+             "MBR/UDF staged header differs from growth plan");
+        guard.protect(512,256ull*block-512);
+    } else guard.protect(0,256ull*block); // ISO PVD, VRS, boot/system area
     for(const auto& [start,length]:before.hybrid_protected_regions)
         guard.protect(start,length);
     for(const auto& [start,length]:before.boot_regions)
@@ -2903,13 +2913,67 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
             }
         }
     }
+    // ROM mastering may grow a recognized LBA-zero MBR container.
+    // GPT and unknown CHS geometries remain restricted. Do not alter
+    // the fast fixed-size allocator route on rewritable media.
+    std::optional<MbrGrowthPlan> mbr_append;
+    if(image.hybrid_system_area && !image.gpt_hybrid) {
+        const auto info=inspect_udf_edit(path,true,true);
+        if(info.parser_compatible && info.partition_access_type==1 &&
+           !info.allocation_bitmap && !info.allocation_table) {
+            HybridTailPlan snapshot;
+            for(const auto& [key,node]:iso_files) {
+                (void)key;
+                each_extent(*node,[&](auto at,auto length) {
+                    if(length)snapshot.original_extents.emplace_back(at,length);
+                });
+            }
+            each_extent(*image.root,[&](auto at,auto length) {
+                if(length)snapshot.original_extents.emplace_back(at,length);
+            });
+            for(const auto* ranges:{&image.boot_regions,&image.joliet_regions,
+                                   &image.udf_metadata_regions,
+                                   &image.iso_auxiliary_regions,
+                                   &image.hybrid_protected_regions})
+                snapshot.original_extents.insert(snapshot.original_extents.end(),
+                                                 ranges->begin(),ranges->end());
+            mbr_append=plan_mbr_growth(image,snapshot,1,true);
+        }
+    }
     // Release the original input handle so Windows can atomically replace
     // the image after the staged UDF writer and boot validator succeed.
     image.file.close();
     const EditStageValidator validate=
         [&path,&image,&progress,&shared,&plan,&deletion_sectors,
-         &iso_files,&add_tree,adding_shared](const std::filesystem::path& staged) {
-            if(adding_shared)
+         &iso_files,&add_tree,&mbr_append,adding_shared](const std::filesystem::path& staged) {
+            if(mbr_append && std::filesystem::file_size(staged)>image.size) {
+                // UDF already verified the staged filesystem. Update only
+                // the MBR container CHS/length before the independent ISO
+                // validator authorizes the single atomic commit.
+                auto growth=*mbr_append;
+                growth.physical_size=std::filesystem::file_size(staged);
+                const auto sectors=growth.physical_size/512u;
+                need(growth.physical_size%block==0 &&
+                     sectors<=0xffffffffull &&
+                     (growth.physical_size/block)%growth.alignment_blocks==0,
+                     "UDF mastering did not honor MBR geometry");
+                const auto cylinder=std::min<std::uint64_t>(
+                     sectors/growth.geometry_sectors-1,1023);
+                auto& header=growth.mbr;
+                header[growth.end_chs_at+1]=static_cast<unsigned char>(
+                    (header[growth.end_chs_at+1]&0x3fu)|((cylinder>>2)&0xc0u));
+                header[growth.end_chs_at+2]=static_cast<unsigned char>(cylinder&0xffu);
+                put(header,growth.length_at,static_cast<std::uint32_t>(sectors));
+                edit_tick(progress);
+                {
+                    std::fstream out(staged,std::ios::in|std::ios::out|std::ios::binary);
+                    need(bool(out),"cannot update staged MBR/UDF header");
+                    write(out,header);
+                    out.flush();
+                    need(bool(out),"staged MBR/UDF header flush failed");
+                }
+                protect_iso_udf_stage(path,staged,image,progress,&growth);
+            } else if(adding_shared)
                 coordinate_shared_add_stage(path,staged,image,iso_files,plan,
                                             add_tree,progress);
             else if(shared.empty())protect_iso_udf_stage(path,staged,image,progress);
@@ -2948,7 +3012,8 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     }
     edit_udf(path,changes,progress,true,validate,immutable,
              shared.empty() && !adding_shared?nullptr:&plan,
-             image.hybrid_system_area);
+             image.hybrid_system_area,
+             mbr_append?mbr_append->alignment_blocks:0);
 }
 }
 // Keep the write and independent readback phases in separate stack frames.

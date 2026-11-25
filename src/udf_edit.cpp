@@ -975,7 +975,8 @@ public:
     ReadonlyAppendPlan prepare_readonly_append(
             const std::vector<ArchiveChange>& changes,
             const EditProtectedRanges& protected_ranges,
-            std::uint64_t iso_metadata_blocks=0) {
+            std::uint64_t iso_metadata_blocks=0,
+            std::uint64_t mbr_append_alignment_blocks=0) {
         need(partition_access_type_==1 && !bitmap_ && !changes.empty() &&
              changes.size()<=max_items,"unsupported read-only UDF mastering");
         ReadonlyAppendPlan plan;
@@ -1098,7 +1099,19 @@ public:
         const auto main=new_end+iso_metadata_blocks;
         const auto reserve=main+vds_bytes/block;
         const auto integrity_lba=reserve+vds_bytes/block;
-        const auto last=integrity_lba+2+256;
+        auto last=integrity_lba+2+256;
+        if(mbr_append_alignment_blocks) {
+            // Keep the UDF physical-end anchors at N and N-256 after
+            // rounding to the validated MBR CHS/optical-sector alignment.
+            need(mbr_append_alignment_blocks<=65536 &&
+                 old_sectors%mbr_append_alignment_blocks==0,
+                 "invalid MBR/UDF append alignment");
+            const auto aligned=((last+1+mbr_append_alignment_blocks-1)/
+                 mbr_append_alignment_blocks)*mbr_append_alignment_blocks;
+            need(aligned<=0xffffffffull/4,
+                 "MBR/UDF growth exceeds 32-bit partition length");
+            last=aligned-1;
+        }
         need(last+1<max_image/block,
              "UDF mastering descriptor addresses exceed optical limit");
         for(std::size_t j=0;j<sequence.size();++j) {
@@ -2999,22 +3012,32 @@ void edit_udf(const std::filesystem::path& image,
               const EditStageValidator& validate_stage,
               const EditProtectedRanges& protected_ranges,
               const CoordinatedIsoUpdate* coordinated,
-              bool bounded_partitioned_bridge) {
+              bool bounded_partitioned_bridge,
+              std::uint64_t mbr_append_alignment_blocks) {
     edit_tick(progress);
+    need(!mbr_append_alignment_blocks || bounded_partitioned_bridge,
+         "MBR/UDF mastering needs validated partition protection");
     need(!bounded_partitioned_bridge ||
          (allow_bridge && validate_stage && !coordinated),
-         "partitioned ISO/UDF edits require a fixed-size UDF-only transaction");
+         "partitioned ISO/UDF edits require a validated UDF-only transaction");
     need(!allow_bridge || bool(validate_stage),
          "ISO/UDF Bridge writes require a staged ISO/boot validator");
     // Run the strict Type-1 write preflight before the permissive read-only
     // Disc parser. This preserves the precise FSD mapping failure reason
     // even when Disc's general UDF reader cannot resolve that map.
     Type1 volume(image,allow_bridge,bounded_partitioned_bridge);
-    if(bounded_partitioned_bridge)
-        need(volume.has_allocation_map() &&
+    if(bounded_partitioned_bridge) {
+        const bool rom=mbr_append_alignment_blocks &&
+            volume.partition_access_type()==1 && !volume.has_allocation_map();
+        need(rom || (volume.has_allocation_map() &&
              (volume.partition_access_type()==3 ||
-              volume.partition_access_type()==4),
-             "partitioned ISO/UDF requires a rewritable Type-1 allocator; growth is unsupported");
+              volume.partition_access_type()==4)),
+             "partitioned ISO/UDF requires a rewritable allocator or validated MBR ROM mastering");
+        if(rom)
+            for(const auto& object:volume.intervals())
+                need(!intersects({0,512},object.range),
+                     "MBR growth header aliases live UDF data");
+    }
     const Disc before(image);
     need(before.format()=="UDF","not a plain readable UDF volume");
     need(!allow_bridge || !protected_ranges.empty(),
@@ -3068,7 +3091,8 @@ void edit_udf(const std::filesystem::path& image,
                       replacement_capacity(it->second.fe);
            return !volume.files().count(key) && !volume.directories().count(key);
        })) {
-        auto plan=volume.prepare_readonly_append(changes,protected_ranges);
+        auto plan=volume.prepare_readonly_append(changes,protected_ranges,0,
+                                                mbr_append_alignment_blocks);
         create_udf_type1_batch(image,volume,changes,progress,allow_bridge,
                                validate_stage,&plan);
         return;
@@ -3192,10 +3216,11 @@ void edit_udf(const std::filesystem::path& image,
 // deliberately does not claim that a standalone parse authorizes mutation
 // of shared ISO/El Torito extents or guarantees allocation for a file.
 UdfEditInspection inspect_udf_edit(
-    const std::filesystem::path& image,bool allow_bridge) {
+    const std::filesystem::path& image,bool allow_bridge,
+    bool bounded_partitioned_bridge) {
     UdfEditInspection result;
     try {
-        Type1 volume(image,allow_bridge);
+        Type1 volume(image,allow_bridge,bounded_partitioned_bridge);
         result.parser_compatible=true;
         result.allocation_bitmap=volume.has_bitmap();
         result.allocation_table=volume.has_unallocated_table();
