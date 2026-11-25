@@ -2893,6 +2893,241 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
              shared.empty() && !adding_shared?nullptr:&plan);
 }
 }
+// Keep the write and independent readback phases in separate stack frames.
+// In particular, do not carry a capturing capacity closure through the
+// full ISO authoring function. MSVC x64 ASan reported use-after-poison
+// at its invocation in ordinary multi-file F5 batches. No sanitizer
+// instrumentation or validation is disabled.
+static void check_iso_capacity(std::uint64_t next,std::uint64_t blocks,
+                               const std::optional<HybridTailPlan>& hybrid_tail) {
+    need(next<0xffffffffu && blocks<0xffffffffull-next,"ISO size limit");
+    if(hybrid_tail)
+        need(next<=hybrid_tail->limit && blocks<=hybrid_tail->limit-next,
+             "hybrid ISO has insufficient verified padding; partition resize required");
+}
+static std::uint64_t write_iso_rebuild(
+        Image& image,std::fstream& out,const std::vector<Node*>& all,
+        const std::vector<Node*>& dirs,
+        const std::optional<HybridTailPlan>& hybrid_tail,
+        const std::optional<GptGrowthPlan>& gpt_growth,
+        const std::optional<MbrGrowthPlan>& mbr_growth,
+        const EditProgress& progress) {
+    std::uint64_t next=hybrid_tail?hybrid_tail->first:image.size/block;
+    if(hybrid_tail) {
+        out.seekp(static_cast<std::streamoff>(next*block));
+        need(bool(out),"cannot seek verified hybrid ISO tail");
+    }
+    for(auto* n:all)if(!n->source.empty()) {
+        check_iso_capacity(next,(n->size+block-1)/block,hybrid_tail);
+        n->lba=static_cast<std::uint32_t>(next);
+        std::ifstream source(n->source,std::ios::binary);
+        need(bool(source),"cannot open ISO replacement source");
+        // ECMA-119 Level 3 permits multiple records per file. Every
+        // nonfinal section is aligned and fits the 32-bit data length.
+        constexpr std::uint64_t max_section=0xfffff800ull;
+        auto left=n->size;
+        do {
+            const auto bytes=static_cast<std::uint32_t>(
+                std::min(left,max_section));
+            n->sections.push_back({static_cast<std::uint32_t>(next),bytes});
+            copy_bytes(source,out,bytes,progress);
+            write(out,Bytes((block-bytes%block)%block));
+            next+=(std::uint64_t(bytes)+block-1)/block;
+            left-=bytes;
+        } while(left);
+        need(source.peek()==std::char_traits<char>::eof(),
+             "ISO replacement source grew during write");
+    }
+    if(hybrid_tail && image.joliet)
+        for(auto* d:dirs) {
+            const auto bytes=std::max(directory_data(*d,0).size(),
+                                      directory_data(*d,1).size());
+            need(bytes<=0xffffffffu,"hybrid ISO directory too large");
+            d->new_size[0]=d->new_size[1]=static_cast<std::uint32_t>(bytes);
+        }
+    for(unsigned view=0;view<(image.joliet?2u:1u);++view){
+        for(auto* d:dirs){
+            if(!hybrid_tail || !image.joliet)
+                d->new_size[view]=static_cast<std::uint32_t>(directory_data(*d,view).size());
+            check_iso_capacity(next,d->new_size[view]/block,hybrid_tail);
+            d->new_lba[view]=static_cast<std::uint32_t>(next);
+            next+=d->new_size[view]/block;
+        }
+        for(auto* d:dirs){
+            edit_tick(progress);
+            auto bytes=directory_data(*d,view);
+            need(bytes.size()<=d->new_size[view],"ISO directory allocation changed");
+            bytes.resize(d->new_size[view],0);
+            write(out,bytes);
+        }
+        // ISO 9660 path-table numbering must be breadth-first and sorted
+        // by the directory identifier within each parent. Primary and
+        // Joliet namespaces can have different identifier orders.
+        std::vector<Node*> path_dirs{image.root.get()};
+        for(std::size_t parent=0;parent<path_dirs.size();++parent){
+            std::vector<Node*> child_dirs;
+            for(const auto& child:path_dirs[parent]->children)
+                if(child->directory)child_dirs.push_back(child.get());
+            std::sort(child_dirs.begin(),child_dirs.end(),[&](const Node* a,const Node* b){
+                const Bytes& lhs=view?a->joliet_identifier:a->identifier;
+                const Bytes& rhs=view?b->joliet_identifier:b->identifier;
+                const auto count=std::min(lhs.size(),rhs.size());
+                for(std::size_t i=0;i<count;++i)if(lhs[i]!=rhs[i])return lhs[i]<rhs[i];
+                return lhs.size()<rhs.size();
+            });
+            // Adding individually also avoids GCC 14's erroneous optimized
+            // vector range-insert -Wstringop-overflow under -Werror.
+            for(auto* child:child_dirs)path_dirs.push_back(child);
+        }
+        need(path_dirs.size()==dirs.size(),"inconsistent ISO path table directory count");
+        std::map<Node*,unsigned> numbers;
+        for(std::size_t i=0;i<path_dirs.size();++i)
+            numbers[path_dirs[i]]=static_cast<unsigned>(i+1);
+        std::array<std::uint32_t,2> table_lba{};std::uint32_t table_size=0;
+        for(unsigned big=0;big<2;++big){Bytes table;for(auto* d:path_dirs){Bytes id=d==image.root.get()?Bytes{0}:(view?d->joliet_identifier:d->identifier);const auto at=table.size();table.resize(at+8+id.size()+(id.size()%2));table[at]=static_cast<unsigned char>(id.size());put(table,at+2,d->new_lba[view],4,big!=0);put(table,at+6,numbers[d->parent?d->parent:d],2,big!=0);std::copy(id.begin(),id.end(),table.begin()+static_cast<std::ptrdiff_t>(at+8));}
+            table_size=static_cast<std::uint32_t>(table.size());table_lba[big]=static_cast<std::uint32_t>(next);table.resize((table.size()+block-1)/block*block);check_iso_capacity(next,table.size()/block,hybrid_tail);next+=table.size()/block;write(out,table);}
+        for(auto& [lba,vd]:image.descriptors)if((vd[0]==2)==(view==1)){both(vd,132,table_size);put(vd,140,table_lba[0]);put(vd,144,0);put(vd,148,table_lba[1],4,true);put(vd,152,0);auto r=record(*image.root,Bytes{0},view);std::copy(r.begin(),r.end(),vd.begin()+156);(void)lba;}
+    }
+    for(auto& [lba,vd]:image.descriptors){both(vd,80,static_cast<std::uint32_t>(next));out.seekp(std::uint64_t(lba)*block);write(out,vd);}
+    if(gpt_growth)write_gpt_growth(out,*gpt_growth,image.size,next,progress);
+    if(mbr_growth)write_mbr_growth(out,*mbr_growth,next,progress);
+    return next;
+}
+static void verify_iso_rebuild(
+        const std::filesystem::path& staged,const Image& image,
+        const std::vector<ArchiveChange>& changes,std::uint64_t next,
+        const std::optional<HybridTailPlan>& hybrid_tail,
+        const std::optional<GptGrowthPlan>& gpt_growth,
+        const std::optional<MbrGrowthPlan>& mbr_growth,
+        const EditProgress& progress) {
+    // Reparse the staged namespaces and reject changed El Torito references
+    // even if the ISO directory metadata itself remains parseable.
+    {
+        Image verified(staged);
+        need(verified.size==(gpt_growth?gpt_growth->physical_size:
+                                 mbr_growth?mbr_growth->physical_size:
+                                 hybrid_tail?image.size:next*block) &&
+             verified.declared_volume_blocks==next,
+             "staged ISO physical or logical size mismatch");
+        if(hybrid_tail) {
+            auto expected_regions=image.hybrid_protected_regions;
+            if(gpt_growth) {
+                const auto& g=*gpt_growth;
+                for(auto& [at,length]:expected_regions) {
+                    if(at==image.size-512 && length==512)at=g.new_header;
+                    else if(at==g.old_backup && length==g.entries.size())at=g.new_table;
+                }
+                need(verified.gpt_first_usable==image.gpt_first_usable &&
+                     verified.gpt_last_usable==g.new_table/512-1 &&
+                     verified.read(0,512)==g.mbr &&
+                     verified.read(512,512)==g.primary &&
+                     verified.read(g.new_table,g.entries.size())==g.entries &&
+                     verified.read(g.new_header,512)==g.backup,
+                     "relocated GPT metadata differs from growth plan");
+                const auto old=verified.read(g.old_backup,
+                    static_cast<std::size_t>(image.size-g.old_backup));
+                need(std::all_of(old.begin(),old.end(),[](auto c){return c==0;}),
+                     "obsolete GPT backup was not cleared");
+            }
+            if(mbr_growth) {
+                need(verified.read(0,512)==mbr_growth->mbr,
+                     "grown MBR header differs from plan");
+                const auto bytes=verified.read(next*block,
+                    static_cast<std::size_t>(verified.size-next*block));
+                need(std::all_of(bytes.begin(),bytes.end(),[](auto c){return c==0;}),
+                     "grown MBR alignment padding is not zero");
+            }
+            need(verified.hybrid_system_area && verified.gpt_hybrid==image.gpt_hybrid &&
+                 verified.hybrid_protected_regions==expected_regions &&
+                 verified.descriptors==image.descriptors,
+                 "hybrid partition geometry or ISO descriptor readback changed");
+            const auto wanted=index_iso_tree(*image.root);
+            const auto actual=index_iso_tree(*verified.root);
+            need(wanted.size()==actual.size(),"hybrid ISO namespace entry count differs");
+            for(const auto& [key,node]:wanted) {
+                const auto found=actual.find(key);
+                need(found!=actual.end() && found->second->directory==node->directory &&
+                     found->second->identifier==node->identifier &&
+                     found->second->joliet_identifier==node->joliet_identifier &&
+                     (node->directory?
+                        (found->second->lba==node->new_lba[0] &&
+                         found->second->size==node->new_size[0]):
+                        (found->second->size==node->size &&
+                         found->second->sections==node->sections)),
+                     "hybrid ISO namespace differs from rebuild plan");
+            }
+        }
+        need(verified.rr_rebuild==image.rr_rebuild,
+             "Rock Ridge extension lost in staged ISO");
+        need(verified.boot_descriptor_lbas==image.boot_descriptor_lbas &&
+             verified.boot_entries==image.boot_entries &&
+             verified.boot_lbas==image.boot_lbas &&
+             verified.boot_regions==image.boot_regions &&
+             verified.boot_regions_bounded==image.boot_regions_bounded,
+             "El Torito boot references changed in staged ISO");
+        // Parsing both ISO9660 and Joliet metadata is not enough to prove F5
+        // wrote the user's bytes. Independently locate every requested path
+        // in the rebuilt ISO tree, then compare the complete staged file
+        // extent with the original source in bounded chunks.
+        for(const auto& change:changes) {
+            edit_tick(progress);
+            Node* entry=verified.root.get();
+            std::istringstream parts(edit_path(change.path));
+            std::string component;
+            while(entry && std::getline(parts,component,'/')) {
+                const auto it=std::find_if(
+                    entry->children.begin(),entry->children.end(),
+                    [&](const auto& child){
+                        return upper(child->logical)==upper(component);
+                    });
+                entry=it==entry->children.end()?nullptr:it->get();
+            }
+            if(change.remove) {
+                need(!entry,"deleted ISO entry remains visible after rebuild");
+                continue;
+            }
+            need(entry && entry->directory==change.directory,
+                 "added ISO path is missing or has the wrong type");
+            if(change.directory)continue;
+            const auto expected=std::filesystem::file_size(change.source);
+            need(expected==entry->size,
+                 "staged ISO file length differs from F5 source");
+            need(!entry->sections.empty(),
+                 "staged ISO file has no section records");
+            std::ifstream input(change.source,std::ios::binary);
+            std::ifstream output(staged,std::ios::binary);
+            need(bool(input) && bool(output),
+                 "cannot open ISO file for independent F5 verification");
+            std::vector<char> source_chunk(64u*1024u),stage_chunk(64u*1024u);
+            std::uint64_t checked=0;
+            for(const auto& section:entry->sections) {
+                const auto at=std::uint64_t(section.lba)*block;
+                need(at<=verified.size && section.length<=verified.size-at &&
+                     section.length<=expected-checked,
+                     "staged ISO section outside image or file bounds");
+                output.clear();
+                output.seekg(static_cast<std::streamoff>(at));
+                need(bool(output),"cannot locate ISO file during verification");
+                for(std::uint64_t left=section.length;left;) {
+                edit_tick(progress);
+                const auto n=static_cast<std::streamsize>(
+                    std::min<std::uint64_t>(left,source_chunk.size()));
+                input.read(source_chunk.data(),n);
+                output.read(stage_chunk.data(),n);
+                need(input.gcount()==n && output.gcount()==n &&
+                     std::memcmp(source_chunk.data(),stage_chunk.data(),
+                                 static_cast<std::size_t>(n))==0,
+                     "staged ISO F5 data differs from original source");
+                    left-=static_cast<std::uint64_t>(n);
+                }
+                checked+=section.length;
+            }
+            need(checked==expected,"staged ISO section lengths differ from source");
+            need(input.peek()==std::char_traits<char>::eof(),
+                 "ISO F5 source grew during staging");
+        }
+    }
+}
 void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
     edit_tick(progress);Image image(path,true);
     // Duplicate WCX entries can otherwise shadow each other in the rebuilt
@@ -3060,219 +3295,11 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         }
     }
     EditTransaction tx(path);std::fstream out(tx.output,std::ios::in|std::ios::out|std::ios::binary|std::ios::trunc);need(bool(out),"cannot create staged ISO");image.file.clear();image.file.seekg(0);copy_bytes(image.file,out,image.size,progress);
-    std::uint64_t next=hybrid_tail?hybrid_tail->first:image.size/block;
-    const auto capacity=[&](std::uint64_t blocks) {
-        need(next<0xffffffffu && blocks<0xffffffffull-next,"ISO size limit");
-        if(hybrid_tail)
-            need(next<=hybrid_tail->limit && blocks<=hybrid_tail->limit-next,
-                 "hybrid ISO has insufficient verified padding; partition resize required");
-    };
-    if(hybrid_tail) {
-        out.seekp(static_cast<std::streamoff>(next*block));
-        need(bool(out),"cannot seek verified hybrid ISO tail");
-    }
-    for(auto* n:all)if(!n->source.empty()) {
-        capacity((n->size+block-1)/block);
-        n->lba=static_cast<std::uint32_t>(next);
-        std::ifstream source(n->source,std::ios::binary);
-        need(bool(source),"cannot open ISO replacement source");
-        // ECMA-119 Level 3 permits multiple records per file. Every
-        // nonfinal section is aligned and fits the 32-bit data length.
-        constexpr std::uint64_t max_section=0xfffff800ull;
-        auto left=n->size;
-        do {
-            const auto bytes=static_cast<std::uint32_t>(
-                std::min(left,max_section));
-            n->sections.push_back({static_cast<std::uint32_t>(next),bytes});
-            copy_bytes(source,out,bytes,progress);
-            write(out,Bytes((block-bytes%block)%block));
-            next+=(std::uint64_t(bytes)+block-1)/block;
-            left-=bytes;
-        } while(left);
-        need(source.peek()==std::char_traits<char>::eof(),
-             "ISO replacement source grew during write");
-    }
-    if(hybrid_tail && image.joliet)
-        for(auto* d:dirs) {
-            const auto bytes=std::max(directory_data(*d,0).size(),
-                                      directory_data(*d,1).size());
-            need(bytes<=0xffffffffu,"hybrid ISO directory too large");
-            d->new_size[0]=d->new_size[1]=static_cast<std::uint32_t>(bytes);
-        }
-    for(unsigned view=0;view<(image.joliet?2u:1u);++view){
-        for(auto* d:dirs){
-            if(!hybrid_tail || !image.joliet)
-                d->new_size[view]=static_cast<std::uint32_t>(directory_data(*d,view).size());
-            capacity(d->new_size[view]/block);
-            d->new_lba[view]=static_cast<std::uint32_t>(next);
-            next+=d->new_size[view]/block;
-        }
-        for(auto* d:dirs){
-            edit_tick(progress);
-            auto bytes=directory_data(*d,view);
-            need(bytes.size()<=d->new_size[view],"ISO directory allocation changed");
-            bytes.resize(d->new_size[view],0);
-            write(out,bytes);
-        }
-        // ISO 9660 path-table numbering must be breadth-first and sorted
-        // by the directory identifier within each parent. Primary and
-        // Joliet namespaces can have different identifier orders.
-        std::vector<Node*> path_dirs{image.root.get()};
-        for(std::size_t parent=0;parent<path_dirs.size();++parent){
-            std::vector<Node*> child_dirs;
-            for(const auto& child:path_dirs[parent]->children)
-                if(child->directory)child_dirs.push_back(child.get());
-            std::sort(child_dirs.begin(),child_dirs.end(),[&](const Node* a,const Node* b){
-                const Bytes& lhs=view?a->joliet_identifier:a->identifier;
-                const Bytes& rhs=view?b->joliet_identifier:b->identifier;
-                const auto count=std::min(lhs.size(),rhs.size());
-                for(std::size_t i=0;i<count;++i)if(lhs[i]!=rhs[i])return lhs[i]<rhs[i];
-                return lhs.size()<rhs.size();
-            });
-            // Adding individually also avoids GCC 14's erroneous optimized
-            // vector range-insert -Wstringop-overflow under -Werror.
-            for(auto* child:child_dirs)path_dirs.push_back(child);
-        }
-        need(path_dirs.size()==dirs.size(),"inconsistent ISO path table directory count");
-        std::map<Node*,unsigned> numbers;
-        for(std::size_t i=0;i<path_dirs.size();++i)
-            numbers[path_dirs[i]]=static_cast<unsigned>(i+1);
-        std::array<std::uint32_t,2> table_lba{};std::uint32_t table_size=0;
-        for(unsigned big=0;big<2;++big){Bytes table;for(auto* d:path_dirs){Bytes id=d==image.root.get()?Bytes{0}:(view?d->joliet_identifier:d->identifier);const auto at=table.size();table.resize(at+8+id.size()+(id.size()%2));table[at]=static_cast<unsigned char>(id.size());put(table,at+2,d->new_lba[view],4,big!=0);put(table,at+6,numbers[d->parent?d->parent:d],2,big!=0);std::copy(id.begin(),id.end(),table.begin()+static_cast<std::ptrdiff_t>(at+8));}
-            table_size=static_cast<std::uint32_t>(table.size());table_lba[big]=static_cast<std::uint32_t>(next);table.resize((table.size()+block-1)/block*block);capacity(table.size()/block);next+=table.size()/block;write(out,table);}
-        for(auto& [lba,vd]:image.descriptors)if((vd[0]==2)==(view==1)){both(vd,132,table_size);put(vd,140,table_lba[0]);put(vd,144,0);put(vd,148,table_lba[1],4,true);put(vd,152,0);auto r=record(*image.root,Bytes{0},view);std::copy(r.begin(),r.end(),vd.begin()+156);(void)lba;}
-    }
-    for(auto& [lba,vd]:image.descriptors){both(vd,80,static_cast<std::uint32_t>(next));out.seekp(std::uint64_t(lba)*block);write(out,vd);}
-    if(gpt_growth)write_gpt_growth(out,*gpt_growth,image.size,next,progress);
-    if(mbr_growth)write_mbr_growth(out,*mbr_growth,next,progress);
+    const auto next=write_iso_rebuild(image,out,all,dirs,hybrid_tail,
+                                      gpt_growth,mbr_growth,progress);
     out.flush();need(bool(out),"ISO flush failed");out.close();image.file.close();
-    // Reparse the staged namespaces and reject changed El Torito references
-    // even if the ISO directory metadata itself remains parseable.
-    {
-        Image verified(tx.output);
-        need(verified.size==(gpt_growth?gpt_growth->physical_size:
-                                 mbr_growth?mbr_growth->physical_size:
-                                 hybrid_tail?image.size:next*block) &&
-             verified.declared_volume_blocks==next,
-             "staged ISO physical or logical size mismatch");
-        if(hybrid_tail) {
-            auto expected_regions=image.hybrid_protected_regions;
-            if(gpt_growth) {
-                const auto& g=*gpt_growth;
-                for(auto& [at,length]:expected_regions) {
-                    if(at==image.size-512 && length==512)at=g.new_header;
-                    else if(at==g.old_backup && length==g.entries.size())at=g.new_table;
-                }
-                need(verified.gpt_first_usable==image.gpt_first_usable &&
-                     verified.gpt_last_usable==g.new_table/512-1 &&
-                     verified.read(0,512)==g.mbr &&
-                     verified.read(512,512)==g.primary &&
-                     verified.read(g.new_table,g.entries.size())==g.entries &&
-                     verified.read(g.new_header,512)==g.backup,
-                     "relocated GPT metadata differs from growth plan");
-                const auto old=verified.read(g.old_backup,
-                    static_cast<std::size_t>(image.size-g.old_backup));
-                need(std::all_of(old.begin(),old.end(),[](auto c){return c==0;}),
-                     "obsolete GPT backup was not cleared");
-            }
-            if(mbr_growth) {
-                need(verified.read(0,512)==mbr_growth->mbr,
-                     "grown MBR header differs from plan");
-                const auto bytes=verified.read(next*block,
-                    static_cast<std::size_t>(verified.size-next*block));
-                need(std::all_of(bytes.begin(),bytes.end(),[](auto c){return c==0;}),
-                     "grown MBR alignment padding is not zero");
-            }
-            need(verified.hybrid_system_area && verified.gpt_hybrid==image.gpt_hybrid &&
-                 verified.hybrid_protected_regions==expected_regions &&
-                 verified.descriptors==image.descriptors,
-                 "hybrid partition geometry or ISO descriptor readback changed");
-            const auto wanted=index_iso_tree(*image.root);
-            const auto actual=index_iso_tree(*verified.root);
-            need(wanted.size()==actual.size(),"hybrid ISO namespace entry count differs");
-            for(const auto& [key,node]:wanted) {
-                const auto found=actual.find(key);
-                need(found!=actual.end() && found->second->directory==node->directory &&
-                     found->second->identifier==node->identifier &&
-                     found->second->joliet_identifier==node->joliet_identifier &&
-                     (node->directory?
-                        (found->second->lba==node->new_lba[0] &&
-                         found->second->size==node->new_size[0]):
-                        (found->second->size==node->size &&
-                         found->second->sections==node->sections)),
-                     "hybrid ISO namespace differs from rebuild plan");
-            }
-        }
-        need(verified.rr_rebuild==image.rr_rebuild,
-             "Rock Ridge extension lost in staged ISO");
-        need(verified.boot_descriptor_lbas==image.boot_descriptor_lbas &&
-             verified.boot_entries==image.boot_entries &&
-             verified.boot_lbas==image.boot_lbas &&
-             verified.boot_regions==image.boot_regions &&
-             verified.boot_regions_bounded==image.boot_regions_bounded,
-             "El Torito boot references changed in staged ISO");
-        // Parsing both ISO9660 and Joliet metadata is not enough to prove F5
-        // wrote the user's bytes. Independently locate every requested path
-        // in the rebuilt ISO tree, then compare the complete staged file
-        // extent with the original source in bounded chunks.
-        for(const auto& change:changes) {
-            edit_tick(progress);
-            Node* entry=verified.root.get();
-            std::istringstream parts(edit_path(change.path));
-            std::string component;
-            while(entry && std::getline(parts,component,'/')) {
-                const auto it=std::find_if(
-                    entry->children.begin(),entry->children.end(),
-                    [&](const auto& child){
-                        return upper(child->logical)==upper(component);
-                    });
-                entry=it==entry->children.end()?nullptr:it->get();
-            }
-            if(change.remove) {
-                need(!entry,"deleted ISO entry remains visible after rebuild");
-                continue;
-            }
-            need(entry && entry->directory==change.directory,
-                 "added ISO path is missing or has the wrong type");
-            if(change.directory)continue;
-            const auto expected=std::filesystem::file_size(change.source);
-            need(expected==entry->size,
-                 "staged ISO file length differs from F5 source");
-            need(!entry->sections.empty(),
-                 "staged ISO file has no section records");
-            std::ifstream input(change.source,std::ios::binary);
-            std::ifstream output(tx.output,std::ios::binary);
-            need(bool(input) && bool(output),
-                 "cannot open ISO file for independent F5 verification");
-            std::array<char,64*1024> source_chunk{},stage_chunk{};
-            std::uint64_t checked=0;
-            for(const auto& section:entry->sections) {
-                const auto at=std::uint64_t(section.lba)*block;
-                need(at<=verified.size && section.length<=verified.size-at &&
-                     section.length<=expected-checked,
-                     "staged ISO section outside image or file bounds");
-                output.clear();
-                output.seekg(static_cast<std::streamoff>(at));
-                need(bool(output),"cannot locate ISO file during verification");
-                for(std::uint64_t left=section.length;left;) {
-                edit_tick(progress);
-                const auto n=static_cast<std::streamsize>(
-                    std::min<std::uint64_t>(left,source_chunk.size()));
-                input.read(source_chunk.data(),n);
-                output.read(stage_chunk.data(),n);
-                need(input.gcount()==n && output.gcount()==n &&
-                     std::memcmp(source_chunk.data(),stage_chunk.data(),
-                                 static_cast<std::size_t>(n))==0,
-                     "staged ISO F5 data differs from original source");
-                    left-=static_cast<std::uint64_t>(n);
-                }
-                checked+=section.length;
-            }
-            need(checked==expected,"staged ISO section lengths differ from source");
-            need(input.peek()==std::char_traits<char>::eof(),
-                 "ISO F5 source grew during staging");
-        }
-    }
+    verify_iso_rebuild(tx.output,image,changes,next,hybrid_tail,
+                       gpt_growth,mbr_growth,progress);
     // The ordinary ISO writer appends data and regenerates PVD/Joliet trees.
     // It must never alter *any* original system-area, boot descriptor,
     // boot catalog or full boot-image byte, including emulated floppy/HDD
