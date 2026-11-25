@@ -976,7 +976,8 @@ public:
             const std::vector<ArchiveChange>& changes,
             const EditProtectedRanges& protected_ranges,
             std::uint64_t iso_metadata_blocks=0,
-            std::uint64_t mbr_append_alignment_blocks=0) {
+            std::uint64_t mbr_append_alignment_blocks=0,
+            std::uint64_t gpt_append_trailer_blocks=0) {
         need(partition_access_type_==1 && !bitmap_ && !changes.empty() &&
              changes.size()<=max_items,"unsupported read-only UDF mastering");
         ReadonlyAppendPlan plan;
@@ -1112,7 +1113,15 @@ public:
                  "MBR/UDF growth exceeds 32-bit partition length");
             last=aligned-1;
         }
-        need(last+1<max_image/block,
+        // GPT reserves the last physical sector for its backup header.
+        // The second UDF anchor must be exactly N-256 relative to the
+        // FINAL disk, and must remain before the GPT trailer. ECMA-167
+        // allows the two-anchor combination 256 and N-256.
+        need(!gpt_append_trailer_blocks ||
+             (!mbr_append_alignment_blocks && gpt_append_trailer_blocks<256),
+             "GPT backup leaves no room for an independent UDF end anchor");
+        need(last+1<max_image/block &&
+             gpt_append_trailer_blocks<max_image/block-(last+1),
              "UDF mastering descriptor addresses exceed optical limit");
         for(std::size_t j=0;j<sequence.size();++j) {
             auto d=sequence[j];
@@ -1134,7 +1143,13 @@ public:
         }
         // The main/reserve copies are both reachable from all original
         // valid anchors, as well as the new physical-end anchor pair.
-        std::set<std::uint64_t> anchors{256,last-256,last};
+        std::set<std::uint64_t> anchors{256};
+        if(gpt_append_trailer_blocks)
+            anchors.insert(last+gpt_append_trailer_blocks-256);
+        else {
+            anchors.insert(last-256);
+            anchors.insert(last);
+        }
         // Physical-end discovery is independent of any ISO namespace.
         // Standalone UDF and padded bridge volumes share this backend.
         std::set<std::uint64_t> candidates{256,512,old_sectors-1,
@@ -3013,10 +3028,13 @@ void edit_udf(const std::filesystem::path& image,
               const EditProtectedRanges& protected_ranges,
               const CoordinatedIsoUpdate* coordinated,
               bool bounded_partitioned_bridge,
-              std::uint64_t mbr_append_alignment_blocks) {
+              std::uint64_t mbr_append_alignment_blocks,
+              std::uint64_t gpt_append_trailer_blocks) {
     edit_tick(progress);
-    need(!mbr_append_alignment_blocks || bounded_partitioned_bridge,
-         "MBR/UDF mastering needs validated partition protection");
+    need((!mbr_append_alignment_blocks && !gpt_append_trailer_blocks) ||
+         (bounded_partitioned_bridge &&
+          !(mbr_append_alignment_blocks && gpt_append_trailer_blocks)),
+         "hybrid UDF mastering needs one validated partition geometry");
     need(!bounded_partitioned_bridge ||
          (allow_bridge && validate_stage && !coordinated),
          "partitioned ISO/UDF edits require a validated UDF-only transaction");
@@ -3027,16 +3045,25 @@ void edit_udf(const std::filesystem::path& image,
     // even when Disc's general UDF reader cannot resolve that map.
     Type1 volume(image,allow_bridge,bounded_partitioned_bridge);
     if(bounded_partitioned_bridge) {
-        const bool rom=mbr_append_alignment_blocks &&
+        const bool rom=(mbr_append_alignment_blocks || gpt_append_trailer_blocks) &&
             volume.partition_access_type()==1 && !volume.has_allocation_map();
         need(rom || (volume.has_allocation_map() &&
              (volume.partition_access_type()==3 ||
               volume.partition_access_type()==4)),
-             "partitioned ISO/UDF requires a rewritable allocator or validated MBR ROM mastering");
-        if(rom)
-            for(const auto& object:volume.intervals())
-                need(!intersects({0,512},object.range),
-                     "MBR growth header aliases live UDF data");
+             "partitioned ISO/UDF requires a rewritable allocator or validated ROM mastering");
+        if(rom) {
+            need(gpt_append_trailer_blocks<256 &&
+                 gpt_append_trailer_blocks<=volume.image_size()/block,
+                 "invalid GPT/UDF trailer geometry");
+            for(const auto& object:volume.intervals()) {
+                need(!intersects({0,gpt_append_trailer_blocks?1024u:512u},object.range),
+                     "hybrid growth header aliases live UDF data");
+                if(gpt_append_trailer_blocks)
+                    need(!intersects({volume.image_size()-gpt_append_trailer_blocks*block,
+                                      gpt_append_trailer_blocks*block},object.range),
+                         "GPT backup trailer aliases live UDF data");
+            }
+        }
     }
     const Disc before(image);
     need(before.format()=="UDF","not a plain readable UDF volume");
@@ -3092,7 +3119,8 @@ void edit_udf(const std::filesystem::path& image,
            return !volume.files().count(key) && !volume.directories().count(key);
        })) {
         auto plan=volume.prepare_readonly_append(changes,protected_ranges,0,
-                                                mbr_append_alignment_blocks);
+                                                mbr_append_alignment_blocks,
+                                                gpt_append_trailer_blocks);
         create_udf_type1_batch(image,volume,changes,progress,allow_bridge,
                                validate_stage,&plan);
         return;

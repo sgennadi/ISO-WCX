@@ -121,8 +121,8 @@ def main(editor, inspector):
             if kind=="GPT":
                 assert updated[-33*512:]==original[-33*512:]
             assert read_image(hybrid)==expected_iso
-            # Read-only Type-1 mastering may extend only a validated
-            # LBA-zero MBR container, not a GPT backup/anchor layout.
+            # Read-only mastering: grow a validated LBA-zero MBR or
+            # protective-only GPT while preserving independent partitions.
             rom=bytearray(original)
             pd=260*B
             struct.pack_into('<I',rom,pd+184,1)
@@ -131,35 +131,46 @@ def main(editor, inspector):
             struct.pack_into('<I',rom,270*B+80,0)
             update_tag(rom,270*B,88)
             hybrid.write_bytes(rom)
-            if kind=="GPT":
-                run(editor,hybrid,'add','MUST-NOT-GROW.BIN',payload,success=False)
-                assert hybrid.read_bytes()==rom
-            else:
-                from test_iso_over4gb import verify_envelope
-                run(editor,hybrid,'add','ROM-GROW.BIN',payload)
-                grown=hybrid.read_bytes()
-                assert len(grown)>len(rom)
-                verify_envelope(hybrid,"MBR",rom[:512],b"",
-                    [(esp,rom[esp:esp+B]),(first,rom[first:first+B]),
-                     (tail,rom[tail:tail+B]),(24*B,rom[24*B:27*B])])
+            from test_iso_over4gb import verify_envelope
+            entries=rom[1024:1024+128*128] if kind=="GPT" else b""
+            run(editor,hybrid,'add','ROM-GROW.BIN',payload)
+            grown=hybrid.read_bytes()
+            assert len(grown)>len(rom)
+            protected=[(esp,rom[esp:esp+B]),(first,rom[first:first+B]),
+                       (tail,rom[tail:tail+B]),(24*B,rom[24*B:27*B])]
+            verify_envelope(hybrid,kind,rom[:512],entries,protected)
+            if kind=="MBR":
                 assert grown[512:256*B]==rom[512:256*B]
-                assert read_image(hybrid)==expected_iso
                 assert struct.unpack_from('<I',grown,len(grown)-B+20)[0]==struct.unpack_from('<I',grown,256*B+20)[0]
-                assert struct.unpack_from('<I',grown,len(grown)-257*B+20)[0]==struct.unpack_from('<I',grown,256*B+20)[0]
-                run(editor,hybrid,'mkdir','rom-folder')
-                out=root/'partitioned-rom-readback'
-                run(inspector,hybrid,'--extract',out)
-                assert (out/'ROM-GROW.BIN').read_bytes()==payload.read_bytes()
-                assert (out/'rom-folder').is_dir()
-                assert (out/'hello').read_bytes()==b'world'
-                before=hybrid.read_bytes()
-                run(editor,hybrid,'cancel','cancel.bin',payload,success=False)
-                assert hybrid.read_bytes()==before
-                malformed=bytearray(rom)
+            else:
+                assert grown[1024:256*B]==rom[1024:256*B]
+                assert grown[len(rom)-33*512:len(rom)]==bytes(33*512)
+                assert grown[-512:-504]==b'EFI PART'
+            assert read_image(hybrid)==expected_iso
+            assert struct.unpack_from('<I',grown,len(grown)-257*B+20)[0]==struct.unpack_from('<I',grown,256*B+20)[0]
+            run(editor,hybrid,'mkdir','rom-folder')
+            repeated=hybrid.read_bytes()
+            verify_envelope(hybrid,kind,rom[:512],entries,protected)
+            assert len(repeated)>len(grown)
+            assert struct.unpack_from('<I',repeated,len(repeated)-257*B+20)[0]==struct.unpack_from('<I',repeated,256*B+20)[0]
+            if kind=="GPT":
+                assert repeated[len(grown)-33*512:len(grown)]==bytes(33*512)
+            out=root/('partitioned-rom-readback-'+kind)
+            run(inspector,hybrid,'--extract',out)
+            assert (out/'ROM-GROW.BIN').read_bytes()==payload.read_bytes()
+            assert (out/'rom-folder').is_dir()
+            assert (out/'hello').read_bytes()==b'world'
+            before=hybrid.read_bytes()
+            run(editor,hybrid,'cancel','cancel.bin',payload,success=False)
+            assert hybrid.read_bytes()==before
+            malformed=bytearray(rom)
+            if kind=="MBR":
                 malformed[453]^=1
-                hybrid.write_bytes(malformed)
-                run(editor,hybrid,'add','BAD-GEOMETRY.BIN',payload,success=False)
-                assert hybrid.read_bytes()==malformed
+            else:
+                malformed[-512+16]^=1
+            hybrid.write_bytes(malformed)
+            run(editor,hybrid,'add','BAD-GEOMETRY.BIN',payload,success=False)
+            assert hybrid.read_bytes()==malformed
             assert not list(root.glob('.iso-wcx-edit-*'))
 
         # Read-only DVD-ROM-style UDF bridge: no on-disc free map.

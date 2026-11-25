@@ -44,7 +44,8 @@ void edit_udf(const std::filesystem::path&, const std::vector<ArchiveChange>&,
               const EditProtectedRanges& = {},
               const CoordinatedIsoUpdate* = nullptr,
               bool bounded_partitioned_bridge = false,
-              std::uint64_t mbr_append_alignment_blocks = 0);
+              std::uint64_t mbr_append_alignment_blocks = 0,
+              std::uint64_t gpt_append_trailer_blocks = 0);
 // Transactional native FAT12/16/32 editor: exact raw/fixed VHD filesystems.
 void edit_dynamic_vhd(const std::filesystem::path&,
                       const std::vector<ArchiveChange>&,

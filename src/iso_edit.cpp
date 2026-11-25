@@ -1326,11 +1326,42 @@ HybridTailPlan plan_hybrid_tail(Image& image,const EditProgress& progress) {
 struct GptGrowthPlan {
     std::uint64_t old_backup{},new_table{},new_header{},physical_size{};
     std::uint64_t logical_blocks{},mbr_length_at{};
+    std::uint64_t trailer_blocks{};
     Bytes mbr,primary,backup,entries;
 };
+void set_gpt_growth_size(GptGrowthPlan& plan,std::uint64_t logical_blocks) {
+    need(logical_blocks<0xffffffffull &&
+         plan.trailer_blocks<0xffffffffull-logical_blocks,
+         "GPT growth exceeds optical address space");
+    plan.logical_blocks=logical_blocks;
+    plan.physical_size=(logical_blocks+plan.trailer_blocks)*block;
+    const auto table_sectors=plan.entries.size()/512u;
+    const auto final_lba=plan.physical_size/512-1;
+    plan.new_header=final_lba*512;
+    plan.new_table=(final_lba-table_sectors)*512;
+    need(plan.new_table>=logical_blocks*block,
+         "new GPT backup overlaps remastered volume");
+    auto put64le=[](Bytes& b,std::size_t at,std::uint64_t v) {
+        put(b,at,static_cast<std::uint32_t>(v));
+        put(b,at+4,static_cast<std::uint32_t>(v>>32));
+    };
+    auto refresh=[](Bytes& header) {
+        put(header,16,0);
+        put(header,16,gpt_crc32(Bytes(header.begin(),header.begin()+92)));
+    };
+    put(plan.mbr,static_cast<std::size_t>(plan.mbr_length_at),
+        static_cast<std::uint32_t>(std::min<std::uint64_t>(final_lba,0xffffffffull)));
+    put64le(plan.primary,32,final_lba);
+    put64le(plan.primary,48,plan.new_table/512-1);
+    refresh(plan.primary);
+    put64le(plan.backup,24,final_lba);
+    put64le(plan.backup,48,plan.new_table/512-1);
+    put64le(plan.backup,72,plan.new_table/512);
+    refresh(plan.backup);
+}
 GptGrowthPlan plan_gpt_growth(Image& image,const HybridTailPlan& tail,
-                             std::uint64_t required) {
-    need(image.gpt_hybrid && !image.udf_bridge &&
+                             std::uint64_t required,bool udf_mastering=false) {
+    need(image.gpt_hybrid && image.udf_bridge==udf_mastering &&
          (!image.iso_system_use || (image.hybrid_rr_strict && image.rr_rebuild)) &&
          image.boot_regions_bounded,
          "GPT growth requires a validated, bounded ISO/Joliet or RRIP hybrid");
@@ -1376,35 +1407,11 @@ GptGrowthPlan plan_gpt_growth(Image& image,const HybridTailPlan& tail,
     // original extent disappears from the check entirely.
     for(const auto& [at,bytes]:tail.original_extents)check(at,bytes);
     const auto original=image.size/block;
-    const auto trailer=(table_sectors+1+3)/4;
+    plan.trailer_blocks=(table_sectors+1+3)/4;
     need(required && original<0xffffffffull &&
-         required<0xffffffffull-original &&
-         trailer<0xffffffffull-original-required,
+         required<0xffffffffull-original,
          "GPT growth exceeds ISO address space");
-    plan.logical_blocks=original+required;
-    plan.physical_size=(plan.logical_blocks+trailer)*block;
-    const auto final_lba=plan.physical_size/512-1;
-    plan.new_header=final_lba*512;
-    plan.new_table=(final_lba-table_sectors)*512;
-    need(plan.new_table>=plan.logical_blocks*block,
-         "new GPT backup overlaps remastered ISO volume");
-    auto put64le=[](Bytes& b,std::size_t at,std::uint64_t v) {
-        put(b,at,static_cast<std::uint32_t>(v));
-        put(b,at+4,static_cast<std::uint32_t>(v>>32));
-    };
-    auto refresh=[](Bytes& header) {
-        put(header,16,0);
-        put(header,16,gpt_crc32(Bytes(header.begin(),header.begin()+92)));
-    };
-    put(plan.mbr,static_cast<std::size_t>(plan.mbr_length_at),
-        static_cast<std::uint32_t>(std::min<std::uint64_t>(final_lba,0xffffffffull)));
-    put64le(plan.primary,32,final_lba);
-    put64le(plan.primary,48,plan.new_table/512-1);
-    refresh(plan.primary);
-    put64le(plan.backup,24,final_lba);
-    put64le(plan.backup,48,plan.new_table/512-1);
-    put64le(plan.backup,72,plan.new_table/512);
-    refresh(plan.backup);
+    set_gpt_growth_size(plan,original+required);
     return plan;
 }
 void write_gpt_growth(std::fstream& out,const GptGrowthPlan& plan,
@@ -1997,19 +2004,42 @@ void edit_iso_udf_bridge_equal_length(
 void protect_iso_udf_stage(const std::filesystem::path& original,
                            const std::filesystem::path& staged,
                            const Image& before,const EditProgress& progress,
-                           const MbrGrowthPlan* mbr_growth=nullptr) {
+                           const MbrGrowthPlan* mbr_growth=nullptr,
+                           const GptGrowthPlan* gpt_growth=nullptr) {
     need(before.udf_bridge && before.boot_regions_bounded,
          "bootable ISO/UDF validation needs bounded boot extents");
     const auto stage_size=std::filesystem::file_size(staged);
     const bool mastering=stage_size>before.size;
     need(!before.hybrid_system_area || stage_size==before.size ||
          (mastering && mbr_growth && !before.gpt_hybrid &&
-          mbr_growth->physical_size==stage_size),
+          mbr_growth->physical_size==stage_size) ||
+         (mastering && gpt_growth && before.gpt_hybrid &&
+          gpt_growth->physical_size==stage_size),
          "partitioned ISO/UDF transaction has unplanned physical growth");
     need(std::filesystem::file_size(original)==before.size &&
          stage_size>=before.size,
          "ISO/UDF image size changed during UDF edit");
     Image after(staged,true);
+    auto expected_regions=before.hybrid_protected_regions;
+    if(gpt_growth) {
+        for(auto& [at,length]:expected_regions) {
+            if(at==before.size-512 && length==512)
+                at=gpt_growth->new_header;
+            else if(at==gpt_growth->old_backup &&
+                    length==gpt_growth->entries.size())
+                at=gpt_growth->new_table;
+        }
+        need(after.read(0,512)==gpt_growth->mbr &&
+             after.read(512,512)==gpt_growth->primary &&
+             after.read(gpt_growth->new_table,gpt_growth->entries.size())==
+                 gpt_growth->entries &&
+             after.read(gpt_growth->new_header,512)==gpt_growth->backup,
+             "GPT/UDF staged partition metadata differs from growth plan");
+        const auto old=after.read(gpt_growth->old_backup,
+                         static_cast<std::size_t>(before.size-gpt_growth->old_backup));
+        need(std::all_of(old.begin(),old.end(),[](auto c){return c==0;}),
+             "obsolete GPT/UDF backup was not cleared");
+    }
     need(after.udf_bridge && after.boot_regions_bounded &&
          after.size==stage_size &&
          after.descriptors==before.descriptors &&
@@ -2017,9 +2047,10 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
          after.boot_lbas==before.boot_lbas &&
          after.hybrid_system_area==before.hybrid_system_area &&
          after.gpt_hybrid==before.gpt_hybrid &&
-         after.hybrid_protected_regions==before.hybrid_protected_regions &&
+         after.hybrid_protected_regions==expected_regions &&
          after.gpt_first_usable==before.gpt_first_usable &&
-         after.gpt_last_usable==before.gpt_last_usable,
+         after.gpt_last_usable==(gpt_growth?gpt_growth->new_table/512-1:
+                                 before.gpt_last_usable),
          "ISO/Joliet, partition geometry or El Torito changed in UDF staging");
 
     // Compare all visible ISO namespace metadata before bytes are committed.
@@ -2042,13 +2073,22 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
     need(tree_same(tree_same,*before.root,*after.root),
          "ISO9660 namespace changed during UDF-only editing");
     OpticalEditGuard guard(before.size);
-    if(mbr_growth) {
+    if(gpt_growth) {
+        need(mastering,"GPT/UDF geometry changes require append mastering");
+        guard.protect(1024,256ull*block-1024);
+    } else if(mbr_growth) {
         need(mastering && after.read(0,512)==mbr_growth->mbr,
              "MBR/UDF staged header differs from growth plan");
         guard.protect(512,256ull*block-512);
     } else guard.protect(0,256ull*block); // ISO PVD, VRS, boot/system area
-    for(const auto& [start,length]:before.hybrid_protected_regions)
+    for(const auto& [start,length]:before.hybrid_protected_regions) {
+        if(gpt_growth &&
+           ((start==512 && length==512) ||
+            (start==before.size-512 && length==512) ||
+            (start==gpt_growth->old_backup &&
+             length==gpt_growth->entries.size())))continue;
         guard.protect(start,length);
+    }
     for(const auto& [start,length]:before.boot_regions)
         guard.protect(start,length);
     for(const auto& [start,length]:before.udf_metadata_regions) {
@@ -2075,9 +2115,9 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
                  "UDF mastering anchor copies disagree");
         };
         for(const auto at:before.udf_anchor_lbas)verify_anchor(at);
-        verify_anchor(stage_size/block-1);
+        if(!gpt_growth)verify_anchor(stage_size/block-1);
         verify_anchor(stage_size/block-257);
-        need(after.udf_anchor_lbas.count(stage_size/block-1)!=0 &&
+        need((gpt_growth || after.udf_anchor_lbas.count(stage_size/block-1)!=0) &&
              after.udf_anchor_lbas.count(stage_size/block-257)!=0,
              "UDF mastering lost new end anchors");
     }
@@ -2913,11 +2953,11 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
             }
         }
     }
-    // ROM mastering may grow a recognized LBA-zero MBR container.
-    // GPT and unknown CHS geometries remain restricted. Do not alter
-    // the fast fixed-size allocator route on rewritable media.
+    // ROM mastering may grow a validated MBR or protective-only GPT.
+    // Do not alter the fixed-size allocator route on rewritable media.
     std::optional<MbrGrowthPlan> mbr_append;
-    if(image.hybrid_system_area && !image.gpt_hybrid) {
+    std::optional<GptGrowthPlan> gpt_append;
+    if(image.hybrid_system_area) {
         const auto info=inspect_udf_edit(path,true,true);
         if(info.parser_compatible && info.partition_access_type==1 &&
            !info.allocation_bitmap && !info.allocation_table) {
@@ -2933,11 +2973,26 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
             });
             for(const auto* ranges:{&image.boot_regions,&image.joliet_regions,
                                    &image.udf_metadata_regions,
-                                   &image.iso_auxiliary_regions,
-                                   &image.hybrid_protected_regions})
+                                   &image.iso_auxiliary_regions})
                 snapshot.original_extents.insert(snapshot.original_extents.end(),
                                                  ranges->begin(),ranges->end());
-            mbr_append=plan_mbr_growth(image,snapshot,1,true);
+            if(image.gpt_hybrid) {
+                // The GPT metadata itself is intentionally relocated;
+                // independent partition extents are not.
+                const auto backup=image.read(image.size-512,512);
+                const auto old_table=le64(backup,72)*512;
+                for(const auto& range:image.hybrid_protected_regions)
+                    if(range.first>=16ull*block && range.first<old_table)
+                        snapshot.original_extents.push_back(range);
+                gpt_append=plan_gpt_growth(image,snapshot,1,true);
+                need(gpt_append->trailer_blocks<256,
+                     "GPT backup is too large for separate UDF end anchor");
+            } else {
+                snapshot.original_extents.insert(snapshot.original_extents.end(),
+                    image.hybrid_protected_regions.begin(),
+                    image.hybrid_protected_regions.end());
+                mbr_append=plan_mbr_growth(image,snapshot,1,true);
+            }
         }
     }
     // Release the original input handle so Windows can atomically replace
@@ -2945,8 +3000,21 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     image.file.close();
     const EditStageValidator validate=
         [&path,&image,&progress,&shared,&plan,&deletion_sectors,
-         &iso_files,&add_tree,&mbr_append,adding_shared](const std::filesystem::path& staged) {
-            if(mbr_append && std::filesystem::file_size(staged)>image.size) {
+         &iso_files,&add_tree,&mbr_append,&gpt_append,adding_shared](const std::filesystem::path& staged) {
+            if(gpt_append && std::filesystem::file_size(staged)>image.size) {
+                auto growth=*gpt_append;
+                const auto bytes=std::filesystem::file_size(staged);
+                need(bytes%block==0,"GPT/UDF mastering produced unaligned volume");
+                set_gpt_growth_size(growth,bytes/block);
+                {
+                    std::fstream out(staged,std::ios::in|std::ios::out|std::ios::binary);
+                    need(bool(out),"cannot update staged GPT/UDF metadata");
+                    write_gpt_growth(out,growth,image.size,bytes/block,progress);
+                    out.flush();
+                    need(bool(out),"staged GPT/UDF flush failed");
+                }
+                protect_iso_udf_stage(path,staged,image,progress,nullptr,&growth);
+            } else if(mbr_append && std::filesystem::file_size(staged)>image.size) {
                 // UDF already verified the staged filesystem. Update only
                 // the MBR container CHS/length before the independent ISO
                 // validator authorizes the single atomic commit.
@@ -3013,7 +3081,8 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     edit_udf(path,changes,progress,true,validate,immutable,
              shared.empty() && !adding_shared?nullptr:&plan,
              image.hybrid_system_area,
-             mbr_append?mbr_append->alignment_blocks:0);
+             mbr_append?mbr_append->alignment_blocks:0,
+             gpt_append?gpt_append->trailer_blocks:0);
 }
 }
 // Keep the write and independent readback phases in separate stack frames.
