@@ -894,6 +894,51 @@ def main(binary, reader=None):
             assert not list(root.glob('.iso-wcx-edit-*'))
         source.write_bytes(b'new content'*1000)
 
+        # A validated RRIP hybrid with tail capacity can now rebuild
+        # directories without dropping its alternate NM names.
+        for kind in ('MBR','GPT'):
+            base=rrip_hybrid_fixture(joliet=False)
+            base[:16*B]=bytes(16*B)
+            if kind=='MBR':
+                base.extend(bytes(120*B-len(base)))
+                base=hybrid_mbr(base)
+            else:
+                base=gpt_fixture(base)
+            image.write_bytes(base)
+            source.write_bytes(b'longer RRIP hybrid payload')
+            run('add','rr-file')
+            run('mkdir','New-Directory')
+            run('add','New-Directory/nested-file.txt')
+            if reader:
+                out=root/('rr-hybrid-'+kind)
+                result=subprocess.run([reader,str(image),'--extract',str(out)],
+                                      capture_output=True)
+                assert result.returncode==0,(result.stdout,result.stderr)
+                assert (out/'rr-file').read_bytes()==source.read_bytes()
+                assert (out/'New-Directory'/'nested-file.txt').read_bytes()==source.read_bytes()
+            run('delete','rr-file')
+            run('delete','New-Directory')
+            assert read_image(image)=={}
+            raw=image.read_bytes()
+            assert raw[:16*B]==base[:16*B]
+            assert raw[24*B:27*B]==base[24*B:27*B]
+            if kind=='GPT':
+                assert raw[120*512:128*512]==base[120*512:128*512]
+                assert raw[-33*512:]==base[-33*512:]
+            validate_path_tables(image)
+            # Unknown SUSP semantics may not be silently dropped.
+            bad=bytearray(base)
+            at=20*B
+            at+=bad[at]
+            at+=bad[at]
+            end=at+bad[at]
+            bad[end:end+4]=b'ZZ\x04\x01'
+            bad[at]+=4
+            image.write_bytes(bad)
+            run('add','NEW.TXT',False)
+            assert image.read_bytes()==bad
+        source.write_bytes(b'new content'*1000)
+
         # Ordinary (non-MBR) Rock Ridge with RRIP NM names: keep original
         # SUSP records while appending replacement data and directory trees.
         rr=rrip_hybrid_fixture(joliet=False)

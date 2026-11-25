@@ -174,6 +174,48 @@ def main(editor: str, xorriso: str) -> None:
         assert rock_ridge_image.read_bytes()==before
         no_workspace_leak(root)
 
+        # Independently mastered RRIP/Joliet with MBR or GPT wrapping.
+        # Force growth, then add/remove a nested directory.
+        from test_iso_over4gb import add_mbr, add_gpt, records, verify_envelope
+        import shutil
+        master_rr = root / "rr-hybrid-master.iso"
+        master(master_rr, disable_rock_ridge=False)
+        efi_section, = records(master_rr, "BOOT/EFI.IMG")
+        esp_start = efi_section[0] * SECTOR // 512
+        esp_count = (efi_section[1]+511)//512
+        boot_lba, boot_bytes = boot_catalog(master_rr)
+        protected = [(boot_lba*SECTOR, boot_bytes)]
+        for name, data in (("BIOS.IMG", bios), ("EFI.IMG", efi)):
+            section, = records(master_rr, "BOOT/"+name)
+            protected.append((section[0]*SECTOR, data))
+        for kind in ("MBR", "GPT"):
+            hybrid = root / ("rr-"+kind+".iso")
+            shutil.copyfile(master_rr, hybrid)
+            if kind == "MBR":
+                add_mbr(hybrid, esp_start, esp_count)
+            else:
+                add_gpt(hybrid, esp_start, esp_count)
+            before = hybrid.read_bytes()
+            initial_mbr = before[:512]
+            entries = before[1024:1024+128*128] if kind == "GPT" else b""
+            incoming = root / ("rr-incoming-"+kind+".bin")
+            incoming.write_bytes(b"RRIP growth payload" * 120000)
+            execute(editor, hybrid, "add", "ORIGINAL.TXT", incoming)
+            assert hybrid.stat().st_size > len(before)
+            assert extract(xorriso, hybrid, "ORIGINAL.TXT", root) == incoming.read_bytes()
+            execute(editor, hybrid, "mkdir", "New-Directory")
+            execute(editor, hybrid, "add", "New-Directory/new-file.txt", rr_payload)
+            assert extract(xorriso, hybrid, "New-Directory/new-file.txt", root) == rr_payload.read_bytes()
+            execute(editor, hybrid, "delete", "New-Directory")
+            assert extract(xorriso, hybrid, "New-Directory/new-file.txt", root) is None
+            assert extract(xorriso, hybrid, "BOOT/BIOS.IMG", root) == bios
+            assert extract(xorriso, hybrid, "BOOT/EFI.IMG", root) == efi
+            verify_envelope(hybrid, kind, initial_mbr, entries, protected)
+            committed = hybrid.read_bytes()
+            execute(editor, hybrid, "delete", "BOOT/EFI.IMG", expect_success=False)
+            assert hybrid.read_bytes()==committed
+            no_workspace_leak(root)
+
         # Independently master a non-RR dual-boot ISO; safe bounded edits
         # must work while preserving its BIOS and EFI El Torito data.
         image = root / "dual-boot.iso"

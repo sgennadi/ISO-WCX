@@ -176,12 +176,17 @@ public:
     bool has_multi_extent=false;
     bool iso_system_use=false; // RRIP/SUSP metadata must never be discarded
     bool rr_rebuild=false;
+    // Opt-in strict RRIP remaster; the legacy byte-only patcher still
+    // accepts independently named or unmatched Joliet namespaces.
+    bool hybrid_rr_strict=false;
     std::uint32_t declared_volume_blocks=0;
     std::uint32_t primary_volume_blocks=0;
     std::uint32_t supplementary_volume_blocks=0;
     std::size_t items=0;
-    explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false)
-        :file(p,std::ios::binary),size(std::filesystem::file_size(p)) {
+    explicit Image(const std::filesystem::path& p,bool allow_udf_bridge=false,
+                   bool strict_hybrid_rr=false)
+        :file(p,std::ios::binary),size(std::filesystem::file_size(p)),
+         hybrid_rr_strict(strict_hybrid_rr) {
         need(file.good()&&size>=18*block&&size%block==0&&size/block<0xffffffffu,"unsupported ISO size/layout");
         const auto system=read(0,16*block);
         hybrid_system_area=std::any_of(system.begin(),system.end(),
@@ -388,7 +393,7 @@ public:
             auto other=parse(Bytes(supplementary.begin()+156,
                                    supplementary.begin()+190),true,nullptr,0,seen);
             if(primary_volume_blocks!=supplementary_volume_blocks &&
-               !(hybrid_system_area && iso_system_use)) {
+               !(hybrid_system_area && iso_system_use && !hybrid_rr_strict)) {
                 // A mismatched descriptor is safe to rebuild only when
                 // EACH independent namespace fits inside its OWN declared
                 // volume. Reject truncated trees and path tables rather than
@@ -446,13 +451,14 @@ public:
                 need(supplementary_nodes.size()<=200000,
                      "Joliet boot-protection extent limit exceeded");
             }
-            // SUSP/Rock Ridge names need not match Joliet's case and aliases.
-            // An MBR hybrid cannot rebuild metadata, so do not rewrite or
-            // 'normalize' the independent supplementary namespace here.
-            // Both trees were parsed, and all original bytes will be guarded.
-            if(!(hybrid_system_area && iso_system_use))
+            // The byte-only path preserves independent namespaces.
+            // Strict RRIP remastering requires a provable pairing.
+            if(!(hybrid_system_area && iso_system_use && !hybrid_rr_strict))
                 pair(*root,*other);
         }
+        if(hybrid_rr_strict)
+            need(hybrid_system_area && !udf_bridge && rr_rebuild,
+                 "hybrid remaster requires recognized Rock Ridge RRIP metadata");
         // Do not permit multi-extent hybrid Rock Ridge/SUSP metadata
         // to enter the plain ISO/Joliet rebuild or single-extent patcher.
         need(!(hybrid_system_area && has_multi_extent && iso_system_use),
@@ -862,7 +868,7 @@ public:
         iso_system_use|=has_system_use;
         if(!j && parent && has_system_use)
             protect_susp(r,rr_rebuild?&n->rr_uneditable:nullptr);
-        need(udf_bridge || hybrid_system_area ||
+        need(udf_bridge || (hybrid_system_area && !hybrid_rr_strict) ||
              (!j && rr_rebuild) || !has_system_use,
              "unrecognized ISO System Use metadata requires a preserving writer");
         n->identifier.assign(r.begin()+33,r.begin()+33+static_cast<std::ptrdiff_t>(idlen));
@@ -904,7 +910,8 @@ public:
                     if(!j) {
                         if(!parent && child[33]==0) {
                             susp_skip=rock_ridge_skip(child);
-                            if(!udf_bridge && !hybrid_system_area && susp_skip) {
+                            if(!udf_bridge && (!hybrid_system_area || hybrid_rr_strict) &&
+                               susp_skip) {
                                 need(*susp_skip==0,
                                      "Rock Ridge with nonzero SUSP skip is not yet writable");
                                 rr_rebuild=rock_ridge_entry(child,*susp_skip,
@@ -921,7 +928,7 @@ public:
                             dot=child;
                         }
                     }
-                    need(udf_bridge || hybrid_system_area ||
+                    need(udf_bridge || (hybrid_system_area && !hybrid_rr_strict) ||
                          (!j && rr_rebuild) || !has_system_use,
                          "unrecognized ISO directory System Use metadata");
                     continue;}
@@ -962,7 +969,10 @@ public:
         for(auto& x:a.children){std::vector<const Node*> found;
             for(const auto& y:b.children)if(!used.count(y.get())&&x->directory==y->directory&&
                     (x->directory?(rr_rebuild||x->size==y->size):
-                     (x->size==y->size&&x->sections==y->sections)))found.push_back(y.get());
+                     (x->size==y->size&&x->sections==y->sections)) &&
+                    (!hybrid_rr_strict || !x->directory ||
+                     upper(x->logical)==upper(y->logical) ||
+                     upper(x->name)==upper(y->logical)))found.push_back(y.get());
             if(found.size()>1) {
                 std::vector<const Node*> named;
                 for(const auto* y:found)
@@ -1202,8 +1212,9 @@ struct HybridTailPlan {
 };
 HybridTailPlan plan_hybrid_tail(Image& image,const EditProgress& progress) {
     need(image.hybrid_system_area && !image.udf_bridge &&
-         !image.iso_system_use && image.boot_regions_bounded,
-         "hybrid directory rebuild requires plain ISO/Joliet and bounded boot data");
+         (!image.iso_system_use || (image.hybrid_rr_strict && image.rr_rebuild)) &&
+         image.boot_regions_bounded,
+         "hybrid directory rebuild requires verified ISO/Joliet or RRIP and bounded boot data");
     HybridTailPlan plan;
     plan.first=image.declared_volume_blocks;
     plan.limit=image.size/block;
@@ -1320,9 +1331,10 @@ struct GptGrowthPlan {
 };
 GptGrowthPlan plan_gpt_growth(Image& image,const HybridTailPlan& tail,
                              std::uint64_t required) {
-    need(image.gpt_hybrid && !image.udf_bridge && !image.iso_system_use &&
+    need(image.gpt_hybrid && !image.udf_bridge &&
+         (!image.iso_system_use || (image.hybrid_rr_strict && image.rr_rebuild)) &&
          image.boot_regions_bounded,
-         "GPT growth requires a plain, bounded ISO/Joliet hybrid");
+         "GPT growth requires a validated, bounded ISO/Joliet or RRIP hybrid");
     GptGrowthPlan plan;
     plan.mbr=image.read(0,512);
     unsigned protective=0;
@@ -1426,7 +1438,8 @@ struct MbrGrowthPlan {
 MbrGrowthPlan plan_mbr_growth(Image& image,const HybridTailPlan& tail,
                              std::uint64_t required) {
     need(!image.gpt_hybrid && !image.udf_bridge &&
-         !image.iso_system_use && image.boot_regions_bounded,
+         (!image.iso_system_use || (image.hybrid_rr_strict && image.rr_rebuild)) &&
+         image.boot_regions_bounded,
          "unsupported MBR growth layout");
     MbrGrowthPlan plan;
     plan.mbr=image.read(0,512);
@@ -3025,7 +3038,7 @@ static void verify_iso_rebuild(
     // Reparse the staged namespaces and reject changed El Torito references
     // even if the ISO directory metadata itself remains parseable.
     {
-        Image verified(staged);
+        Image verified(staged,false,image.hybrid_rr_strict);
         need(verified.size==(gpt_growth?gpt_growth->physical_size:
                                  mbr_growth?mbr_growth->physical_size:
                                  hybrid_tail?image.size:next*block) &&
@@ -3077,6 +3090,25 @@ static void verify_iso_rebuild(
                         (found->second->size==node->size &&
                          found->second->sections==node->sections)),
                      "hybrid ISO namespace differs from rebuild plan");
+                if(image.hybrid_rr_strict)
+                    need(found->second->record==
+                         record(*node,node->identifier,0,nullptr,nullptr,false,
+                                &node->rr_record),
+                         "hybrid Rock Ridge record differs from remaster plan");
+            }
+            if(image.hybrid_rr_strict) {
+                auto verify_dots=[](const Node& want,const Node& got) {
+                    if(!want.directory)return;
+                    need(got.rr_dot==record(want,Bytes{0},0,&want,nullptr,
+                                           false,&want.rr_dot,true) &&
+                         got.rr_parent==record(want,Bytes{1},0,
+                              want.parent?want.parent:&want,nullptr,false,
+                              &want.rr_parent,true),
+                         "hybrid Rock Ridge dot metadata differs from remaster plan");
+                };
+                verify_dots(*image.root,*verified.root);
+                for(const auto& [key,node]:wanted)
+                    verify_dots(*node,*actual.at(key));
             }
         }
         need(verified.rr_rebuild==image.rr_rebuild,
@@ -3171,20 +3203,44 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
     }
     std::optional<HybridTailPlan> hybrid_tail;
     if(image.hybrid_system_area && !image.udf_bridge) {
-        const auto index=index_iso_tree(*image.root);
-        const bool same_size=!changes.empty() &&
-            std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
-                if(c.remove || c.directory || !std::filesystem::is_regular_file(
-                       std::filesystem::symlink_status(c.source)))return false;
-                const auto found=index.find(upper(edit_path(c.path)));
-                return found!=index.end() && !found->second->directory &&
-                       found->second->sections.size()==1 &&
-                       found->second->size==std::filesystem::file_size(c.source);
-            });
-        if(same_size || image.iso_system_use) {
+        bool same_size=false;
+        if(image.iso_system_use) {
+            // The ordinary parsed tree has ISO aliases, not RRIP NM
+            // names. Keep the byte-only path for equal-length edits.
+            const Disc disc(path);
+            same_size=disc.format()=="Rock Ridge" && !changes.empty() &&
+                std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c) {
+                    if(c.remove || c.directory || !std::filesystem::is_regular_file(
+                           std::filesystem::symlink_status(c.source)))return false;
+                    const auto key=edit_path(c.path);
+                    const auto item=std::find_if(disc.items().begin(),disc.items().end(),
+                        [&](const Item& entry){return entry.path==key && !entry.directory;});
+                    return item!=disc.items().end() &&
+                           item->size==std::filesystem::file_size(c.source);
+                });
+        } else {
+            const auto index=index_iso_tree(*image.root);
+            same_size=!changes.empty() &&
+                std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c) {
+                    if(c.remove || c.directory || !std::filesystem::is_regular_file(
+                           std::filesystem::symlink_status(c.source)))return false;
+                    const auto found=index.find(upper(edit_path(c.path)));
+                    return found!=index.end() && !found->second->directory &&
+                           found->second->sections.size()==1 &&
+                           found->second->size==std::filesystem::file_size(c.source);
+                });
+        }
+        if(same_size) {
             edit_iso_hybrid_equal_length(path,image,changes,progress);
             return;
         }
+        if(image.iso_system_use) {
+            // Unknown SUSP, unmatched views and unsupported geometry
+            // fail before staging. Never downgrade to plain ISO rebuild.
+            image.file.close();
+            image=Image(path,true,true);
+        }
+        const auto index=index_iso_tree(*image.root);
         hybrid_tail=plan_hybrid_tail(image,progress);
         // Check the original targets before changing the in-memory tree.
         for(const auto& c:changes) {
