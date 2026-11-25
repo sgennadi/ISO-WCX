@@ -1963,16 +1963,18 @@ IsoNodeIndex index_iso_tree(const Node& root) {
     gather(gather,root,"");
     return result;
 }
-struct SharedAddView {
-    const Node* parent{};
-    unsigned view{};
-    std::uint64_t at{};
-    Bytes original;
-    std::vector<Bytes> old_records;
-    std::vector<std::pair<std::string,Bytes>> new_records;
+// Reauthor only the two ISO directory trees and their path tables in
+// a dedicated append area; UDF remains the owner of the file payloads.
+// Retain every old raw file record and directory attribute byte.
+struct SharedTreePlan {
+    std::unique_ptr<Node> root;
+    std::vector<Node*> dirs;
+    std::map<const Node*,std::array<std::pair<Bytes,Bytes>,2>> dots;
+    std::map<std::string,Node*> added;
+    std::array<std::vector<Node*>,2> path_dirs;
+    std::array<std::uint32_t,2> table_size{};
+    std::array<std::array<std::uint32_t,2>,2> table_lba{};
 };
-using SharedAddViews=std::map<std::uint64_t,SharedAddView>;
-
 bool iso_identifier_less(const Bytes& a,const Bytes& b) {
     const auto n=std::min(a.size(),b.size());
     for(std::size_t i=0;i<n;++i)if(a[i]!=b[i])return a[i]<b[i];
@@ -1983,170 +1985,249 @@ Bytes directory_identifier(const Bytes& r) {
          "invalid ISO directory identifier");
     return Bytes(r.begin()+33,r.begin()+33+r[32]);
 }
-// Repack the existing directory allocation; never change directory
-// locations, path tables, dot entries or any existing record contents.
-Bytes pack_shared_add_view(const SharedAddView& v,
-                           const std::map<std::string,FileSection>& sections) {
-    auto records=v.old_records;
-    for(const auto& [key,id]:v.new_records) {
-        Node node;
-        node.record.resize(34,0);
-        node.record[18]=126;node.record[19]=1;node.record[20]=1;
-        const auto found=sections.find(key);
-        const FileSection placeholder{0,1};
-        const auto* section=found==sections.end()?&placeholder:&found->second;
-        records.push_back(record(node,id,v.view,nullptr,section));
+const Bytes& view_id(const Node& n,unsigned view) {
+    return view?n.joliet_identifier:n.identifier;
+}
+Bytes shared_tree_record(const Node& n,unsigned view) {
+    const auto& old=view?n.joliet_record:n.record;
+    if(old.empty())return record(n,view_id(n,view),view);
+    auto result=old;
+    if(n.directory) {
+        both(result,2,n.new_lba[view]);both(result,10,n.new_size[view]);
     }
-    need(records.size()>=2,"ISO directory lacks dot records");
-    std::sort(records.begin()+2,records.end(),[](const Bytes& a,const Bytes& b){
-        return iso_identifier_less(directory_identifier(a),directory_identifier(b));
+    return result;
+}
+Bytes shared_tree_directory(const SharedTreePlan& tree,const Node& dir,
+                            unsigned view) {
+    Bytes data;
+    auto append=[&](const Bytes& r) {
+        need(r.size()>=34 && r.size()<=255 && r[0]==r.size(),
+             "invalid mirrored directory record");
+        if(data.size()%block+r.size()>block)
+            data.resize((data.size()/block+1)*block,0);
+        data.insert(data.end(),r.begin(),r.end());
+        need(data.size()<=8u*1024u*1024u,"mirrored ISO directory exceeds budget");
+    };
+    const auto& dot=tree.dots.at(&dir)[view];
+    auto make_dot=[&](const Bytes& old,const Node& dest,unsigned char id) {
+        if(old.empty())return record(dir,Bytes{id},view,&dest);
+        auto r=old;
+        both(r,2,dest.new_lba[view]);both(r,10,dest.new_size[view]);
+        return r;
+    };
+    append(make_dot(dot.first,dir,0));
+    append(make_dot(dot.second,dir.parent?*dir.parent:dir,1));
+    std::vector<const Node*> sorted;
+    for(const auto& child:dir.children)sorted.push_back(child.get());
+    std::sort(sorted.begin(),sorted.end(),[&](const Node* a,const Node* b){
+        return iso_identifier_less(view_id(*a,view),view_id(*b,view));
     });
-    Bytes output;
-    for(const auto& r:records) {
-        if(output.size()%block+r.size()>block)
-            output.resize((output.size()/block+1)*block,0);
-        need(output.size()<=v.original.size() &&
-             r.size()<=v.original.size()-output.size(),
-             "shared ISO directory has no space for new records; relocation required");
-        output.insert(output.end(),r.begin(),r.end());
+    for(const auto* child:sorted)append(shared_tree_record(*child,view));
+    data.resize((data.size()+block-1)/block*block,0);
+    return data;
+}
+Bytes shared_tree_path_table(const SharedTreePlan& tree,unsigned view,bool big) {
+    const auto& dirs=tree.path_dirs[view];
+    std::map<const Node*,std::uint32_t> numbers;
+    for(std::size_t i=0;i<dirs.size();++i)
+        numbers.emplace(dirs[i],static_cast<std::uint32_t>(i+1));
+    Bytes table;
+    for(const auto* d:dirs) {
+        const auto id=d==tree.root.get()?Bytes{0}:view_id(*d,view);
+        const auto at=table.size();
+        table.resize(at+8+id.size()+(id.size()%2),0);
+        table[at]=static_cast<unsigned char>(id.size());
+        put(table,at+2,d->new_lba[view],4,big);
+        put(table,at+6,numbers.at(d->parent?d->parent:d),2,big);
+        std::copy(id.begin(),id.end(),table.begin()+static_cast<std::ptrdiff_t>(at+8));
     }
-    output.resize(v.original.size(),0);
-    return output;
+    return table;
 }
 bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         const IsoNodeIndex& iso_files,const std::vector<ArchiveChange>& changes,
-        CoordinatedIsoUpdate& plan,SharedAddViews& views) {
+        CoordinatedIsoUpdate& plan,SharedTreePlan& tree) {
     if(image.hybrid_system_area || image.iso_system_use || changes.empty() ||
        !std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
-           return !c.remove && !c.directory &&
-                  !iso_files.count(upper(edit_path(c.path)));
+           return !c.remove && !iso_files.count(upper(edit_path(c.path)));
        }))return false;
-    const Disc udf(path);
-    if(udf.format()!="UDF" || udf.items().size()!=iso_files.size())return false;
-    std::set<std::string> seen;
-    bool common_data=false;
-    for(const auto& item:udf.items()) {
-        const auto key=upper(item.path);
-        const auto at=iso_files.find(key);
-        if(!seen.insert(key).second || at==iso_files.end() ||
-           at->second->directory!=item.directory)return false;
-        if(item.directory)continue;
-        const auto* n=at->second;
-        if(n->size!=item.size || !item.size || !item.inline_data.empty() ||
-           n->sections.size()!=1 || item.extents.size()!=1 ||
-           item.extents[0].sparse ||
-           item.extents[0].offset!=std::uint64_t(n->lba)*block ||
-           item.extents[0].length!=item.size)return false;
-        common_data=true;
+    {
+        const Disc udf(path);
+        if(udf.format()!="UDF" || udf.items().size()!=iso_files.size())return false;
+        std::set<std::string> seen;
+        bool common_data=false;
+        for(const auto& item:udf.items()) {
+            const auto key=upper(item.path);
+            const auto at=iso_files.find(key);
+            if(!seen.insert(key).second || at==iso_files.end() ||
+               at->second->directory!=item.directory)return false;
+            if(item.directory)continue;
+            const auto* n=at->second;
+            if(n->size!=item.size || !item.size || !item.inline_data.empty() ||
+               n->sections.size()!=1 || item.extents.size()!=1 ||
+               item.extents[0].sparse ||
+               item.extents[0].offset!=std::uint64_t(n->lba)*block ||
+               item.extents[0].length!=item.size)return false;
+            common_data=true;
+        }
+        if(!common_data)return false;
     }
-    if(!common_data)return false;
     const auto inspection=inspect_udf_edit(path,true);
     if(!inspection.parser_compatible || inspection.partition_access_type!=1 ||
        inspection.allocation_bitmap || inspection.allocation_table)return false;
-    auto plan_view=[&](const Node& parent,unsigned view,const std::string& key,
-                       const std::string& component) {
-        const auto& r=view?parent.joliet_record:parent.record;
-        need(r.size()>=34,"missing mirrored ISO directory record");
-        const auto start=std::uint64_t(le(r,2))*block;
-        const auto length=le(r,10);
-        need(start>=16ull*block && length && length<=8u*1024u*1024u &&
-             length%block==0,"unsupported mirrored ISO directory allocation");
-        auto [it,inserted]=views.try_emplace(start);
-        auto& v=it->second;
-        if(inserted) {
-            v.parent=&parent;v.view=view;v.at=start;
-            v.original=image.read(start,length);
-            for(std::size_t at=0;at<v.original.size();) {
-                const auto n=std::size_t(v.original[at]);
-                if(!n) {
-                    const auto end=std::min(v.original.size(),(at/block+1)*block);
-                    need(std::all_of(v.original.begin()+static_cast<std::ptrdiff_t>(at),
-                         v.original.begin()+static_cast<std::ptrdiff_t>(end),
-                         [](auto c){return c==0;}),"nonzero ISO directory padding");
-                    at=end;continue;
+    const unsigned views=image.joliet?2u:1u;
+    std::map<std::string,Node*> index;
+    std::uint64_t original_bytes=0;
+    auto clone=[&](auto&& self,const Node& old,Node* parent,
+                   const std::string& key)->std::unique_ptr<Node> {
+        auto n=std::make_unique<Node>();
+        n->name=old.name;n->logical=old.logical;n->directory=old.directory;
+        n->parent=parent;n->record=old.record;n->joliet_record=old.joliet_record;
+        n->identifier=old.identifier;n->joliet_identifier=old.joliet_identifier;
+        n->lba=old.lba;n->size=old.size;n->sections=old.sections;
+        need(index.emplace(upper(key),n.get()).second,"duplicate mirrored ISO path");
+        if(n->directory) {
+            tree.dirs.push_back(n.get());
+            auto& dots=tree.dots[n.get()];
+            for(unsigned view=0;view<views;++view) {
+                const auto& r=view?old.joliet_record:old.record;
+                need(r.size()>=34,"missing original ISO directory record");
+                const auto at=std::uint64_t(le(r,2))*block;
+                const auto bytes=le(r,10);
+                need(bytes && bytes%block==0 && bytes<=8u*1024u*1024u &&
+                     original_bytes+bytes<=64ull*1024*1024,
+                     "unsupported original mirrored directory geometry");
+                original_bytes+=bytes;
+                const auto data=image.read(at,bytes);
+                std::size_t count=0;
+                for(std::size_t p=0;p<data.size();) {
+                    const auto length=std::size_t(data[p]);
+                    if(!length) {
+                        const auto end=std::min(data.size(),(p/block+1)*block);
+                        need(std::all_of(data.begin()+static_cast<std::ptrdiff_t>(p),
+                               data.begin()+static_cast<std::ptrdiff_t>(end),
+                               [](auto c){return c==0;}),
+                             "nonzero old ISO directory padding");
+                        p=end;continue;
+                    }
+                    need(length>=34 && length<=data.size()-p && p%block+length<=block,
+                         "invalid old mirrored ISO directory record");
+                    if(count<2) {
+                        Bytes dot(data.begin()+static_cast<std::ptrdiff_t>(p),
+                                  data.begin()+static_cast<std::ptrdiff_t>(p+length));
+                        need(directory_identifier(dot)==Bytes{static_cast<unsigned char>(count)} &&
+                             (dot[25]&2u),"missing original ISO dot record");
+                        if(!count)dots[view].first=std::move(dot);
+                        else dots[view].second=std::move(dot);
+                    }
+                    ++count;p+=length;
                 }
-                need(n>=34 && n<=v.original.size()-at && at%block+n<=block,
-                     "invalid mirrored ISO directory record");
-                v.old_records.emplace_back(v.original.begin()+static_cast<std::ptrdiff_t>(at),
-                    v.original.begin()+static_cast<std::ptrdiff_t>(at+n));
-                at+=n;
-            }
-            need(v.old_records.size()>=2 &&
-                 directory_identifier(v.old_records[0])==Bytes{0} &&
-                 directory_identifier(v.old_records[1])==Bytes{1},
-                 "mirrored ISO directory lacks leading dot records");
-        }
-        need(v.parent==&parent && v.view==view && v.original.size()==length,
-             "aliased ISO directory storage cannot be edited");
-        auto collision=[&](const Bytes& id) {
-            const auto name=upper(decode(id,view!=0,false));
-            for(std::size_t i=2;i<v.old_records.size();++i) {
-                const auto& old=v.old_records[i];
-                if(upper(decode(directory_identifier(old),view!=0,
-                                (old[25]&2u)!=0))==name)return true;
-            }
-            for(const auto& [other,existing]:v.new_records) {
-                (void)other;
-                if(upper(decode(existing,view!=0,false))==name)return true;
-            }
-            return false;
-        };
-        Bytes id;
-        try {id=identifier(component,view!=0,false);}
-        catch(const EditUnsupported&) {
-            need(!view && image.joliet,"new name cannot be represented in ISO/Joliet");
-            for(unsigned salt=0;salt<128;++salt) {
-                id=identifier(iso_alias(component,false,salt),false,false);
-                if(!collision(id))break;
+                need(count==old.children.size()+2,
+                     "old mirrored ISO directory has unsupported extra records");
             }
         }
-        need(!collision(id),"new shared ISO filename or alias collides");
-        v.new_records.emplace_back(key,std::move(id));
+        for(const auto& child:old.children) {
+            const auto child_key=key.empty()?child->logical:key+"/"+child->logical;
+            n->children.push_back(self(self,*child,n.get(),child_key));
+        }
+        return n;
     };
-    for(const auto& change:changes) {
-        const auto key=edit_path(change.path);
-        need(std::filesystem::is_regular_file(
-                 std::filesystem::symlink_status(change.source)),
-             "shared addition source must be a regular file");
-        const auto length=std::filesystem::file_size(change.source);
-        need(length>0 && length<=0xffffffffull,
-             "shared addition requires a nonempty file within single ISO extent bounds");
+    tree.root=clone(clone,*image.root,nullptr,"");
+    std::vector<const ArchiveChange*> sorted;
+    for(const auto& c:changes)sorted.push_back(&c);
+    std::stable_sort(sorted.begin(),sorted.end(),[](const auto* a,const auto* b){
+        return std::count(a->path.begin(),a->path.end(),'/')<
+               std::count(b->path.begin(),b->path.end(),'/');
+    });
+    for(const auto* c:sorted) {
+        const auto key=edit_path(c->path);
         const auto slash=key.rfind('/');
         const auto parent_key=slash==std::string::npos?std::string{}:key.substr(0,slash);
         const auto component=slash==std::string::npos?key:key.substr(slash+1);
-        const Node* parent=image.root.get();
-        if(!parent_key.empty()) {
-            const auto found=iso_files.find(upper(parent_key));
-            need(found!=iso_files.end() && found->second->directory,
-                 "shared addition requires an existing mirrored parent directory");
-            parent=found->second;
+        const auto found=index.find(upper(parent_key));
+        need(found!=index.end() && found->second->directory,
+             "new shared entry requires an existing or explicitly created parent");
+        auto* parent=found->second;
+        auto n=std::make_unique<Node>();
+        n->parent=parent;n->logical=component;n->directory=c->directory;
+        if(!c->directory) {
+            need(std::filesystem::is_regular_file(
+                     std::filesystem::symlink_status(c->source)),
+                 "shared addition source must be a regular file");
+            n->size=std::filesystem::file_size(c->source);
+            need(n->size>0 && n->size<=0xffffffffull,
+                 "shared addition requires nonempty single-extent ISO file");
         }
-        need(plan.shared_additions.insert(key).second,"duplicate shared addition");
-        plan_view(*parent,0,key,component);
-        if(image.joliet)plan_view(*parent,1,key,component);
-    }
-    for(const auto& [at,v]:views) {
-        // Validate capacity before staging (record lengths do not depend
-        // on physical file locations).
-        (void)pack_shared_add_view(v,{});
-        plan.metadata_writes.emplace_back(at,v.original.size());
-        // A directory extent may never alias a different directory view.
-        auto check_directory=[&](const Node& n,unsigned view){
-            if(!n.directory)return;
-            if(&n==v.parent && view==v.view)return;
-            const auto& r=view?n.joliet_record:n.record;
-            need(r.size()>=34,"missing ISO directory record");
-            need(!intersect(at,v.original.size(),
-                    std::uint64_t(le(r,2))*block,le(r,10)),
-                 "mirrored directory aliases another ISO directory");
+        auto collision=[&](const Bytes& id,unsigned view) {
+            const auto name=upper(decode(id,view!=0,n->directory));
+            return std::any_of(parent->children.begin(),parent->children.end(),
+                [&](const auto& child) {
+                    return upper(decode(view_id(*child,view),view!=0,
+                                        child->directory))==name;
+                });
         };
-        check_directory(*image.root,0);
-        if(image.joliet)check_directory(*image.root,1);
-        for(const auto& [key,n]:iso_files) {
-            (void)key;
-            check_directory(*n,0);
-            if(image.joliet)check_directory(*n,1);
+        try {n->identifier=identifier(component,false,n->directory);}
+        catch(const EditUnsupported&) {
+            need(image.joliet,"shared name cannot be represented in ISO9660");
+            for(unsigned salt=0;salt<128;++salt) {
+                n->identifier=identifier(iso_alias(component,n->directory,salt),
+                                         false,n->directory);
+                if(!collision(n->identifier,0))break;
+            }
         }
+        need(!collision(n->identifier,0),"shared primary ISO name collision");
+        n->name=decode(n->identifier,false,n->directory);
+        if(image.joliet) {
+            n->joliet_identifier=identifier(component,true,n->directory);
+            need(!collision(n->joliet_identifier,1),"shared Joliet name collision");
+        } else n->logical=n->name;
+        // Generated record() uses this minimal header for timestamps.
+        // Leave the raw-record members empty until serialization.
+        if(n->directory) {
+            plan.shared_directories.insert(key);
+            tree.dirs.push_back(n.get());
+            tree.dots[n.get()]={};
+        } else plan.shared_additions.insert(key);
+        need(index.emplace(upper(key),n.get()).second &&
+             tree.added.emplace(key,n.get()).second,
+             "duplicate new mirrored entry");
+        parent->children.push_back(std::move(n));
+        need(index.size()<=200000 && tree.dirs.size()<=65535,
+             "mirrored directory tree exceeds entry limit");
+    }
+    // The existing strict ISO/Joliet pairer accepts equal directory sizes.
+    // Pad each pair to the larger size, preserving both views' record data.
+    for(auto* dir:tree.dirs) {
+        std::size_t largest=0;
+        for(unsigned view=0;view<views;++view)
+            largest=std::max(largest,shared_tree_directory(tree,*dir,view).size());
+        for(unsigned view=0;view<views;++view)
+            dir->new_size[view]=static_cast<std::uint32_t>(largest);
+    }
+    std::uint64_t blocks=0;
+    for(unsigned view=0;view<views;++view) {
+        auto& order=tree.path_dirs[view];
+        order.push_back(tree.root.get());
+        for(std::size_t i=0;i<order.size();++i) {
+            std::vector<Node*> children;
+            for(const auto& child:order[i]->children)
+                if(child->directory)children.push_back(child.get());
+            std::sort(children.begin(),children.end(),[&](const Node* a,const Node* b){
+                return iso_identifier_less(view_id(*a,view),view_id(*b,view));
+            });
+            for(auto* child:children)order.push_back(child);
+        }
+        need(order.size()==tree.dirs.size(),"invalid mirrored path table count");
+        const auto size=shared_tree_path_table(tree,view,false).size();
+        need(size && size<=0xffffffffu,"mirrored path table exceeds size limit");
+        tree.table_size[view]=static_cast<std::uint32_t>(size);
+        for(const auto* dir:tree.dirs)blocks+=dir->new_size[view]/block;
+        blocks+=2*((size+block-1)/block);
+    }
+    need(blocks && blocks<=32768,"mirrored ISO metadata exceeds 64 MiB budget");
+    plan.iso_metadata_blocks=blocks;
+    for(const auto& [lba,vd]:image.descriptors) {
+        (void)vd;
+        plan.metadata_writes.emplace_back(std::uint64_t(lba)*block+132,58);
     }
     return true;
 }
@@ -2154,24 +2235,50 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
 void coordinate_shared_add_stage(const std::filesystem::path& path,
         const std::filesystem::path& staged,const Image& image,
         const IsoNodeIndex& original,const CoordinatedIsoUpdate& plan,
-        const SharedAddViews& views,const EditProgress& progress) {
+        SharedTreePlan& tree,const EditProgress& progress) {
     protect_iso_udf_stage(path,staged,image,progress);
     const auto size=std::filesystem::file_size(staged);
     need(size>image.size && size%block==0 && size/block<0xffffffffu,
          "shared addition requires append mastering");
-    std::map<std::string,FileSection> sections;
+    const unsigned views=image.joliet?2u:1u;
+    std::uint64_t first=0,main=0;
+    {
+        Image mapped(staged,true);
+        const auto anchor=mapped.read(256ull*block,block);
+        main=le(anchor,20);
+        need(main>=plan.iso_metadata_blocks &&
+             main<size/block,"invalid reserved ISO metadata area");
+        first=main-plan.iso_metadata_blocks;
+        need(first>=image.size/block,"reserved ISO metadata overlaps source image");
+        const auto vds_blocks=le(anchor,16)/block;
+        need(vds_blocks && vds_blocks<=8192 && vds_blocks<=size/block-main,
+             "invalid remastered UDF VDS bounds");
+        bool pd=false;
+        for(std::uint64_t i=0;i<vds_blocks;++i) {
+            const auto d=mapped.read((main+i)*block,block);
+            if(le(d,0,2)==8)break;
+            if(le(d,0,2)!=5)continue;
+            need(!pd && std::uint64_t(le(d,188))+le(d,192)==first,
+                 "reserved ISO metadata overlaps UDF partition");
+            pd=true;
+        }
+        need(pd,"missing remastered physical UDF partition");
+    }
     {
         const Disc udf(staged);
         need(udf.format()=="UDF","cannot read staged UDF additions");
-        for(const auto& key:plan.shared_additions) {
+        for(const auto& [key,n]:tree.added) {
             const auto found=std::find_if(udf.items().begin(),udf.items().end(),
-                [&](const Item& item){return !item.directory && item.path==key;});
-            need(found!=udf.items().end() && found->size>0 &&
-                 found->size<=0xffffffffull && found->inline_data.empty() &&
+                [&](const Item& item){return item.path==key;});
+            need(found!=udf.items().end() && found->directory==n->directory,
+                 "new shared UDF path missing or wrong type");
+            if(n->directory)continue;
+            need(found->size==n->size && found->inline_data.empty() &&
                  !found->extents.empty(),"shared UDF addition has no ISO extent");
             const auto start=found->extents.front().offset;
-            need(start>=image.size && start%block==0 && start<=size &&
-                 found->size<=size-start,"shared addition outside append area");
+            need(start>=image.size && start%block==0 && start<=first*block &&
+                 found->size<=first*block-start,
+                 "shared addition outside UDF append area");
             auto next=start;
             for(const auto& e:found->extents) {
                 need(!e.sparse && e.offset==next &&
@@ -2180,76 +2287,130 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
                 next+=e.length;
             }
             need(next-start==found->size,"shared addition extent size mismatch");
-            sections.emplace(key,FileSection{static_cast<std::uint32_t>(start/block),
-                static_cast<std::uint32_t>(found->size)});
+            n->lba=static_cast<std::uint32_t>(start/block);
+            n->sections={{n->lba,static_cast<std::uint32_t>(n->size)}};
         }
     }
+    // Assign every directory and path table LBA before serializing any
+    // parent, child, '.' or '..' reference.
+    auto next=first;
+    for(unsigned view=0;view<views;++view) {
+        for(auto* dir:tree.dirs) {
+            dir->new_lba[view]=static_cast<std::uint32_t>(next);
+            next+=dir->new_size[view]/block;
+        }
+        for(unsigned big=0;big<2;++big) {
+            tree.table_lba[view][big]=static_cast<std::uint32_t>(next);
+            next+=(tree.table_size[view]+block-1)/block;
+        }
+    }
+    need(next==main,"mirrored ISO metadata reservation mismatch");
     std::fstream out(staged,std::ios::binary|std::ios::in|std::ios::out);
-    need(bool(out),"cannot open staged ISO directory additions");
-    auto patch=[&](std::uint64_t at,const Bytes& old,const Bytes& next) {
+    need(bool(out),"cannot open staged mirrored ISO metadata");
+    auto write_reserved=[&](std::uint64_t at,const Bytes& data) {
         edit_tick(progress);
-        need(old.size()==next.size() &&
-             std::find(plan.metadata_writes.begin(),plan.metadata_writes.end(),
-                std::pair<std::uint64_t,std::uint64_t>{at,old.size()})!=
-                     plan.metadata_writes.end(),"unplanned shared addition field");
-        Bytes current(old.size());
+        need(at>=first*block && at<=main*block &&
+             data.size()<=main*block-at,"mirrored ISO metadata outside reservation");
+        Bytes old(data.size());
         out.clear();out.seekg(static_cast<std::streamoff>(at));
-        out.read(reinterpret_cast<char*>(current.data()),
-                 static_cast<std::streamsize>(current.size()));
-        need(bool(out) && current==old,"ISO directory changed during UDF staging");
-        out.clear();out.seekp(static_cast<std::streamoff>(at));
-        write(out,next);
+        out.read(reinterpret_cast<char*>(old.data()),
+                 static_cast<std::streamsize>(old.size()));
+        need(bool(out) && std::all_of(old.begin(),old.end(),[](auto c){return c==0;}),
+             "reserved ISO metadata space is not empty");
+        out.clear();out.seekp(static_cast<std::streamoff>(at));write(out,data);
     };
-    for(const auto& [at,v]:views)
-        patch(at,v.original,pack_shared_add_view(v,sections));
+    for(unsigned view=0;view<views;++view) {
+        for(const auto* dir:tree.dirs) {
+            auto data=shared_tree_directory(tree,*dir,view);
+            need(data.size()<=dir->new_size[view],"mirrored ISO directory size changed");
+            data.resize(dir->new_size[view],0);
+            write_reserved(std::uint64_t(dir->new_lba[view])*block,data);
+        }
+        for(unsigned big=0;big<2;++big) {
+            auto data=shared_tree_path_table(tree,view,big!=0);
+            need(data.size()==tree.table_size[view],"mirrored path table size changed");
+            data.resize((data.size()+block-1)/block*block,0);
+            write_reserved(std::uint64_t(tree.table_lba[view][big])*block,data);
+        }
+    }
     auto expected=image.descriptors;
     for(auto& [lba,vd]:expected) {
-        Bytes old(vd.begin()+80,vd.begin()+88);
+        const auto old=vd;
+        const unsigned view=vd[0]==2?1u:0u;
         both(vd,80,static_cast<std::uint32_t>(size/block));
-        patch(std::uint64_t(lba)*block+80,old,Bytes(vd.begin()+80,vd.begin()+88));
+        both(vd,132,tree.table_size[view]);
+        put(vd,140,tree.table_lba[view][0]);put(vd,144,0);
+        put(vd,148,tree.table_lba[view][1],4,true);put(vd,152,0);
+        const auto& root_record=view?tree.root->joliet_record:tree.root->record;
+        need(root_record.size()==34,"invalid original ISO root record");
+        auto root=root_record;
+        both(root,2,tree.root->new_lba[view]);both(root,10,tree.root->new_size[view]);
+        std::copy(root.begin(),root.end(),vd.begin()+156);
+        for(const auto& [offset,length]:{std::pair<std::size_t,std::size_t>{80,8},{132,58}}) {
+            const auto at=std::uint64_t(lba)*block+offset;
+            need(std::find(plan.metadata_writes.begin(),plan.metadata_writes.end(),
+                    std::pair<std::uint64_t,std::uint64_t>{at,length})!=
+                         plan.metadata_writes.end(),"unplanned mirrored ISO descriptor field");
+            Bytes actual(length);
+            out.clear();out.seekg(static_cast<std::streamoff>(at));
+            out.read(reinterpret_cast<char*>(actual.data()),
+                     static_cast<std::streamsize>(actual.size()));
+            need(bool(out) && std::equal(actual.begin(),actual.end(),old.begin()+offset),
+                 "original ISO descriptor changed during UDF mastering");
+            out.clear();out.seekp(static_cast<std::streamoff>(at));
+            write(out,Bytes(vd.begin()+offset,vd.begin()+offset+length));
+        }
     }
-    out.flush();need(bool(out),"cannot flush shared addition stage");out.close();
+    out.flush();need(bool(out),"cannot flush mirrored ISO tree");out.close();
     Image checked(staged,true);
-    need(checked.udf_bridge && checked.size==size &&
-         checked.descriptors==expected && checked.boot_regions==image.boot_regions &&
+    need(checked.udf_bridge && checked.size==size && checked.descriptors==expected &&
+         checked.boot_regions==image.boot_regions &&
          checked.boot_entries==image.boot_entries &&
          checked.boot_lbas==image.boot_lbas &&
          checked.boot_descriptor_lbas==image.boot_descriptor_lbas,
-         "shared addition changed ISO/boot descriptors");
+         "shared tree remaster changed boot descriptors");
     const auto after=index_iso_tree(*checked.root);
-    need(after.size()==original.size()+sections.size(),
-         "shared additions changed unrelated ISO namespace");
-    for(const auto& [key,n]:original) {
+    const auto wanted=index_iso_tree(*tree.root);
+    need(after.size()==original.size()+tree.added.size() && after.size()==wanted.size(),
+         "shared tree remaster changed unrelated namespace");
+    for(const auto& [key,n]:wanted) {
         const auto found=after.find(key);
-        need(found!=after.end(),"shared addition lost an existing entry");
-        const auto* a=found->second;
-        need(n->directory==a->directory && n->name==a->name &&
-             n->logical==a->logical && n->record==a->record &&
-             n->joliet_record==a->joliet_record && n->sections==a->sections &&
-             n->lba==a->lba && n->size==a->size,
-             "shared addition changed existing ISO directory metadata");
+        need(found!=after.end(),"remastered shared ISO entry missing");
+        const auto* got=found->second;
+        need(n->directory==got->directory && n->name==got->name &&
+             n->logical==got->logical &&
+             n->identifier==got->identifier && n->joliet_identifier==got->joliet_identifier &&
+             got->record==shared_tree_record(*n,0) &&
+             (!image.joliet || got->joliet_record==shared_tree_record(*n,1)) &&
+             (n->directory?
+                (got->lba==n->new_lba[0] && got->size==n->new_size[0]):
+                (got->lba==n->lba && got->size==n->size && got->sections==n->sections)),
+             "remastered shared ISO entry differs from plan");
     }
-    for(const auto& [key,part]:sections) {
-        const auto found=after.find(upper(key));
-        need(found!=after.end() && !found->second->directory &&
-             found->second->sections==std::vector<FileSection>{part},
-             "new shared ISO/Joliet file does not map to UDF payload");
+    for(unsigned view=0;view<views;++view) {
+        for(const auto* dir:tree.dirs) {
+            auto data=shared_tree_directory(tree,*dir,view);
+            data.resize(dir->new_size[view],0);
+            need(checked.read(std::uint64_t(dir->new_lba[view])*block,data.size())==data,
+                 "remastered ISO directory readback differs from plan");
+        }
+        for(unsigned big=0;big<2;++big) {
+            auto data=shared_tree_path_table(tree,view,big!=0);
+            data.resize((data.size()+block-1)/block*block,0);
+            need(checked.read(std::uint64_t(tree.table_lba[view][big])*block,data.size())==data,
+                 "remastered ISO path table readback differs from plan");
+        }
     }
-    // Verify the exact packed directory bytes including dot records and
-    // padding. This checks both primary and supplementary views.
-    for(const auto& [at,v]:views)
-        need(checked.read(at,v.original.size())==pack_shared_add_view(v,sections),
-             "shared ISO directory readback differs from plan");
     checked.file.close();
     const Disc udf(staged);
-    need(udf.format()=="UDF","shared addition lost UDF namespace");
-    for(const auto& [key,part]:sections) {
+    need(udf.format()=="UDF","mirrored remaster lost UDF namespace");
+    for(const auto& [key,n]:tree.added) {
         const auto found=std::find_if(udf.items().begin(),udf.items().end(),
-            [&](const Item& item){return !item.directory && item.path==key;});
-        need(found!=udf.items().end() && found->size==part.length &&
-             !found->extents.empty() &&
-             found->extents.front().offset==std::uint64_t(part.lba)*block,
-             "shared ISO/UDF addition final mapping mismatch");
+            [&](const Item& item){return item.path==key;});
+        need(found!=udf.items().end() && found->directory==n->directory &&
+             (n->directory || (found->size==n->size && !found->extents.empty() &&
+                found->extents.front().offset==std::uint64_t(n->lba)*block)),
+             "final shared ISO/Joliet/UDF mapping differs");
     }
 }
 void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
@@ -2272,10 +2433,10 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     gather(gather,*image.root,"");
     CoordinatedIsoUpdate plan;
     SharedIsoDeleteSectors deletion_sectors;
-    SharedAddViews add_views;
+    SharedTreePlan add_tree;
     std::map<std::string,const Node*> shared;
     const bool adding_shared=plan_shared_additions(path,image,iso_files,changes,
-                                                   plan,add_views);
+                                                   plan,add_tree);
     if(std::any_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
             return iso_files.count(upper(edit_path(c.path)))!=0;
         })) {
@@ -2362,10 +2523,10 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     image.file.close();
     const EditStageValidator validate=
         [&path,&image,&progress,&shared,&plan,&deletion_sectors,
-         &iso_files,&add_views,adding_shared](const std::filesystem::path& staged) {
+         &iso_files,&add_tree,adding_shared](const std::filesystem::path& staged) {
             if(adding_shared)
                 coordinate_shared_add_stage(path,staged,image,iso_files,plan,
-                                            add_views,progress);
+                                            add_tree,progress);
             else if(shared.empty())protect_iso_udf_stage(path,staged,image,progress);
             else coordinate_shared_bridge_stage(path,staged,image,shared,plan,
                                                 deletion_sectors,progress);

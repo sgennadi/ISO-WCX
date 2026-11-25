@@ -304,12 +304,37 @@ def main(editor,inspector):
             assert (target/'ADDED.TXT').read_bytes()==source.read_bytes()
             assert (target/'EXTRA.BIN').read_bytes()==second.read_bytes()
             assert image.read_bytes()[24*B:26*B]==common[24*B:26*B]
-            before=image.read_bytes()
-            too_many=[editor,str(image),'batch']
+            # Grow both directory allocations beyond one sector. Use
+            # a separate copy to retain the older shared-delete scenarios.
+            from test_iso_edit import validate_path_tables
+            expanded=root/f'expanded-{j}.iso'
+            expanded.write_bytes(image.read_bytes())
+            many=[editor,str(expanded),'batch']
             for i in range(80):
-                too_many+=['add',f'FILE{i:03d}.TXT',str(source)]
-            run(too_many,expected=1)
-            assert image.read_bytes()==before
+                many+=['add',f'FILE{i:03d}.TXT',str(source)]
+            run(many)
+            many_expected=dict(expected)
+            many_expected.update({f'FILE{i:03d}.TXT':source.read_bytes()
+                                  for i in range(80)})
+            assert read_image(expanded)==many_expected
+            if j: assert read_image(expanded,True)==many_expected
+            validate_path_tables(expanded)
+            # Nested explicit mkdir and F5 in the same transaction.
+            run([editor,str(expanded),'batch','mkdir','DATA',
+                 'mkdir','DATA/SUB','add','DATA/SUB/NESTED.BIN',str(second)])
+            many_expected.update({'DATA/':None,'DATA/SUB/':None,
+                                  'DATA/SUB/NESTED.BIN':second.read_bytes()})
+            assert read_image(expanded)==many_expected
+            if j: assert read_image(expanded,True)==many_expected
+            validate_path_tables(expanded)
+            target=root/f'expanded-readback-{j}'
+            run([inspector,str(expanded),'--extract',str(target)])
+            assert (target/'DATA'/'SUB'/'NESTED.BIN').read_bytes()==second.read_bytes()
+            assert (target/'FILE079.TXT').read_bytes()==source.read_bytes()
+            assert expanded.read_bytes()[24*B:26*B]==common[24*B:26*B]
+            before=expanded.read_bytes()
+            run([editor,str(expanded),'add','MISSING/REJECT.TXT',str(source)],expected=1)
+            assert expanded.read_bytes()==before
             run([editor,str(image),'batch','delete','ADDED.TXT',
                  'delete','EXTRA.BIN'])
             assert read_image(image)=={'hello':b'world','keep':b'KEEP!'}

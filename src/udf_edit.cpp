@@ -965,7 +965,8 @@ public:
     // partition, preserving every original payload offset and ISO boot LBA.
     ReadonlyAppendPlan prepare_readonly_append(
             const std::vector<ArchiveChange>& changes,
-            const EditProtectedRanges& protected_ranges) {
+            const EditProtectedRanges& protected_ranges,
+            std::uint64_t iso_metadata_blocks=0) {
         need(partition_access_type_==1 && !bitmap_ && !changes.empty() &&
              changes.size()<=max_items,"unsupported read-only UDF mastering");
         ReadonlyAppendPlan plan;
@@ -1079,7 +1080,13 @@ public:
         }
         need(pd_found && lvd_found && terminated,
              "incomplete UDF mastering descriptor sequence");
-        const auto main=new_end;
+        // The coordinator's new ISO directory/path-table area lies
+        // strictly after the UDF partition, but before the relocated VDS.
+        // It is never represented by a free bit in the UDF virtual map.
+        need(iso_metadata_blocks<=32768 &&
+             iso_metadata_blocks<max_image/block-new_end,
+             "ISO metadata reservation exceeds mastering budget");
+        const auto main=new_end+iso_metadata_blocks;
         const auto reserve=main+vds_bytes/block;
         const auto integrity_lba=reserve+vds_bytes/block;
         const auto last=integrity_lba+2+256;
@@ -3000,18 +3007,20 @@ void edit_udf(const std::filesystem::path& image,
              volume.partition_access_type()==1 && !volume.has_allocation_map() &&
              coordinated->shared_replacements.size()+
                  coordinated->shared_deletions.size()+
-                 coordinated->shared_additions.size()==changes.size() &&
+                 coordinated->shared_additions.size()+
+                 coordinated->shared_directories.size()==changes.size() &&
              !coordinated->metadata_writes.empty(),
              "shared ISO/UDF edit requires read-only Type-1 mastering");
         for(const auto& change:changes) {
             const auto key=edit_path(change.path);
             const bool existing=volume.files().count(key)!=0;
-            need(!change.directory &&
-                 (existing?
-                    (change.remove?coordinated->shared_deletions.count(key):
-                                   coordinated->shared_replacements.count(key)):
+            need(existing?
+                    (!change.directory &&
+                     (change.remove?coordinated->shared_deletions.count(key):
+                                    coordinated->shared_replacements.count(key))):
                     (!change.remove && !volume.directories().count(key) &&
-                     coordinated->shared_additions.count(key))),
+                     (change.directory?coordinated->shared_directories.count(key):
+                                       coordinated->shared_additions.count(key))),
                  "invalid coordinated edit target");
         }
         for(const auto& [at,bytes]:coordinated->metadata_writes) {
@@ -3022,7 +3031,8 @@ void edit_udf(const std::filesystem::path& image,
                 need(!intersects({at,bytes},object.range),
                      "coordinated ISO field overlaps a live UDF object");
         }
-        auto plan=volume.prepare_readonly_append(changes,protected_ranges);
+        auto plan=volume.prepare_readonly_append(changes,protected_ranges,
+                                                coordinated->iso_metadata_blocks);
         create_udf_type1_batch(image,volume,changes,progress,true,
                                validate_stage,&plan,coordinated);
         return;
