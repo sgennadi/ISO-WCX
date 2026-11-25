@@ -205,8 +205,8 @@ separately. No Type-1 allocator fallback is permitted.
 
 ### Initial VAT append writer (standalone UDF 2.x)
 
-The standalone dispatcher supports one ordinary file or directory
-operation, with a VAT 2.x FE at the last recorded sector of a
+The standalone dispatcher supports batched ordinary file and directory
+operations, with a VAT 2.x FE at the last recorded sector of a
 write-once image, an open integrity sequence and capacity already
 declared by the physical partition descriptor. Embedded or external
 physical VAT storage is supported (16 MiB table limit). File data
@@ -221,7 +221,7 @@ fallback nor zero-filled space authorizes a write.
 
 This is intentionally a narrow backend. VAT 1.50 writing, EFE,
 external allocation continuations, external directory bodies,
-multiple changes, full/closed sessions, partition growth and ISO/UDF
+full/closed sessions, partition growth and ISO/UDF
 bridge VAT writing remain unsupported. Physical data runs that alias
 VAT entries, the previous VAT, other files, or the table storage are
 rejected. Tests cover embedded-to-external replacement, repeat external
@@ -251,8 +251,7 @@ FID IDs, file counts in the original root-only profile. A full embedded root
 directory is rejected rather than relocated. Tests cover creation,
 deletion, re-creation, non-reuse of retired virtual addresses,
 transition to external VAT, cancellation and complete old-session
-preservation. Multiple changes in one request,
-legacy VAT 1.50 writing and physical recording remain unsupported.
+preservation. Legacy VAT 1.50 writing and physical recording remain unsupported.
 
 
 ### VAT nested embedded directories
@@ -269,5 +268,24 @@ as required by UDF 2.01 section 2.2.11 and later VAT definitions.
 Directory link counts are validated against immediate children.
 All prior physical bytes, surviving namespace entries, and newly
 written metadata are checked before commit. External directory bodies,
-recursive deletion of nonempty directories, batches, special ICBs,
+implicit recursive deletion of nonempty directories, special ICBs,
 and unsupported parent geometry still fail closed.
+
+
+### VAT atomic batches
+
+One request supports up to 4096 distinct file/directory operations.
+Paths are normalized and case-colliding requests are rejected.
+Explicit descendant removals are sorted deepest-first and new parent
+directories are created before their children, irrespective of the
+order supplied by the WCX host. Mixed replacement, creation, and
+deletion update one in-memory directory tree, stream each external
+payload once, write each modified FE or surviving dirty directory
+once, and record exactly one final VAT ICB referencing the original
+transaction. All selected replacement sources and the original image
+prefix are checked before the single atomic commit. A nonempty
+directory may be removed when all its descendants are explicitly
+removed in the same batch. Implicit recursive expansion, external
+directory storage, and recreation/replacement of the same normalized
+path twice in one batch remain unsupported. A capacity or validation
+failure anywhere in the batch leaves the original image unchanged.

@@ -545,6 +545,88 @@ def test_vat_nested(editor,inspector,root,image,replacement):
         assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def test_vat_batch(editor,inspector,root,image,replacement):
+    # A single append transaction can mix changes, submit children before
+    # their mkdir, and remove several FIDs from the same original parent.
+    import binascii
+    small=root/'vat-batch-small.txt'
+    big=root/'vat-batch-large.bin'
+    small.write_bytes(b'NEW')
+    big.write_bytes(b'large payload'*7000)
+    def snapshot(data):
+        fe=len(data)-B
+        length=struct.unpack_from('<Q',data,fe+56)[0]
+        if struct.unpack_from('<H',data,fe+34)[0]==3:
+            vat=data[fe+176:fe+176+length]
+        else:
+            size,lba=struct.unpack_from('<II',data,fe+176)
+            assert size==length
+            vat=data[(PARTITION+lba)*B:(PARTITION+lba)*B+length]
+        header=struct.unpack_from('<H',vat,0)[0]
+        mapping=struct.unpack_from('<'+'I'*((length-header)//4),vat,header)
+        return vat,mapping
+    for external in (False,True):
+        original=vat_append_image(capacity=8192,external_table=external)
+        image.write_bytes(original)
+        original_vat,original_map=snapshot(original)
+        run(editor,image,'batch',
+            'add','A/B/LARGE.BIN',big,
+            'add','A/SMALL.TXT',small,
+            'mkdir','A/B','mkdir','A',
+            'delete','hello','add','keep',big,
+            'add','ROOT.TXT',small)
+        grown=image.read_bytes()
+        vat,mapping=snapshot(grown)
+        assert grown[:len(original)]==original
+        # One final VAT ICB points directly at the old transaction.
+        assert struct.unpack_from('<I',vat,132)[0]==len(original)//B-PARTITION-1
+        assert struct.unpack_from('<II',vat,136)==(4,3)
+        assert mapping[2]==0xffffffff
+        assert len(mapping)==len(original_map)+5
+        blocks=(big.stat().st_size+B-1)//B
+        # Four changed regular FEs, three dirty directory FEs, two
+        # payloads, one VAT ICB and optional external table.
+        assert len(grown)-len(original)==(2*blocks+4+3+1+(2 if external else 0))*B
+        out=root/f'vat-batch-{external}-one'
+        check_disc(inspector,image,out)
+        assert {p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}=={
+            'A/B/LARGE.BIN':big.read_bytes(),'A/SMALL.TXT':small.read_bytes(),
+            'keep':big.read_bytes(),'ROOT.TXT':small.read_bytes()}
+        assert {p.relative_to(out).as_posix() for p in out.rglob('*') if p.is_dir()}=={'A','A/B'}
+        # Explicit child deletion may be submitted after its parent.
+        run(editor,image,'batch','delete','A','delete','A/B',
+            'delete','A/SMALL.TXT','delete','A/B/LARGE.BIN',
+            'add','keep',small,'delete','ROOT.TXT')
+        removed=image.read_bytes()
+        new_vat,new_map=snapshot(removed)
+        assert removed[:len(grown)]==grown
+        assert struct.unpack_from('<I',new_vat,132)[0]==len(grown)//B-PARTITION-1
+        assert struct.unpack_from('<II',new_vat,136)==(1,1)
+        assert len(new_map)==len(mapping)
+        assert all(value==0xffffffff for value in new_map[len(original_map):])
+        # Only root and keep need replacement FEs; removed directories
+        # never consume another metadata sector.
+        assert len(removed)-len(grown)==(2+1+(2 if external else 0))*B
+        out=root/f'vat-batch-{external}-two'
+        check_disc(inspector,image,out)
+        assert sorted(p.name for p in out.iterdir())==['keep']
+        assert (out/'keep').read_bytes()==small.read_bytes()
+        for args in (
+            ('batch','add','valid.txt',small,'add','missing/child',small),
+            ('batch','add','valid.txt',small,'add','VALID.TXT',small),
+            ('batch','delete','keep','add','keep/child',small),
+            ('batchcancel','mkdir','NEW','add','NEW/large',big)):
+            run(editor,image,*args,success=False)
+            assert image.read_bytes()==removed
+            assert not list(root.glob('.iso-wcx-edit-*'))
+        # Valid prefix of a batch must not commit when final capacity fails.
+        limited=vat_append_image(capacity=253,external_table=external)
+        image.write_bytes(limited)
+        run(editor,image,'batch','add','new',small,'add','large',big,success=False)
+        assert image.read_bytes()==limited
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
         root=pathlib.Path(temp)
@@ -573,6 +655,7 @@ def main(editor,inspector):
         test_vat_external(editor,inspector,root,image,replacement)
         test_vat_root_mutations(editor,inspector,root,image,replacement)
         test_vat_nested(editor,inspector,root,image,replacement)
+        test_vat_batch(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),
