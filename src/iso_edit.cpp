@@ -1815,7 +1815,9 @@ void edit_iso_udf_bridge_equal_length(
              offset<=iso.size && entry.size<=iso.size-offset,
              "UDF file extent is not a bounded standalone payload");
         if(node) {
-            need(std::uint64_t(node->lba)*block==offset &&
+            need(node->sections.size()==1 &&
+                 std::uint64_t(node->sections.front().lba)*block==offset &&
+                 node->sections.front().length==entry.size &&
                  node->size==entry.size,
                  "ISO and UDF aliases disagree about file extent");
             protect_boot(*node,iso.boot_lbas);
@@ -1847,9 +1849,10 @@ void edit_iso_udf_bridge_equal_length(
                  "bridge replacement intersects independent Joliet extent");
         for(const auto* other:iso_nodes) {
             if(other==node || other->size==0)continue;
-            need(!intersect(offset,entry.size,
-                            std::uint64_t(other->lba)*block,other->size),
-                 "bridge file overlaps ISO directory, boot image or other entry");
+            each_extent(*other,[&](auto start,auto length) {
+                need(!intersect(offset,entry.size,start,length),
+                     "bridge file overlaps ISO directory, boot image or other entry");
+            });
         }
         for(const auto& other:udf.items()) {
             if(other.path==key)continue;
@@ -2042,8 +2045,9 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
     std::vector<const Node*> nodes{before.root.get()};
     for(std::size_t at=0;at<nodes.size();++at) {
         const auto* node=nodes[at];
-        if(node->size)
-            guard.protect(std::uint64_t(node->lba)*block,node->size);
+        each_extent(*node,[&](auto start,auto length) {
+            if(length)guard.protect(start,length);
+        });
         for(const auto& child:node->children)
             nodes.push_back(child.get());
         need(nodes.size()<=200000,"ISO namespace exceeds validation limit");
@@ -2788,6 +2792,8 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
             const auto item=std::find_if(udf.items().begin(),udf.items().end(),
                 [&](const Item& v){return v.path==key && !v.directory;});
             need(item!=udf.items().end() && item->size==node->size &&
+                 node->sections.size()==1 &&
+                 node->sections.front().length==node->size &&
                  item->size>0 && item->inline_data.empty() &&
                  item->extents.size()==1 && !item->extents[0].sparse &&
                  item->extents[0].offset==std::uint64_t(node->lba)*block &&
@@ -2882,9 +2888,12 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     std::vector<const Node*> nodes{image.root.get()};
     for(std::size_t at=0;at<nodes.size();++at) {
         const auto* node=nodes[at];
-        if(node->size)
-            immutable.emplace_back(std::uint64_t(node->lba)*block,
-                                   node->size);
+        // ISO9660 multi-extent sections may live in unrelated blocks.
+        // Protect the actual physical intervals, not the fictitious
+        // contiguous range [first LBA, first LBA + logical file size).
+        each_extent(*node,[&](auto start,auto length) {
+            if(length)immutable.emplace_back(start,length);
+        });
         for(const auto& child:node->children)
             nodes.push_back(child.get());
         need(nodes.size()<=200000,"ISO/UDF immutable namespace exceeds limit");

@@ -51,6 +51,19 @@ def descriptor_bridge(boot=False,shared=True,udf_only=False,boot_count=None,
     data[19*B+1:19*B+6]=b'NSR02'
     return data
 
+def discontiguous_iso_file(data, tail_length):
+    # The first extent is one full sector; the final extent is far away,
+    # inside the UDF partition. ISO owns both even if UDF calls the latter
+    # free or exposes it through a different filename.
+    root=(iso_record(20,B,2,bytes([0]))+
+          iso_record(20,B,2,bytes([1]))+
+          iso_record(21,B,0x80,b'FOREIGN.BIN;1')+
+          iso_record(303,tail_length,0,b'FOREIGN.BIN;1'))
+    data[20*B:21*B]=bytes(B)
+    data[20*B:20*B+len(root)]=root
+    data[21*B:22*B]=b'A'*B
+    return data
+
 def assert_boot_preserved(before, after):
     assert len(after)==len(before),'ISO/UDF physical size changed'
     assert after[:256*B]==before[:256*B], (
@@ -101,6 +114,34 @@ def main(editor,inspector):
         target=root/'bootable-udf-out'
         run([inspector,str(image),'--extract',str(target)])
         assert (target/'hello').read_bytes()==b'EARTH'
+
+        # Equal-length UDF-only F5 must reject an alias to the SECOND
+        # extent of an unrelated ISO file, even without Joliet.
+        collision=discontiguous_iso_file(
+            descriptor_bridge(udf_only=True),5)
+        image.write_bytes(collision)
+        before=image.read_bytes()
+        assert read_image(image)['FOREIGN.BIN']==b'A'*B+b'world'
+        run([editor,str(image),'add','hello',str(source)],expected=1)
+        assert image.read_bytes()==before,'ISO multi-extent alias was overwritten'
+
+        # A writable UDF bitmap may call the second ISO extent free.
+        # The allocator must skip it; a valid unrelated F5 still succeeds.
+        foreign=discontiguous_iso_file(
+            descriptor_bridge(udf_only=True,writable=True),B)
+        foreign[303*B:304*B]=b'Z'*B
+        image.write_bytes(foreign)
+        original=image.read_bytes()
+        assert read_image(image)['FOREIGN.BIN']==b'A'*B+b'Z'*B
+        source.write_bytes(b'NEW')
+        run([editor,str(image),'add','new.bin',str(source)])
+        assert image.read_bytes()[303*B:304*B]==original[303*B:304*B]
+        assert read_image(image)['FOREIGN.BIN']==b'A'*B+b'Z'*B
+        target=root/'discontiguous-udf-out'
+        run([inspector,str(image),'--extract',str(target)])
+        assert (target/'new.bin').read_bytes()==b'NEW'
+        assert (target/'hello').read_bytes()==b'world'
+        source.write_bytes(b'EARTH')
 
         # Refuse equal-size changes if they overlap a boot image, even when
         # the UDF filename is not represented in the ISO9660 namespace.
