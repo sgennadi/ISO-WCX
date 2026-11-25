@@ -122,7 +122,9 @@ def main(editor,inspector):
         image.write_bytes(collision)
         before=image.read_bytes()
         assert read_image(image)['FOREIGN.BIN']==b'A'*B+b'world'
-        run([editor,str(image),'add','hello',str(source)],expected=1)
+        response=run([editor,str(image),'add','hello',str(source)],expected=1)
+        assert b'bridge file overlaps ISO directory, boot image or other entry' in response.stderr, (
+            'fixture must reach the physical overlap check', response.stderr)
         assert image.read_bytes()==before,'ISO multi-extent alias was overwritten'
 
         # A writable UDF bitmap may call the second ISO extent free.

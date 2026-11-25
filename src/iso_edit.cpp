@@ -835,8 +835,12 @@ public:
         need(r.size()>=34&&r[0]==r.size()&&r[1]==0&&r[26]==0&&r[27]==0&&le(r,28,2)==1,"unsupported ISO record");
         need((r[25]&~0x83u)==0 && !((r[25]&0x80u) && (r[25]&2u)),
              "associated or unsupported ISO record flags");
+        // A nonpartitioned ISO/UDF bridge can retain multi-extent
+        // ISO files as immutable resources. The bridge writers protect
+        // each physical section separately and only coordinate shared
+        // single-extent targets. Partitioned hybrids remain restricted.
         if(r[25]&0x80u)
-            need(!udf_bridge && !hybrid_system_area,
+            need(!hybrid_system_area,
                  "multi-extent hybrid ISO requires partition-aware editing");
         auto n=std::make_unique<Node>();n->record=r;n->directory=(r[25]&2)!=0;n->lba=le(r,2);n->size=le(r,10);n->parent=parent;
         need(std::uint64_t(n->lba)*block+n->size<=size,"ISO resource out of bounds");
