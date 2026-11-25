@@ -11,7 +11,7 @@ import struct
 import sys
 import tempfile
 
-from test_images import B
+from test_images import B, iso_record
 from test_iso_edit import both, fixture, read_image
 from test_udf_allocator import bitmap_image, run, update_tag
 
@@ -78,9 +78,22 @@ def main(editor, inspector):
             raw=bootable_bridge_bitmap()
             esp=303*B
             raw[esp:esp+B]=b'E'*B
+            # Two separated ISO-only extents, neither owned by the UDF
+            # allocator nor part of the separately addressed ESP.
+            first, tail = 304*B, 307*B
+            raw[first:first+B]=b'A'*B
+            raw[tail:tail+B]=b'Z'*B
+            at=20*B
+            while raw[at]:at+=raw[at]
+            records=(iso_record(304,B,0x80,b'FOREIGN.BIN;1')+
+                     iso_record(307,B,0,b'FOREIGN.BIN;1'))
+            assert at+len(records)<21*B
+            raw[at:at+len(records)]=records
             hybrid.write_bytes(raw)
             (add_mbr if kind=="MBR" else add_gpt)(hybrid,esp//512,B//512)
             original=hybrid.read_bytes()
+            expected_iso=read_image(hybrid)
+            assert expected_iso['FOREIGN.BIN']==b'A'*B+b'Z'*B
             payload.write_bytes(b'new UDF-only data'*200)
             run(editor,hybrid,'add','HYBRID.BIN',payload)
             run(editor,hybrid,'mkdir','hybrid-folder')
@@ -90,6 +103,12 @@ def main(editor, inspector):
             assert (out/'HYBRID.BIN').read_bytes()==payload.read_bytes()
             assert (out/'hybrid-folder'/'nested.bin').read_bytes()==payload.read_bytes()
             assert (out/'hello').read_bytes()==b'world'
+            # ISO-only multi-extent file removal/resize must not be
+            # interpreted as UDF-only metadata mutation.
+            committed=hybrid.read_bytes()
+            run(editor,hybrid,'delete','FOREIGN.BIN',success=False)
+            run(editor,hybrid,'add','FOREIGN.BIN',payload,success=False)
+            assert hybrid.read_bytes()==committed
             run(editor,hybrid,'delete','HYBRID.BIN')
             run(editor,hybrid,'delete','hybrid-folder/nested.bin')
             run(editor,hybrid,'delete','hybrid-folder')
@@ -97,9 +116,11 @@ def main(editor, inspector):
             assert len(updated)==len(original)
             assert updated[:256*B]==original[:256*B]
             assert updated[esp:esp+B]==original[esp:esp+B]
+            assert updated[first:first+B]==original[first:first+B]
+            assert updated[tail:tail+B]==original[tail:tail+B]
             if kind=="GPT":
                 assert updated[-33*512:]==original[-33*512:]
-            assert read_image(hybrid)==iso_before
+            assert read_image(hybrid)==expected_iso
             # ROM-style volumes cannot extend a partitioned image.
             rom=bytearray(original)
             pd=260*B

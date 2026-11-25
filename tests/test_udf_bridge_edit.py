@@ -127,6 +127,17 @@ def main(editor,inspector):
             'fixture must reach the physical overlap check', response.stderr)
         assert image.read_bytes()==before,'ISO multi-extent alias was overwritten'
 
+        # Same overlap in a partitioned ISO/UDF bridge: the parser must
+        # allow the chain, but the payload writer must still reject it.
+        from test_iso_over4gb import add_mbr, add_gpt
+        for envelope in (add_mbr, add_gpt):
+            image.write_bytes(collision)
+            envelope(image,305*B//512,B//512)
+            protected=image.read_bytes()
+            response=run([editor,str(image),'add','hello',str(source)],expected=1)
+            assert b'bridge file overlaps ISO directory, boot image or other entry' in response.stderr, response.stderr
+            assert image.read_bytes()==protected
+
         # A writable UDF bitmap may call the second ISO extent free.
         # The allocator must skip it; a valid unrelated F5 still succeeds.
         foreign=discontiguous_iso_file(

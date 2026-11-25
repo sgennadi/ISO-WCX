@@ -846,13 +846,12 @@ public:
         need(r.size()>=34&&r[0]==r.size()&&r[1]==0&&r[26]==0&&r[27]==0&&le(r,28,2)==1,"unsupported ISO record");
         need((r[25]&~0x83u)==0 && !((r[25]&0x80u) && (r[25]&2u)),
              "associated or unsupported ISO record flags");
-        if(r[25]&0x80u) {
-            has_multi_extent=true;
-            // The synchronized partitioned UDF bridge writer is not yet
-            // available. Plain MBR/GPT ISO/Joliet is rebuilt separately.
-            need(!(hybrid_system_area && udf_bridge),
-                 "multi-extent partitioned ISO/UDF requires a specialized writer");
-        }
+        // Multi-extent ISO resources may remain immutable inside a
+        // partitioned UDF bridge. All physical sections are excluded
+        // from allocation and verified before commit. The shared-file
+        // writer still requires a single extent; SUSP hybrids have a
+        // separate rejection after both namespace trees are parsed.
+        if(r[25]&0x80u)has_multi_extent=true;
         auto n=std::make_unique<Node>();n->record=r;n->directory=(r[25]&2)!=0;n->lba=le(r,2);n->size=le(r,10);n->parent=parent;
         need(std::uint64_t(n->lba)*block+n->size<=size,"ISO resource out of bounds");
         if(!n->directory) {
