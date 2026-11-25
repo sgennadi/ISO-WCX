@@ -614,11 +614,19 @@ def test_vat_batch(editor,inspector,root,image,replacement):
         for args in (
             ('batch','add','valid.txt',small,'add','missing/child',small),
             ('batch','add','valid.txt',small,'add','VALID.TXT',small),
-            ('batch','delete','keep','add','keep/child',small),
-            ('batchcancel','mkdir','NEW','add','NEW/large',big)):
+            ('batch','delete','keep','add','keep/child',small)):
             run(editor,image,*args,success=False)
             assert image.read_bytes()==removed
             assert not list(root.glob('.iso-wcx-edit-*'))
+        # Require the actual EditCancelled result (3), not merely any
+        # error. The callback observes growth in the private stage, so
+        # this exercises rollback after append has begun, independently
+        # of copy-on-write support and the number of progress ticks.
+        cancelled=run(editor,image,'batchcancelstaged',
+                      'mkdir','NEW','add','NEW/large',big,success=False)
+        assert cancelled.returncode==3, cancelled.stderr
+        assert image.read_bytes()==removed
+        assert not list(root.glob('.iso-wcx-edit-*'))
         # Valid prefix of a batch must not commit when final capacity fails.
         limited=vat_append_image(capacity=253,external_table=external)
         image.write_bytes(limited)

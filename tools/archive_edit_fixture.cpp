@@ -62,15 +62,30 @@ static int invoke(const std::filesystem::path& image,
 
 static int invoke_batch(const std::filesystem::path& image,
                         const std::vector<iso_wcx::ArchiveChange>& changes,
-                        bool cancel) {
+                        bool cancel,bool cancel_staged=false) {
     try {
         unsigned ticks=0;
+        const auto original_size=std::filesystem::file_size(image);
+        const auto parent=std::filesystem::absolute(image).parent_path();
         route_edit(image,changes,[&] {
+            // Test-only stage-aware cancellation for append writers. A
+            // fixed tick threshold is not reliable on small or COW images.
+            if(cancel_staged) {
+                for(const auto& entry:std::filesystem::directory_iterator(parent)) {
+                    if(!entry.path().filename().string().starts_with(".iso-wcx-edit-"))
+                        continue;
+                    std::error_code ec;
+                    const auto size=std::filesystem::file_size(
+                        entry.path()/image.filename(),ec);
+                    if(!ec && size>original_size)return false;
+                }
+                return true;
+            }
             return !cancel || ++ticks<=40;
         });
         return 0; // Cancellation probes must fail by actually cancelling.
     } catch (const iso_wcx::EditCancelled&) {
-        return cancel ? 3 : 2;
+        return (cancel || cancel_staged) ? 3 : 2;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
@@ -84,7 +99,7 @@ int wmain(int argc, wchar_t** argv) {
     if (argc < 4) return 2;
     try {
         const auto operation=wide_to_utf8(argv[2]);
-        if(operation=="batch" || operation=="batchcancel") {
+        if(operation=="batch" || operation=="batchcancel" || operation=="batchcancelstaged") {
             std::vector<iso_wcx::ArchiveChange> changes;
             for(int at=3;at<argc;) {
                 const auto kind=wide_to_utf8(argv[at++]);
@@ -100,7 +115,7 @@ int wmain(int argc, wchar_t** argv) {
                 changes.push_back(std::move(c));
             }
             return invoke_batch(std::filesystem::path(argv[1]),changes,
-                                operation=="batchcancel");
+                                operation=="batchcancel",operation=="batchcancelstaged");
         }
         return invoke(std::filesystem::path(argv[1]),operation,
                       wide_to_utf8(argv[3]),
@@ -115,7 +130,7 @@ int wmain(int argc, wchar_t** argv) {
 int main(int argc, char** argv) {
     if (argc < 4) return 2;
     const std::string operation(argv[2]);
-    if(operation=="batch" || operation=="batchcancel") {
+    if(operation=="batch" || operation=="batchcancel" || operation=="batchcancelstaged") {
         std::vector<iso_wcx::ArchiveChange> changes;
         for(int at=3;at<argc;) {
             const std::string kind(argv[at++]);
@@ -131,7 +146,7 @@ int main(int argc, char** argv) {
             changes.push_back(std::move(c));
         }
         return invoke_batch(std::filesystem::path(argv[1]),changes,
-                            operation=="batchcancel");
+                            operation=="batchcancel",operation=="batchcancelstaged");
     }
     return invoke(std::filesystem::path(argv[1]),operation,argv[3],
                   argc >= 5 ? std::filesystem::path(argv[4]) : std::filesystem::path{},
