@@ -340,6 +340,52 @@ def main(editor,inspector):
                 jr+=iso_record(303,5,0,'hello;1'.encode('utf-16-be'))
                 jr+=iso_record(305,5,0,'keep;1'.encode('utf-16-be'))
                 common[22*B:23*B]=jr.ljust(B,b'\0')
+            # Test the same fully mirrored ROM on both partition schemes.
+            # The ESP is a separate inert block, not an edited file.
+            from test_iso_over4gb import verify_envelope
+            for kind in ('MBR','GPT'):
+                hybrid=root/f'common-{kind}-{j}.iso'
+                wrapped=bytearray(common)
+                esp=307*B
+                wrapped[esp:esp+B]=b'E'*B
+                hybrid.write_bytes(wrapped)
+                (add_mbr if kind=='MBR' else add_gpt)(hybrid,esp//512,B//512)
+                original=hybrid.read_bytes()
+                entries=original[1024:1024+128*128] if kind=='GPT' else b''
+                protected=[(esp,bytes(wrapped[esp:esp+B])),
+                           (24*B,bytes(wrapped[24*B:26*B])),
+                           (303*B,b'world'),(305*B,b'KEEP!')]
+                source.write_bytes(b'coordinated hybrid addition')
+                run([editor,str(hybrid),'batch','mkdir','DATA',
+                     'add','DATA/NEW.BIN',str(source)])
+                wanted={'hello':b'world','keep':b'KEEP!',
+                        'DATA/':None,'DATA/NEW.BIN':source.read_bytes()}
+                assert read_image(hybrid)==wanted
+                if j: assert read_image(hybrid,True)==wanted
+                assert hybrid.stat().st_size>len(original)
+                verify_envelope(hybrid,kind,original[:512],entries,protected)
+                source.write_bytes(b'coordinated replacement'*700)
+                run([editor,str(hybrid),'batch','delete','hello',
+                     'add','keep',str(source)])
+                del wanted['hello']
+                wanted['keep']=source.read_bytes()
+                assert read_image(hybrid)==wanted
+                if j: assert read_image(hybrid,True)==wanted
+                verify_envelope(hybrid,kind,original[:512],entries,protected)
+                target=root/f'common-hybrid-out-{kind}-{j}'
+                run([inspector,str(hybrid),'--extract',str(target)])
+                assert not (target/'hello').exists()
+                assert (target/'keep').read_bytes()==source.read_bytes()
+                assert (target/'DATA'/'NEW.BIN').read_bytes()==wanted['DATA/NEW.BIN']
+                committed=hybrid.read_bytes()
+                run([editor,str(hybrid),'cancel','keep',str(source)],expected=1)
+                assert hybrid.read_bytes()==committed
+                run([editor,str(hybrid),'delete','DATA/NEW.BIN'])
+                del wanted['DATA/NEW.BIN']
+                assert read_image(hybrid)==wanted
+                if j: assert read_image(hybrid,True)==wanted
+                verify_envelope(hybrid,kind,original[:512],entries,protected)
+                assert not list(root.glob('.iso-wcx-edit-*'))
             image.write_bytes(common)
             # An independently mirrored namespace receives new files
             # in all views, including small files that normally embed.

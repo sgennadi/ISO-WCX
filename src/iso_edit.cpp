@@ -2201,9 +2201,12 @@ void coordinate_shared_bridge_stage(
         const Image& image,const std::map<std::string,const Node*>& targets,
         const CoordinatedIsoUpdate& plan,
         const SharedIsoDeleteSectors& deletion_sectors,
-        const EditProgress& progress) {
-    protect_iso_udf_stage(path,staged,image,progress);
+        const EditProgress& progress,
+        const MbrGrowthPlan* mbr_growth=nullptr,
+        const GptGrowthPlan* gpt_growth=nullptr) {
+    protect_iso_udf_stage(path,staged,image,progress,mbr_growth,gpt_growth);
     const auto size=std::filesystem::file_size(staged);
+    const auto volume_blocks=gpt_growth?gpt_growth->logical_blocks:size/block;
     need(size>image.size && size%block==0 && size/block<0xffffffffu,
          "shared ISO/UDF resize did not produce bounded append mastering");
     std::map<const Node*,FileSection> sections;
@@ -2313,7 +2316,7 @@ void coordinate_shared_bridge_stage(
     auto expected=image.descriptors;
     for(auto& [lba,vd]:expected) {
         Bytes old(vd.begin()+80,vd.begin()+88);
-        both(vd,80,static_cast<std::uint32_t>(size/block));
+        both(vd,80,static_cast<std::uint32_t>(volume_blocks));
         patch(std::uint64_t(lba)*block+80,std::move(old),
               Bytes(vd.begin()+80,vd.begin()+88));
     }
@@ -2466,7 +2469,7 @@ Bytes shared_tree_path_table(const SharedTreePlan& tree,unsigned view,bool big) 
 bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         const IsoNodeIndex& iso_files,const std::vector<ArchiveChange>& changes,
         CoordinatedIsoUpdate& plan,SharedTreePlan& tree) {
-    if(image.hybrid_system_area || image.iso_system_use || changes.empty() ||
+    if(image.iso_system_use || changes.empty() ||
        !std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
            return !c.remove && !iso_files.count(upper(edit_path(c.path)));
        }))return false;
@@ -2491,7 +2494,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         }
         if(!common_data)return false;
     }
-    const auto inspection=inspect_udf_edit(path,true);
+    const auto inspection=inspect_udf_edit(path,true,image.hybrid_system_area);
     if(!inspection.parser_compatible || inspection.partition_access_type!=1 ||
        inspection.allocation_bitmap || inspection.allocation_table)return false;
     const unsigned views=image.joliet?2u:1u;
@@ -2655,9 +2658,12 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
 void coordinate_shared_add_stage(const std::filesystem::path& path,
         const std::filesystem::path& staged,const Image& image,
         const IsoNodeIndex& original,const CoordinatedIsoUpdate& plan,
-        SharedTreePlan& tree,const EditProgress& progress) {
-    protect_iso_udf_stage(path,staged,image,progress);
+        SharedTreePlan& tree,const EditProgress& progress,
+        const MbrGrowthPlan* mbr_growth=nullptr,
+        const GptGrowthPlan* gpt_growth=nullptr) {
+    protect_iso_udf_stage(path,staged,image,progress,mbr_growth,gpt_growth);
     const auto size=std::filesystem::file_size(staged);
+    const auto volume_blocks=gpt_growth?gpt_growth->logical_blocks:size/block;
     need(size>image.size && size%block==0 && size/block<0xffffffffu,
          "shared addition requires append mastering");
     const unsigned views=image.joliet?2u:1u;
@@ -2757,7 +2763,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
     for(auto& [lba,vd]:expected) {
         const auto old=vd;
         const unsigned view=vd[0]==2?1u:0u;
-        both(vd,80,static_cast<std::uint32_t>(size/block));
+        both(vd,80,static_cast<std::uint32_t>(volume_blocks));
         both(vd,132,tree.table_size[view]);
         put(vd,140,tree.table_lba[view][0]);put(vd,144,0);
         put(vd,148,tree.table_lba[view][1],4,true);put(vd,152,0);
@@ -2851,29 +2857,31 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
         }
     };
     gather(gather,*image.root,"");
-    if(image.hybrid_system_area) {
+    if(image.hybrid_system_area)
         need(!image.iso_system_use,
              "partitioned UDF metadata edits require plain ISO/Joliet");
-        const Disc udf(path);
-        need(udf.format()=="UDF" &&
-             std::any_of(udf.items().begin(),udf.items().end(),[&](const Item& item) {
-                 return !item.directory && !iso_files.count(upper(item.path));
-             }),
-             "partitioned ISO/UDF requires a demonstrably split namespace");
-        for(const auto& change:changes)
-            need(!iso_files.count(upper(edit_path(change.path))),
-                 "partitioned ISO/UDF cannot remaster shared metadata");
-    }
     CoordinatedIsoUpdate plan;
     SharedIsoDeleteSectors deletion_sectors;
     SharedTreePlan add_tree;
     std::map<std::string,const Node*> shared;
     const bool adding_shared=plan_shared_additions(path,image,iso_files,changes,
                                                    plan,add_tree);
-    if(std::any_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
+    const bool existing_shared=std::any_of(changes.begin(),changes.end(),
+        [&](const ArchiveChange& c){
             return iso_files.count(upper(edit_path(c.path)))!=0;
-        })) {
-        need(!image.hybrid_system_area && !image.iso_system_use,
+        });
+    if(image.hybrid_system_area && !adding_shared && !existing_shared) {
+        // Never downgrade a common namespace to a UDF-only addition
+        // when the mirrored planner rejects an unsupported layout.
+        const Disc udf(path);
+        need(udf.format()=="UDF" &&
+             std::any_of(udf.items().begin(),udf.items().end(),[&](const Item& item) {
+                 return !item.directory && !iso_files.count(upper(item.path));
+             }),
+             "partitioned ISO/UDF requires coordinated or demonstrably split namespace");
+    }
+    if(existing_shared) {
+        need(!image.iso_system_use,
              "shared ISO/UDF resize needs a plain ISO/Joliet bridge");
         const Disc udf(path);
         for(const auto& change:changes) {
@@ -2901,6 +2909,7 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                      "shared replacement exceeds single ISO extent bounds");
             }
             protect_boot(*node,image.boot_lbas);
+            if(image.hybrid_system_area)protect_hybrid_target(*node,image);
             for(const auto& [at,bytes]:image.boot_regions)
                 need(!intersect(item->extents[0].offset,item->size,at,bytes),
                      "shared replacement overlaps boot data");
@@ -2940,7 +2949,8 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                  "overlapping or invalid shared ISO metadata fields");
             end=at+bytes;
             for(const auto* ranges:{&image.boot_regions,&image.udf_metadata_regions,
-                                   &image.iso_auxiliary_regions})
+                                   &image.iso_auxiliary_regions,
+                                   &image.hybrid_protected_regions})
                 for(const auto& [start,length]:*ranges)
                     need(!intersect(at,bytes,start,length),
                          "shared ISO metadata field overlaps protected data");
@@ -3001,8 +3011,11 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     const EditStageValidator validate=
         [&path,&image,&progress,&shared,&plan,&deletion_sectors,
          &iso_files,&add_tree,&mbr_append,&gpt_append,adding_shared](const std::filesystem::path& staged) {
+            std::optional<GptGrowthPlan> gpt_growth;
+            std::optional<MbrGrowthPlan> mbr_growth;
             if(gpt_append && std::filesystem::file_size(staged)>image.size) {
-                auto growth=*gpt_append;
+                gpt_growth=*gpt_append;
+                auto& growth=*gpt_growth;
                 const auto bytes=std::filesystem::file_size(staged);
                 need(bytes%block==0,"GPT/UDF mastering produced unaligned volume");
                 set_gpt_growth_size(growth,bytes/block);
@@ -3013,12 +3026,12 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                     out.flush();
                     need(bool(out),"staged GPT/UDF flush failed");
                 }
-                protect_iso_udf_stage(path,staged,image,progress,nullptr,&growth);
             } else if(mbr_append && std::filesystem::file_size(staged)>image.size) {
                 // UDF already verified the staged filesystem. Update only
                 // the MBR container CHS/length before the independent ISO
                 // validator authorizes the single atomic commit.
-                auto growth=*mbr_append;
+                mbr_growth=*mbr_append;
+                auto& growth=*mbr_growth;
                 growth.physical_size=std::filesystem::file_size(staged);
                 const auto sectors=growth.physical_size/512u;
                 need(growth.physical_size%block==0 &&
@@ -3040,13 +3053,16 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                     out.flush();
                     need(bool(out),"staged MBR/UDF header flush failed");
                 }
-                protect_iso_udf_stage(path,staged,image,progress,&growth);
-            } else if(adding_shared)
+            }
+            const auto* mbr=mbr_growth?&*mbr_growth:nullptr;
+            const auto* gpt=gpt_growth?&*gpt_growth:nullptr;
+            if(adding_shared)
                 coordinate_shared_add_stage(path,staged,image,iso_files,plan,
-                                            add_tree,progress);
-            else if(shared.empty())protect_iso_udf_stage(path,staged,image,progress);
+                                            add_tree,progress,mbr,gpt);
+            else if(shared.empty())
+                protect_iso_udf_stage(path,staged,image,progress,mbr,gpt);
             else coordinate_shared_bridge_stage(path,staged,image,shared,plan,
-                                                deletion_sectors,progress);
+                                                deletion_sectors,progress,mbr,gpt);
         };
     // UDF may advertise free blocks that ISO9660 owns exclusively, e.g.
     // boot.catalog, BIOS/EFI image extents or a shared old ISO filename.

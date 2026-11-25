@@ -3036,8 +3036,9 @@ void edit_udf(const std::filesystem::path& image,
           !(mbr_append_alignment_blocks && gpt_append_trailer_blocks)),
          "hybrid UDF mastering needs one validated partition geometry");
     need(!bounded_partitioned_bridge ||
-         (allow_bridge && validate_stage && !coordinated),
-         "partitioned ISO/UDF edits require a validated UDF-only transaction");
+         (allow_bridge && validate_stage &&
+          (!coordinated || mbr_append_alignment_blocks || gpt_append_trailer_blocks)),
+         "partitioned ISO/UDF coordinated edits need validated ROM growth");
     need(!allow_bridge || bool(validate_stage),
          "ISO/UDF Bridge writes require a staged ISO/boot validator");
     // Run the strict Type-1 write preflight before the permissive read-only
@@ -3101,7 +3102,9 @@ void edit_udf(const std::filesystem::path& image,
                      "coordinated ISO field overlaps a live UDF object");
         }
         auto plan=volume.prepare_readonly_append(changes,protected_ranges,
-                                                coordinated->iso_metadata_blocks);
+                                                coordinated->iso_metadata_blocks,
+                                                mbr_append_alignment_blocks,
+                                                gpt_append_trailer_blocks);
         create_udf_type1_batch(image,volume,changes,progress,true,
                                validate_stage,&plan,coordinated);
         return;
