@@ -649,11 +649,23 @@ def main(binary, reader=None):
         # Exhaust the bounded tail on a standard protective-only GPT.
         # Growth must relocate the backup but preserve partition entries,
         # boot code, ESP payload, disk identity and all original ISO data.
-        image.write_bytes(gpt)
         old_table=len(gpt)//512-33
         old_entries=gpt[old_table*512:old_table*512+128*128]
         big_payload=b'G'*(120*B+37)
         source.write_bytes(big_payload)
+        # A genuine original file alias of the primary GPT header must
+        # still be refused, even though an unallocated new file also has
+        # LBA zero in the editor's working tree.
+        header_alias=bytearray(gpt)
+        at=20*B
+        at+=header_alias[at]
+        at+=header_alias[at]
+        both(header_alias,at+2,0)
+        both(header_alias,at+10,1024)
+        image.write_bytes(header_alias)
+        run('add','GROW.BIN',False)
+        assert image.read_bytes()==header_alias
+        image.write_bytes(gpt)
         run('add','GROW.BIN')
         def verify_grown_gpt(raw,previous):
             n=len(raw)//512

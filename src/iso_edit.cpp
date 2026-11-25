@@ -1187,6 +1187,9 @@ bool intersect(std::uint64_t a,std::uint64_t a_bytes,
 struct HybridTailPlan {
     std::uint64_t first{},limit{}; // ISO blocks, exclusive limit
     EditProtectedRanges descriptor_fields;
+    // Snapshot all live source extents BEFORE applying ArchiveChange to
+    // the tree. A new/replaced node has no final LBA during preflight.
+    EditProtectedRanges original_extents;
 };
 HybridTailPlan plan_hybrid_tail(Image& image,const EditProgress& progress) {
     need(image.hybrid_system_area && !image.udf_bridge &&
@@ -1261,6 +1264,7 @@ HybridTailPlan plan_hybrid_tail(Image& image,const EditProgress& progress) {
     }
     auto check_extent=[&](std::uint64_t at,std::uint64_t bytes) {
         within_volume(at,bytes);
+        if(bytes)plan.original_extents.emplace_back(at,bytes);
         for(const auto& [field,length]:plan.descriptor_fields)
             need(!intersect(at,bytes,field,length),
                  "ISO descriptor field aliases an existing namespace extent");
@@ -1272,8 +1276,8 @@ HybridTailPlan plan_hybrid_tail(Image& image,const EditProgress& progress) {
         need(nodes.size()<=200000,"hybrid ISO namespace exceeds validation limit");
     }
     for(const auto& [at,bytes]:image.joliet_regions)check_extent(at,bytes);
-    for(const auto& [at,bytes]:image.boot_regions)within_volume(at,bytes);
-    for(const auto& [at,bytes]:image.iso_auxiliary_regions)within_volume(at,bytes);
+    for(const auto& [at,bytes]:image.boot_regions)check_extent(at,bytes);
+    for(const auto& [at,bytes]:image.iso_auxiliary_regions)check_extent(at,bytes);
     for(const auto& [at,bytes]:image.hybrid_protected_regions) {
         if(!bytes || at+bytes<=volume)continue;
         // Stop BEFORE the first independent partition, GPT entry array,
@@ -1306,7 +1310,8 @@ struct GptGrowthPlan {
     std::uint64_t logical_blocks{},mbr_length_at{};
     Bytes mbr,primary,backup,entries;
 };
-GptGrowthPlan plan_gpt_growth(Image& image,std::uint64_t required) {
+GptGrowthPlan plan_gpt_growth(Image& image,const HybridTailPlan& tail,
+                             std::uint64_t required) {
     need(image.gpt_hybrid && !image.udf_bridge && !image.iso_system_use &&
          image.boot_regions_bounded,
          "GPT growth requires a plain, bounded ISO/Joliet hybrid");
@@ -1347,15 +1352,10 @@ GptGrowthPlan plan_gpt_growth(Image& image,std::uint64_t required) {
              !intersect(at,bytes,plan.old_backup,image.size-plan.old_backup),
              "GPT growth metadata aliases live ISO or boot data");
     };
-    std::vector<const Node*> nodes{image.root.get()};
-    for(std::size_t i=0;i<nodes.size();++i) {
-        each_extent(*nodes[i],check);
-        for(const auto& child:nodes[i]->children)nodes.push_back(child.get());
-        need(nodes.size()<=200000,"GPT growth namespace exceeds validation limit");
-    }
-    for(const auto* ranges:{&image.joliet_regions,&image.boot_regions,
-                           &image.iso_auxiliary_regions})
-        for(const auto& [at,bytes]:*ranges)check(at,bytes);
+    // Inspect the original namespace, not the mutated working tree.
+    // Otherwise a new file appears to occupy LBA zero, while a deleted
+    // original extent disappears from the check entirely.
+    for(const auto& [at,bytes]:tail.original_extents)check(at,bytes);
     const auto original=image.size/block;
     const auto trailer=(table_sectors+1+3)/4;
     need(required && original<0xffffffffull &&
@@ -2959,7 +2959,7 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         if(required>hybrid_tail->limit-hybrid_tail->first) {
             need(image.gpt_hybrid,
                  "hybrid ISO has insufficient verified padding; partition resize required");
-            gpt_growth=plan_gpt_growth(image,required);
+            gpt_growth=plan_gpt_growth(image,*hybrid_tail,required);
             hybrid_tail->first=image.size/block;
             hybrid_tail->limit=gpt_growth->logical_blocks;
         }
