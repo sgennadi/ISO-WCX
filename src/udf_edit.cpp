@@ -223,14 +223,20 @@ struct ReadonlyAppendPlan {
 
 class Type1 {
 public:
-    explicit Type1(const std::filesystem::path& path,bool allow_bridge=false)
-        :file_(path,std::ios::binary),size_(std::filesystem::file_size(path)) {
+    explicit Type1(const std::filesystem::path& path,bool allow_bridge=false,
+                   bool bounded_partitioned_bridge=false)
+        :file_(path,std::ios::binary),size_(std::filesystem::file_size(path)),
+         bounded_partitioned_bridge_(bounded_partitioned_bridge) {
+        need(!bounded_partitioned_bridge || allow_bridge,
+             "partitioned UDF writes require an ISO bridge validator");
         need(file_.good() && size_%block==0 && size_>=300*block &&
              size_<max_image,"unsupported UDF image size/sector geometry");
         const auto system=read(0,16*block);
-        need(std::all_of(system.begin(),system.end(),
-                         [](std::uint8_t x){return x==0;}),
-             "UDF system-area hybrid image is read-only");
+        need(bounded_partitioned_bridge ?
+                 (system[510]==0x55 && system[511]==0xaa) :
+                 std::all_of(system.begin(),system.end(),
+                             [](std::uint8_t x){return x==0;}),
+             "UDF system-area hybrid image requires validated partition protection");
         bool vrs=false;
         for(std::uint64_t i=16;i<256 && (i+1)*block<=size_;++i) {
             const auto b=read(i*block,8);
@@ -553,6 +559,9 @@ public:
     }
     [[nodiscard]] Bytes directory_payload(const Fe& directory) {
         return directory_data(directory);
+    }
+    [[nodiscard]] bool bounded_partitioned_bridge() const noexcept {
+        return bounded_partitioned_bridge_;
     }
     [[nodiscard]] bool has_bitmap() const noexcept {
         return bitmap_.has_value() && !table_.has_value();
@@ -1187,6 +1196,7 @@ public:
 private:
     std::ifstream file_;
     std::uint64_t size_{};
+    bool bounded_partitioned_bridge_{};
     std::uint32_t partition_{},partition_blocks_{};
     std::uint32_t partition_access_type_{},allocation_start_{};
     std::map<std::string,File> files_;
@@ -2080,7 +2090,7 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     // Full strict structural parse plus independent extraction of changed
     // file bytes. Newly allocated FEs must also be discoverable by name.
     {
-        Type1 strict(tx.output,allow_bridge);
+        Type1 strict(tx.output,allow_bridge,volume.bounded_partitioned_bridge());
         need( (strict.files().count(key)!=0)==(!change.directory),
              "staged UDF file map was not updated");
         need( (strict.directories().count(key)!=0)==change.directory,
@@ -2913,7 +2923,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     // bitmap/LVID mismatches and parent allocation errors. Read every new
     // file through Disc extents and compare its complete source stream.
     {
-        Type1 strict(tx.output,allow_bridge);
+        Type1 strict(tx.output,allow_bridge,volume.bounded_partitioned_bridge());
         // A mastered ROM intentionally has no persistent free-space map.
         // Its deletion is checked by namespace and data verification below.
         if(!mastering)for(const auto& region:deleted_regions) {
@@ -2988,14 +2998,23 @@ void edit_udf(const std::filesystem::path& image,
               const EditProgress& progress,bool allow_bridge,
               const EditStageValidator& validate_stage,
               const EditProtectedRanges& protected_ranges,
-              const CoordinatedIsoUpdate* coordinated) {
+              const CoordinatedIsoUpdate* coordinated,
+              bool bounded_partitioned_bridge) {
     edit_tick(progress);
+    need(!bounded_partitioned_bridge ||
+         (allow_bridge && validate_stage && !coordinated),
+         "partitioned ISO/UDF edits require a fixed-size UDF-only transaction");
     need(!allow_bridge || bool(validate_stage),
          "ISO/UDF Bridge writes require a staged ISO/boot validator");
     // Run the strict Type-1 write preflight before the permissive read-only
     // Disc parser. This preserves the precise FSD mapping failure reason
     // even when Disc's general UDF reader cannot resolve that map.
-    Type1 volume(image,allow_bridge);
+    Type1 volume(image,allow_bridge,bounded_partitioned_bridge);
+    if(bounded_partitioned_bridge)
+        need(volume.has_allocation_map() &&
+             (volume.partition_access_type()==3 ||
+              volume.partition_access_type()==4),
+             "partitioned ISO/UDF requires a rewritable Type-1 allocator; growth is unsupported");
     const Disc before(image);
     need(before.format()=="UDF","not a plain readable UDF volume");
     need(!allow_bridge || !protected_ranges.empty(),

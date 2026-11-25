@@ -1999,6 +1999,8 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
          "bootable ISO/UDF validation needs bounded boot extents");
     const auto stage_size=std::filesystem::file_size(staged);
     const bool mastering=stage_size>before.size;
+    need(!before.hybrid_system_area || stage_size==before.size,
+         "partitioned ISO/UDF transaction must not grow or shrink the image");
     need(std::filesystem::file_size(original)==before.size &&
          stage_size>=before.size,
          "ISO/UDF image size changed during UDF edit");
@@ -2007,8 +2009,13 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
          after.size==stage_size &&
          after.descriptors==before.descriptors &&
          after.boot_regions==before.boot_regions &&
-         after.boot_lbas==before.boot_lbas,
-         "ISO/Joliet or El Torito boot descriptors changed in UDF staging");
+         after.boot_lbas==before.boot_lbas &&
+         after.hybrid_system_area==before.hybrid_system_area &&
+         after.gpt_hybrid==before.gpt_hybrid &&
+         after.hybrid_protected_regions==before.hybrid_protected_regions &&
+         after.gpt_first_usable==before.gpt_first_usable &&
+         after.gpt_last_usable==before.gpt_last_usable,
+         "ISO/Joliet, partition geometry or El Torito changed in UDF staging");
 
     // Compare all visible ISO namespace metadata before bytes are committed.
     // UDF-only files are intentionally absent from these trees.
@@ -2031,6 +2038,8 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
          "ISO9660 namespace changed during UDF-only editing");
     OpticalEditGuard guard(before.size);
     guard.protect(0,256ull*block); // ISO PVD, VRS, boot/system area
+    for(const auto& [start,length]:before.hybrid_protected_regions)
+        guard.protect(start,length);
     for(const auto& [start,length]:before.boot_regions)
         guard.protect(start,length);
     for(const auto& [start,length]:before.udf_metadata_regions) {
@@ -2793,6 +2802,19 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
         }
     };
     gather(gather,*image.root,"");
+    if(image.hybrid_system_area) {
+        need(!image.iso_system_use,
+             "partitioned UDF metadata edits require plain ISO/Joliet");
+        const Disc udf(path);
+        need(udf.format()=="UDF" &&
+             std::any_of(udf.items().begin(),udf.items().end(),[&](const Item& item) {
+                 return !item.directory && !iso_files.count(upper(item.path));
+             }),
+             "partitioned ISO/UDF requires a demonstrably split namespace");
+        for(const auto& change:changes)
+            need(!iso_files.count(upper(edit_path(change.path))),
+                 "partitioned ISO/UDF cannot remaster shared metadata");
+    }
     CoordinatedIsoUpdate plan;
     SharedIsoDeleteSectors deletion_sectors;
     SharedTreePlan add_tree;
@@ -2902,6 +2924,8 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     // All spans still go through the mandatory byte-exact staged guard.
     EditProtectedRanges immutable;
     immutable.emplace_back(0,256ull*block);
+    immutable.insert(immutable.end(),image.hybrid_protected_regions.begin(),
+                     image.hybrid_protected_regions.end());
     immutable.insert(immutable.end(),image.boot_regions.begin(),
                      image.boot_regions.end());
     immutable.insert(immutable.end(),image.udf_metadata_regions.begin(),
@@ -2924,7 +2948,8 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
         need(nodes.size()<=200000,"ISO/UDF immutable namespace exceeds limit");
     }
     edit_udf(path,changes,progress,true,validate,immutable,
-             shared.empty() && !adding_shared?nullptr:&plan);
+             shared.empty() && !adding_shared?nullptr:&plan,
+             image.hybrid_system_area);
 }
 }
 // Keep the write and independent readback phases in separate stack frames.
@@ -3274,12 +3299,8 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         }
         if(same_size_replace)
             edit_iso_udf_bridge_equal_length(path,image,changes,progress);
-        else {
-            need(!image.hybrid_system_area,
-                 "hybrid MBR ISO/UDF only supports equal-length file replacement; "
-                 "add/delete/resize requires a partition-aware writer");
+        else
             edit_iso_udf_bridge_metadata(path,image,changes,progress);
-        }
         return;
     }
     // Non-emulated catalog entries may refer to a short BIOS load whose

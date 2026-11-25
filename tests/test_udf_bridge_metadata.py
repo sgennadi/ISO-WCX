@@ -69,6 +69,50 @@ def main(editor, inspector):
         assert (root/'extracted-done'/'newfolder').is_dir()
         verify_boot()
 
+        # Fixed-size MBR/GPT bridges with separate ISO boot files and
+        # a rewritable Type-1 UDF namespace. A partition can occupy a
+        # block that the UDF bitmap otherwise advertises as available.
+        from test_iso_over4gb import add_mbr, add_gpt
+        for kind in ("MBR", "GPT"):
+            hybrid=root/("partitioned-"+kind+".iso")
+            raw=bootable_bridge_bitmap()
+            esp=303*B
+            raw[esp:esp+B]=b'E'*B
+            hybrid.write_bytes(raw)
+            (add_mbr if kind=="MBR" else add_gpt)(hybrid,esp//512,B//512)
+            original=hybrid.read_bytes()
+            payload.write_bytes(b'new UDF-only data'*200)
+            run(editor,hybrid,'add','HYBRID.BIN',payload)
+            run(editor,hybrid,'mkdir','hybrid-folder')
+            run(editor,hybrid,'add','hybrid-folder/nested.bin',payload)
+            out=root/("partitioned-out-"+kind)
+            run(inspector,hybrid,'--extract',out)
+            assert (out/'HYBRID.BIN').read_bytes()==payload.read_bytes()
+            assert (out/'hybrid-folder'/'nested.bin').read_bytes()==payload.read_bytes()
+            assert (out/'hello').read_bytes()==b'world'
+            run(editor,hybrid,'delete','HYBRID.BIN')
+            run(editor,hybrid,'delete','hybrid-folder/nested.bin')
+            run(editor,hybrid,'delete','hybrid-folder')
+            updated=hybrid.read_bytes()
+            assert len(updated)==len(original)
+            assert updated[:256*B]==original[:256*B]
+            assert updated[esp:esp+B]==original[esp:esp+B]
+            if kind=="GPT":
+                assert updated[-33*512:]==original[-33*512:]
+            assert read_image(hybrid)==iso_before
+            # ROM-style volumes cannot extend a partitioned image.
+            rom=bytearray(original)
+            pd=260*B
+            struct.pack_into('<I',rom,pd+184,1)
+            rom[pd+56:pd+96]=bytes(40)
+            update_tag(rom,pd,512)
+            struct.pack_into('<I',rom,270*B+80,0)
+            update_tag(rom,270*B,88)
+            hybrid.write_bytes(rom)
+            run(editor,hybrid,'add','MUST-NOT-GROW.BIN',payload,success=False)
+            assert hybrid.read_bytes()==rom
+            assert not list(root.glob('.iso-wcx-edit-*'))
+
         # Read-only DVD-ROM-style UDF bridge: no on-disc free map.
         # Appended allocations must not overwrite old ISO/boot sectors.
         readonly=bootable_bridge_bitmap()
