@@ -193,7 +193,7 @@ def vat_append_image(*, capacity=300, external_table=False):
         seal(raw,at,176+length,logical)
     vat=bytearray(152+4*(600 if external_table else 4))
     p16(vat,0,152);vat[4:132]=volume
-    p32(vat,132,0xffffffff);p32(vat,136,2)
+    p32(vat,132,0xffffffff);p32(vat,136,2);p32(vat,140,1)
     for at in (144,146,148):p16(vat,at,0x0201)
     for i in range(4):p32(vat,152+4*i,i)
     if external_table:
@@ -240,7 +240,7 @@ def test_vat_append(editor,inspector,root,image,replacement):
     replacement.write_bytes(b'cancelled')
     run(editor,image,'cancel','hello',replacement,success=False)
     assert image.read_bytes()==committed
-    for args in (('add','HELLO',replacement),('delete','missing'),('mkdir','DIR')):
+    for args in (('add','HELLO',replacement),('delete','missing'),('mkdir','missing/DIR')):
         run(editor,image,*args,success=False)
         assert image.read_bytes()==committed
     replacement.write_bytes(b'X'*(60*B))
@@ -401,7 +401,7 @@ def test_vat_root_mutations(editor,inspector,root,image,replacement):
             vat,mapping,uid=table(after)
             assert after[:len(before)]==before
             assert struct.unpack_from('<I',vat,132)[0]==len(before)//B-PARTITION-1
-            assert struct.unpack_from('<II',vat,136)==(len(expected),0)
+            assert struct.unpack_from('<II',vat,136)==(len(expected),1)
             assert uid>old_uid
             assert mapping[1]!=old_mapping[1]
             fids=root_fids(after,mapping)
@@ -427,6 +427,121 @@ def test_vat_root_mutations(editor,inspector,root,image,replacement):
         replacement.write_bytes(b'cancel')
         run(editor,image,'cancel','ABORT.TXT',replacement,success=False)
         assert image.read_bytes()==committed
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
+
+def test_vat_nested(editor,inspector,root,image,replacement):
+    import binascii
+    for external in (False,True):
+        image.write_bytes(vat_append_image(capacity=8192,external_table=external))
+        original=image.read_bytes()
+        expected={'hello':b'world','keep':b'keep me'}
+        directories={''}
+        retired=set()
+        def read_tree(data):
+            at=len(data)-B
+            length=struct.unpack_from('<Q',data,at+56)[0]
+            if struct.unpack_from('<H',data,at+34)[0]==3:
+                table=data[at+176:at+176+length]
+            else:
+                size,lba=struct.unpack_from('<II',data,at+176)
+                assert size==length
+                table=data[(PARTITION+lba)*B:(PARTITION+lba)*B+size]
+            header=struct.unpack_from('<H',table,0)[0]
+            mapping=struct.unpack_from('<'+'I'*((len(table)-header)//4),table,header)
+            found={}
+            def sector(logical):
+                start=(PARTITION+mapping[logical])*B
+                return data[start:start+B]
+            def walk(logical,parent,parent_uid,path):
+                fe=sector(logical)
+                uid=struct.unpack_from('<Q',fe,160)[0]
+                assert struct.unpack_from('<I',fe,12)[0]==logical and fe[27]==4
+                end=176+struct.unpack_from('<I',fe,172)[0]
+                pos=176
+                subdirs=0
+                while pos<end:
+                    n=fe[pos+19]
+                    fid_bytes=(38+n+3)&~3
+                    assert struct.unpack_from('<I',fe,pos+12)[0]==logical
+                    assert struct.unpack_from('<H',fe,pos+8)[0]==binascii.crc_hqx(fe[pos+16:pos+fid_bytes],0)
+                    child=struct.unpack_from('<I',fe,pos+24)[0]
+                    fid_uid=struct.unpack_from('<I',fe,pos+32)[0]
+                    flags=fe[pos+18]
+                    if pos==176:
+                        assert flags==10 and n==0 and child==parent and fid_uid==parent_uid
+                    else:
+                        assert flags in (0,2) and n
+                        name=fe[pos+39:pos+38+n].decode('ascii')
+                        key=path+'/'+name if path else name
+                        child_fe=sector(child)
+                        assert struct.unpack_from('<I',child_fe,12)[0]==child
+                        assert struct.unpack_from('<Q',child_fe,160)[0]==fid_uid
+                        found[key]=(child,fid_uid,flags==2)
+                        if flags==2:
+                            subdirs+=1
+                            walk(child,logical,uid,key)
+                    pos+=fid_bytes
+                assert pos==end
+                assert struct.unpack_from('<H',fe,48)[0]==1+subdirs
+            walk(1,1,0,'')
+            assert struct.unpack_from('<II',table,136)==(
+                sum(not obj[2] for obj in found.values()),
+                1+sum(obj[2] for obj in found.values()))
+            return found,mapping,table
+        for i,(action,name,body) in enumerate((
+            ('mkdir','A',None),
+            ('mkdir','A/B',None),
+            ('add','A/B/NEW.TXT',b'first'),
+            ('add','A/B/NEW.TXT',b'longer data'*1000),
+            ('add','A/KEEP.BIN',b'separate'),
+            ('mkdir','OTHER',None),
+            ('delete','A/B/NEW.TXT',None),
+            ('delete','A/B',None),
+            ('delete','A/KEEP.BIN',None),
+            ('delete','A',None),
+            ('mkdir','A',None),
+            ('delete','A',None),
+            ('delete','OTHER',None))):
+            before=image.read_bytes()
+            old,old_map,_=read_tree(before)
+            if action=='mkdir':
+                run(editor,image,'mkdir',name)
+                directories.add(name)
+            elif action=='add':
+                replacement.write_bytes(body)
+                run(editor,image,'add',name,replacement)
+                expected[name]=body
+            else:
+                run(editor,image,'delete',name)
+                if name in directories:directories.remove(name)
+                else:del expected[name]
+                retired.add(old[name][0])
+            after=image.read_bytes()
+            assert after[:len(before)]==before
+            found,mapping,vat=read_tree(after)
+            assert struct.unpack_from('<I',vat,132)[0]==len(before)//B-PARTITION-1
+            assert set(found)==set(expected)|(directories-{''})
+            assert all(mapping[lba]==0xffffffff for lba in retired)
+            for key,entry in old.items():
+                if key in found:assert found[key]==entry
+            if name not in old and name in found:
+                assert found[name][0]==len(old_map)
+            out=root/f'vat-nested-{external}-{i}'
+            check_disc(inspector,image,out)
+            assert {p.relative_to(out).as_posix() for p in out.rglob('*') if p.is_dir()}==directories-{''}
+            assert {p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}==expected
+            if i==2:
+                # No accidental recursive deletion, overwrite, or orphan.
+                for args in (('delete','A'),('delete','A/B'),
+                             ('mkdir','A/B'),('mkdir','missing/child'),
+                             ('add','A/B',replacement),
+                             ('add','A/B/new.txt',replacement)):
+                    run(editor,image,*args,success=False)
+                    assert image.read_bytes()==after
+                run(editor,image,'cancel','A/B/CANCEL.BIN',replacement,success=False)
+                assert image.read_bytes()==after
+        assert image.read_bytes()[:len(original)]==original
         assert not list(root.glob('.iso-wcx-edit-*'))
 
 
@@ -457,6 +572,7 @@ def main(editor,inspector):
         test_vat_append(editor,inspector,root,image,replacement)
         test_vat_external(editor,inspector,root,image,replacement)
         test_vat_root_mutations(editor,inspector,root,image,replacement)
+        test_vat_nested(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),

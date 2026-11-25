@@ -205,8 +205,8 @@ separately. No Type-1 allocator fallback is permitted.
 
 ### Initial VAT append writer (standalone UDF 2.x)
 
-The standalone dispatcher supports one ordinary root file
-creation, replacement or deletion, with a VAT 2.x FE at the last recorded sector of a
+The standalone dispatcher supports one ordinary file or directory
+operation, with a VAT 2.x FE at the last recorded sector of a
 write-once image, an open integrity sequence and capacity already
 declared by the physical partition descriptor. Embedded or external
 physical VAT storage is supported (16 MiB table limit). File data
@@ -220,7 +220,7 @@ are verified before atomic commit. Neither damaged historical-VAT
 fallback nor zero-filled space authorizes a write.
 
 This is intentionally a narrow backend. VAT 1.50 writing, EFE,
-external allocation continuations, nested directories,
+external allocation continuations, external directory bodies,
 multiple changes, full/closed sessions, partition growth and ISO/UDF
 bridge VAT writing remain unsupported. Physical data runs that alias
 VAT entries, the previous VAT, other files, or the table storage are
@@ -247,9 +247,27 @@ removed virtual address unmapped, and preserves the retired file's
 physical data in earlier sessions. File counts and the VAT ICB
 UniqueID counter are maintained (OSTA UDF 2.x, section 2.3.4.3 and
 the UniqueID rules). The strict input requires consistent live IDs,
-FID IDs, file counts and no subdirectories. A full embedded root
+FID IDs, file counts in the original root-only profile. A full embedded root
 directory is rejected rather than relocated. Tests cover creation,
 deletion, re-creation, non-reuse of retired virtual addresses,
 transition to external VAT, cancellation and complete old-session
-preservation. Nested directories, multiple changes in one request,
+preservation. Multiple changes in one request,
 legacy VAT 1.50 writing and physical recording remain unsupported.
+
+
+### VAT nested embedded directories
+
+The standalone VAT 2.x backend traverses and validates the full directory
+tree (bounded depth and number of directories). Each directory retains
+its own virtual ICB address. Creating a directory writes its mandatory
+parent FID, allocates a fresh UniqueID, and increments the parent's link
+count. Creation and replacement of regular files inside existing
+directories, and removal of files or empty directories, use the same
+append-only transaction. Parent FIDs identify the actual parent
+including its UniqueID. VAT NumberOfDirectories includes the root,
+as required by UDF 2.01 section 2.2.11 and later VAT definitions.
+Directory link counts are validated against immediate children.
+All prior physical bytes, surviving namespace entries, and newly
+written metadata are checked before commit. External directory bodies,
+recursive deletion of nonempty directories, batches, special ICBs,
+and unsupported parent geometry still fail closed.
