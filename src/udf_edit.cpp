@@ -788,7 +788,7 @@ public:
     // Reclaim a uniquely owned regular file or EMPTY directory. Its parent
     // FID must first be tombstoned. Blocks stay unavailable in this batch.
     [[nodiscard]] std::vector<Location> reclaim_entry_blocks(
-            const File& file,bool directory) {
+            const File& file,bool directory,bool preserve=false) {
         need(bitmap_ && integrity_,"UDF reclamation needs a closed allocation map/LVID");
         const auto owner=file.fe.at;
         const auto found=references_.find(owner);
@@ -829,6 +829,10 @@ public:
                 need(!bitmap_free(*bitmap_,first+static_cast<std::uint32_t>(j)),
                      "UDF reclaim sector is already free");
         }
+        // A coordinated ROM deletion unlinks the FID but leaves the
+        // former FE and shared data immutable. Ownership was still
+        // checked above; no reclaimed sectors enter the virtual bitmap.
+        if(preserve)return {};
         for(const auto& range:reclaimed) {
             const auto first=logical_of(range.at);
             for(std::uint64_t j=0;j<range.bytes/block;++j) {
@@ -2280,9 +2284,12 @@ void create_udf_type1_batch(const std::filesystem::path& image,
              "UDF batch contains duplicate or case-colliding changes");
         if(volume.files().count(key) || volume.directory_links().count(key)) {
             const bool shared=coordinated &&
-                coordinated->shared_replacements.count(key)!=0;
-            need(!shared || (mastering && !change.remove && !change.directory),
-                 "shared ISO/UDF replacement needs append mastering");
+                (coordinated->shared_replacements.count(key)!=0 ||
+                 coordinated->shared_deletions.count(key)!=0);
+            need(!shared || (mastering && !change.directory &&
+                 (change.remove?coordinated->shared_deletions.count(key):
+                                coordinated->shared_replacements.count(key))),
+                 "shared ISO/UDF edit needs matching append mastering plan");
             validate_udf_existing_change(volume,change,mastering!=nullptr,shared);
             existing_changes.push_back(change);
             continue;
@@ -2751,7 +2758,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         const bool is_directory=volume.directory_links().count(key)!=0;
         const auto& entry=is_directory?
             volume.directory_links().at(key):volume.files().at(key);
-        const auto regions=volume.reclaim_entry_blocks(entry,is_directory);
+        const bool preserve=mastering && coordinated &&
+            coordinated->shared_deletions.count(key)!=0;
+        const auto regions=volume.reclaim_entry_blocks(entry,is_directory,preserve);
         for(const auto& region:regions) {
             need(region.bytes%block==0 &&
                  region.bytes/block<=
@@ -2984,14 +2993,17 @@ void edit_udf(const std::filesystem::path& image,
     if(coordinated) {
         need(allow_bridge && validate_stage &&
              volume.partition_access_type()==1 && !volume.has_allocation_map() &&
-             coordinated->shared_replacements.size()==changes.size() &&
+             coordinated->shared_replacements.size()+
+                 coordinated->shared_deletions.size()==changes.size() &&
              !coordinated->metadata_writes.empty(),
-             "shared ISO/UDF resize requires read-only Type-1 mastering");
-        for(const auto& change:changes)
-            need(!change.remove && !change.directory &&
-                 volume.files().count(edit_path(change.path)) &&
-                 coordinated->shared_replacements.count(edit_path(change.path)),
-                 "invalid coordinated replacement target");
+             "shared ISO/UDF edit requires read-only Type-1 mastering");
+        for(const auto& change:changes) {
+            const auto key=edit_path(change.path);
+            need(!change.directory && volume.files().count(key) &&
+                 (change.remove?coordinated->shared_deletions.count(key):
+                                coordinated->shared_replacements.count(key)),
+                 "invalid coordinated edit target");
+        }
         for(const auto& [at,bytes]:coordinated->metadata_writes) {
             need(bytes && at<=volume.image_size() &&
                  bytes<=volume.image_size()-at,

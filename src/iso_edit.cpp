@@ -1719,23 +1719,85 @@ void protect_iso_udf_stage(const std::filesystem::path& original,
     if(mastering)guard.verify_appended(original,staged,progress);
     else guard.verify(original,staged,progress);
 }
+// Sector-local ISO directory deletion. ECMA-119 treats a zero-length
+// record as padding to the NEXT sector, not a deleted-entry marker.
+// Compact surviving records within each affected sector, never across
+// a sector boundary. The directory LBAs, sizes and path tables stay fixed.
+struct SharedIsoDeleteSector {
+    Bytes original;
+    std::vector<std::pair<std::size_t,std::size_t>> removed;
+};
+using SharedIsoDeleteSectors=std::map<std::uint64_t,SharedIsoDeleteSector>;
+
+void plan_shared_iso_delete(Image& image,const Node& node,bool joliet,
+                            SharedIsoDeleteSectors& sectors) {
+    const auto* parent=node.parent;
+    need(parent && parent->directory,"shared ISO deletion lacks parent directory");
+    const auto& record=joliet?node.joliet_record:node.record;
+    const auto& directory=joliet?parent->joliet_record:parent->record;
+    const auto at=joliet?node.joliet_record_at:node.record_at;
+    need(directory.size()>=34 && record.size()>=34 &&
+         record[0]==record.size(),"invalid shared ISO delete record");
+    const auto start=std::uint64_t(le(directory,2))*block;
+    const auto length=std::uint64_t(le(directory,10));
+    need(at>=start && at-start<length &&
+         record.size()<=length-(at-start),"shared ISO record outside parent");
+    const auto sector=at/block*block;
+    const auto span=static_cast<std::size_t>(
+        std::min<std::uint64_t>(block,length-(sector-start)));
+    const auto offset=static_cast<std::size_t>(at-sector);
+    need(offset<=span && record.size()<=span-offset,
+         "shared ISO delete record crosses a sector");
+    auto& patch=sectors[sector];
+    if(patch.original.empty())patch.original=image.read(sector,span);
+    need(patch.original.size()==span &&
+         std::equal(record.begin(),record.end(),patch.original.begin()+
+                    static_cast<std::ptrdiff_t>(offset)),
+         "shared ISO delete record differs from parent sector");
+    // Confirm this is an actual record boundary, and that sector padding
+    // contains no hidden vendor metadata that compaction would move.
+    bool matched=false;
+    std::size_t p=0;
+    while(p<span && patch.original[p]) {
+        const auto n=std::size_t(patch.original[p]);
+        need(n>=34 && n<=span-p,"invalid ISO directory sector");
+        if(p==offset)matched=n==record.size();
+        p+=n;
+    }
+    need(matched && std::all_of(patch.original.begin()+
+             static_cast<std::ptrdiff_t>(p),patch.original.end(),
+             [](auto c){return c==0;}),"invalid or nonzero ISO directory padding");
+    for(const auto& [begin,bytes]:patch.removed)
+        need(!intersect(begin,bytes,offset,record.size()),
+             "duplicate or overlapping shared ISO deletion record");
+    patch.removed.emplace_back(offset,record.size());
+}
+
 // UDF verifies its replacement first. Verify the unmodified ISO view,
 // then retarget its exact existing file records, not its directory tree.
 void coordinate_shared_bridge_stage(
         const std::filesystem::path& path,const std::filesystem::path& staged,
         const Image& image,const std::map<std::string,const Node*>& targets,
-        const CoordinatedIsoUpdate& plan,const EditProgress& progress) {
+        const CoordinatedIsoUpdate& plan,
+        const SharedIsoDeleteSectors& deletion_sectors,
+        const EditProgress& progress) {
     protect_iso_udf_stage(path,staged,image,progress);
     const auto size=std::filesystem::file_size(staged);
     need(size>image.size && size%block==0 && size/block<0xffffffffu,
          "shared ISO/UDF resize did not produce bounded append mastering");
     std::map<const Node*,FileSection> sections;
+    std::set<const Node*> deleted;
     {
         const Disc udf(staged);
         need(udf.format()=="UDF","cannot read staged coordinated UDF");
         for(const auto& [key,node]:targets) {
             const auto item=std::find_if(udf.items().begin(),udf.items().end(),
                 [&](const Item& v){return v.path==key && !v.directory;});
+            if(plan.shared_deletions.count(key)) {
+                need(item==udf.items().end(),"shared deleted file is still in UDF");
+                deleted.insert(node);
+                continue;
+            }
             need(item!=udf.items().end() && item->size>0 &&
                  item->size<=0xffffffffull && item->inline_data.empty() &&
                  !item->extents.empty(),
@@ -1781,16 +1843,52 @@ void coordinate_shared_bridge_stage(
         }
         return record;
     };
+    std::map<std::uint64_t,Bytes> compacted;
+    for(const auto& [sector,entry]:deletion_sectors)
+        compacted.emplace(sector,entry.original);
     for(const auto& [node,section]:sections) {
         (void)section;
         auto patch_record=[&](std::uint64_t at,const Bytes& record) {
             auto updated=updated_record(record,*node);
-            patch(at+2,Bytes(record.begin()+2,record.begin()+18),
-                       Bytes(updated.begin()+2,updated.begin()+18));
+            const auto sector=at/block*block;
+            auto found=compacted.find(sector);
+            if(found!=compacted.end()) {
+                auto& data=found->second;
+                const auto offset=static_cast<std::size_t>(at-sector)+2;
+                need(offset<=data.size() && 16<=data.size()-offset &&
+                     std::equal(record.begin()+2,record.begin()+18,
+                                data.begin()+static_cast<std::ptrdiff_t>(offset)),
+                     "shared replacement conflicts with directory compaction");
+                std::copy(updated.begin()+2,updated.begin()+18,
+                          data.begin()+static_cast<std::ptrdiff_t>(offset));
+            } else patch(at+2,Bytes(record.begin()+2,record.begin()+18),
+                              Bytes(updated.begin()+2,updated.begin()+18));
         };
         patch_record(node->record_at,node->record);
         if(image.joliet)patch_record(node->joliet_record_at,node->joliet_record);
     }
+    for(const auto& [sector,entry]:deletion_sectors) {
+        auto& data=compacted.at(sector);
+        auto removed=entry.removed;
+        std::sort(removed.rbegin(),removed.rend());
+        for(const auto& [at,bytes]:removed) {
+            need(at<=data.size() && bytes<=data.size()-at,
+                 "shared ISO directory compaction exceeds sector");
+            data.erase(data.begin()+static_cast<std::ptrdiff_t>(at),
+                       data.begin()+static_cast<std::ptrdiff_t>(at+bytes));
+            data.resize(entry.original.size(),0);
+        }
+        patch(sector,entry.original,std::move(data));
+    }
+    auto adjusted_record_at=[&](std::uint64_t at) {
+        const auto sector=at/block*block;
+        const auto found=deletion_sectors.find(sector);
+        if(found==deletion_sectors.end())return at;
+        const auto offset=at-sector;
+        for(const auto& [begin,bytes]:found->second.removed)
+            if(begin<offset)at-=bytes;
+        return at;
+    };
     auto expected=image.descriptors;
     for(auto& [lba,vd]:expected) {
         Bytes old(vd.begin()+80,vd.begin()+88);
@@ -1816,22 +1914,31 @@ void coordinate_shared_bridge_stage(
         need(a.name==b.name && a.logical==b.logical &&
              a.directory==b.directory && lba==b.lba && length==b.size &&
              a.identifier==b.identifier && a.joliet_identifier==b.joliet_identifier &&
-             a.record_at==b.record_at && a.joliet_record_at==b.joliet_record_at &&
+             adjusted_record_at(a.record_at)==b.record_at &&
+             adjusted_record_at(a.joliet_record_at)==b.joliet_record_at &&
              parts==b.sections && updated_record(a.record,a)==b.record &&
-             updated_record(a.joliet_record,a)==b.joliet_record &&
-             a.children.size()==b.children.size(),
+             updated_record(a.joliet_record,a)==b.joliet_record,
              "coordinated ISO/Joliet namespace differs from edit plan");
-        for(std::size_t i=0;i<a.children.size();++i)
-            self(self,*a.children[i],*b.children[i]);
+        std::size_t next=0;
+        for(const auto& child:a.children) {
+            if(deleted.count(child.get()))continue;
+            need(next<b.children.size(),"shared ISO deletion removed unrelated entry");
+            self(self,*child,*b.children[next++]);
+        }
+        need(next==b.children.size(),"deleted ISO entry remains visible");
     };
     verify(verify,*image.root,*checked.root);
     checked.file.close();
     const Disc final_udf(staged);
     need(final_udf.format()=="UDF","coordinated image lost its UDF namespace");
     for(const auto& [key,node]:targets) {
-        const auto& section=sections.at(node);
         const auto item=std::find_if(final_udf.items().begin(),final_udf.items().end(),
             [&](const Item& v){return v.path==key && !v.directory;});
+        if(deleted.count(node)) {
+            need(item==final_udf.items().end(),"deleted UDF entry remains visible");
+            continue;
+        }
+        const auto& section=sections.at(node);
         need(item!=final_udf.items().end() && item->size==section.length &&
              !item->extents.empty() &&
              item->extents.front().offset==std::uint64_t(section.lba)*block,
@@ -1844,8 +1951,8 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                                   const EditProgress& progress) {
     need(image.udf_bridge && image.boot_regions_bounded,
          "ISO/UDF metadata edit requires bounded El Torito boot images");
-    // ISO-visible objects are immutable in this mode. Shared ISO/UDF file
-    // replacements are handled exclusively by the equal-length patcher.
+    // Shared regular files can be remastered or unlinked from both
+    // namespaces; ISO-only and ambiguous aliases remain protected.
     std::map<std::string,const Node*> iso_files;
     auto gather=[&](auto&& self,const Node& node,const std::string& prefix)->void {
         for(const auto& child:node.children) {
@@ -1857,6 +1964,7 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     };
     gather(gather,*image.root,"");
     CoordinatedIsoUpdate plan;
+    SharedIsoDeleteSectors deletion_sectors;
     std::map<std::string,const Node*> shared;
     if(std::any_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
             return iso_files.count(upper(edit_path(c.path)))!=0;
@@ -1868,9 +1976,9 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
             const auto key=edit_path(change.path);
             const auto found=iso_files.find(upper(key));
             need(found!=iso_files.end() && !found->second->directory &&
-                 !change.remove && !change.directory &&
-                 std::filesystem::is_regular_file(
-                     std::filesystem::symlink_status(change.source)),
+                 !change.directory &&
+                 (change.remove || std::filesystem::is_regular_file(
+                     std::filesystem::symlink_status(change.source))),
                  "shared ISO/UDF edits require existing regular files");
             const auto* node=found->second;
             const auto item=std::find_if(udf.items().begin(),udf.items().end(),
@@ -1881,20 +1989,36 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                  item->extents[0].offset==std::uint64_t(node->lba)*block &&
                  item->extents[0].length==node->size,
                  "ISO and UDF original shared extents disagree");
-            const auto length=std::filesystem::file_size(change.source);
-            need(length>0 && length<=0xffffffffull,
-                 "shared replacement exceeds single ISO extent bounds");
+            if(!change.remove) {
+                const auto length=std::filesystem::file_size(change.source);
+                need(length>0 && length<=0xffffffffull,
+                     "shared replacement exceeds single ISO extent bounds");
+            }
             protect_boot(*node,image.boot_lbas);
             for(const auto& [at,bytes]:image.boot_regions)
                 need(!intersect(item->extents[0].offset,item->size,at,bytes),
                      "shared replacement overlaps boot data");
             need(node->record_at && (!image.joliet || node->joliet_record_at),
                  "missing shared ISO directory record location");
-            plan.shared_replacements.insert(key);
             shared.emplace(key,node);
-            plan.metadata_writes.emplace_back(node->record_at+2,16);
-            if(image.joliet)plan.metadata_writes.emplace_back(node->joliet_record_at+2,16);
+            if(change.remove) {
+                plan.shared_deletions.insert(key);
+                plan_shared_iso_delete(image,*node,false,deletion_sectors);
+                if(image.joliet)
+                    plan_shared_iso_delete(image,*node,true,deletion_sectors);
+            } else plan.shared_replacements.insert(key);
         }
+        for(const auto& [key,node]:shared) {
+            if(plan.shared_deletions.count(key))continue;
+            auto add_field=[&](std::uint64_t at) {
+                if(!deletion_sectors.count(at/block*block))
+                    plan.metadata_writes.emplace_back(at+2,16);
+            };
+            add_field(node->record_at);
+            if(image.joliet)add_field(node->joliet_record_at);
+        }
+        for(const auto& [sector,entry]:deletion_sectors)
+            plan.metadata_writes.emplace_back(sector,entry.original.size());
         for(const auto& [lba,vd]:image.descriptors) {
             (void)vd;
             plan.metadata_writes.emplace_back(std::uint64_t(lba)*block+80,8);
@@ -1925,9 +2049,10 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
     // the image after the staged UDF writer and boot validator succeed.
     image.file.close();
     const EditStageValidator validate=
-        [&path,&image,&progress,&shared,&plan](const std::filesystem::path& staged) {
+        [&path,&image,&progress,&shared,&plan,&deletion_sectors](const std::filesystem::path& staged) {
             if(shared.empty())protect_iso_udf_stage(path,staged,image,progress);
-            else coordinate_shared_bridge_stage(path,staged,image,shared,plan,progress);
+            else coordinate_shared_bridge_stage(path,staged,image,shared,plan,
+                                                deletion_sectors,progress);
         };
     // UDF may advertise free blocks that ISO9660 owns exclusively, e.g.
     // boot.catalog, BIOS/EFI image extents or a shared old ISO filename.

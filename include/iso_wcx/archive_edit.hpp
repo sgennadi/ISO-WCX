@@ -30,6 +30,7 @@ using EditProtectedRanges =
 // Explicit coordinator contract: old shared data remains immutable.
 struct CoordinatedIsoUpdate {
     std::set<std::string> shared_replacements;
+    std::set<std::string> shared_deletions;
     EditProtectedRanges metadata_writes;
 };
 // UDF Type-1 Preview: plain-UDF writes by default. Bridge writes are opt-in

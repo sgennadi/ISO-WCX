@@ -255,6 +255,27 @@ def main(editor,inspector):
             struct.pack_into('<Q',common,fe+64,1)
             update_tag(common,fe,184,2)
             common[303*B:303*B+5]=b'world'
+            # A second shared file in the same directory sector allows
+            # mixed deletion+replacement to exercise compaction, not just
+            # removing the final record and zero-padding the end.
+            from test_udf_edit import fid
+            extra=fid(304,'keep')
+            update_tag(extra,0,len(extra),1)
+            root_fe=301*B
+            length=struct.unpack_from('<I',common,root_fe+172)[0]
+            common[root_fe+176+length:root_fe+176+length+len(extra)]=extra
+            struct.pack_into('<Q',common,root_fe+56,length+len(extra))
+            struct.pack_into('<I',common,root_fe+172,length+len(extra))
+            update_tag(common,root_fe,176+length+len(extra),1)
+            common[304*B:305*B]=common[302*B:303*B]
+            struct.pack_into('<I',common,304*B+180,5)
+            struct.pack_into('<Q',common,304*B+160,17)
+            update_tag(common,304*B,184,4)
+            common[305*B:305*B+5]=b'KEEP!'
+            primary=(iso_record(20,B,2,b'\0')+iso_record(20,B,2,b'\1')+
+                     iso_record(303,5,0,b'hello;1')+
+                     iso_record(305,5,0,b'keep;1'))
+            common[20*B:21*B]=primary.ljust(B,b'\0')
             if j:
                 common[23*B:24*B]=common[19*B:20*B]
                 common[19*B:20*B]=common[18*B:19*B]
@@ -263,6 +284,7 @@ def main(editor,inspector):
                 both(common,17*B+80,len(common)//B)
                 jr=iso_record(22,B,2,b'\0')+iso_record(22,B,2,b'\1')
                 jr+=iso_record(303,5,0,'hello;1'.encode('utf-16-be'))
+                jr+=iso_record(305,5,0,'keep;1'.encode('utf-16-be'))
                 common[22*B:23*B]=jr.ljust(B,b'\0')
             image.write_bytes(common)
             for i,body in enumerate((b'SHARED FILE'*1200,b'shorter')):
@@ -283,10 +305,28 @@ def main(editor,inspector):
                 if j:
                     assert struct.unpack_from('<I',changed,17*B+80)[0]==len(changed)//B
             before=image.read_bytes()
-            run([editor,str(image),'delete','hello'],expected=1)
-            assert image.read_bytes()==before
             run([editor,str(image),'cancel','hello',str(source)],expected=1)
             assert image.read_bytes()==before
+            source.write_bytes(b'UPDATED SURVIVING SHARED FILE'*101)
+            run([editor,str(image),'batch','delete','hello',
+                 'add','keep',str(source)])
+            after=image.read_bytes()
+            assert after[24*B:26*B]==common[24*B:26*B]
+            assert after[303*B:303*B+5]==b'world'
+            assert after[305*B:305*B+5]==b'KEEP!'
+            assert read_image(image)=={'keep':source.read_bytes()}
+            if j: assert read_image(image,True)=={'keep':source.read_bytes()}
+            target=root/f'coordinated-delete-{j}'
+            run([inspector,str(image),'--extract',str(target)])
+            assert not (target/'hello').exists()
+            assert (target/'keep').read_bytes()==source.read_bytes()
+            run([editor,str(image),'delete','keep'])
+            assert read_image(image)=={}
+            if j: assert read_image(image,True)=={}
+            target=root/f'coordinated-empty-{j}'
+            run([inspector,str(image),'--extract',str(target)])
+            assert not (target/'keep').exists()
+            assert image.read_bytes()[24*B:26*B]==common[24*B:26*B]
             assert not list(root.glob('.iso-wcx-edit-*'))
 
         def rejected(operation,name,content=b'EARTH',boot=False,shared=True):
