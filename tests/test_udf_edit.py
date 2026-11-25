@@ -131,6 +131,24 @@ def main(editor,inspector):
         image=root/'volume.udf'
         replacement=root/'replacement.bin'
         out=root/'extract'
+        # Recognized Type-2 maps must produce specific diagnostics and
+        # preserve the entire image. No Type-1 fallback may mutate them.
+        from test_images import udf_vat_image, udf_sparable_image, udf_metadata_image
+        for family,builder in (
+            ('UDF VAT virtual partition',udf_vat_image),
+            ('UDF Sparable Partition',udf_sparable_image),
+            ('UDF Metadata Partition',udf_metadata_image)):
+            raw=builder()
+            raw[19*B+1:19*B+6]=b'NSR03'
+            image.write_bytes(raw)
+            replacement.write_bytes(b'new content')
+            for arguments in (('add','hello',replacement),('delete','hello'),
+                              ('mkdir','NEW')):
+                result=run(editor,image,*arguments,success=False)
+                detail=(result.stdout+result.stderr).decode(errors='replace')
+                assert family in detail, detail
+                assert image.read_bytes()==raw
+                assert not list(root.glob('.iso-wcx-edit-*'))
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),

@@ -188,3 +188,23 @@ real independently formatted file larger than 8 MiB and an over-4-GiB
 create/grow/replace test with independently streamed content verification.
 This does not imply that all rewritable UDF types are supported: broad
 Windows/optical interoperability for files over 4 GiB remains pending.
+
+
+### Type-2 partition diagnostics and VAT read compatibility
+
+The reader distinguishes the UDF 1.50 VAT ICB (file type 0, 36-byte
+EntityID trailer) from UDF 2.x (file type 248, variable-length header).
+It validates candidate ICB locations, table bounds, previous-transaction
+locations, recorded data extents and every non-hole physical mapping
+before accepting a table. A damaged VAT candidate may still be skipped
+during **read-only** recovery. Tests cover embedded and external tables,
+noncontiguous physical data, prior VAT recovery and malformed candidates.
+
+The edit preflight reports VAT, Sparable and Metadata partitions
+separately. These Type-2 maps remain **read-only**: no Type-1 allocator
+fallback is permitted. A VAT append transaction must eventually create
+a new VAT ICB, preserve the preceding transaction, and verify all
+referenced blocks before committing. This reader groundwork alone does
+not authorize writes.
+
+References: OSTA UDF 1.50 §2.2.10 and UDF 2.60 §2.2.11.

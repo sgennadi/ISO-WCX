@@ -875,24 +875,52 @@ class Udf {
                 if(u16(descriptor,0)!=261 && u16(descriptor,0)!=266)continue;
                 try {
                     check_tag(descriptor,0,u16(descriptor,0));
-                    if(descriptor[27]!=248)continue;
+                    const auto type=descriptor[27];
+                    if(type!=0 && type!=248)continue;
+                    // UDF 1.50 uses ICB file type 0 with an EntityID
+                    // trailer; UDF 2.x uses type 248 with a length header.
+                    // Do not guess the format from the first table entries.
+                    require(u16(descriptor,2)==2 || u16(descriptor,2)==3,
+                            "unsupported VAT ICB descriptor version");
+                    require(u32(descriptor,12)==at,
+                            "VAT ICB tag location mismatch");
                     const auto file=fe(static_cast<std::uint32_t>(at),physical);
+                    for(const auto& extent:file.extents)
+                        require(!extent.sparse,"unrecorded VAT table extent");
                     const auto vat=data_bytes(file,16*1024*1024);
                     std::size_t header=0,entries_end=vat.size();
-                    if(vat.size()>=152 && u16(vat,0)>=152 && u16(vat,0)<=vat.size() &&
-                       u16(vat,0)==152u+u16(vat,2)) header=u16(vat,0);
-                    else {
-                        // UDF 1.50 layout has a 36-byte trailer, not a header.
+                    std::uint32_t previous=0xffffffffu;
+                    if(type==248) {
+                        require(vat.size()>=156 &&
+                                u16(vat,0)==152u+u16(vat,2) &&
+                                u16(vat,0)<=vat.size()-4u,
+                                "invalid UDF 2.x VAT header");
+                        header=u16(vat,0);
+                        previous=u32(vat,132);
+                    } else {
                         require(vat.size()>=40 &&
                                 std::string_view(reinterpret_cast<const char*>(vat.data()+vat.size()-35),22)==
-                                "*UDF Virtual Alloc Tbl","invalid VAT header or trailer");
+                                "*UDF Virtual Alloc Tbl","invalid UDF 1.50 VAT trailer");
                         entries_end=vat.size()-36;
+                        previous=u32(vat,vat.size()-4);
                     }
-                    require((entries_end-header)%4==0 && entries_end>header &&
+                    require(previous==0xffffffffu || previous<at,
+                            "VAT previous ICB is not an earlier physical block");
+                    require(entries_end>header && (entries_end-header)%4==0 &&
                             (entries_end-header)/4<=8*1024*1024,
                             "invalid VAT length");
-                    vt.entries.clear();
-                    for(auto p=header;p<entries_end;p+=4)vt.entries.push_back(u32(vat,p));
+                    // Publish the candidate only after the ENTIRE table
+                    // validates. A hole is legal, an out-of-range mapping
+                    // (including an unused entry) is not.
+                    std::vector<std::uint32_t> candidate;
+                    candidate.reserve((entries_end-header)/4);
+                    for(auto p=header;p<entries_end;p+=4) {
+                        const auto mapped=u32(vat,p);
+                        require(mapped==0xffffffffu || mapped<at,
+                                "VAT entry exceeds recorded backing partition");
+                        candidate.push_back(mapped);
+                    }
+                    vt.entries=std::move(candidate);
                     found=true;break;
                 } catch(const std::exception&) { /* Ignore damaged historic VAT ICB. */ }
             }

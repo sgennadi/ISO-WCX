@@ -265,6 +265,35 @@ public:
             if(tag==6) {need(lvd.empty(),"multiple UDF logical volumes unsupported");lvd=b;}
             if(tag==8) break;
         }
+        // Identify recognized Type-2 maps before falling back to the
+        // generic Type-1 rejection. This is a read-only diagnostic, not
+        // permission to write through virtual or remapped logical LBAs.
+        if(!lvd.empty()) {
+            const auto bytes=u32(lvd,264), count=u32(lvd,268);
+            if(bytes<=lvd.size()-440 && count<=64) {
+                std::size_t at=440;
+                for(std::uint32_t index=0;index<count;++index) {
+                    const auto end=std::size_t(440)+bytes;
+                    if(at>end || end-at<2)break;
+                    const auto length=lvd[at+1];
+                    if(length<2 || length>end-at)break;
+                    if(lvd[at]==2 && length==64) {
+                        const std::string_view identifier(
+                            reinterpret_cast<const char*>(lvd.data()+at+5),23);
+                        if(identifier.substr(0,22)=="*UDF Virtual Partition")
+                            throw EditUnsupported("UDF VAT virtual partition is read-only; "
+                                "sequential VAT append transaction writer not yet supported");
+                        if(identifier=="*UDF Sparable Partition")
+                            throw EditUnsupported("UDF Sparable Partition is read-only; "
+                                "packet-aware allocator not yet supported");
+                        if(identifier=="*UDF Metadata Partition")
+                            throw EditUnsupported("UDF Metadata Partition is read-only; "
+                                "metadata/mirror allocator not yet supported");
+                    }
+                    at+=length;
+                }
+            }
+        }
         need(!pd.empty() && !lvd.empty() && u32(lvd,212)==block &&
              u32(lvd,264)==6 && u32(lvd,268)==1 &&
              lvd[440]==1 && lvd[441]==6 &&
