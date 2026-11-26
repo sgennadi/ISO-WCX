@@ -219,7 +219,7 @@ descriptor area and available capacity. The original prefix and all independentl
 are verified before atomic commit. Neither damaged historical-VAT
 fallback nor zero-filled space authorizes a write.
 
-This is intentionally a narrow backend. VAT 1.50 writing, EFE,
+This is intentionally a narrow backend. EFE,
 external allocation continuations,
 full/closed sessions, partition growth and ISO/UDF
 bridge VAT writing remain unsupported. Physical data runs that alias
@@ -251,7 +251,7 @@ FID IDs, file counts in the original root-only profile. A full embedded root
 directory is rejected rather than relocated. Tests cover creation,
 deletion, re-creation, non-reuse of retired virtual addresses,
 transition to external VAT, cancellation and complete old-session
-preservation. Legacy VAT 1.50 writing and physical recording remain unsupported.
+preservation. Legacy VAT 1.50 extended-attribute writing and physical recording remain unsupported.
 
 
 ### VAT nested embedded directories
@@ -308,3 +308,24 @@ Retired virtual addresses remain unmapped and historical physical bytes
 remain byte-identical. Tests exercise deep deletion, external bodies,
 overlapping selection, similarly prefixed siblings, conflicting batches
 and cancellation after real staged growth.
+
+
+### UDF 1.50 sequential VAT editing
+
+The standalone sequential writer now also recognizes the restricted
+UDF 1.50 profile: NSR02, UDF domain and virtual-map revision 0x0150,
+type-0 VAT ICB with zero link count, and a validated 36-byte trailer.
+The existing validated append planner is shared with 2.x, but legacy
+VAT entry allocation excludes the trailer, which is preserved except
+for PreviousVAT ICB. Legacy FIDs do not require the 2.x implementation
+use UniqueID field; existing values are preserved and new values are
+zero. The writer requires an existing monotonically maintained FE
+UniqueID counter and rejects extended attributes, including legacy VAT
+LVExtension metadata. Supported operations include file replacement,
+creation, directories, batch and recursive removal, and external VAT
+storage. Tests use independently constructed type-0 VAT fixtures and
+validate the suffix, previous pointer, old-prefix integrity, transition
+to external storage, extraction, and rollback. This is not a claim
+of complete compatibility with all historical CD-R masters or physical
+recording devices. Source: OSTA UDF 1.50 sections 2.2.10, 2.3.6.5,
+and 6.10.1.

@@ -3058,13 +3058,11 @@ void create_udf_type1_batch(const std::filesystem::path& image,
 }
 
 
-// Conservative first VAT writer: a standalone, open write-once UDF 2.x
-// image with a clean VAT ICB at its actual EOF. The declared
-// physical partition already reserves the unrecorded capacity. No sector
-// of the original is overwritten; no free-space bitmap is manufactured.
-// Root directory metadata is still embedded, but regular file data
-// may use physical long_ad extents. External VAT storage uses physical
-// allocation descriptors as well. Never map bulk file data through VAT.
+// Standalone open write-once UDF 1.50 / 2.x images with a clean
+// VAT ICB at actual EOF and declared unrecorded partition capacity.
+// No original sector is overwritten. Directory metadata uses virtual
+// addresses; bulk file data and external VAT storage use physical ADs.
+// Keep each revision's on-disc VAT layout and FID conventions distinct.
 struct VatFileLayout {
     bool directory=false;
     std::uint64_t size{};
@@ -3147,7 +3145,8 @@ VatVolumeDescriptors vat_vds(std::ifstream& in,std::uint64_t sectors,
 }
 Bytes vat_embedded_fe(Bytes b,std::uint32_t lba,std::uint8_t type) {
     vat_need(u16(b,0)==261 && b[27]==type && u16(b,20)==4 &&
-             u16(b,24)==1 && (type==4?u16(b,48)>=1:u16(b,48)==1) &&
+             u16(b,24)==1 &&
+             (type==4?u16(b,48)>=1:(type==0?u16(b,48)==0:u16(b,48)==1)) &&
              u16(b,34)==3 &&
              u32(b,168)==0 && u64(b,64)==0 &&
              u64(b,56)==u32(b,172) && u32(b,172)<=block-176,
@@ -3161,7 +3160,7 @@ Bytes vat_embedded_fe(Bytes b,std::uint32_t lba,std::uint8_t type) {
 VatFileLayout vat_physical_file(const Bytes& b,std::uint32_t lba,
         std::uint8_t type,std::uint32_t partition,std::uint32_t old_vat) {
     vat_need(u16(b,0)==261 && b[27]==type && u16(b,20)==4 &&
-             u16(b,24)==1 && u16(b,48)==1 && u32(b,168)==0,
+             u16(b,24)==1 && u16(b,48)==(type==0?0:1) && u32(b,168)==0,
              "requires a single-link ordinary FE without extended attributes");
     const auto mode=u16(b,34);
     VatFileLayout layout;
@@ -3171,7 +3170,7 @@ VatFileLayout vat_physical_file(const Bytes& b,std::uint32_t lba,
         layout.embedded.assign(b.begin()+176,b.begin()+176+u32(b,172));
         return layout;
     }
-    vat_need(mode==1 || (type==248 && mode==0),
+    vat_need(mode==1 || ((type==248 || type==0) && mode==0),
              "external VAT file data must use physical allocation descriptors");
     const std::size_t step=mode==0?8u:16u;
     const auto ads=u32(b,172);
@@ -3284,11 +3283,13 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     const auto partition=u32(pd,188),capacity=u32(pd,192);
     const auto part_number=u16(pd,22);
     const std::string_view contents(reinterpret_cast<const char*>(pd.data()+25),6);
-    vat_need(contents=="+NSR03" && u32(pd,184)==2 &&
+    const auto revision=u16(lvd,240);
+    const bool legacy=revision==0x0150;
+    vat_need(contents==(legacy?"+NSR02":"+NSR03") && u32(pd,184)==2 &&
              partition>256 && partition<sectors &&
              capacity<=0xffffffffu-partition &&
              sectors-partition+2<=capacity,
-             "requires UDF 2.x write-once partition with unrecorded capacity");
+             "requires UDF 1.50/2.x write-once partition with unrecorded capacity");
     vat_need(std::all_of(pd.begin()+56,pd.begin()+96,[](auto c){return c==0;}),
              "write-once partition must not advertise free-space structures");
     const Location main_range{std::uint64_t(main_start)*block,main_bytes};
@@ -3307,8 +3308,13 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
              "requires exactly one physical map and its virtual map");
     vat_need(std::string_view(reinterpret_cast<const char*>(lvd.data()+217),19)==
                  "*OSTA UDF Compliant" &&
-             u16(lvd,240)>=0x0200 && u16(lvd,240)<=0x0260 &&
+             (legacy || (revision>=0x0200 && revision<=0x0260)) &&
              lvd[242]==0,"unsupported or write-protected UDF domain");
+    if(legacy) {
+        vat_need(u16(lvd,2)==2 && u16(pd,2)==2 &&
+                 u16(lvd,474)==0x0150 && lvd[450]==0,
+                 "UDF 1.50 virtual partition revision mismatch");
+    }
     // Open integrity plus a valid VAT at the final recorded sector is
     // the clean sequential state. Never recover an old VAT for writing.
     const auto integrity_start=u32(lvd,436),integrity_bytes=u32(lvd,432);
@@ -3333,19 +3339,45 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     }
     const auto old_vat=static_cast<std::uint32_t>(sectors-partition-1);
     auto vat_fe=vat_read_sector(in,sectors-1,sectors);
-    const auto vat_layout=vat_physical_file(vat_fe,old_vat,248,partition,old_vat);
+    const auto vat_layout=vat_physical_file(vat_fe,old_vat,
+                                            legacy?0:248,partition,old_vat);
     auto vat=vat_table_bytes(in,vat_layout);
-    vat_need(vat.size()>=156 && u16(vat,0)==152u+u16(vat,2) &&
-             u16(vat,0)<=vat.size()-4 && (vat.size()-u16(vat,0))%4==0 &&
-             std::equal(vat.begin()+4,vat.begin()+132,lvd.begin()+84) &&
-             u16(vat,144)>=0x0200 && u16(vat,144)<=0x0260 &&
-             u16(vat,146)>=0x0200 && u16(vat,146)<=0x0260 &&
-             u16(vat,148)>=u16(vat,146) && u16(vat,148)<=0x0260 &&
-             u16(vat,150)==0,"invalid UDF 2.x VAT header");
-    const auto previous=u32(vat,132);
+    Bytes legacy_trailer;
+    std::uint32_t previous=0xffffffffu;
+    std::size_t header=0;
+    if(legacy) {
+        // UDF 1.50 section 2.2.10: entries followed by EntityID
+        // (32 bytes) and PreviousVAT ICB (4 bytes), not a 2.x header.
+        // Exclude this trailer during mapping allocation so newly
+        // allocated virtual addresses can never overwrite the EntityID.
+        vat_need(vat.size()>=40 && (vat.size()-36)%4==0 &&
+                 u16(vat_fe,2)==2,
+                 "invalid UDF 1.50 VAT size or descriptor version");
+        const auto at=vat.size()-36;
+        vat_need(vat[at]==0 && vat[at+23]==0 &&
+                 std::string_view(reinterpret_cast<const char*>(vat.data()+at+1),22)==
+                     "*UDF Virtual Alloc Tbl" &&
+                 u16(vat,at+24)==0x0150 &&
+                 std::all_of(vat.begin()+at+28,vat.begin()+at+32,
+                             [](auto c){return c==0;}),
+                 "invalid UDF 1.50 VAT EntityID");
+        previous=u32(vat,at+32);
+        legacy_trailer.assign(vat.begin()+at,vat.end());
+        vat.resize(at);
+    } else {
+        vat_need(vat.size()>=156 && u16(vat,0)==152u+u16(vat,2) &&
+                 u16(vat,0)<=vat.size()-4 && (vat.size()-u16(vat,0))%4==0 &&
+                 std::equal(vat.begin()+4,vat.begin()+132,lvd.begin()+84) &&
+                 u16(vat,144)>=0x0200 && u16(vat,144)<=0x0260 &&
+                 u16(vat,146)>=0x0200 && u16(vat,146)<=0x0260 &&
+                 u16(vat,148)>=u16(vat,146) && u16(vat,148)<=0x0260 &&
+                 u16(vat,150)==0,"invalid UDF 2.x VAT header");
+        previous=u32(vat,132);
+        header=u16(vat,0);
+    }
+    const auto table_limit=vat_max_table-legacy_trailer.size();
     vat_need(previous==0xffffffffu || previous<old_vat,
              "invalid previous VAT ICB location");
-    const auto header=std::size_t(u16(vat,0));
     std::vector<std::uint32_t> mapping;
     std::set<std::uint32_t> used;
     for(std::size_t pos=header;pos<vat.size();pos+=4) {
@@ -3507,7 +3539,7 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
             if(flags==10) {
                 vat_need(dense.empty() && !have_parent && !n &&
                          child==current.parent &&
-                         u32(body,pos+32)==static_cast<std::uint32_t>(current.parent_uid),
+                         (legacy || u32(body,pos+32)==static_cast<std::uint32_t>(current.parent_uid)),
                          "invalid VAT parent directory FID");
                 have_parent=true;
             } else {
@@ -3524,7 +3556,7 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                 const auto unique=u64(fe,160);
                 vat_need(unique>=16 && unique<vat_uid &&
                          live_ids.insert(unique).second &&
-                         u32(body,pos+32)==static_cast<std::uint32_t>(unique),
+                         (legacy || u32(body,pos+32)==static_cast<std::uint32_t>(unique)),
                          "VAT object has invalid or duplicate unique ID");
                 const bool is_directory=flags==2;
                 if(is_directory) {
@@ -3556,8 +3588,11 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     }
     // OSTA UDF 2.01 and later count the root directory itself in VAT
     // NumberOfDirectories. Earlier synthetic fixtures omitted this one.
-    vat_need(vat_uid>=16 && u32(vat,136)==file_count &&
-             u32(vat,140)==directories.size(),
+    // Legacy VAT has no count fields. Limit its writer to images
+    // already carrying a valid monotonic FE UniqueID counter; do not
+    // infer a new counter from a potentially incomplete historical tree.
+    vat_need(vat_uid>=16 && (legacy ||
+             (u32(vat,136)==file_count && u32(vat,140)==directories.size())),
              "VAT unique ID or file/directory counts disagree with namespace");
     // Independent public reader must agree with every strict input entry.
     // No hidden special files, physical payload references or fallback
@@ -3715,7 +3750,7 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         }
         Bytes target;
         if(creating) {
-            vat_need(vat.size()+4<=vat_max_table &&
+            vat_need(vat.size()+4<=table_limit &&
                      (vat.size()-header)/4<0xffffffffu &&
                      objects.size()<max_items,
                      "VAT virtual address or namespace limit exhausted");
@@ -3734,7 +3769,10 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
             fid[19]=static_cast<std::uint8_t>(encoded.size());
             put32(fid,20,static_cast<std::uint32_t>(block));
             put32(fid,24,target_lba);put16(fid,28,1);
-            put32(fid,32,static_cast<std::uint32_t>(new_uid));
+            // The FID long_ad implementation bytes are not the
+            // mandatory UDF UniqueID field introduced in UDF 2.x.
+            // Preserve old legacy FIDs; new 1.50 FIDs leave them zero.
+            if(!legacy)put32(fid,32,static_cast<std::uint32_t>(new_uid));
             std::copy(encoded.begin(),encoded.end(),fid.begin()+38);
             tag_update(fid,0,fid.size());
             parent_body.insert(parent_body.end(),fid.begin(),fid.end());
@@ -3768,7 +3806,7 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                 put16(parent_fid,16,1);parent_fid[18]=10;
                 put32(parent_fid,20,static_cast<std::uint32_t>(block));
                 put32(parent_fid,24,parent_lba);put16(parent_fid,28,1);
-                put32(parent_fid,32,static_cast<std::uint32_t>(u64(parent_fe,160)));
+                if(!legacy)put32(parent_fid,32,static_cast<std::uint32_t>(u64(parent_fe,160)));
                 tag_update(parent_fid,0,parent_fid.size());
                 put16(target,34,3);put64(target,56,parent_fid.size());
                 put32(target,172,static_cast<std::uint32_t>(parent_fid.size()));
@@ -3855,7 +3893,7 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         dir.old_data.clear();
         if(dir.body.size()>block-176) {
             const auto count=(dir.body.size()+block-1)/block;
-            vat_need(count<=(vat_max_table-vat.size())/4 &&
+            vat_need(count<=(table_limit-vat.size())/4 &&
                      count<=max_items-directory_blocks,
                      "VAT directory virtual address limit exceeded");
             const auto first=(vat.size()-header)/4;
@@ -3876,7 +3914,10 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                  "VAT live metadata traversal limit exceeded");
         live_metadata+=dir.old_data.size();
     }
-    const auto vat_blocks=vat.size()<=block-176?0:(vat.size()+block-1)/block;
+    // Include the legacy trailer in the final VAT allocation, without
+    // appending it to the mutable mapping until all addresses are assigned.
+    const auto final_vat_bytes=vat.size()+legacy_trailer.size();
+    const auto vat_blocks=final_vat_bytes<=block-176?0:(final_vat_bytes+block-1)/block;
     const auto required=plan->payload_blocks+file_entries.size()+
                         dirty_directories.size()+directory_blocks+vat_blocks+1u;
     vat_need(required<=available && required<(max_image-plan->original_size)/block,
@@ -3936,12 +3977,18 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     }
     const auto new_table=physical;
     const auto new_vat=new_table+vat_blocks;
-    put32(vat,132,old_vat);
-    const auto directory_count=static_cast<std::size_t>(std::count_if(
-        plan->expected.begin(),plan->expected.end(),
-        [](const auto& item){return item.second.directory;}));
-    put32(vat,136,static_cast<std::uint32_t>(plan->expected.size()-directory_count));
-    put32(vat,140,static_cast<std::uint32_t>(directory_count+1));
+    if(legacy) {
+        put32(legacy_trailer,32,old_vat);
+        vat.insert(vat.end(),legacy_trailer.begin(),legacy_trailer.end());
+    } else {
+        put32(vat,132,old_vat);
+        const auto directory_count=static_cast<std::size_t>(std::count_if(
+            plan->expected.begin(),plan->expected.end(),
+            [](const auto& item){return item.second.directory;}));
+        put32(vat,136,static_cast<std::uint32_t>(plan->expected.size()-directory_count));
+        put32(vat,140,static_cast<std::uint32_t>(directory_count+1));
+    }
+    vat_need(vat.size()==final_vat_bytes,"VAT serialization size mismatch");
     put64(vat_fe,160,new_uid);
     std::fill(vat_fe.begin()+176,vat_fe.end(),std::uint8_t{0});
     put64(vat_fe,56,vat.size());

@@ -805,6 +805,153 @@ def test_vat_recursive(editor,inspector,root,image,replacement):
         assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def test_vat_150(editor,inspector,root,image,replacement):
+    """Legacy trailer, type-0 ICB and zero implementation-use FID IDs."""
+    import binascii
+    def seal(data,at,length):
+        p16(data,at+10,length-16)
+        p16(data,at+8,binascii.crc_hqx(data[at+16:at+length],0))
+        checksum(data,at)
+
+    def legacy_image(external):
+        raw=vat_append_image(capacity=8192,external_table=external)
+        # Independent conversion of an open sequential fixture to the
+        # UDF 1.50 structures. Keep both volume descriptor sequences.
+        raw[19*B+1:19*B+6]=b'NSR02'
+        for index in (260,264):
+            at=index*B
+            raw[at+25:at+31]=b'+NSR02'
+            seal(raw,at,512)
+        for index in (261,265):
+            at=index*B
+            p16(raw,at+240,0x0150)
+            p16(raw,at+474,0x0150)
+            seal(raw,at,510)
+        # No UDF 2.x FID UniqueID requirement in legacy format.
+        at=301*B
+        pos=at+176
+        end=pos+struct.unpack_from('<I',raw,at+172)[0]
+        while pos<end:
+            count=(38+raw[pos+19]+3)&~3
+            p32(raw,pos+32,0)
+            seal(raw,pos,count)
+            pos+=count
+        seal(raw,at,end-at)
+        fe=549*B
+        count=600 if external else 4
+        entries=bytearray(b'\xff'*(4*count))
+        for i in range(4):p32(entries,4*i,i)
+        entity=bytearray(32)
+        entity[1:23]=b'*UDF Virtual Alloc Tbl'
+        p16(entity,24,0x0150)
+        entity[26:28]=b'\x04\x00'
+        table=entries+entity+struct.pack('<I',0xffffffff)
+        raw[fe+27]=0
+        p16(raw,fe+48,0)
+        raw[fe+176:fe+B]=bytes(B-176)
+        p64(raw,fe+56,len(table))
+        if external:
+            start=547*B
+            raw[start:fe]=table.ljust(2*B,b'\0')
+            p16(raw,fe+34,0);p64(raw,fe+64,2)
+            p32(raw,fe+172,8);p32(raw,fe+176,len(table));p32(raw,fe+180,247)
+            seal(raw,fe,184)
+        else:
+            p16(raw,fe+34,3);p64(raw,fe+64,0)
+            p32(raw,fe+172,len(table));raw[fe+176:fe+176+len(table)]=table
+            seal(raw,fe,176+len(table))
+        return raw,bytes(entity)
+
+    def view(data):
+        fe=len(data)-B
+        assert data[fe+27]==0
+        assert struct.unpack_from('<H',data,fe+48)[0]==0
+        size=struct.unpack_from('<Q',data,fe+56)[0]
+        if struct.unpack_from('<H',data,fe+34)[0]==3:
+            at=fe+176
+        else:
+            length,lba=struct.unpack_from('<II',data,fe+176)
+            assert size==length
+            at=(PARTITION+lba)*B
+        table=data[at:at+size]
+        assert len(table)>=40 and (len(table)-36)%4==0
+        return table,struct.unpack_from('<'+'I'*((len(table)-36)//4),table),at
+
+    big=root/'vat150-bulk.bin'
+    big.write_bytes(b'Legacy sequential data'*2000)
+    for external in (False,True):
+        raw,entity=legacy_image(external)
+        image.write_bytes(raw)
+        initial_table,initial_map,_=view(raw)
+        assert initial_table[-36:-4]==entity
+        replacement.write_bytes(b'new legacy file')
+        before=image.read_bytes()
+        run(editor,image,'batch','mkdir','TREE','mkdir','TREE/SUB',
+            'add','TREE/SUB/BIG.BIN',big,'add','hello',replacement,
+            'delete','keep')
+        after=image.read_bytes()
+        table,mapping,_=view(after)
+        assert after[:len(before)]==before
+        assert table[-36:-4]==entity
+        assert struct.unpack_from('<I',table,len(table)-4)[0]==len(before)//B-PARTITION-1
+        assert len(mapping)==len(initial_map)+3 and mapping[3]==0xffffffff
+        assert struct.unpack_from('<Q',after,len(after)-B+160)[0]>18
+        out=root/f'vat150-{external}-created'
+        check_disc(inspector,image,out)
+        assert (out/'hello').read_bytes()==replacement.read_bytes()
+        assert (out/'TREE'/'SUB'/'BIG.BIN').read_bytes()==big.read_bytes()
+        assert not (out/'keep').exists()
+        # Retire the entire new tree in one VAT transaction.
+        run(editor,image,'delete','TREE')
+        removed=image.read_bytes()
+        table,mapping2,_=view(removed)
+        assert removed[:len(after)]==after
+        assert table[-36:-4]==entity
+        assert struct.unpack_from('<I',table,len(table)-4)[0]==len(after)//B-PARTITION-1
+        assert all(x==0xffffffff for x in mapping2[len(initial_map):])
+        out=root/f'vat150-{external}-deleted'
+        check_disc(inspector,image,out)
+        assert sorted(p.name for p in out.iterdir())==['hello']
+        # Preserve the original revision while switching to external
+        # table storage. Force a near-full inline VAT on a fresh image.
+        if not external:
+            fresh,_=legacy_image(False)
+            fe=549*B
+            original_table,_,_=view(fresh)
+            table=original_table[:-36]+b'\xff'*(B-176-len(original_table))+original_table[-36:]
+            assert len(table)==B-176
+            fresh[fe+176:fe+B]=table
+            p64(fresh,fe+56,len(table));p32(fresh,fe+172,len(table))
+            seal(fresh,fe,B)
+            image.write_bytes(fresh)
+            run(editor,image,'add','NEW.BIN',replacement)
+            grown=image.read_bytes()
+            table,_,_=view(grown)
+            assert grown[:len(fresh)]==fresh
+            assert struct.unpack_from('<H',grown,len(grown)-B+34)[0]==0
+            assert len(table)==B-176+4 and table[-36:-4]==entity
+        image.write_bytes(removed)
+        cancelled=run(editor,image,'batchcancelstaged','add','CANCEL.BIN',big,success=False)
+        assert cancelled.returncode==3
+        assert image.read_bytes()==removed
+        # Reject invalid legacy EntityID, suffix revision, a self-linked
+        # previous transaction, and a VAT ICB from the wrong revision.
+        for defect in ('identifier','revision','previous','type'):
+            bad=bytearray(raw)
+            table,_,at=view(bad)
+            fe=len(bad)-B
+            if defect=='identifier':bad[at+len(table)-35]^=1
+            elif defect=='revision':p16(bad,at+len(table)-12,0x0201)
+            elif defect=='previous':p32(bad,at+len(table)-4,len(bad)//B-PARTITION-1)
+            else:bad[fe+27]=248
+            if not external:seal(bad,fe,176+len(table))
+            elif defect=='type':seal(bad,fe,184)
+            image.write_bytes(bad)
+            run(editor,image,'add','hello',replacement,success=False)
+            assert image.read_bytes()==bad
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
         root=pathlib.Path(temp)
@@ -836,6 +983,7 @@ def main(editor,inspector):
         test_vat_batch(editor,inspector,root,image,replacement)
         test_vat_large_directories(editor,inspector,root,image,replacement)
         test_vat_recursive(editor,inspector,root,image,replacement)
+        test_vat_150(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),
