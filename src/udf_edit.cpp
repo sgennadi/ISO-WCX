@@ -3235,7 +3235,8 @@ void vat_reserve_physical(const VatFileLayout& layout,std::uint32_t partition,
 }
 std::unique_ptr<VatAppendPlan> prepare_vat_append(
         const std::filesystem::path& image,
-        const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
+        const std::vector<ArchiveChange>& changes,const EditProgress& progress,
+        const CoordinatedIsoUpdate* coordinated) {
     edit_tick(progress);
     vat_need(!changes.empty() && changes.size()<=4096,
              "VAT transaction requires 1..4096 changes");
@@ -3269,6 +3270,38 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
              plan->original_size<max_image-2*block,"unsupported recorded image size");
     std::ifstream in(image,std::ios::binary);
     vat_need(bool(in),"cannot open sequential image");
+    if(coordinated) {
+        vat_need(coordinated->shared_additions.empty() &&
+                 coordinated->shared_directories.empty() &&
+                 coordinated->iso_metadata_blocks==0 &&
+                 coordinated->shared_replacements.size()+
+                 coordinated->shared_deletions.size()==changes.size() &&
+                 !coordinated->metadata_writes.empty(),
+                 "unsupported VAT shared ISO coordination plan");
+        for(const auto& request:requests) {
+            const auto& change=*request.change;
+            vat_need(!change.directory &&
+                     (change.remove?coordinated->shared_deletions.count(request.key):
+                                    coordinated->shared_replacements.count(request.key)),
+                     "VAT shared ISO request differs from plan");
+        }
+        std::uint64_t end=16ull*block;
+        // The only mutable historical bytes are ISO record fields
+        // before the primary AVDP. VRS, boot, UDF VDS, LVID, FSD and
+        // all physical partition bytes remain immutable.
+        for(const auto& [at,length]:coordinated->metadata_writes) {
+            vat_need(length && at>=end && at<256ull*block &&
+                     length<=256ull*block-at,
+                     "VAT shared ISO metadata is not safely before the UDF anchor");
+            end=at+length;
+            for(auto sector=at/block;sector<=(end-1)/block;++sector) {
+                const auto b=vat_read_sector(in,sector,sectors);
+                const std::string_view id(reinterpret_cast<const char*>(b.data()+1),5);
+                vat_need(id!="NSR02" && id!="NSR03" && id!="BEA01" &&
+                         id!="TEA01","VAT shared ISO metadata overlaps VRS");
+            }
+        }
+    }
     const auto anchor=vat_read_sector(in,256,sectors);
     vat_tag(anchor,2,256,512);
     const auto main_start=u32(anchor,20),main_bytes=u32(anchor,16);
@@ -3835,7 +3868,12 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         const auto size=std::filesystem::file_size(change.source);
         vat_need(size<=vat_max_ad*((block-176)/16),
                  "replacement exceeds FE long_ad capacity");
-        const bool embedded=size<=block-176;
+        const bool shared=coordinated && coordinated->shared_replacements.count(key);
+        vat_need(!shared || (!creating && size && size<=0xffffffffull),
+                 "VAT shared replacement requires a nonempty ISO-compatible file");
+        // Even small shared files must remain externally addressable
+        // by ISO9660. Never embed a common payload in its new UDF FE.
+        const bool embedded=!shared && size<=block-176;
         const auto payload_blocks=embedded?0:(size+block-1)/block;
         vat_need(plan->payload_blocks<=available &&
                  payload_blocks<=available-plan->payload_blocks,
@@ -4012,10 +4050,11 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
 }
 void edit_vat_append(const std::filesystem::path& image,
         const std::vector<ArchiveChange>& changes,const EditProgress& progress,
-        const EditStageValidator& validate_stage) {
+        const EditStageValidator& validate_stage,
+        const CoordinatedIsoUpdate* coordinated) {
     // Pin source identity before reading any plan data.
     EditTransaction tx(image);
-    const auto plan=prepare_vat_append(image,changes,progress);
+    const auto plan=prepare_vat_append(image,changes,progress,coordinated);
     tx.assert_source_unchanged();
     prepare_udf_stage(image,tx.output,plan->original_size,progress);
     {
@@ -4055,9 +4094,37 @@ void edit_vat_append(const std::filesystem::path& image,
     }
     vat_need(std::filesystem::file_size(tx.output)==plan->final_size,
              "unexpected VAT append size");
+    // Before any ISO coordination callback, the complete sequential
+    // stage must preserve the entire source prefix. Afterwards, only
+    // prevalidated ISO metadata fields may differ from that prefix.
+    if(coordinated) {
+        OpticalEditGuard whole(plan->original_size);
+        whole.protect(0,plan->original_size);
+        whole.verify_appended(image,tx.output,progress);
+    }
     if(validate_stage)validate_stage(tx.output);
+    vat_need(std::filesystem::file_size(tx.output)==plan->final_size,
+             "VAT ISO coordination changed the append size");
     OpticalEditGuard guard(plan->original_size);
-    guard.protect(0,plan->original_size);
+    if(coordinated) {
+        std::uint64_t at=0;
+        for(const auto& [start,length]:coordinated->metadata_writes) {
+            if(start>at)guard.protect(at,start-at);
+            at=start+length;
+        }
+        guard.protect(at,plan->original_size-at);
+        // The callback owns only original ISO metadata fields, never
+        // newly appended VAT data. Recheck every staged metadata run.
+        std::fstream in(tx.output,std::ios::binary|std::ios::in);
+        vat_need(bool(in),"cannot reopen coordinated VAT stage");
+        auto pos=plan->original_size+plan->payload_blocks*block;
+        for(const auto& bytes:plan->append) {
+            edit_tick(progress);
+            vat_need(staged_read(in,pos,bytes.size())==bytes,
+                     "ISO coordination modified appended VAT metadata");
+            pos+=bytes.size();
+        }
+    } else guard.protect(0,plan->original_size);
     guard.verify_appended(image,tx.output,progress);
     {
         const Disc checked(tx.output);
@@ -4107,14 +4174,13 @@ void edit_udf(const std::filesystem::path& image,
     try {
         owner=std::make_unique<Type1>(image,allow_bridge,bounded_partitioned_bridge);
     } catch(const VatWriteRequired&) {
-        // The split-namespace VAT bridge always provides the external
-        // ISO validator and immutable ranges. Its append-only backend
-        // preserves the entire original prefix. Partitioned and shared
-        // mastering require separate coordinators and remain refused.
-        if(coordinated || bounded_partitioned_bridge ||
+        // The VAT bridge provides the external ISO validator and
+        // immutable ranges. Shared-file coordination may only change
+        // the explicitly checked pre-anchor ISO metadata fields.
+        if(bounded_partitioned_bridge ||
            (allow_bridge && (!validate_stage || protected_ranges.empty())) ||
-           (!allow_bridge && (validate_stage || !protected_ranges.empty())))throw;
-        edit_vat_append(image,changes,progress,validate_stage);
+           (!allow_bridge && (validate_stage || !protected_ranges.empty() || coordinated)))throw;
+        edit_vat_append(image,changes,progress,validate_stage,coordinated);
         return;
     }
     auto& volume=*owner;

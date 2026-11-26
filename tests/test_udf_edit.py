@@ -1014,6 +1014,89 @@ def test_vat_bridge(editor,inspector,root,image,replacement):
     assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def test_vat_shared_bridge(editor,inspector,root,image,replacement):
+    from test_iso_edit import fixture, both, read_image
+    from test_images import iso_record
+    import binascii
+    bridge=root/'vat-shared.iso'
+    for joliet in (False,True):
+        raw=vat_append_image(capacity=8192,external_table=True)
+        optical=fixture(joliet=joliet,boot=not joliet,boot_efi=not joliet)
+        raw[16*B:19*B]=optical[16*B:19*B]
+        if not joliet:
+            raw[24*B:27*B]=optical[24*B:27*B]
+            p16(raw,24*B+38,4);p16(raw,24*B+102,4)
+        # Shared UDF file "hello" has a single physical long_ad.
+        # The ordinary ISO records below reference precisely that data.
+        fe=302*B
+        raw[fe+176:fe+B]=bytes(B-176)
+        p16(raw,fe+34,1);p64(raw,fe+56,5);p64(raw,fe+64,1)
+        p32(raw,fe+172,16);p32(raw,fe+176,5);p32(raw,fe+180,4)
+        p16(raw,fe+10,176)
+        p16(raw,fe+8,binascii.crc_hqx(raw[fe+16:fe+192],0))
+        checksum(raw,fe)
+        raw[304*B:304*B+5]=b'world'
+        dirs=[20,22] if joliet else [20]
+        fields=[]
+        for sector in dirs:
+            at=sector*B
+            dots=iso_record(sector,B,2,b'\x00')+iso_record(sector,B,2,b'\x01')
+            label='hello;1'.encode('utf-16-be') if sector==22 else b'HELLO;1'
+            data=dots+iso_record(304,5,0,label)
+            raw[at:at+B]=data.ljust(B,b'\x00')
+            fields.append((at+len(dots)+2,16))
+        descriptors=[16,17] if joliet else [16]
+        for sector in descriptors:
+            both(raw,sector*B+80,len(raw)//B)
+            fields.append((sector*B+80,8))
+        bridge.write_bytes(raw)
+        def assert_prefix(old,new,allowed):
+            restored=bytearray(new[:len(old)])
+            for at,n in allowed:restored[at:at+n]=old[at:at+n]
+            assert restored==old
+        # Same size, larger, then tiny shared replacements. Small
+        # replacements must not become inline data inaccessible to ISO.
+        for k,body in enumerate((b'NEW!!',b'longer data'*1000,b'x')):
+            before=bridge.read_bytes()
+            replacement.write_bytes(body)
+            run(editor,bridge,'add','hello',replacement)
+            after=bridge.read_bytes()
+            assert len(after)>len(before)
+            assert_prefix(before,after,fields)
+            assert after[304*B:304*B+5]==b'world'
+            assert read_image(bridge)=={'HELLO':body}
+            if joliet:assert read_image(bridge,True)=={'hello':body}
+            out=root/f'vat-shared-{joliet}-{k}'
+            check_disc(inspector,bridge,out)
+            assert (out/'hello').read_bytes()==body
+            assert (out/'keep').read_bytes()==b'keep me'
+            assert after[256*B:len(before)]==before[256*B:]
+        before=bridge.read_bytes()
+        for args in (('batch','add','hello',replacement,'add','NEW.BIN',replacement),
+                     ('mkdir','hello')):
+            run(editor,bridge,*args,success=False)
+            assert bridge.read_bytes()==before
+        cancelled=run(editor,bridge,'batchcancelstaged','delete','hello',success=False)
+        assert cancelled.returncode==3
+        assert bridge.read_bytes()==before
+        run(editor,bridge,'delete','hello')
+        deleted=bridge.read_bytes()
+        assert_prefix(before,deleted,[(x*B,B) for x in dirs]+[(x*B+80,8) for x in descriptors])
+        assert read_image(bridge)=={}
+        if joliet:assert read_image(bridge,True)=={}
+        out=root/f'vat-shared-deleted-{joliet}'
+        check_disc(inspector,bridge,out)
+        assert sorted(p.name for p in out.iterdir())==['keep']
+        # A same-name ISO entry with different extent is not shared.
+        bad=bytearray(raw)
+        p=fields[0][0]
+        both(bad,p,305)
+        bridge.write_bytes(bad)
+        run(editor,bridge,'add','hello',replacement,success=False)
+        assert bridge.read_bytes()==bad
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
         root=pathlib.Path(temp)
@@ -1047,6 +1130,7 @@ def main(editor,inspector):
         test_vat_recursive(editor,inspector,root,image,replacement)
         test_vat_150(editor,inspector,root,image,replacement)
         test_vat_bridge(editor,inspector,root,image,replacement)
+        test_vat_shared_bridge(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),
