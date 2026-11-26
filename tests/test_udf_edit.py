@@ -635,6 +635,113 @@ def test_vat_batch(editor,inspector,root,image,replacement):
         assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def test_vat_large_directories(editor,inspector,root,image,replacement):
+    import binascii
+    for external in (False,True):
+        initial=vat_append_image(capacity=8192,external_table=external)
+        image.write_bytes(initial)
+        replacement.write_bytes(b'BODY')
+        names=[f'F{i:03d}-'+'x'*61+'.TXT' for i in range(70)]
+        def view(data):
+            at=len(data)-B
+            n=struct.unpack_from('<Q',data,at+56)[0]
+            if struct.unpack_from('<H',data,at+34)[0]==3:
+                vat=data[at+176:at+176+n]
+            else:
+                length,lba=struct.unpack_from('<II',data,at+176)
+                assert length==n
+                vat=data[(PARTITION+lba)*B:(PARTITION+lba)*B+n]
+            h=struct.unpack_from('<H',vat,0)[0]
+            return vat,struct.unpack_from('<'+'I'*((n-h)//4),vat,h)
+        def directory(data,mapping,logical):
+            at=(PARTITION+mapping[logical])*B
+            fe=data[at:at+B]
+            n=struct.unpack_from('<Q',fe,56)[0]
+            mode=struct.unpack_from('<H',fe,34)[0]
+            if mode==3:
+                body=fe[176:176+n];lbas=[]
+            else:
+                assert mode==0 and struct.unpack_from('<I',fe,172)[0]==8
+                size,start=struct.unpack_from('<II',fe,176)
+                assert size==n
+                lbas=list(range(start,start+(size+B-1)//B))
+                body=b''.join(data[(PARTITION+mapping[x])*B:(PARTITION+mapping[x]+1)*B] for x in lbas)[:n]
+                assert struct.unpack_from('<Q',fe,64)[0]==len(lbas)
+            children={}
+            p=0;crossed=False
+            while p<len(body):
+                count=(38+body[p+19]+3)&~3
+                assert struct.unpack_from('<I',body,p+12)[0]==(lbas[p//B] if lbas else logical)
+                assert struct.unpack_from('<H',body,p+8)[0]==binascii.crc_hqx(body[p+16:p+count],0)
+                crossed|=p%B+count>B
+                if body[p+19]:
+                    name=body[p+39:p+38+body[p+19]].decode('ascii')
+                    children[name]=struct.unpack_from('<I',body,p+24)[0]
+                p+=count
+            assert p==n
+            return children,lbas,crossed
+        args=['batch','mkdir','BIG']
+        for name in names:args+=['add','BIG/'+name,replacement]
+        for name in names[:25]:args+=['add',name,replacement]
+        run(editor,image,*args)
+        grown=image.read_bytes()
+        vat,mapping=view(grown)
+        assert grown[:len(initial)]==initial
+        assert struct.unpack_from('<I',vat,132)[0]==len(initial)//B-PARTITION-1
+        root_children,root_data,_=directory(grown,mapping,1)
+        child=root_children['BIG']
+        contents,child_data,crossed=directory(grown,mapping,child)
+        assert set(contents)==set(names) and len(child_data)>=3 and crossed
+        assert len(root_data)>=2
+        out=root/f'vat-large-{external}-1'
+        check_disc(inspector,image,out)
+        assert len(list((out/'BIG').iterdir()))==len(names)
+        assert all((out/'BIG'/name).read_bytes()==b'BODY' for name in names)
+        # Cancellation after staging grows must also roll back an
+        # external directory relocation, not just a small inline append.
+        cancelled=run(editor,image,'batchcancelstaged',
+                      'add','BIG/EXTRA.BIN',replacement,
+                      'delete','BIG/'+names[0],success=False)
+        assert cancelled.returncode==3, cancelled.stderr
+        assert image.read_bytes()==grown
+        assert not list(root.glob('.iso-wcx-edit-*'))
+        # Reopen external directories, grow and then compact back to inline.
+        run(editor,image,'batch','add','BIG/EXTRA.BIN',replacement,
+            'delete','BIG/'+names[0],'delete',names[0])
+        updated=image.read_bytes()
+        _,m2=view(updated)
+        _,child_data2,_=directory(updated,m2,child)
+        assert updated[:len(grown)]==grown
+        assert all(m2[x]==0xffffffff for x in root_data+child_data)
+        assert child_data2 and min(child_data2)>=len(mapping)
+        args=['batch']
+        for name in names[1:]:args+=['delete','BIG/'+name]
+        for name in names[1:25]:args+=['delete',name]
+        run(editor,image,*args)
+        shrunk=image.read_bytes()
+        vat,m3=view(shrunk)
+        assert shrunk[:len(updated)]==updated
+        _,data3,_=directory(shrunk,m3,1)
+        contents,data4,_=directory(shrunk,m3,child)
+        assert not data3 and not data4 and set(contents)=={'EXTRA.BIN'}
+        assert all(m3[x]==0xffffffff for x in child_data2)
+        out=root/f'vat-large-{external}-2'
+        check_disc(inspector,image,out)
+        assert (out/'BIG'/'EXTRA.BIN').read_bytes()==b'BODY'
+        assert sorted(p.name for p in out.iterdir())==['BIG','hello','keep']
+        assert sorted(p.name for p in (out/'BIG').iterdir())==['EXTRA.BIN']
+        # Corrupt an external directory's ShortAD to point at the root FE.
+        malformed=bytearray(grown)
+        at=(PARTITION+mapping[child])*B
+        p32(malformed,at+180,1)
+        p16(malformed,at+8,binascii.crc_hqx(malformed[at+16:at+184],0))
+        checksum(malformed,at)
+        image.write_bytes(malformed)
+        run(editor,image,'add','BIG/NEW',replacement,success=False)
+        assert image.read_bytes()==malformed
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
         root=pathlib.Path(temp)
@@ -664,6 +771,7 @@ def main(editor,inspector):
         test_vat_root_mutations(editor,inspector,root,image,replacement)
         test_vat_nested(editor,inspector,root,image,replacement)
         test_vat_batch(editor,inspector,root,image,replacement)
+        test_vat_large_directories(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),

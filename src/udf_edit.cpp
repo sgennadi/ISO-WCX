@@ -3383,6 +3383,8 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     struct Directory {
         std::uint32_t lba{};
         Bytes fe;
+        Bytes body; // dense FIDs, independent of the FE allocation mode
+        std::vector<std::uint32_t> old_data;
         std::size_t children{};
     };
     struct Pending {
@@ -3399,13 +3401,64 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     const auto vat_uid=u64(vat_fe,160);
     std::map<std::string,std::uint32_t> objects;
     std::size_t file_count=0;
-    auto directory_layout=[](const Bytes& fe) {
-        VatFileLayout result;
-        result.directory=true;
-        // Disc represents directories with size zero, while preserving
-        // the inline directory body for independent metadata comparison.
-        result.embedded.assign(fe.begin()+176,fe.begin()+176+u32(fe,172));
-        return result;
+    std::uint64_t directory_bytes_total=0;
+    constexpr std::uint64_t max_directory_metadata=64u*1024u*1024u;
+    // Reserve every virtual directory-data block in the same set as
+    // FSD and FE addresses. The already checked VAT is injective, so
+    // this also prevents physical aliasing between metadata objects.
+    auto read_directory=[&](const Bytes& fe,std::uint32_t logical,
+                            std::vector<std::uint32_t>& data_lbas,
+                            VatFileLayout& layout) {
+        layout.directory=true;
+        const auto mode=u16(fe,34);
+        if(mode==3) {
+            vat_embedded_fe(fe,logical,4);
+            layout.embedded.assign(fe.begin()+176,fe.begin()+176+u32(fe,172));
+            return layout.embedded;
+        }
+        vat_need(u16(fe,0)==261 && fe[27]==4 && u16(fe,20)==4 &&
+                 u16(fe,24)==1 && u16(fe,48)>=1 && u32(fe,168)==0 &&
+                 (mode==0 || mode==1),
+                 "unsupported external VAT directory FE");
+        const auto size=u64(fe,56);
+        const auto ads=u32(fe,172);
+        const std::size_t step=mode==0?8u:16u;
+        vat_need(size>=40 && size<=max_dir &&
+                 ads && ads<=block-176 && ads%step==0,
+                 "invalid external VAT directory allocation size");
+        vat_tag(fe,261,logical,176u+ads);
+        Bytes data;
+        data.reserve(static_cast<std::size_t>(size));
+        for(std::size_t at=176;at<176u+ads;at+=step) {
+            const auto length=u32(fe,at);
+            const auto first=u32(fe,at+4);
+            const auto count=(std::uint64_t(length)+block-1)/block;
+            vat_need(length && length<=0x3fffffffu && length<=size-data.size() &&
+                     (length==size-data.size() || length%block==0) &&
+                     first<mapping.size() && count<=mapping.size()-first,
+                     "external VAT directory extent outside virtual space");
+            if(mode==1)
+                vat_need(u16(fe,at+8)==1 &&
+                         std::all_of(fe.begin()+at+10,fe.begin()+at+16,
+                                     [](auto c){return c==0;}),
+                         "directory long_ad must reference virtual partition");
+            std::uint64_t remaining=length;
+            for(std::uint64_t j=0;j<count;++j) {
+                edit_tick(progress);
+                const auto lba=static_cast<std::uint32_t>(first+j);
+                vat_need(visited.insert(lba).second && visited.size()<=max_items,
+                         "VAT directory data aliases another live object");
+                const auto sector=read_virtual(lba);
+                const auto n=std::min<std::uint64_t>(remaining,block);
+                data.insert(data.end(),sector.begin(),sector.begin()+static_cast<std::ptrdiff_t>(n));
+                data_lbas.push_back(lba);
+                layout.extents.push_back({(std::uint64_t(partition)+mapping[lba])*block,n,false});
+                remaining-=n;
+            }
+        }
+        vat_need(data.size()==size && data_lbas.size()==u64(fe,64),
+                 "external VAT directory recorded block count mismatch");
+        return data;
     };
     for(std::size_t cursor=0;cursor<pending.size();++cursor) {
         edit_tick(progress);
@@ -3413,39 +3466,59 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         vat_need(current.depth<max_depth && pending.size()<=4096 &&
                  visited.size()<=max_items,
                  "VAT directory tree exceeds safe traversal limit");
-        auto dir=vat_embedded_fe(read_virtual(current.lba),current.lba,4);
+        auto dir=read_virtual(current.lba);
+        std::vector<std::uint32_t> data_lbas;
+        VatFileLayout layout;
+        const auto body=read_directory(dir,current.lba,data_lbas,layout);
+        vat_need(body.size()<=max_directory_metadata-directory_bytes_total,
+                 "VAT directory metadata limit exceeded");
+        directory_bytes_total+=body.size();
+        Bytes dense;
+        dense.reserve(body.size());
+        if(!current.path.empty())
+            vat_need(plan->expected.emplace(current.path,std::move(layout)).second,
+                     "duplicate VAT directory path");
         const auto uid=u64(dir,160);
         vat_need(!current.path.empty() || uid==0,
                  "VAT root UniqueID must be zero");
-        const auto end=176u+u32(dir,172);
+        const auto end=body.size();
         bool have_parent=false;
         std::size_t child_count=0,subdirectories=0;
-        for(std::size_t pos=176;pos<end;) {
+        for(std::size_t pos=0;pos<end;) {
+            // External directories may contain sector-end zero padding.
+            if(!data_lbas.empty() && body[pos]==0 &&
+               (end-pos<2 || body[pos+1]==0)) {
+                const auto padding=std::min<std::size_t>(end-pos,block-pos%block);
+                vat_need(std::all_of(body.begin()+pos,body.begin()+pos+padding,
+                                     [](auto c){return c==0;}),
+                         "invalid VAT directory sector padding");
+                pos+=padding;continue;
+            }
             vat_need(end-pos>=38,"truncated embedded directory");
-            const auto n=dir[pos+19];
-            const auto implementation_bytes=u16(dir,pos+36);
+            const auto n=body[pos+19];
+            const auto implementation_bytes=u16(body,pos+36);
             const auto fid_size=(38u+std::size_t(implementation_bytes)+n+3u)&~std::size_t(3);
             vat_need(fid_size<=end-pos && implementation_bytes==0,
                      "unsupported FID length or implementation use");
-            tag_check(dir,pos,257);
-            vat_need(u16(dir,pos+2)>=2 && u16(dir,pos+2)<=3 &&
-                     u16(dir,pos+10)==fid_size-16 &&
-                     u32(dir,pos+12)==current.lba &&
-                     u16(dir,pos+16)==1 && u32(dir,pos+20)==block &&
-                     u16(dir,pos+28)==1,"invalid virtual directory reference");
-            const auto child=u32(dir,pos+24);
-            const auto flags=dir[pos+18];
+            tag_check(body,pos,257);
+            vat_need(u16(body,pos+2)>=2 && u16(body,pos+2)<=3 &&
+                     u16(body,pos+10)==fid_size-16 &&
+                     u32(body,pos+12)==(data_lbas.empty()?current.lba:data_lbas.at(pos/block)) &&
+                     u16(body,pos+16)==1 && u32(body,pos+20)==block &&
+                     u16(body,pos+28)==1,"invalid virtual directory reference");
+            const auto child=u32(body,pos+24);
+            const auto flags=body[pos+18];
             if(flags==10) {
-                vat_need(pos==176 && !have_parent && !n &&
+                vat_need(dense.empty() && !have_parent && !n &&
                          child==current.parent &&
-                         u32(dir,pos+32)==static_cast<std::uint32_t>(current.parent_uid),
+                         u32(body,pos+32)==static_cast<std::uint32_t>(current.parent_uid),
                          "invalid VAT parent directory FID");
                 have_parent=true;
             } else {
                 vat_need(have_parent && (flags==0 || flags==2) && n &&
                          visited.insert(child).second && visited.size()<=max_items,
                          "duplicate, cyclic or unsupported VAT directory reference");
-                const auto filename=name(dir,pos+38,n);
+                const auto filename=name(body,pos+38,n);
                 const auto key=current.path.empty()?filename:current.path+"/"+filename;
                 vat_need(edit_path(key)==key && folded_names.insert(fold(key)).second,
                          "case-insensitive VAT name collision");
@@ -3453,16 +3526,14 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                 const auto unique=u64(fe,160);
                 vat_need(unique>=16 && unique<vat_uid &&
                          live_ids.insert(unique).second &&
-                         u32(dir,pos+32)==static_cast<std::uint32_t>(unique),
+                         u32(body,pos+32)==static_cast<std::uint32_t>(unique),
                          "VAT object has invalid or duplicate unique ID");
                 const bool is_directory=flags==2;
                 if(is_directory) {
-                    fe=vat_embedded_fe(std::move(fe),child,4);
+                    vat_need(fe[27]==4,"VAT directory FID refers to non-directory");
                     ++subdirectories;
                     vat_need(pending.size()<4096,"too many VAT directories");
                     pending.push_back({key,child,current.lba,uid,current.depth+1});
-                    vat_need(plan->expected.emplace(key,directory_layout(fe)).second,
-                             "duplicate VAT directory path");
                 } else {
                     auto layout=vat_physical_file(fe,child,5,partition,old_vat);
                     vat_reserve_physical(layout,partition,used,previous,allocated);
@@ -3474,13 +3545,15 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                 vat_need(objects.emplace(key,child).second,
                          "duplicate VAT object path");
             }
+            dense.insert(dense.end(),body.begin()+pos,body.begin()+pos+fid_size);
             pos+=fid_size;
         }
         vat_need(have_parent && subdirectories<65535 &&
                  u16(dir,48)==subdirectories+1,
                  "VAT directory parent reference or FileLinkCount mismatch");
         vat_need(directories.emplace(current.path,
-                     Directory{current.lba,std::move(dir),child_count}).second,
+                     Directory{current.lba,std::move(dir),std::move(dense),
+                               std::move(data_lbas),child_count}).second,
                  "duplicate directory during VAT traversal");
     }
     // OSTA UDF 2.01 and later count the root directory itself in VAT
@@ -3537,7 +3610,8 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         auto& parent=parent_it->second;
         auto& parent_fe=parent.fe;
         const auto parent_lba=parent.lba;
-        const auto end=176u+u32(parent_fe,172);
+        auto& parent_body=parent.body;
+        const auto end=parent_body.size();
         const auto found=objects.find(key);
         const bool creating=found==objects.end();
         vat_need(!change.remove || !creating,"deletion target does not exist");
@@ -3555,28 +3629,25 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
             // Earlier operations can move FIDs in the same parent.
             // Resolve the current offset by virtual address, not the
             // original on-disc offset.
-            std::size_t pos=176;
+            std::size_t pos=0;
             std::size_t fid_bytes=0;
             for(;pos<end;pos+=fid_bytes) {
                 vat_need(end-pos>=38,"truncated staged VAT directory");
-                fid_bytes=(38u+std::size_t(u16(parent_fe,pos+36))+parent_fe[pos+19]+3u)&~std::size_t(3);
+                fid_bytes=(38u+std::size_t(u16(parent_body,pos+36))+parent_body[pos+19]+3u)&~std::size_t(3);
                 vat_need(fid_bytes<=end-pos,"invalid staged VAT FID");
-                if(!(parent_fe[pos+18]&8u) && u32(parent_fe,pos+24)==target_lba)break;
+                if(!(parent_body[pos+18]&8u) && u32(parent_body,pos+24)==target_lba)break;
             }
             vat_need(pos<end && fid_bytes<=end-pos && parent.children>0,
                      "VAT deletion FID missing from parent");
-            std::move(parent_fe.begin()+pos+fid_bytes,parent_fe.begin()+end,parent_fe.begin()+pos);
-            const auto new_end=end-fid_bytes;
-            std::fill(parent_fe.begin()+new_end,parent_fe.end(),std::uint8_t{0});
-            put64(parent_fe,56,new_end-176);
-            put32(parent_fe,172,static_cast<std::uint32_t>(new_end-176));
+            parent_body.erase(parent_body.begin()+pos,parent_body.begin()+pos+fid_bytes);
             if(target_directory) {
                 vat_need(u16(parent_fe,48)>1,"VAT parent directory link count underflow");
                 put16(parent_fe,48,static_cast<std::uint16_t>(u16(parent_fe,48)-1));
                 dirty_directories.erase(key);
+                for(const auto logical:directories.at(key).old_data)
+                    put32(vat,header+std::size_t(logical)*4,0xffffffffu);
                 directories.erase(key);
             }
-            tag_update(parent_fe,0,new_end);
             --parent.children;
             dirty_directories.insert(parent_key);
             put32(vat,header+std::size_t(target_lba)*4,0xffffffffu);
@@ -3595,7 +3666,10 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
             vat.resize(vat.size()+4,0xff);
             const auto encoded=encode_udf_cs0(component);
             const auto fid_bytes=(38u+encoded.size()+3u)&~std::size_t(3);
-            vat_need(fid_bytes<=block-end,"embedded VAT parent directory is full");
+            vat_need(end<=max_dir && fid_bytes<=max_dir-end &&
+                     fid_bytes<=max_directory_metadata-directory_bytes_total,
+                     "VAT directory metadata limit exceeded");
+            directory_bytes_total+=fid_bytes;
             Bytes fid(fid_bytes,0);
             put16(fid,0,257);put16(fid,2,u16(parent_fe,2));
             put16(fid,6,u16(parent_fe,6));put32(fid,12,parent_lba);
@@ -3606,16 +3680,12 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
             put32(fid,32,static_cast<std::uint32_t>(new_uid));
             std::copy(encoded.begin(),encoded.end(),fid.begin()+38);
             tag_update(fid,0,fid.size());
-            std::fill(parent_fe.begin()+end,parent_fe.end(),std::uint8_t{0});
-            std::copy(fid.begin(),fid.end(),parent_fe.begin()+end);
-            put64(parent_fe,56,u32(parent_fe,172)+fid_bytes);
-            put32(parent_fe,172,static_cast<std::uint32_t>(u64(parent_fe,56)));
+            parent_body.insert(parent_body.end(),fid.begin(),fid.end());
             if(making_directory) {
                 vat_need(u16(parent_fe,48)<65535 && directories.size()<4096,
                          "VAT directory link count or directory limit exceeded");
                 put16(parent_fe,48,static_cast<std::uint16_t>(u16(parent_fe,48)+1));
             }
-            tag_update(parent_fe,0,176u+u32(parent_fe,172));
             ++parent.children;
             dirty_directories.insert(parent_key);
             target.assign(block,0);
@@ -3647,8 +3717,14 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                 put32(target,172,static_cast<std::uint32_t>(parent_fid.size()));
                 std::copy(parent_fid.begin(),parent_fid.end(),target.begin()+176);
                 tag_update(target,0,176+parent_fid.size());
-                plan->expected.emplace(key,directory_layout(target));
-                vat_need(directories.emplace(key,Directory{target_lba,std::move(target),0}).second,
+                VatFileLayout layout;
+                layout.directory=true;layout.embedded=parent_fid;
+                plan->expected.emplace(key,std::move(layout));
+                vat_need(parent_fid.size()<=max_directory_metadata-directory_bytes_total,
+                         "VAT directory metadata limit exceeded");
+                directory_bytes_total+=parent_fid.size();
+                vat_need(directories.emplace(key,Directory{target_lba,std::move(target),
+                                                          std::move(parent_fid),{},0}).second,
                          "duplicate new VAT directory");
                 dirty_directories.insert(key);
                 continue;
@@ -3712,9 +3788,40 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     in.close();
     // Stream all external data once. Emit each changed regular FE and
     // each dirty directory exactly once, followed by ONE VAT ICB.
+    std::uint64_t directory_blocks=0;
+    // Retire old directory-data addresses and allocate fresh contiguous
+    // virtual ranges. Pre-size VAT before computing its own allocation.
+    for(const auto& key:dirty_directories) {
+        auto& dir=directories.at(key);
+        for(const auto logical:dir.old_data)
+            put32(vat,header+std::size_t(logical)*4,0xffffffffu);
+        dir.old_data.clear();
+        if(dir.body.size()>block-176) {
+            const auto count=(dir.body.size()+block-1)/block;
+            vat_need(count<=(vat_max_table-vat.size())/4 &&
+                     count<=max_items-directory_blocks,
+                     "VAT directory virtual address limit exceeded");
+            const auto first=(vat.size()-header)/4;
+            for(std::size_t j=0;j<count;++j)
+                dir.old_data.push_back(static_cast<std::uint32_t>(first+j));
+            vat.resize(vat.size()+count*4,0xff);
+            directory_blocks+=count;
+        }
+    }
+    // The strict reader counts both directory-data blocks and FE/FSD
+    // addresses against the live metadata traversal limit. Keep the
+    // newly published namespace within the same limit.
+    std::uint64_t live_metadata=objects.size()+2u; // root and FSD
+    for(const auto& [key,dir]:directories) {
+        (void)key;
+        vat_need(live_metadata<=max_items &&
+                 dir.old_data.size()<=max_items-live_metadata,
+                 "VAT live metadata traversal limit exceeded");
+        live_metadata+=dir.old_data.size();
+    }
     const auto vat_blocks=vat.size()<=block-176?0:(vat.size()+block-1)/block;
     const auto required=plan->payload_blocks+file_entries.size()+
-                        dirty_directories.size()+vat_blocks+1u;
+                        dirty_directories.size()+directory_blocks+vat_blocks+1u;
     vat_need(required<=available && required<(max_image-plan->original_size)/block,
              "insufficient unrecorded partition capacity for VAT append");
     plan->final_size=plan->original_size+required*block;
@@ -3725,9 +3832,50 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     }
     for(const auto& key:dirty_directories) {
         auto& dir=directories.at(key);
+        auto& body=dir.body;
+        auto& fe=dir.fe;
+        VatFileLayout layout;
+        layout.directory=true;
+        // TagLocation is the virtual block holding the start of each FID.
+        // Packed descriptors may cross block boundaries. Their CRCs cover
+        // the complete record, including required four-byte alignment.
+        for(std::size_t pos=0;pos<body.size();) {
+            vat_need(body.size()-pos>=38,"invalid planned VAT FID");
+            const auto count=(38u+std::size_t(u16(body,pos+36))+body[pos+19]+3u)&~std::size_t(3);
+            vat_need(count<=body.size()-pos,"planned VAT FID exceeds directory");
+            put32(body,pos+12,dir.old_data.empty()?dir.lba:dir.old_data.at(pos/block));
+            tag_update(body,pos,count);
+            pos+=count;
+        }
+        std::fill(fe.begin()+176,fe.end(),std::uint8_t{0});
+        put64(fe,56,body.size());
+        if(dir.old_data.empty()) {
+            put16(fe,34,3);put64(fe,64,0);
+            put32(fe,172,static_cast<std::uint32_t>(body.size()));
+            std::copy(body.begin(),body.end(),fe.begin()+176);
+            tag_update(fe,0,176+body.size());
+            layout.embedded=std::move(body);
+        } else {
+            put16(fe,34,0);put64(fe,64,dir.old_data.size());
+            put32(fe,172,8);put32(fe,176,static_cast<std::uint32_t>(body.size()));
+            put32(fe,180,dir.old_data.front());
+            tag_update(fe,0,184);
+            std::size_t pos=0;
+            for(const auto logical:dir.old_data) {
+                const auto n=std::min<std::size_t>(block,body.size()-pos);
+                put32(vat,header+std::size_t(logical)*4,static_cast<std::uint32_t>(physical));
+                layout.extents.push_back({(std::uint64_t(partition)+physical)*block,n,false});
+                ++physical;
+                Bytes sector(block,0);
+                std::copy_n(body.begin()+pos,n,sector.begin());
+                plan->append.push_back(std::move(sector));
+                pos+=n;
+            }
+            vat_need(pos==body.size(),"VAT directory allocation plan differs");
+        }
         put32(vat,header+std::size_t(dir.lba)*4,static_cast<std::uint32_t>(physical++));
-        if(!key.empty())plan->expected.at(key)=directory_layout(dir.fe);
-        plan->append.push_back(std::move(dir.fe));
+        if(!key.empty())plan->expected.at(key)=std::move(layout);
+        plan->append.push_back(std::move(fe));
     }
     const auto new_table=physical;
     const auto new_vat=new_table+vat_blocks;

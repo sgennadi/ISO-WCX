@@ -220,7 +220,7 @@ are verified before atomic commit. Neither damaged historical-VAT
 fallback nor zero-filled space authorizes a write.
 
 This is intentionally a narrow backend. VAT 1.50 writing, EFE,
-external allocation continuations, external directory bodies,
+external allocation continuations,
 full/closed sessions, partition growth and ISO/UDF
 bridge VAT writing remain unsupported. Physical data runs that alias
 VAT entries, the previous VAT, other files, or the table storage are
@@ -267,8 +267,7 @@ including its UniqueID. VAT NumberOfDirectories includes the root,
 as required by UDF 2.01 section 2.2.11 and later VAT definitions.
 Directory link counts are validated against immediate children.
 All prior physical bytes, surviving namespace entries, and newly
-written metadata are checked before commit. External directory bodies,
-implicit recursive deletion of nonempty directories, special ICBs,
+written metadata are checked before commit. implicit recursive deletion of nonempty directories, special ICBs,
 and unsupported parent geometry still fail closed.
 
 
@@ -285,7 +284,10 @@ once, and record exactly one final VAT ICB referencing the original
 transaction. All selected replacement sources and the original image
 prefix are checked before the single atomic commit. A nonempty
 directory may be removed when all its descendants are explicitly
-removed in the same batch. Implicit recursive expansion, external
-directory storage, and recreation/replacement of the same normalized
+removed in the same batch. Implicit recursive expansion and recreation/replacement of the same normalized
 path twice in one batch remain unsupported. A capacity or validation
 failure anywhere in the batch leaves the original image unchanged.
+
+### VAT external directory bodies
+
+Directories may use embedded data or recorded virtual ShortAD/LongAD runs. The writer validates every referenced virtual block, FID CRC and virtual TagLocation, rejects metadata aliases, and normalizes valid sector padding. Dirty directories are repacked into fresh virtual blocks when they outgrow the FE, or compacted back into an embedded FE when possible. Retired directory-data mappings are cleared, never reused; all previous physical bytes remain intact. Metadata limits: 8 MiB per directory and 64 MiB aggregate directory metadata, plus the existing namespace and VAT table limits. New external bodies use one contiguous virtual ShortAD with packed, four-byte-aligned FIDs. Regression tests exercise multiple blocks, crossing FIDs, simultaneous root/child growth, repeated changes, shrinking, cancellation after actual staged growth, and malformed AD rejection. EFE, AED chains and unsupported directory allocation types remain read-only.
