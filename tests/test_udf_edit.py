@@ -532,8 +532,9 @@ def test_vat_nested(editor,inspector,root,image,replacement):
             assert {p.relative_to(out).as_posix() for p in out.rglob('*') if p.is_dir()}==directories-{''}
             assert {p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}==expected
             if i==2:
-                # No accidental recursive deletion, overwrite, or orphan.
-                for args in (('delete','A'),('delete','A/B'),
+                # No conflicting removal/addition, overwrite or orphan.
+                for args in (('batch','delete','A','add','A/B/NEWER.TXT',replacement),
+                             ('batch','delete','A/B','delete','A/B/missing'),
                              ('mkdir','A/B'),('mkdir','missing/child'),
                              ('add','A/B',replacement),
                              ('add','A/B/new.txt',replacement)):
@@ -730,6 +731,32 @@ def test_vat_large_directories(editor,inspector,root,image,replacement):
         assert (out/'BIG'/'EXTRA.BIN').read_bytes()==b'BODY'
         assert sorted(p.name for p in out.iterdir())==['BIG','hello','keep']
         assert sorted(p.name for p in (out/'BIG').iterdir())==['EXTRA.BIN']
+        # Delete a complete external subtree with an overlapping
+        # explicit child selection. No doomed directory FE or body is
+        # appended; only the surviving parent's body and FE are remapped.
+        image.write_bytes(grown)
+        cancelled=run(editor,image,'batchcancelstaged','delete','BIG',
+                      'delete','BIG/'+names[0],success=False)
+        assert cancelled.returncode==3, cancelled.stderr
+        assert image.read_bytes()==grown
+        assert not list(root.glob('.iso-wcx-edit-*'))
+        run(editor,image,'batch','delete','BIG','delete','BIG/'+names[0])
+        removed=image.read_bytes()
+        vat,m4=view(removed)
+        assert removed[:len(grown)]==grown
+        assert struct.unpack_from('<I',vat,132)[0]==len(grown)//B-PARTITION-1
+        assert struct.unpack_from('<II',vat,136)==(27,1)
+        # Use the original tree's mapping for all removed objects.
+        old_contents,old_child_data,_=directory(grown,mapping,child)
+        assert all(m4[x]==0xffffffff for x in [child,*old_contents.values(),*old_child_data,*root_data])
+        surviving,new_root_data,_=directory(removed,m4,1)
+        assert set(surviving)=={'hello','keep',*names[:25]}
+        assert all(surviving[name]==root_children[name] for name in surviving)
+        assert len(removed)-len(grown)==(len(new_root_data)+1+1+(2 if external else 0))*B
+        out=root/f'vat-large-{external}-recursive'
+        check_disc(inspector,image,out)
+        assert sorted(p.name for p in out.iterdir())==sorted(surviving)
+        assert all((out/name).read_bytes()==b'BODY' for name in names[:25])
         # Corrupt an external directory's ShortAD to point at the root FE.
         malformed=bytearray(grown)
         at=(PARTITION+mapping[child])*B
@@ -739,6 +766,42 @@ def test_vat_large_directories(editor,inspector,root,image,replacement):
         image.write_bytes(malformed)
         run(editor,image,'add','BIG/NEW',replacement,success=False)
         assert image.read_bytes()==malformed
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
+
+def test_vat_recursive(editor,inspector,root,image,replacement):
+    replacement.write_bytes(b'selected subtree')
+    for external in (False,True):
+        initial=vat_append_image(capacity=8192,external_table=external)
+        image.write_bytes(initial)
+        run(editor,image,'batch','mkdir','A','mkdir','A/B',
+            'mkdir','A/B/C','mkdir','AB',
+            'add','A/B/C/deep.txt',replacement,
+            'add','A/file.txt',replacement,
+            'add','AB/keep.txt',replacement,
+            'add','A-KEEP.txt',replacement)
+        before=image.read_bytes()
+        for args in (
+            ('batch','delete','A','add','A/B/C/new.txt',replacement),
+            ('batch','delete','A','delete','A/B/missing.txt'),
+            ('batch','delete','A','delete','a'),
+            ('batch','delete','A','mkdir','A/NEW')):
+            run(editor,image,*args,success=False)
+            assert image.read_bytes()==before
+        # One directory-only Delete must remove its descendants, but
+        # not an unrelated entry sharing its textual prefix.
+        run(editor,image,'delete','A')
+        after=image.read_bytes()
+        assert after[:len(before)]==before
+        # Only the surviving root FE and new VAT (plus external VAT
+        # data) are appended. No retired descendant is rewritten.
+        assert len(after)-len(before)==(2+(2 if external else 0))*B
+        out=root/f'vat-recursive-{external}'
+        check_disc(inspector,image,out)
+        assert {p.relative_to(out).as_posix() for p in out.rglob('*') if p.is_dir()}=={'AB'}
+        assert {p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}=={
+            'hello':b'world','keep':b'keep me',
+            'AB/keep.txt':replacement.read_bytes(),'A-KEEP.txt':replacement.read_bytes()}
         assert not list(root.glob('.iso-wcx-edit-*'))
 
 
@@ -772,6 +835,7 @@ def main(editor,inspector):
         test_vat_nested(editor,inspector,root,image,replacement)
         test_vat_batch(editor,inspector,root,image,replacement)
         test_vat_large_directories(editor,inspector,root,image,replacement)
+        test_vat_recursive(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),

@@ -267,7 +267,7 @@ including its UniqueID. VAT NumberOfDirectories includes the root,
 as required by UDF 2.01 section 2.2.11 and later VAT definitions.
 Directory link counts are validated against immediate children.
 All prior physical bytes, surviving namespace entries, and newly
-written metadata are checked before commit. implicit recursive deletion of nonempty directories, special ICBs,
+written metadata are checked before commit. special ICBs,
 and unsupported parent geometry still fail closed.
 
 
@@ -283,11 +283,28 @@ payload once, write each modified FE or surviving dirty directory
 once, and record exactly one final VAT ICB referencing the original
 transaction. All selected replacement sources and the original image
 prefix are checked before the single atomic commit. A nonempty
-directory may be removed when all its descendants are explicitly
-removed in the same batch. Implicit recursive expansion and recreation/replacement of the same normalized
+directory removal now expands its validated descendants automatically.
+Recreation/replacement of the same normalized
 path twice in one batch remain unsupported. A capacity or validation
 failure anywhere in the batch leaves the original image unchanged.
 
 ### VAT external directory bodies
 
 Directories may use embedded data or recorded virtual ShortAD/LongAD runs. The writer validates every referenced virtual block, FID CRC and virtual TagLocation, rejects metadata aliases, and normalizes valid sector padding. Dirty directories are repacked into fresh virtual blocks when they outgrow the FE, or compacted back into an embedded FE when possible. Retired directory-data mappings are cleared, never reused; all previous physical bytes remain intact. Metadata limits: 8 MiB per directory and 64 MiB aggregate directory metadata, plus the existing namespace and VAT table limits. New external bodies use one contiguous virtual ShortAD with packed, four-byte-aligned FIDs. Regression tests exercise multiple blocks, crossing FIDs, simultaneous root/child growth, repeated changes, shrinking, cancellation after actual staged growth, and malformed AD rejection. EFE, AED chains and unsupported directory allocation types remain read-only.
+
+
+### VAT recursive directory removal
+
+A directory Delete selects the entire validated subtree, including
+external directory-data mappings. Exact selected paths are checked
+before expansion, and overlapping directory/child selections are
+coalesced. Descendant paths are resolved by canonical component prefix
+(not by wildcard matching). The explicit request limit is 4096; the
+expanded deletion is bounded by the existing namespace limit. Mixed
+batches cannot add or replace objects in a deleted subtree. Internal
+directory bodies scheduled for removal are not rewritten: only the
+surviving parents, remaining dirty FEs and one final VAT are emitted.
+Retired virtual addresses remain unmapped and historical physical bytes
+remain byte-identical. Tests exercise deep deletion, external bodies,
+overlapping selection, similarly prefixed siblings, conflicting batches
+and cancellation after real staged growth.

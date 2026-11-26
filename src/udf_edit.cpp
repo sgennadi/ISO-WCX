@@ -3262,12 +3262,8 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                  "duplicate, case-colliding or too-deep VAT batch path");
         requests.push_back({std::move(key),&change});
     }
-    // Delete explicit descendants before their directories; create
-    // parents before children even if WCX submitted children first.
-    std::stable_sort(requests.begin(),requests.end(),[&](const Request& a,const Request& b) {
-        if(a.change->remove!=b.change->remove)return a.change->remove;
-        return a.change->remove?depth(a.key)>depth(b.key):depth(a.key)<depth(b.key);
-    });
+    // Expand recursive removals only after validating the complete
+    // on-disc tree and comparing it with the public reader.
     plan->original_size=std::filesystem::file_size(image);
     const auto sectors=plan->original_size/block;
     vat_need(plan->original_size%block==0 && sectors>=300 &&
@@ -3519,6 +3515,8 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                          visited.insert(child).second && visited.size()<=max_items,
                          "duplicate, cyclic or unsupported VAT directory reference");
                 const auto filename=name(body,pos+38,n);
+                vat_need(filename.find('/')==std::string::npos,
+                         "VAT FID must identify a single path component");
                 const auto key=current.path.empty()?filename:current.path+"/"+filename;
                 vat_need(edit_path(key)==key && folded_names.insert(fold(key)).second,
                          "case-insensitive VAT name collision");
@@ -3575,6 +3573,57 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                      "strict VAT input payload mismatch");
         }
     }
+    // A WCX directory Delete denotes the entire selected subtree.
+    // Resolve it from the validated namespace, never from arbitrary
+    // wildcard matching. All explicit removals must exist even if a
+    // selected ancestor would otherwise cover them. The lexical map
+    // orders each exact parent before its descendants, allowing nested
+    // selections to be coalesced without walking the same tree twice.
+    std::map<std::string,const ArchiveChange*> selected_removals;
+    for(const auto& request:requests) {
+        if(!request.change->remove)continue;
+        vat_need(objects.count(request.key)!=0,
+                 "deletion target does not exist");
+        selected_removals.emplace(request.key,request.change);
+    }
+    std::map<std::string,const ArchiveChange*> removals;
+    for(const auto& [key,change]:selected_removals) {
+        edit_tick(progress);
+        if(!removals.emplace(key,change).second)continue;
+        if(!directories.count(key))continue;
+        const auto prefix=key+"/";
+        for(auto it=objects.lower_bound(prefix);
+            it!=objects.end() && it->first.starts_with(prefix);++it) {
+            edit_tick(progress);
+            removals.emplace(it->first,change);
+        }
+    }
+    vat_need(removals.size()<=max_items,"VAT recursive removal exceeds namespace limit");
+    std::vector<Request> expanded;
+    expanded.reserve(requests.size()+removals.size());
+    for(const auto& [key,change]:removals)
+        expanded.push_back({key,change});
+    for(auto& request:requests) {
+        if(request.change->remove)continue;
+        // Reject additions/replacements inside a removed subtree up
+        // front, including targets that did not exist in the original.
+        // ASCII case aliases are already rejected by namespace checks.
+        auto ancestor=request.key;
+        for(;;) {
+            vat_need(!removals.count(ancestor),
+                     "VAT cannot add or replace within a deleted subtree");
+            const auto slash=ancestor.rfind('/');
+            if(slash==std::string::npos)break;
+            ancestor.resize(slash);
+        }
+        expanded.push_back(std::move(request));
+    }
+    requests=std::move(expanded);
+    // Descendants precede removed parents; additions are parent-first.
+    std::stable_sort(requests.begin(),requests.end(),[&](const Request& a,const Request& b) {
+        if(a.change->remove!=b.change->remove)return a.change->remove;
+        return a.change->remove?depth(a.key)>depth(b.key):depth(a.key)<depth(b.key);
+    });
     // Create a new virtual address rather than reusing an address from
     // a deleted object. The prior transaction remains independently
     // readable. VAT ICB UniqueID is the sequential volume's ID counter.
@@ -3625,31 +3674,39 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         if(change.remove) {
             if(target_directory)
                 vat_need(directories.at(key).children==0,
-                         "nonempty VAT directory requires explicit descendant deletions");
-            // Earlier operations can move FIDs in the same parent.
-            // Resolve the current offset by virtual address, not the
-            // original on-disc offset.
-            std::size_t pos=0;
-            std::size_t fid_bytes=0;
-            for(;pos<end;pos+=fid_bytes) {
-                vat_need(end-pos>=38,"truncated staged VAT directory");
-                fid_bytes=(38u+std::size_t(u16(parent_body,pos+36))+parent_body[pos+19]+3u)&~std::size_t(3);
-                vat_need(fid_bytes<=end-pos,"invalid staged VAT FID");
-                if(!(parent_body[pos+18]&8u) && u32(parent_body,pos+24)==target_lba)break;
+                         "VAT recursive deletion did not cover every descendant");
+            vat_need(parent.children>0,"VAT parent child count underflow");
+            const bool retire_parent=removals.count(parent_key)!=0;
+            if(!retire_parent) {
+                // Resolve the current FID offset: earlier operations
+                // may have compacted the surviving parent's body.
+                std::size_t pos=0;
+                std::size_t fid_bytes=0;
+                for(;pos<end;pos+=fid_bytes) {
+                    vat_need(end-pos>=38,"truncated staged VAT directory");
+                    fid_bytes=(38u+std::size_t(u16(parent_body,pos+36))+parent_body[pos+19]+3u)&~std::size_t(3);
+                    vat_need(fid_bytes<=end-pos,"invalid staged VAT FID");
+                    if(!(parent_body[pos+18]&8u) && u32(parent_body,pos+24)==target_lba)break;
+                }
+                vat_need(pos<end && fid_bytes<=end-pos,
+                         "VAT deletion FID missing from surviving parent");
+                parent_body.erase(parent_body.begin()+pos,parent_body.begin()+pos+fid_bytes);
+                if(target_directory) {
+                    vat_need(u16(parent_fe,48)>1,"VAT parent directory link count underflow");
+                    put16(parent_fe,48,static_cast<std::uint16_t>(u16(parent_fe,48)-1));
+                }
+                dirty_directories.insert(parent_key);
             }
-            vat_need(pos<end && fid_bytes<=end-pos && parent.children>0,
-                     "VAT deletion FID missing from parent");
-            parent_body.erase(parent_body.begin()+pos,parent_body.begin()+pos+fid_bytes);
+            // Internal FIDs in a doomed directory need no rewrite.
+            // The full original tree was checked above; retire all its
+            // FE/data mappings without modifying those physical bytes.
             if(target_directory) {
-                vat_need(u16(parent_fe,48)>1,"VAT parent directory link count underflow");
-                put16(parent_fe,48,static_cast<std::uint16_t>(u16(parent_fe,48)-1));
                 dirty_directories.erase(key);
                 for(const auto logical:directories.at(key).old_data)
                     put32(vat,header+std::size_t(logical)*4,0xffffffffu);
                 directories.erase(key);
             }
             --parent.children;
-            dirty_directories.insert(parent_key);
             put32(vat,header+std::size_t(target_lba)*4,0xffffffffu);
             plan->expected.erase(key);
             folded_names.erase(fold(key));
