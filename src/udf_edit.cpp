@@ -4011,7 +4011,8 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     return plan;
 }
 void edit_vat_append(const std::filesystem::path& image,
-        const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
+        const std::vector<ArchiveChange>& changes,const EditProgress& progress,
+        const EditStageValidator& validate_stage) {
     // Pin source identity before reading any plan data.
     EditTransaction tx(image);
     const auto plan=prepare_vat_append(image,changes,progress);
@@ -4054,6 +4055,7 @@ void edit_vat_append(const std::filesystem::path& image,
     }
     vat_need(std::filesystem::file_size(tx.output)==plan->final_size,
              "unexpected VAT append size");
+    if(validate_stage)validate_stage(tx.output);
     OpticalEditGuard guard(plan->original_size);
     guard.protect(0,plan->original_size);
     guard.verify_appended(image,tx.output,progress);
@@ -4105,11 +4107,14 @@ void edit_udf(const std::filesystem::path& image,
     try {
         owner=std::make_unique<Type1>(image,allow_bridge,bounded_partitioned_bridge);
     } catch(const VatWriteRequired&) {
-        // No ISO, hybrid or coordinated caller may bypass its protection
-        // contract through the standalone sequential VAT backend.
-        if(allow_bridge || validate_stage || !protected_ranges.empty() ||
-           coordinated || bounded_partitioned_bridge)throw;
-        edit_vat_append(image,changes,progress);
+        // The split-namespace VAT bridge always provides the external
+        // ISO validator and immutable ranges. Its append-only backend
+        // preserves the entire original prefix. Partitioned and shared
+        // mastering require separate coordinators and remain refused.
+        if(coordinated || bounded_partitioned_bridge ||
+           (allow_bridge && (!validate_stage || protected_ranges.empty())) ||
+           (!allow_bridge && (validate_stage || !protected_ranges.empty())))throw;
+        edit_vat_append(image,changes,progress,validate_stage);
         return;
     }
     auto& volume=*owner;

@@ -1164,6 +1164,7 @@ public:
         }
         return false;
     }
+    bool has_virtual_partition() const noexcept {return !virtual_.empty();}
     std::vector<Item> take() {return std::move(entries_);}
 };
 
@@ -1375,7 +1376,10 @@ Disc::Disc(std::filesystem::path image,
     }
     Source source(image_);
     Udf udf(source);
-    if(udf.parse()) {entries_=udf.take();format_="UDF";}
+    if(udf.parse()) {
+        udf_virtual_partition_=udf.has_virtual_partition();
+        entries_=udf.take();format_="UDF";
+    }
     else {
         try {entries_=parse_iso(source,format_);}
         catch(const std::exception&) {

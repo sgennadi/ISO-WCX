@@ -952,6 +952,68 @@ def test_vat_150(editor,inspector,root,image,replacement):
         assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def test_vat_bridge(editor,inspector,root,image,replacement):
+    from test_iso_edit import fixture, both, read_image
+    from test_images import iso_record
+    bridge=root/'vat-split.iso'
+    raw=vat_append_image(capacity=8192,external_table=True)
+    optical=fixture(boot=True,boot_efi=True)
+    raw[16*B:19*B]=optical[16*B:19*B]
+    raw[20*B:22*B]=optical[20*B:22*B]
+    raw[24*B:27*B]=optical[24*B:27*B]
+    both(raw,16*B+80,len(raw)//B)
+    p16(raw,24*B+38,4);p16(raw,24*B+102,4)
+    bridge.write_bytes(raw)
+    iso_before=read_image(bridge)
+    payload=b'old recorded payload'*400
+    replacement.write_bytes(payload)
+    run(editor,bridge,'batch','mkdir','TREE','add','TREE/FILE.BIN',replacement)
+    before=bridge.read_bytes()
+    assert before[:len(raw)]==raw
+    assert read_image(bridge)==iso_before
+    # An equal-length physical replacement must append, not patch the
+    # old VAT transaction's data. Verify exact preservation of all bytes.
+    replacement.write_bytes(b'N'*len(payload))
+    run(editor,bridge,'add','TREE/FILE.BIN',replacement)
+    after=bridge.read_bytes()
+    assert after[:len(before)]==before and len(after)>len(before)
+    assert read_image(bridge)==iso_before
+    out=root/'vat-bridge-extract'
+    check_disc(inspector,bridge,out)
+    assert (out/'TREE'/'FILE.BIN').read_bytes()==replacement.read_bytes()
+    assert (out/'hello').read_bytes()==b'world'
+    for args in (('add','HELLO.TXT',replacement),('delete','HELLO.TXT'),
+                 ('mkdir','HELLO.TXT/CHILD')):
+        run(editor,bridge,*args,success=False)
+        assert bridge.read_bytes()==after
+    cancelled=run(editor,bridge,'batchcancelstaged','add','TREE/ANOTHER.BIN',
+                  replacement,success=False)
+    assert cancelled.returncode==3
+    assert bridge.read_bytes()==after
+    run(editor,bridge,'delete','TREE')
+    deleted=bridge.read_bytes()
+    assert deleted[:len(after)]==after and read_image(bridge)==iso_before
+    out=root/'vat-bridge-deleted'
+    check_disc(inspector,bridge,out)
+    assert sorted(p.name for p in out.iterdir())==['hello','keep']
+    # A mirrored name is not a split namespace, even with different
+    # physical extents. Neither resize nor equal-size paths may edit it.
+    bad=bytearray(after)
+    pos=20*B
+    dots=iso_record(20,B,2,b'\x00')+iso_record(20,B,2,b'\x01')
+    record=dots+iso_record(21,5,0,b'HELLO;1')
+    bad[pos:pos+B]=record.ljust(B,b'\x00')
+    bridge.write_bytes(bad)
+    run(editor,bridge,'add','TREE/FILE.BIN',replacement,success=False)
+    assert bridge.read_bytes()==bad
+    # Unbounded boot entries also prevent append.
+    bad=bytearray(raw);p16(bad,24*B+38,0)
+    bridge.write_bytes(bad)
+    run(editor,bridge,'add','OTHER.BIN',replacement,success=False)
+    assert bridge.read_bytes()==bad
+    assert not list(root.glob('.iso-wcx-edit-*'))
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
         root=pathlib.Path(temp)
@@ -984,6 +1046,7 @@ def main(editor,inspector):
         test_vat_large_directories(editor,inspector,root,image,replacement)
         test_vat_recursive(editor,inspector,root,image,replacement)
         test_vat_150(editor,inspector,root,image,replacement)
+        test_vat_bridge(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),

@@ -221,7 +221,7 @@ fallback nor zero-filled space authorizes a write.
 
 This is intentionally a narrow backend. EFE,
 external allocation continuations,
-full/closed sessions, partition growth and ISO/UDF
+full/closed sessions, partition growth and coordinated ISO/UDF
 bridge VAT writing remain unsupported. Physical data runs that alias
 VAT entries, the previous VAT, other files, or the table storage are
 rejected. Tests cover embedded-to-external replacement, repeat external
@@ -329,3 +329,7 @@ to external storage, extraction, and rollback. This is not a claim
 of complete compatibility with all historical CD-R masters or physical
 recording devices. Source: OSTA UDF 1.50 sections 2.2.10, 2.3.6.5,
 and 6.10.1.
+
+### Sequential VAT in a split ISO/UDF bridge
+
+The raw UDF reader exposes whether its successfully parsed namespace uses a virtual partition. ISO/UDF dispatch checks this before the equal-length in-place shortcut, which must never modify recorded VAT history. For a nonpartitioned plain ISO/Joliet bridge with bounded El Torito extents, a strict split namespace can use the VAT append planner. Both ISO views must have top-level components disjoint from the UDF namespace and requested targets. Physical UDF payload extents must not overlap protected ISO/boot regions. The staged image is reparsed as an ISO bridge, and every original byte (including ISO VolumeSpaceSize and boot sectors) is verified unchanged before atomic commit. The final LBA contains a new VAT ICB rather than a ROM end anchor. Tests cover equal-length external replacement, batch create, recursive removal, cancellation after staged growth, shared-name rejection and unbounded boot rejection. Mirrored namespaces, shared extents, Rock Ridge/system-use bridge and partitioned MBR/GPT VAT growth remain unsupported.

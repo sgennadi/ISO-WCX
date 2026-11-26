@@ -3146,6 +3146,84 @@ void execute_bridge_metadata_edit(const std::filesystem::path& path,
              partitioned,mbr_alignment,gpt_trailer);
 }
 
+// Sequential VAT media may grow only by appending a new transaction.
+// This initial bridge profile intentionally supports disjoint top-level
+// trees, not a mirrored namespace. All original ISO/El Torito bytes stay
+// unchanged, including the original ISO VolumeSpaceSize. The UDF anchor
+// at sector 256 discovers the VAT ICB at actual EOF.
+void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
+        const Disc& udf,const std::vector<ArchiveChange>& changes,
+        const EditProgress& progress) {
+    need(!image.hybrid_system_area && !image.iso_system_use &&
+         image.boot_regions_bounded && udf.udf_has_virtual_partition(),
+         "VAT bridge requires bounded nonpartitioned plain ISO/Joliet");
+    std::set<std::string> iso_roots;
+    auto top=[](const std::string& key) {
+        return upper(key.substr(0,key.find('/')));
+    };
+    // Inspect both views separately, including aliases that the merged
+    // Image tree may otherwise present under only one visible name.
+    auto immutable=bridge_metadata_protected_ranges(image);
+    for(bool primary:{true,false}) {
+        const auto view=inspect_iso_namespace(path,primary);
+        need(view.format=="ISO 9660" || view.format=="Joliet",
+             "VAT bridge requires ordinary ISO/Joliet namespaces");
+        for(const auto& item:view.items) {
+            iso_roots.insert(top(item.path));
+            for(const auto& e:item.extents)
+                if(e.length && !e.sparse)immutable.emplace_back(e.offset,e.length);
+        }
+    }
+    // Coalesce immutable ranges for efficient overlap checks. Even an
+    // ISO alias with a different name must not become a silently split
+    // shared payload. Historical source bytes are always protected.
+    std::sort(immutable.begin(),immutable.end());
+    EditProtectedRanges merged;
+    for(const auto& [at,length]:immutable) {
+        need(at<=image.size && length<=image.size-at,
+             "VAT bridge protected extent outside recorded image");
+        if(!length)continue;
+        if(!merged.empty() && at<=merged.back().first+merged.back().second)
+            merged.back().second=std::max(merged.back().first+merged.back().second,
+                                         at+length)-merged.back().first;
+        else merged.emplace_back(at,length);
+    }
+    for(const auto& item:udf.items()) {
+        edit_tick(progress);
+        need(!iso_roots.count(top(item.path)),
+             "VAT bridge shared ISO/UDF namespace requires coordinated mastering");
+        for(const auto& e:item.extents) {
+            if(e.sparse || !e.length)continue;
+            need(e.offset<=image.size && e.length<=image.size-e.offset,
+                 "VAT bridge UDF payload outside original image");
+            const auto at=std::lower_bound(merged.begin(),merged.end(),e.offset,
+                [](const auto& range,std::uint64_t offset) {
+                    return range.first+range.second<=offset;
+                });
+            need(at==merged.end() || at->first>=e.offset+e.length,
+                 "VAT bridge UDF payload overlaps protected ISO/boot data");
+        }
+    }
+    for(const auto& change:changes)
+        need(!iso_roots.count(top(edit_path(change.path))),
+             "VAT bridge edit would change a protected ISO namespace");
+    // Prefix verification in the VAT backend covers every original byte,
+    // not just these ranges. Reparse the staged ISO/boot structures as an
+    // additional independent contract; do NOT require ROM end anchors,
+    // since a sequential VAT ICB, rather than AVDP, occupies the last LBA.
+    const EditStageValidator validate=[&image](const std::filesystem::path& staged) {
+        Image after(staged,true);
+        need(after.udf_bridge && !after.hybrid_system_area &&
+             after.boot_regions_bounded && after.size>image.size &&
+             after.descriptors==image.descriptors &&
+             after.boot_regions==image.boot_regions &&
+             after.boot_lbas==image.boot_lbas,
+             "staged VAT bridge changed ISO/El Torito geometry");
+    };
+    image.file.close();
+    edit_udf(path,changes,progress,true,validate,merged);
+}
+
 void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
                                   Image& image,
                                   const std::vector<ArchiveChange>& changes,
@@ -3480,6 +3558,14 @@ void edit_iso(const std::filesystem::path& path,const std::vector<ArchiveChange>
         // single-extent file (including UDF-only paths).
         const Disc udf(path);
         need(udf.format()=="UDF","ISO/UDF filesystem is unreadable");
+        // VAT must never take the legacy in-place equal-length shortcut,
+        // even when the current file has one ordinary physical extent.
+        // The parsed map family, not a guessed revision string or the
+        // Type-1 write preflight, determines this routing.
+        if(udf.udf_has_virtual_partition()) {
+            edit_iso_vat_bridge(path,image,udf,changes,progress);
+            return;
+        }
         bool same_size_replace=!changes.empty();
         for(const auto& change:changes) {
             if(change.remove || change.directory ||
