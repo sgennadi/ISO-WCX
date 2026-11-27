@@ -380,6 +380,28 @@ in the old image; all UDF history, ISO descriptors, boot and EFI
 payloads and the remainder of the prefix stay byte-identical.
 Regression tests cover repeated append, external and embedded VAT
 tables, exact MBR geometry, rollback, protected ISO paths, capacity
-and malformed partition rejection. Mirrored/shared MBR VAT and GPT
+and malformed partition rejection. Partially mirrored MBR VAT and GPT
 VAT writing remain unsupported. Physical boot testing remains separate
 from image-level validation.
+
+
+### Fully mirrored MBR VAT mastering
+
+The validated whole-image MBR profile also permits the fully mirrored
+ISO/Joliet/VAT tree coordinator. Add, replace and recursively remove
+shared entries through a single append transaction. Cylinder-alignment
+padding precedes the reserved ISO directory/path-table area so the
+coordinator can derive the reservation independently from the final
+VAT ICB. The old image may change only at the exact validated MBR
+header and planned ISO descriptor fields; independent EFI partitions,
+boot resources, old ISO trees, UDF metadata and historical payloads
+remain unchanged. The MBR header and appended VAT blocks are checked
+again after ISO coordination, and the staged hybrid geometry is
+reparsed. Tests extend the mirrored-tree matrix to MBR with and
+without Joliet, embedded and external VAT, repeated remastering,
+recursive deletion, cancellation, malformed CHS and EFI-alias
+rejection. A paired plain/MBR test proves that a transaction fitting
+the declared capacity without alignment is rejected when mandatory
+cylinder rounding would overflow it. Partially shared MBR namespaces
+and GPT remain unsupported.
+Physical boot behavior is not established by these image-level tests.

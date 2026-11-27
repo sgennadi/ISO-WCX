@@ -3302,8 +3302,9 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         const std::vector<ArchiveChange>& changes,const EditProgress& progress,
         const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment) {
     edit_tick(progress);
-    vat_need(!mbr_alignment || (!coordinated && mbr_alignment<=65536),
-             "VAT MBR is limited to a split namespace");
+    vat_need(!mbr_alignment ||
+             (mbr_alignment<=65536 && (!coordinated || coordinated->iso_metadata_blocks)),
+             "VAT MBR coordination requires a mirrored-tree reservation");
     vat_need(!changes.empty() && changes.size()<=4096,
              "VAT transaction requires 1..4096 changes");
     auto plan=std::make_unique<VatAppendPlan>();
@@ -4117,6 +4118,13 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         if(!key.empty())plan->expected.at(key)=std::move(layout);
         plan->append.push_back(std::move(fe));
     }
+    // Alignment precedes the ISO reservation. This keeps the
+    // reservation immediately before the VAT table/ICB, so the ISO
+    // coordinator can independently derive its exact physical bounds.
+    if(padding) {
+        plan->append.emplace_back(static_cast<std::size_t>(padding*block),0);
+        physical+=padding;
+    }
     // Keep ISO metadata unmapped in the VAT. The final table/ICB follow
     // the private zero-filled reservation; historical bytes are untouched.
     if(iso_blocks) {
@@ -4124,10 +4132,6 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         plan->iso_reservation_bytes=iso_blocks*block;
         plan->append.emplace_back(static_cast<std::size_t>(plan->iso_reservation_bytes),0);
         physical+=iso_blocks;
-    }
-    if(padding) {
-        plan->append.emplace_back(static_cast<std::size_t>(padding*block),0);
-        physical+=padding;
     }
     const auto new_table=physical;
     const auto new_vat=new_table+vat_blocks;
@@ -4232,7 +4236,9 @@ void edit_vat_append(const std::filesystem::path& image,
              "VAT ISO coordination changed the append size");
     OpticalEditGuard guard(plan->original_size);
     if(coordinated) {
-        std::uint64_t at=0;
+        // Independently checked exact MBR header is the only other
+        // mutable historical range besides planned ISO fields.
+        std::uint64_t at=plan->mbr.empty()?0u:512u;
         for(const auto& [start,length]:coordinated->metadata_writes) {
             if(start>at)guard.protect(at,start-at);
             at=start+length;
@@ -4242,6 +4248,9 @@ void edit_vat_append(const std::filesystem::path& image,
         // explicitly reserved new ISO tree. Recheck every VAT run.
         std::fstream in(tx.output,std::ios::binary|std::ios::in);
         vat_need(bool(in),"cannot reopen coordinated VAT stage");
+        if(!plan->mbr.empty())
+            vat_need(staged_read(in,0,512)==plan->mbr,
+                     "ISO coordination modified the validated MBR");
         auto pos=plan->original_size+plan->payload_blocks*block;
         for(const auto& bytes:plan->append) {
             edit_tick(progress);
@@ -4320,7 +4329,9 @@ void edit_udf(const std::filesystem::path& image,
         // immutable ranges. Shared-file coordination may only change
         // the explicitly checked pre-anchor ISO metadata fields.
         if(gpt_append_trailer_blocks ||
-           (bounded_partitioned_bridge && (!mbr_append_alignment_blocks || coordinated)) ||
+           (bounded_partitioned_bridge &&
+            (!mbr_append_alignment_blocks ||
+             (coordinated && !coordinated->iso_metadata_blocks))) ||
            (allow_bridge && (!validate_stage || protected_ranges.empty())) ||
            (!allow_bridge && (validate_stage || !protected_ranges.empty() || coordinated)))throw;
         edit_vat_append(image,changes,progress,validate_stage,coordinated,

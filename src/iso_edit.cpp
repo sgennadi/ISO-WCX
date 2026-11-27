@@ -2533,7 +2533,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         // Independently confirm the same names and extents in BOTH views.
         // parse_iso can append a synthetic boot.images folder; it is not
         // an on-disc namespace entry when the ISO tree has no such root.
-        if(image.hybrid_system_area)return false;
+        if(image.gpt_hybrid)return false;
         for(bool primary:{true,false}) {
             const auto view=inspect_iso_namespace(path,primary);
             if(view.format!="ISO 9660" && view.format!="Joliet")return false;
@@ -2700,6 +2700,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                                 (!n->directory && !c->directory)),
                      "VAT mirrored target has invalid type or surviving children");
                 protect_boot(*n,image.boot_lbas);
+                if(image.hybrid_system_area)protect_hybrid_target(*n,image);
                 each_extent(*n,[&](auto start,auto length) {
                     for(const auto& [at,bytes]:image.boot_regions)
                         need(!intersect(start,length,at,bytes),
@@ -2714,9 +2715,11 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                         if(image.joliet) {
                             const auto at=std::uint64_t(le(n->joliet_record,2))*block;
                             const auto bytes=le(n->joliet_record,10);
-                            for(const auto& [start,length]:image.boot_regions)
-                                need(!intersect(at,bytes,start,length),
-                                     "VAT mirrored Joliet directory overlaps boot data");
+                            for(const auto* ranges:{&image.boot_regions,
+                                                    &image.hybrid_protected_regions})
+                                for(const auto& [start,length]:*ranges)
+                                    need(!intersect(at,bytes,start,length),
+                                         "VAT mirrored Joliet directory overlaps boot/partition data");
                         }
                         tree.dots.erase(n);
                         tree.dirs.erase(std::remove(tree.dirs.begin(),tree.dirs.end(),n),
@@ -2841,8 +2844,11 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         const GptGrowthPlan* gpt_growth=nullptr,
         bool sequential_vat=false) {
     if(sequential_vat) {
-        need(!mbr_growth && !gpt_growth,"partitioned VAT remaster is unsupported");
-        validate_vat_bridge_envelope(staged,image);
+        // VAT has its own independently validated MBR header and
+        // alignment. Never use the ROM end-anchor growth coordinator.
+        need(!mbr_growth && !gpt_growth && !image.gpt_hybrid,
+             "GPT/ROM growth is not a sequential VAT remaster");
+        validate_vat_bridge_envelope(staged,image,image.hybrid_system_area);
     } else protect_iso_udf_stage(path,staged,image,progress,mbr_growth,gpt_growth);
     const auto size=std::filesystem::file_size(staged);
     const auto volume_blocks=gpt_growth?gpt_growth->logical_blocks:size/block;
@@ -3028,6 +3034,11 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
          checked.boot_lbas==image.boot_lbas &&
          checked.boot_descriptor_lbas==image.boot_descriptor_lbas,
          "shared tree remaster changed boot descriptors");
+    if(sequential_vat)
+        need(checked.hybrid_system_area==image.hybrid_system_area &&
+             !checked.gpt_hybrid &&
+             checked.hybrid_protected_regions==image.hybrid_protected_regions,
+             "VAT mirrored remaster changed independent partitions");
     const auto after=index_iso_tree(*checked.root);
     const auto wanted=index_iso_tree(*tree.root);
     need(tree.removed<=original.size() &&
@@ -3248,7 +3259,7 @@ std::unique_ptr<BridgeMetadataEdit> prepare_bridge_metadata_edit(
     // Do not alter the fixed-size allocator route on rewritable media.
     auto& mbr_append=edit->mbr_append;
     auto& gpt_append=edit->gpt_append;
-    if(image.hybrid_system_area) {
+    if(image.hybrid_system_area && !sequential_vat) {
         const auto info=inspect_udf_edit(path,true,true);
         if(info.parser_compatible && info.partition_access_type==1 &&
            !info.allocation_bitmap && !info.allocation_table) {
@@ -3463,11 +3474,24 @@ void edit_iso_vat_shared_bridge(const std::filesystem::path& path,Image& image,
 // Fully mirrored VAT trees use a fresh ISO directory/path-table
 // reservation. This supports repeat edits even after the previous
 // directory tree was appended inside the recorded partition.
+// The first protection span covers the whole system area. Exclude
+// only this synthetic blanket range from the geometry preflight;
+// retain every real ISO/UDF/EFI/boot extent, even in the system area.
+std::uint64_t vat_mbr_alignment(Image& image,const EditProtectedRanges& immutable) {
+    if(!image.hybrid_system_area)return 0;
+    need(!image.gpt_hybrid && !immutable.empty() &&
+         immutable.front().first==0 && immutable.front().second==256ull*block,
+         "missing VAT MBR system-area protection");
+    HybridTailPlan tail;
+    tail.original_extents.assign(std::next(immutable.begin()),immutable.end());
+    return plan_mbr_growth(image,tail,1,true).alignment_blocks;
+}
 bool try_edit_iso_vat_mirrored_tree(const std::filesystem::path& path,Image& image,
         const std::vector<ArchiveChange>& changes,const EditProgress& progress) {
     auto edit=prepare_bridge_metadata_edit(path,image,changes,true);
     if(!edit)return false;
     const auto immutable=bridge_metadata_protected_ranges(image);
+    const auto alignment=vat_mbr_alignment(image,immutable);
     auto* owner=edit.get();
     const EditStageValidator validate=
         [&path,&image,&progress,owner](const std::filesystem::path& staged) {
@@ -3475,7 +3499,8 @@ bool try_edit_iso_vat_mirrored_tree(const std::filesystem::path& path,Image& ima
                 owner->plan,owner->add_tree,progress,nullptr,nullptr,true);
         };
     image.file.close();
-    edit_udf(path,changes,progress,true,validate,immutable,&edit->plan);
+    edit_udf(path,changes,progress,true,validate,immutable,&edit->plan,
+             alignment!=0,alignment);
     return true;
 }
 
@@ -3490,15 +3515,14 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
     need(!image.gpt_hybrid && !image.iso_system_use &&
          image.boot_regions_bounded && udf.udf_has_virtual_partition(),
          "VAT bridge requires bounded plain ISO/Joliet; GPT is not yet supported");
-    if(!image.hybrid_system_area &&
-       try_edit_iso_vat_mirrored_tree(path,image,changes,progress))return;
+    if(try_edit_iso_vat_mirrored_tree(path,image,changes,progress))return;
     {
         const auto index=index_iso_tree(*image.root);
         const bool shared=std::any_of(changes.begin(),changes.end(),
             [&](const ArchiveChange& c){return index.count(upper(edit_path(c.path)))!=0;});
         if(shared) {
             need(!image.hybrid_system_area,
-                 "MBR VAT shared namespace mastering is not yet supported");
+                 "MBR VAT shared edits require a fully mirrored namespace");
             edit_iso_vat_shared_bridge(path,image,changes,progress);
             return;
         }
@@ -3520,19 +3544,7 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
                 if(e.length && !e.sparse)immutable.emplace_back(e.offset,e.length);
         }
     }
-    std::uint64_t mbr_alignment=0;
-    if(image.hybrid_system_area) {
-        // The first range is the entire protected ISO system area. Its
-        // MBR fields are deliberately excluded from the live-extent
-        // snapshot, but every actual ISO/UDF/EFI/boot extent is retained.
-        need(!immutable.empty() && immutable.front().first==0 &&
-             immutable.front().second==256ull*block,
-             "missing VAT bridge system-area protection");
-        HybridTailPlan tail;
-        tail.original_extents.assign(std::next(immutable.begin()),immutable.end());
-        const auto geometry=plan_mbr_growth(image,tail,1,true);
-        mbr_alignment=geometry.alignment_blocks;
-    }
+    const auto mbr_alignment=vat_mbr_alignment(image,immutable);
     // Coalesce immutable ranges for efficient overlap checks. Even an
     // ISO alias with a different name must not become a silently split
     // shared payload. Historical source bytes are always protected.

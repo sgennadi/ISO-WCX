@@ -1103,7 +1103,7 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
     import binascii
     bridge=root/'vat-mirrored-tree.iso'
     for joliet in (False,True):
-        for external in (False,True):
+        for external,mbr in ((False,False),(True,False),(False,True),(True,True)):
             raw=vat_append_image(capacity=8192,external_table=external)
             # Remove the independent second file from this synthetic
             # namespace, leaving an exactly mirrored regular file.
@@ -1139,6 +1139,16 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
                 raw[sector*B:(sector+1)*B]=body.ljust(B,b'\0')
             descriptors=[16,17] if joliet else [16]
             for sector in descriptors:both(raw,sector*B+80,len(raw)//B)
+            if mbr:
+                # Ten optical sectors per cylinder. A separate EFI
+                # partition at LBA 26 is immutable in both namespaces.
+                raw[0:32]=bytes(range(32))
+                raw[446:454]=bytes((0x80,0,1,0,0x17,9,4,54))
+                p32(raw,454,0);p32(raw,458,len(raw)//512)
+                raw[466]=0xef
+                p32(raw,470,26*4);p32(raw,474,4)
+                raw[510:512]=b'\x55\xaa'
+                if joliet:raw[26*B:27*B]=b'E'*B
             bridge.write_bytes(raw)
             def verify(before,expected,number):
                 after=bridge.read_bytes()
@@ -1148,11 +1158,43 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
                     for at,n in ((80,8),(132,58)):
                         offset=sector*B+at
                         restored[offset:offset+n]=before[offset:offset+n]
+                if mbr:
+                    assert len(after)%(10*B)==0
+                    restored[451:454]=before[451:454]
+                    restored[458:462]=before[458:462]
+                    sectors=len(after)//512
+                    cylinder=min(sectors//40-1,1023)
+                    assert after[451:454]==bytes((9,4|((cylinder>>2)&0xc0),cylinder&255))
+                    assert struct.unpack_from('<I',after,458)[0]==sectors
+                    assert after[26*B:27*B]==before[26*B:27*B]
                 assert restored==before
+                fe=len(after)-B
+                assert after[fe+27]==248
+                assert struct.unpack_from('<I',after,fe+12)[0]==len(after)//B-PARTITION-1
+                # All alignment padding must precede the new ISO
+                # metadata reservation, not the final VAT ICB.
+                vat_size=struct.unpack_from('<Q',after,fe+56)[0]
+                if struct.unpack_from('<H',after,fe+34)[0]==0:
+                    n,lba=struct.unpack_from('<II',after,fe+176)
+                    assert n==vat_size
+                    vat_at=(PARTITION+lba)*B
+                    assert vat_at+((n+B-1)//B)*B==fe
+                    reservation_end=vat_at
+                else:
+                    vat_at=fe+176
+                    reservation_end=fe
+                assert struct.unpack_from('<I',after,vat_at+132)[0]==len(before)//B-PARTITION-1
+                # Every new path table/root record belongs to the
+                # appended ISO metadata before the VAT table.
+                for vd in descriptors:
+                    at=vd*B
+                    for field in (140,158):
+                        lba=struct.unpack_from('<I',after,at+field)[0]
+                        assert len(before)<=lba*B<reservation_end
                 assert read_image(bridge)=={k.upper():v for k,v in expected.items()}
                 if joliet:assert read_image(bridge,True)==expected
                 validate_path_tables(bridge)
-                out=root/f'vat-mirror-{joliet}-{external}-{number}'
+                out=root/f'vat-mirror-{joliet}-{external}-{mbr}-{number}'
                 check_disc(inspector,bridge,out)
                 files={p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}
                 dirs={p.relative_to(out).as_posix()+'/':None for p in out.rglob('*') if p.is_dir()}
@@ -1280,7 +1322,53 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
             run(editor,bridge,'batch','delete','hello','delete','SUBKEEP/KEEP.BIN')
             sixth=verify(fifth,{'SUBKEEP/':None},6)
             run(editor,bridge,'add','SUBKEEP/NEW.BIN',replacement)
-            verify(sixth,{'SUBKEEP/':None,'SUBKEEP/NEW.BIN':replacement.read_bytes()},7)
+            seventh=verify(sixth,{'SUBKEEP/':None,'SUBKEEP/NEW.BIN':replacement.read_bytes()},7)
+            if mbr:
+                bad=bytearray(seventh)
+                bad[453]^=1 # valid signature, wrong end cylinder
+                bridge.write_bytes(bad)
+                run(editor,bridge,'add','SUBKEEP/ABORT.BIN',replacement,success=False)
+                assert bridge.read_bytes()==bad
+                # Capacity sufficient for an ordinary mirrored append,
+                # but not for rounding the transaction to an MBR cylinder.
+                # For a one-byte replacement, the appended payload and FE
+                # each need one sector, plus root/path tables per ISO
+                # view and the final VAT table/ICB. No directory is dirty.
+                minimal=1+1+(6 if joliet else 3)+(2 if external else 0)+1
+                assert minimal%10!=0
+                capacity=550-PARTITION+minimal
+                limited=bytearray(raw)
+                for sector in (260,264):
+                    at=sector*B
+                    p32(limited,at+192,capacity)
+                    p16(limited,at+8,binascii.crc_hqx(limited[at+16:at+512],0))
+                    checksum(limited,at)
+                at=270*B
+                p32(limited,at+88,capacity)
+                p16(limited,at+8,binascii.crc_hqx(limited[at+16:at+96],0))
+                checksum(limited,at)
+                replacement.write_bytes(b'X')
+                # Prove the same exact budget is enough without MBR
+                # alignment, not merely that an arbitrary bad input fails.
+                plain=bytearray(limited)
+                plain[:16*B]=bytes(16*B)
+                bridge.write_bytes(plain)
+                run(editor,bridge,'add','hello',replacement)
+                assert len(bridge.read_bytes())==len(plain)+minimal*B
+                assert read_image(bridge)=={'HELLO':b'X'}
+                bridge.write_bytes(limited)
+                result=run(editor,bridge,'add','hello',replacement,success=False)
+                detail=(result.stdout+result.stderr).decode(errors='replace')
+                assert 'capacity' in detail.lower() and 'alignment' in detail.lower(),detail
+                assert bridge.read_bytes()==limited
+                assert not list(root.glob('.iso-wcx-edit-*'))
+                # An independent EFI entry aliases the old live file.
+                # Its historical bytes must not be unlinked/replaced.
+                bad=bytearray(raw)
+                p32(bad,470,304*4);p32(bad,474,4)
+                bridge.write_bytes(bad)
+                run(editor,bridge,'add','hello',replacement,success=False)
+                assert bridge.read_bytes()==bad
             assert not list(root.glob('.iso-wcx-edit-*'))
 
 
