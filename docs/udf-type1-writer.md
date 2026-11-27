@@ -405,3 +405,26 @@ the declared capacity without alignment is rejected when mandatory
 cylinder rounding would overflow it. Partially shared MBR namespaces
 and GPT remain unsupported.
 Physical boot behavior is not established by these image-level tests.
+
+
+### Split-namespace sequential GPT VAT bridge (initial restricted profile)
+
+A standard 512-byte-sector protective-only GPT with 128 entries of
+128 bytes, a trailing nine-optical-sector backup reservation, and
+a clean VAT ICB immediately before that reservation may grow. The ISO
+preflight validates both GPT arrays, partition/boot bounds and live ISO
+extents. The VAT writer independently validates GPT geometry and CRCs,
+the exact last recorded VAT and its mappings. Appends begin at the
+physical end of the original file; the old VAT and all preceding UDF
+sectors are preserved. Only the protective MBR length and primary GPT
+header change at the front. The obsolete backup array/header is cleared
+and a new identical partition array and CRC-correct backup header are
+placed after the new VAT. No partition extent moves. The final staged
+GPT is independently reparsed and compared to the expected growth
+plan; the full unchanged prefix and appended bytes are verified.
+Regression tests cover embedded/external VAT, repeated appends, EFI
+payload preservation, cancellation, CRC corruption, nonzero trailer
+padding and refusal of damaged current VAT. This does not support GPT
+mirrored namespace mastering, nonstandard arrays, hybrid protective
+MBR entries, or physical recording. Physical BIOS/UEFI boot remains
+unverified.

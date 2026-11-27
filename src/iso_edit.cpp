@@ -3509,20 +3509,72 @@ bool try_edit_iso_vat_mirrored_tree(const std::filesystem::path& path,Image& ima
 // trees, not a mirrored namespace. All original ISO/El Torito bytes stay
 // unchanged, including the original ISO VolumeSpaceSize. The UDF anchor
 // at sector 256 discovers the VAT ICB at actual EOF.
+GptGrowthPlan plan_vat_gpt_bridge(Image& image,const EditProtectedRanges& immutable) {
+    need(image.gpt_hybrid && image.hybrid_system_area &&
+         immutable.size()>=1+image.hybrid_protected_regions.size() &&
+         image.hybrid_protected_regions.size()>=5,
+         "missing VAT GPT protected geometry");
+    const auto header=image.read(512,512);
+    need(le64(header,72)==2 && le(header,80)==128 && le(header,84)==128,
+         "VAT GPT requires a standard 128-entry partition array");
+    // The ISO parser lists GPT metadata before partition data. Exclude
+    // only its structural metadata entries from the relocation check.
+    // Independent ISO/UDF/boot extents at those addresses remain in
+    // the snapshot and therefore cannot be mistaken for GPT metadata.
+    const auto& regions=image.hybrid_protected_regions;
+    need(regions[0]==std::pair<std::uint64_t,std::uint64_t>{512,512} &&
+         regions[1]==std::pair<std::uint64_t,std::uint64_t>{image.size-512,512} &&
+         regions[2]==std::pair<std::uint64_t,std::uint64_t>{1024,16384} &&
+         regions[3]==std::pair<std::uint64_t,std::uint64_t>{image.size-33*512,16384},
+         "VAT GPT requires protective-only standard GPT geometry");
+    HybridTailPlan tail;
+    tail.original_extents.assign(immutable.begin()+1+regions.size(),immutable.end());
+    tail.original_extents.insert(tail.original_extents.end(),regions.begin()+4,regions.end());
+    auto plan=plan_gpt_growth(image,tail,1,true);
+    need(plan.trailer_blocks==9 &&
+         std::uint64_t(image.declared_volume_blocks)<=image.size/block-9,
+         "VAT GPT backup must follow the recorded optical volume");
+    return plan;
+}
+void validate_vat_gpt_bridge(const std::filesystem::path& staged,
+                             const Image& before,GptGrowthPlan plan) {
+    const auto size=std::filesystem::file_size(staged);
+    need(size>before.size && size%block==0 && size/block>plan.trailer_blocks,
+         "invalid staged VAT GPT size");
+    set_gpt_growth_size(plan,size/block-plan.trailer_blocks);
+    Image after(staged,true);
+    auto expected=before.hybrid_protected_regions;
+    expected[1].first=plan.new_header;
+    expected[3].first=plan.new_table;
+    need(after.udf_bridge && after.gpt_hybrid && after.hybrid_system_area &&
+         after.hybrid_protected_regions==expected &&
+         after.gpt_first_usable==before.gpt_first_usable &&
+         after.gpt_last_usable==plan.new_table/512-1 &&
+         after.boot_regions_bounded && after.descriptors==before.descriptors &&
+         after.boot_regions==before.boot_regions &&
+         after.boot_entries==before.boot_entries &&
+         after.boot_lbas==before.boot_lbas &&
+         after.boot_descriptor_lbas==before.boot_descriptor_lbas &&
+         after.read(0,512)==plan.mbr && after.read(512,512)==plan.primary &&
+         after.read(plan.new_header,512)==plan.backup &&
+         after.read(plan.new_table,plan.entries.size())==plan.entries,
+         "staged VAT GPT geometry differs from independent growth plan");
+}
+
 void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
         const Disc& udf,const std::vector<ArchiveChange>& changes,
         const EditProgress& progress) {
-    need(!image.gpt_hybrid && !image.iso_system_use &&
+    need(!image.iso_system_use &&
          image.boot_regions_bounded && udf.udf_has_virtual_partition(),
-         "VAT bridge requires bounded plain ISO/Joliet; GPT is not yet supported");
-    if(try_edit_iso_vat_mirrored_tree(path,image,changes,progress))return;
+         "VAT bridge requires bounded plain ISO/Joliet");
+    if(!image.gpt_hybrid && try_edit_iso_vat_mirrored_tree(path,image,changes,progress))return;
     {
         const auto index=index_iso_tree(*image.root);
         const bool shared=std::any_of(changes.begin(),changes.end(),
             [&](const ArchiveChange& c){return index.count(upper(edit_path(c.path)))!=0;});
         if(shared) {
             need(!image.hybrid_system_area,
-                 "MBR VAT shared edits require a fully mirrored namespace");
+                 "partitioned VAT shared edits require a supported mirrored namespace");
             edit_iso_vat_shared_bridge(path,image,changes,progress);
             return;
         }
@@ -3544,7 +3596,9 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
                 if(e.length && !e.sparse)immutable.emplace_back(e.offset,e.length);
         }
     }
-    const auto mbr_alignment=vat_mbr_alignment(image,immutable);
+    std::optional<GptGrowthPlan> gpt;
+    if(image.gpt_hybrid)gpt=plan_vat_gpt_bridge(image,immutable);
+    const auto mbr_alignment=gpt?0u:vat_mbr_alignment(image,immutable);
     // Coalesce immutable ranges for efficient overlap checks. Even an
     // ISO alias with a different name must not become a silently split
     // shared payload. Historical source bytes are always protected.
@@ -3583,11 +3637,14 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
     // additional independent contract; do NOT require ROM end anchors,
     // since a sequential VAT ICB, rather than AVDP, occupies the last LBA.
     const bool mbr=mbr_alignment!=0;
-    const EditStageValidator validate=[&image,mbr](const std::filesystem::path& staged) {
-        validate_vat_bridge_envelope(staged,image,mbr);
+    const auto* gpt_plan=gpt?&*gpt:nullptr;
+    const EditStageValidator validate=[&image,mbr,gpt_plan](const std::filesystem::path& staged) {
+        if(gpt_plan)validate_vat_gpt_bridge(staged,image,*gpt_plan);
+        else validate_vat_bridge_envelope(staged,image,mbr);
     };
     image.file.close();
-    edit_udf(path,changes,progress,true,validate,merged,nullptr,mbr,mbr_alignment);
+    edit_udf(path,changes,progress,true,validate,merged,nullptr,
+             mbr || gpt_plan!=nullptr,mbr_alignment,gpt_plan?gpt_plan->trailer_blocks:0);
 }
 
 void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,

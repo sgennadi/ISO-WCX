@@ -1457,6 +1457,117 @@ def test_vat_mbr_bridge(editor,inspector,root,image,replacement):
             assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def test_vat_gpt_bridge(editor,inspector,root,image,replacement):
+    from test_iso_edit import fixture, both, read_image
+    import zlib
+    bridge=root/'vat-gpt.iso'
+    def build(external):
+        raw=vat_append_image(capacity=8192,external_table=external)
+        optical=fixture(boot=True,boot_efi=True)
+        raw[16*B:19*B]=optical[16*B:19*B]
+        raw[20*B:22*B]=optical[20*B:22*B]
+        raw[24*B:27*B]=optical[24*B:27*B]
+        both(raw,16*B+80,len(raw)//B)
+        p16(raw,24*B+38,4);p16(raw,24*B+102,4)
+        raw.extend(bytes(9*B))
+        last=len(raw)//512-1
+        raw[510:512]=b'\x55\xaa'
+        raw[450]=0xee
+        p32(raw,454,1);p32(raw,458,last)
+        entries=bytearray(128*128)
+        entries[:16]=bytes.fromhex('28732ac11ff8d211ba4b00a0c93ec93b')
+        entries[16:32]=bytes(range(1,17))
+        p64(entries,32,26*4);p64(entries,40,26*4+3)
+        for here,other,table in ((1,last,2),(last,1,last-32)):
+            raw[table*512:table*512+len(entries)]=entries
+            h=bytearray(512)
+            h[:8]=b'EFI PART'
+            p32(h,8,0x10000);p32(h,12,92)
+            p64(h,24,here);p64(h,32,other)
+            p64(h,40,34);p64(h,48,last-33)
+            h[56:72]=bytes(range(16,32))
+            p64(h,72,table);p32(h,80,128);p32(h,84,128)
+            p32(h,88,zlib.crc32(entries))
+            p32(h,16,zlib.crc32(h[:92]))
+            raw[here*512:(here+1)*512]=h
+        return raw
+    for external in (False,True):
+        initial=build(external)
+        bridge.write_bytes(initial)
+        iso_before=read_image(bridge)
+        entries=initial[1024:1024+16384]
+        def verify(before,after):
+            assert len(after)>len(before)
+            assert after[1024:len(before)-33*512]==before[1024:len(before)-33*512]
+            assert not any(after[len(before)-33*512:len(before)])
+            restored=bytearray(after[:1024])
+            restored[458:462]=before[458:462]
+            for at,n in ((16,4),(32,8),(48,8)):
+                restored[512+at:512+at+n]=before[512+at:512+at+n]
+            assert restored==before[:1024]
+            last=len(after)//512-1
+            assert struct.unpack_from('<I',after,458)[0]==last
+            for here,other,table in ((1,last,2),(last,1,last-32)):
+                h=bytearray(after[here*512:(here+1)*512])
+                assert h[:8]==b'EFI PART'
+                assert struct.unpack_from('<QQQQ',h,24)==(here,other,34,last-33)
+                assert struct.unpack_from('<QIII',h,72)==(table,128,128,zlib.crc32(entries))
+                crc=struct.unpack_from('<I',h,16)[0]
+                p32(h,16,0)
+                assert zlib.crc32(h[:92])==crc
+                assert after[table*512:table*512+16384]==entries
+            fe=len(after)-10*B
+            assert not any(after[fe+B:len(after)-33*512])
+            assert after[fe+27]==248
+            assert struct.unpack_from('<I',after,fe+12)[0]==fe//B-PARTITION
+            size=struct.unpack_from('<Q',after,fe+56)[0]
+            if external:
+                n,lba=struct.unpack_from('<II',after,fe+176)
+                assert n==size and struct.unpack_from('<H',after,fe+34)[0]==0
+                at=(PARTITION+lba)*B
+                assert at+((n+B-1)//B)*B==fe
+            else:
+                assert struct.unpack_from('<H',after,fe+34)[0]==3
+                at=fe+176
+            assert struct.unpack_from('<I',after,at+132)[0]==len(before)//B-10-PARTITION
+            assert read_image(bridge)==iso_before
+        replacement.write_bytes(b'GPT payload'*1000)
+        run(editor,bridge,'batch','mkdir','TREE','add','TREE/FILE.BIN',replacement)
+        first=bridge.read_bytes()
+        verify(initial,first)
+        out=root/f'vat-gpt-{external}-1'
+        check_disc(inspector,bridge,out)
+        assert (out/'TREE'/'FILE.BIN').read_bytes()==replacement.read_bytes()
+        replacement.write_bytes(b'new')
+        run(editor,bridge,'add','TREE/FILE.BIN',replacement)
+        second=bridge.read_bytes()
+        verify(first,second)
+        out=root/f'vat-gpt-{external}-2'
+        check_disc(inspector,bridge,out)
+        assert (out/'TREE'/'FILE.BIN').read_bytes()==b'new'
+        cancelled=run(editor,bridge,'batchcancelstaged','delete','TREE',success=False)
+        assert cancelled.returncode==3 and bridge.read_bytes()==second
+        run(editor,bridge,'delete','TREE')
+        third=bridge.read_bytes()
+        verify(second,third)
+        out=root/f'vat-gpt-{external}-3'
+        check_disc(inspector,bridge,out)
+        assert sorted(p.name for p in out.iterdir())==['hello','keep']
+        # The writer must not recover a damaged latest VAT or guess
+        # where the GPT trailer starts; an ISO-only target is protected.
+        run(editor,bridge,'add','HELLO.TXT',replacement,success=False)
+        assert bridge.read_bytes()==third
+        for defect in ('crc','gap','vat'):
+            bad=bytearray(initial)
+            if defect=='crc':bad[-512+16]^=1
+            elif defect=='gap':bad[-9*B]=1
+            else:bad[-10*B+4]^=1
+            bridge.write_bytes(bad)
+            run(editor,bridge,'add','hello',replacement,success=False)
+            assert bridge.read_bytes()==bad
+        assert not list(root.glob('.iso-wcx-edit-*'))
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
         root=pathlib.Path(temp)
@@ -1493,6 +1604,7 @@ def main(editor,inspector):
         test_vat_shared_bridge(editor,inspector,root,image,replacement)
         test_vat_mirrored_tree(editor,inspector,root,image,replacement)
         test_vat_mbr_bridge(editor,inspector,root,image,replacement)
+        test_vat_gpt_bridge(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),

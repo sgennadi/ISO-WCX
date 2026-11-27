@@ -3073,10 +3073,15 @@ struct VatPayload {
     std::filesystem::path source;
     std::uint64_t size{},blocks{};
 };
+struct VatGptEdit {
+    std::uint64_t old_backup{};
+    Bytes prefix,retired,tail;
+};
 struct VatAppendPlan {
     std::uint64_t original_size{},final_size{},payload_blocks{};
     std::uint64_t iso_reservation_at{},iso_reservation_bytes{};
     Bytes mbr; // exact independently validated replacement header, or empty
+    std::optional<VatGptEdit> gpt;
     std::vector<VatPayload> payloads;
     std::vector<Bytes> append;
     std::map<std::string,VatFileLayout> expected;
@@ -3297,11 +3302,118 @@ Bytes vat_grown_mbr(std::ifstream& in,std::uint64_t original,
     return mbr;
 }
 
+// Independent byte-level derivation of the limited GPT VAT profile.
+// No GPT partition entries or data addresses may be changed. Only the
+// protective MBR length, the two headers, and the old/new backup array
+// location change. The retired backup is strictly after the old VAT.
+std::uint32_t vat_gpt_crc(const Bytes& bytes,std::size_t count) {
+    std::uint32_t crc=0xffffffffu;
+    for(std::size_t j=0;j<count;++j) {
+        crc^=bytes[j];
+        for(unsigned bit=0;bit<8;++bit)
+            crc=(crc>>1)^((crc&1u)?0xedb88320u:0u);
+    }
+    return ~crc;
+}
+VatGptEdit vat_gpt_edit(std::ifstream& in,std::uint64_t original,
+                       std::uint64_t final,std::uint64_t trailer) {
+    vat_need(trailer==9 && original>=310*block && original%block==0 &&
+             final>original && final%block==0,
+             "unsupported sequential GPT envelope");
+    auto read=[&](std::uint64_t at,std::size_t n) {
+        vat_need(at<=original && n<=original-at,"GPT metadata outside source");
+        Bytes b(n);
+        in.clear();in.seekg(static_cast<std::streamoff>(at));
+        in.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(n));
+        vat_need(bool(in),"cannot read GPT metadata");
+        return b;
+    };
+    const auto old_last=original/512-1,new_last=final/512-1;
+    const auto old_table=old_last-32,new_table=new_last-32;
+    const auto recorded=(original/block-trailer)*block;
+    auto mbr=read(0,512);
+    vat_need(mbr[510]==0x55 && mbr[511]==0xaa,
+             "invalid GPT protective MBR signature");
+    std::optional<std::size_t> protective;
+    for(std::size_t at=446;at<510;at+=16) {
+        if(mbr[at+4]==0xee) {
+            vat_need(!protective && mbr[at]==0 && u32(mbr,at+8)==1 &&
+                     u32(mbr,at+12)==std::min<std::uint64_t>(old_last,0xffffffffull),
+                     "invalid GPT protective partition");
+            protective=at;
+        } else vat_need(std::all_of(mbr.begin()+at,mbr.begin()+at+16,
+                                   [](auto c){return c==0;}),
+                        "VAT GPT requires a protective-only MBR");
+    }
+    vat_need(protective.has_value(),"missing GPT protective partition");
+    auto primary=read(512,512);
+    auto backup=read(old_last*512,512);
+    auto entries=read(1024,16384);
+    const auto crc=vat_gpt_crc(entries,entries.size());
+    auto validate_header=[&](Bytes h,std::uint64_t self,std::uint64_t alternate,
+                             std::uint64_t table) {
+        vat_need(std::string_view(reinterpret_cast<const char*>(h.data()),8)=="EFI PART" &&
+                 u32(h,8)==0x10000 && u32(h,12)==92 && u32(h,20)==0 &&
+                 u64(h,24)==self && u64(h,32)==alternate && u64(h,40)>=34 &&
+                 u64(h,40)<=u64(h,48) && u64(h,48)==old_table-1 &&
+                 u64(h,72)==table && u32(h,80)==128 && u32(h,84)==128 &&
+                 u32(h,88)==crc,
+                 "invalid standard GPT header geometry");
+        const auto expected=u32(h,16);
+        put32(h,16,0);
+        vat_need(vat_gpt_crc(h,92)==expected,"GPT header CRC32 mismatch");
+    };
+    validate_header(primary,1,old_last,2);
+    validate_header(backup,old_last,1,old_table);
+    vat_need(u64(primary,40)==u64(backup,40) &&
+             std::equal(primary.begin()+56,primary.begin()+72,backup.begin()+56) &&
+             read(old_table*512,entries.size())==entries &&
+             old_table*512>=recorded,
+             "GPT headers or partition arrays disagree");
+    std::size_t used=0;
+    for(std::size_t at=0;at<entries.size();at+=128) {
+        if(std::all_of(entries.begin()+at,entries.begin()+at+16,
+                       [](auto c){return c==0;}))continue;
+        ++used;
+        const auto first=u64(entries,at+32),last=u64(entries,at+40);
+        vat_need(first>=u64(primary,40) && first<=last &&
+                 last<recorded/512,
+                 "GPT partition extends into sequential VAT trailer");
+    }
+    vat_need(used!=0,"GPT has no independent partitions");
+    // The padding before the old GPT backup is outside recorded UDF
+    // space. Require it to be empty rather than infer unknown records.
+    const auto gap=read(recorded,static_cast<std::size_t>(old_table*512-recorded));
+    vat_need(std::all_of(gap.begin(),gap.end(),[](auto c){return c==0;}),
+             "nonzero bytes between final VAT and GPT backup");
+    put32(mbr,*protective+12,static_cast<std::uint32_t>(
+                                 std::min<std::uint64_t>(new_last,0xffffffffull)));
+    put64(primary,32,new_last);put64(primary,48,new_table-1);
+    put64(backup,24,new_last);put64(backup,48,new_table-1);
+    put64(backup,72,new_table);
+    for(auto* h:{&primary,&backup}) {
+        put32(*h,16,0);put32(*h,16,vat_gpt_crc(*h,92));
+    }
+    VatGptEdit result;
+    result.old_backup=old_table*512;
+    result.retired.assign(static_cast<std::size_t>(original-result.old_backup),0);
+    result.prefix=std::move(mbr);
+    result.prefix.insert(result.prefix.end(),primary.begin(),primary.end());
+    result.tail.assign(static_cast<std::size_t>(trailer*block),0);
+    const auto offset=static_cast<std::size_t>(trailer*block-33*512);
+    std::copy(entries.begin(),entries.end(),result.tail.begin()+offset);
+    std::copy(backup.begin(),backup.end(),result.tail.end()-512);
+    return result;
+}
+
 std::unique_ptr<VatAppendPlan> prepare_vat_append(
         const std::filesystem::path& image,
         const std::vector<ArchiveChange>& changes,const EditProgress& progress,
-        const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment) {
+        const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment,
+        std::uint64_t gpt_trailer) {
     edit_tick(progress);
+    vat_need(!gpt_trailer || (gpt_trailer==9 && !mbr_alignment && !coordinated),
+             "VAT GPT currently requires a split namespace and standard trailer");
     vat_need(!mbr_alignment ||
              (mbr_alignment<=65536 && (!coordinated || coordinated->iso_metadata_blocks)),
              "VAT MBR coordination requires a mirrored-tree reservation");
@@ -3333,6 +3445,8 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     // on-disc tree and comparing it with the public reader.
     plan->original_size=std::filesystem::file_size(image);
     const auto sectors=plan->original_size/block;
+    vat_need(sectors>=300+gpt_trailer,"truncated sequential GPT image");
+    const auto recorded_sectors=sectors-gpt_trailer;
     vat_need(plan->original_size%block==0 && sectors>=300 &&
              plan->original_size<max_image-2*block,"unsupported recorded image size");
     std::ifstream in(image,std::ios::binary);
@@ -3393,7 +3507,7 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     const auto revision=u16(lvd,240);
     const bool legacy=revision==0x0150;
     vat_need(contents==(legacy?"+NSR02":"+NSR03") && u32(pd,184)==2 &&
-             partition>256 && partition<sectors &&
+             partition>256 && partition<recorded_sectors &&
              capacity<=0xffffffffu-partition &&
              sectors-partition+2<=capacity,
              "requires UDF 1.50/2.x write-once partition with unrecorded capacity");
@@ -3444,8 +3558,10 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         vat_need(j==1,"unsupported integrity sequence continuation");
         vat_tag(tail,8,integrity_start+j,512);
     }
-    const auto old_vat=static_cast<std::uint32_t>(sectors-partition-1);
-    auto vat_fe=vat_read_sector(in,sectors-1,sectors);
+    // In GPT images the clean VAT ends the recorded optical volume,
+    // not the whole hybrid file. No search/fallback is allowed to write.
+    const auto old_vat=static_cast<std::uint32_t>(recorded_sectors-partition-1);
+    auto vat_fe=vat_read_sector(in,recorded_sectors-1,sectors);
     const auto vat_layout=vat_physical_file(vat_fe,old_vat,
                                             legacy?0:248,partition,old_vat);
     auto vat=vat_table_bytes(in,vat_layout);
@@ -3794,7 +3910,9 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     std::vector<std::pair<std::uint32_t,Bytes>> file_entries;
     file_entries.reserve(requests.size());
     const auto next_physical=[&]() {
-        return std::uint64_t(old_vat)+1+plan->payload_blocks;
+        // Preserve the prior VAT and its complete trailer. Append
+        // payloads at physical EOF, even when GPT follows the old VAT.
+        return sectors-partition+plan->payload_blocks;
     };
     const auto available=std::uint64_t(capacity)-(sectors-partition);
     for(const auto& request:requests) {
@@ -4056,7 +4174,7 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                         dirty_directories.size()+directory_blocks+iso_blocks+vat_blocks+1u;
     const auto padding=mbr_alignment?
         (mbr_alignment-(sectors+minimum)%mbr_alignment)%mbr_alignment:0u;
-    const auto required=minimum+padding;
+    const auto required=minimum+padding+gpt_trailer;
     vat_need(required<=available && required<(max_image-plan->original_size)/block,
              "insufficient unrecorded partition capacity for VAT append/alignment");
     plan->final_size=plan->original_size+required*block;
@@ -4065,6 +4183,11 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         vat_need(bool(mbr_source),"cannot reopen original VAT MBR");
         plan->mbr=vat_grown_mbr(mbr_source,plan->original_size,
                                plan->final_size,mbr_alignment);
+    }
+    if(gpt_trailer) {
+        std::ifstream gpt_source(image,std::ios::binary);
+        vat_need(bool(gpt_source),"cannot reopen original VAT GPT");
+        plan->gpt=vat_gpt_edit(gpt_source,plan->original_size,plan->final_size,gpt_trailer);
     }
     auto physical=next_physical();
     for(auto& [logical,fe]:file_entries) {
@@ -4166,15 +4289,17 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         tag_update(vat_fe,0,176+vat.size());
     }
     plan->append.push_back(std::move(vat_fe));
+    if(plan->gpt)plan->append.push_back(std::move(plan->gpt->tail));
     return plan;
 }
 void edit_vat_append(const std::filesystem::path& image,
         const std::vector<ArchiveChange>& changes,const EditProgress& progress,
         const EditStageValidator& validate_stage,
-        const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment) {
+        const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment,
+        std::uint64_t gpt_trailer) {
     // Pin source identity before reading any plan data.
     EditTransaction tx(image);
-    const auto plan=prepare_vat_append(image,changes,progress,coordinated,mbr_alignment);
+    const auto plan=prepare_vat_append(image,changes,progress,coordinated,mbr_alignment,gpt_trailer);
     tx.assert_source_unchanged();
     prepare_udf_stage(image,tx.output,plan->original_size,progress);
     {
@@ -4217,7 +4342,7 @@ void edit_vat_append(const std::filesystem::path& image,
     // Before any ISO coordination callback, the complete sequential
     // stage must preserve the entire source prefix. Afterwards, only
     // prevalidated ISO metadata fields may differ from that prefix.
-    if(coordinated) {
+    if(coordinated || plan->gpt) {
         OpticalEditGuard whole(plan->original_size);
         whole.protect(0,plan->original_size);
         whole.verify_appended(image,tx.output,progress);
@@ -4230,6 +4355,16 @@ void edit_vat_append(const std::filesystem::path& image,
         vat_need(bool(out),"cannot open staged VAT MBR");
         staged_write(out,0,plan->mbr);
         vat_need(staged_read(out,0,512)==plan->mbr,"staged VAT MBR readback differs");
+    }
+    if(plan->gpt) {
+        edit_tick(progress);
+        std::fstream out(tx.output,std::ios::binary|std::ios::in|std::ios::out);
+        vat_need(bool(out),"cannot open staged VAT GPT");
+        staged_write(out,0,plan->gpt->prefix);
+        staged_write(out,plan->gpt->old_backup,plan->gpt->retired);
+        vat_need(staged_read(out,0,1024)==plan->gpt->prefix &&
+                 staged_read(out,plan->gpt->old_backup,plan->gpt->retired.size())==plan->gpt->retired,
+                 "staged VAT GPT header readback differs");
     }
     if(validate_stage)validate_stage(tx.output);
     vat_need(std::filesystem::file_size(tx.output)==plan->final_size,
@@ -4259,6 +4394,19 @@ void edit_vat_append(const std::filesystem::path& image,
                          "VAT ISO reservation differs from planned range");
             else vat_need(staged_read(in,pos,bytes.size())==bytes,
                           "ISO coordination modified appended VAT metadata");
+            pos+=bytes.size();
+        }
+    } else if(plan->gpt) {
+        std::fstream in(tx.output,std::ios::binary|std::ios::in);
+        vat_need(bool(in) && staged_read(in,0,1024)==plan->gpt->prefix &&
+                 staged_read(in,plan->gpt->old_backup,plan->gpt->retired.size())==plan->gpt->retired,
+                 "staged validation changed VAT GPT metadata");
+        guard.protect(1024,plan->gpt->old_backup-1024);
+        auto pos=plan->original_size+plan->payload_blocks*block;
+        for(const auto& bytes:plan->append) {
+            edit_tick(progress);
+            vat_need(staged_read(in,pos,bytes.size())==bytes,
+                     "GPT VAT append readback changed");
             pos+=bytes.size();
         }
     } else if(!plan->mbr.empty()) {
@@ -4328,14 +4476,14 @@ void edit_udf(const std::filesystem::path& image,
         // The VAT bridge provides the external ISO validator and
         // immutable ranges. Shared-file coordination may only change
         // the explicitly checked pre-anchor ISO metadata fields.
-        if(gpt_append_trailer_blocks ||
+        if((gpt_append_trailer_blocks && coordinated) ||
            (bounded_partitioned_bridge &&
-            (!mbr_append_alignment_blocks ||
+            ((!mbr_append_alignment_blocks && !gpt_append_trailer_blocks) ||
              (coordinated && !coordinated->iso_metadata_blocks))) ||
            (allow_bridge && (!validate_stage || protected_ranges.empty())) ||
            (!allow_bridge && (validate_stage || !protected_ranges.empty() || coordinated)))throw;
         edit_vat_append(image,changes,progress,validate_stage,coordinated,
-                        mbr_append_alignment_blocks);
+                        mbr_append_alignment_blocks,gpt_append_trailer_blocks);
         return;
     }
     // A mirrored sequential deletion contract cannot be interpreted
