@@ -1495,7 +1495,11 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
     private.write_bytes(b'private content')
     base_payload=b'BASE-GPT-SHARED-PAYLOAD!'*400
     for joliet in (False,True):
-        for external,envelope in ((False,'gpt'),(True,'gpt'),(False,'mbr'),(True,'mbr')):
+        for external,envelope,iso_only in (
+            (external,envelope,iso_only)
+            for external in (False,True) for envelope in ('gpt','mbr')
+            for iso_only in (False,True)
+        ):
             gpt=envelope=='gpt'
             # Seed MBR through the established split-namespace writer so
             # the last VAT ICB remains at EOF with real cylinder padding.
@@ -1519,8 +1523,10 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 seed[510:512]=b'\x55\xaa'
             seed_path.write_bytes(seed)
             replacement.write_bytes(base_payload)
-            run(editor,seed_path,'batch','mkdir','COMMON','add','COMMON/BASE.BIN',replacement,
-                'add','COMMON/PRIVATE.BIN',private,'mkdir','OTHER')
+            seed_args=['batch','mkdir','COMMON','add','COMMON/BASE.BIN',replacement,
+                       'add','COMMON/PRIVATE.BIN',private,'mkdir','OTHER']
+            if iso_only:seed_args+=['mkdir','COMMON/ISOSUB']
+            run(editor,seed_path,*seed_args)
             raw=bytearray(seed_path.read_bytes())
             at=raw.find(base_payload)
             assert at>=0 and at%B==0 and raw.find(base_payload,at+1)==-1
@@ -1531,6 +1537,15 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 p16(raw,24*B+38,4);p16(raw,24*B+102,4)
             else:raw[26*B:27*B]=b'E'*B
             descriptors=[16,17] if joliet else [16]
+            iso_expected={}
+            alias_fields=[]
+            if iso_only:
+                raw[34*B:34*B+8]=b'ISO only'
+                raw[35*B:35*B+9]=b'ISO root!'
+                raw[38*B:38*B+8]=b'ISO tree'
+                iso_expected={'COMMON/ISOSUB/KEEP.BIN':b'ISO only',
+                              'ISO_ROOT.BIN':b'ISO root!',
+                              'ONLY/':None,'ONLY/KEEP.BIN':b'ISO tree'}
             for vd in descriptors:
                 view=vd==17
                 parent=22 if view else 20
@@ -1538,17 +1553,32 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 def name(v):return v.encode('utf-16-be' if view else 'ascii')
                 directory=iso_record(parent,B,2,b'\0')+iso_record(parent,B,2,b'\1')
                 directory+=iso_record(child,B,2,name('COMMON'))
+                if iso_only:
+                    alias_fields.append(parent*B+len(directory)+2)
+                    directory+=iso_record(35,9,0,name('ISO_ROOT.BIN;1'))
+                    only=37 if view else 36
+                    directory+=iso_record(only,B,2,name('ONLY'))
+                    only_data=iso_record(only,B,2,b'\0')+iso_record(parent,B,2,b'\1')
+                    only_data+=iso_record(38,8,0,name('KEEP.BIN;1'))
+                    raw[only*B:(only+1)*B]=only_data.ljust(B,b'\0')
                 raw[parent*B:(parent+1)*B]=directory.ljust(B,b'\0')
                 directory=iso_record(child,B,2,b'\0')+iso_record(parent,B,2,b'\1')
                 directory+=iso_record(at//B,len(base_payload),0,name('BASE.BIN;1'))
+                if iso_only:
+                    sub=33 if view else 32
+                    directory+=iso_record(sub,B,2,name('ISOSUB'))
+                    sub_data=iso_record(sub,B,2,b'\0')+iso_record(child,B,2,b'\1')
+                    sub_data+=iso_record(34,8,0,name('KEEP.BIN;1'))
+                    raw[sub*B:(sub+1)*B]=sub_data.ljust(B,b'\0')
                 raw[child*B:(child+1)*B]=directory.ljust(B,b'\0')
                 both(raw,vd*B+80,len(raw)//B)
             if gpt:vat_gpt_envelope(raw)
             else:assert len(raw)%(10*B)==0
             bridge.write_bytes(raw)
             expected={'COMMON/':None,'COMMON/BASE.BIN':base_payload}
-            assert read_image(bridge)==expected
-            if joliet:assert read_image(bridge,True)==expected
+            if iso_only:expected['COMMON/ISOSUB/']=None
+            assert read_image(bridge)=={**expected,**iso_expected}
+            if joliet:assert read_image(bridge,True)=={**expected,**iso_expected}
 
             def verify(before,number):
                 after=bridge.read_bytes()
@@ -1590,10 +1620,10 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     assert after[len(after)-B+27]==248
                     assert struct.unpack_from('<I',after,len(after)-B+12)[0]==len(after)//B-PARTITION-1
                 assert restored==before
-                assert read_image(bridge)==expected
-                if joliet:assert read_image(bridge,True)==expected
+                assert read_image(bridge)=={**expected,**iso_expected}
+                if joliet:assert read_image(bridge,True)=={**expected,**iso_expected}
                 validate_path_tables(bridge)
-                out=root/f'vat-partial-{envelope}-{joliet}-{external}-{number}'
+                out=root/f'vat-partial-{envelope}-{joliet}-{external}-{iso_only}-{number}'
                 check_disc(inspector,bridge,out)
                 files={p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}
                 dirs={p.relative_to(out).as_posix()+'/':None for p in out.rglob('*') if p.is_dir()}
@@ -1602,8 +1632,8 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 return after
 
             initial=raw
-            if not gpt:
-                replacement.write_bytes(b'first MBR shared replacement')
+            if not gpt or iso_only:
+                replacement.write_bytes(b'first partial shared replacement')
                 run(editor,bridge,'add','COMMON/BASE.BIN',replacement)
                 expected['COMMON/BASE.BIN']=replacement.read_bytes()
                 initial=verify(raw,0)
@@ -1617,6 +1647,22 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             run(editor,bridge,'add','COMMON/SUB/NEXT.BIN',replacement)
             expected['COMMON/SUB/NEXT.BIN']=replacement.read_bytes()
             second=verify(first,2)
+            if iso_only:
+                for args in (
+                    ('add','ISO_ROOT.BIN',replacement),
+                    ('delete','ISO_ROOT.BIN'),
+                    ('delete','ONLY'),
+                    ('add','ONLY/NEW.BIN',replacement),
+                    ('add','COMMON/ISOSUB/KEEP.BIN',replacement),
+                    ('delete','COMMON/ISOSUB'),
+                    ('batch','delete','COMMON/ISOSUB','add','COMMON/NEW.BIN',replacement)):
+                    run(editor,bridge,*args,success=False)
+                    assert bridge.read_bytes()==second
+                # ISOSUB is a shared directory. Its ISO-only child
+                # must remain, but another shared child can be added.
+                run(editor,bridge,'add','COMMON/ISOSUB/NEW.BIN',replacement)
+                expected['COMMON/ISOSUB/NEW.BIN']=replacement.read_bytes()
+                second=verify(second,21)
             for args in (
                 ('add','ROOT.BIN',replacement),
                 ('add','OTHER/NEW.BIN',replacement),
@@ -1676,6 +1722,15 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             run(editor,bridge,'add','COMMON/AGAIN.BIN',replacement)
             expected['COMMON/AGAIN.BIN']=replacement.read_bytes()
             sixth=verify(fifth,6)
+            if iso_only:
+                # A distinct ISO name pointing into a live shared UDF
+                # extent is not an independent file. Reject atomically.
+                bad=bytearray(raw)
+                for field in alias_fields:both(bad,field,at//B)
+                bridge.write_bytes(bad)
+                run(editor,bridge,'add','COMMON/NEW.BIN',replacement,success=False)
+                assert bridge.read_bytes()==bad
+                bridge.write_bytes(sixth)
             if not gpt:
                 for defect in ('chs','partition','length','efi-alias'):
                     bad=bytearray(raw)

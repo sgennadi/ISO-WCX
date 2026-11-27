@@ -506,6 +506,34 @@ container length and CHS, an unchanged independent EFI partition,
 the final VAT ICB at physical EOF, and rollback for invalid CHS,
 unknown partition type, inconsistent length and an EFI payload alias.
 The original MBR coordinator and its reservation requirement remain
-unchanged. A partial remaster still requires a demonstrably shared
-regular file in the source, with ISO/Joliet a subset of UDF. New root
-paths remain ambiguous, and physical boot behavior remains unverified.
+unchanged. The following profile extends the subset requirement.
+New root paths remain ambiguous, and physical boot behavior remains
+unverified.
+
+### Mixed bridges with independent ISO-only and UDF-only paths
+
+For the established sequential MBR and protective GPT profiles, the
+ISO/Joliet and UDF trees may now overlap without either being a subset
+of the other. A common regular file with matching physical extent is
+still required. The coordinator classifies original shared entries,
+ISO-only paths and UDF-only paths separately, verifies the primary
+and Joliet views, and rejects independent ISO payload extents that
+overlap live UDF payload ranges. ISO-only records and payloads remain
+unchanged in the planned tree (directory locations may be remastered);
+UDF-only paths retain their original layout. The staged verification
+checks independent path membership and type separately from the shared
+namespace and retains the existing byte-level historical prefix guard.
+
+New entries are allowed only beneath confirmed shared non-root
+directories or their new descendants. Direct edits to independent
+paths, ambiguous root additions, and recursive deletion of a directory
+containing independent descendants on either side are rejected.
+Shared subtree additions, replacements and recursive deletes still
+use one atomic transaction. The expanded matrix covers MBR and GPT,
+embedded and external VAT, primary ISO and Joliet, ISO-only root files
+and directories, ISO-only children of shared directories, colliding
+names, aliasing payload extents, repeated remastering and rollback.
+Independent primary/Joliet trees that disagree with each other,
+multi-extent ISO-only records, and independent-path editing in a
+mixed bridge remain outside this profile. Physical boot behavior is
+not established by the image-level tests.
