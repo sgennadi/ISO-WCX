@@ -340,4 +340,26 @@ Existing regular files that have a matching name and identical single physical e
 
 ### Fully mirrored VAT bridge tree remaster
 
-When both ordinary ISO views and the VAT namespace agree on every original path and regular-file extent, the editor can add shared files and directories and mix regular-file replacement/removal in a single append. It rebuilds ISO directory trees and both endian path tables in a bounded zero-filled physical reservation directly preceding the final VAT table/ICB. The reservation is not mapped into VAT; UDF allocation and payload extents are checked independently. Only the planned pre-anchor ISO volume descriptor fields in the old prefix may change. Newly appended UDF FEs, directory blocks and VAT bytes are checked again after ISO coordination, and the resulting ISO/UDF trees and all replacement sources must match before commit. Repeat edits do not patch appended historical ISO directory blocks. Ordinary ISO-representable names, nonempty regular shared files within single ISO extent bounds, and fully mirrored source trees are required. Shared directory removal, primary-name aliases, mixed split/mirrored namespaces for tree creation, and MBR/GPT growth remain unsupported. Regression tests cover repeated edits, mixed batches, primary/Joliet path tables, embedded and external VAT storage, bootable fixtures, failed batch and cancellation.
+When both ordinary ISO views and the VAT namespace agree on every original path and regular-file extent, the editor can add shared files and directories and mix regular-file replacement/removal in a single append. It rebuilds ISO directory trees and both endian path tables in a bounded zero-filled physical reservation directly preceding the final VAT table/ICB. The reservation is not mapped into VAT; UDF allocation and payload extents are checked independently. Only the planned pre-anchor ISO volume descriptor fields in the old prefix may change. Newly appended UDF FEs, directory blocks and VAT bytes are checked again after ISO coordination, and the resulting ISO/UDF trees and all replacement sources must match before commit. Repeat edits do not patch appended historical ISO directory blocks. Ordinary ISO-representable names, nonempty regular shared files within single ISO extent bounds, and fully mirrored source trees are required. Primary-name aliases, mixed split/mirrored namespaces for tree creation, and MBR/GPT growth remain unsupported. Regression tests cover repeated edits, mixed batches, primary/Joliet path tables, embedded and external VAT storage, bootable fixtures, failed batch and cancellation.
+
+
+### Recursive mirrored VAT directory removal
+
+The ISO tree planner independently expands exact selected UDF directory
+paths to all their descendants after verifying the original ISO/UDF
+namespaces. The explicit selections and expanded canonical paths are
+separate coordination fields. The strict VAT parser must independently
+expand the identical deletion set; mismatch aborts before writing.
+Overlapping parent/child selections are coalesced, while missing
+explicit paths, case collisions and additions inside a removed
+subtree fail closed. The private ISO tree removes children first,
+clears non-owning directory references before freeing nodes, and
+rebuilds only surviving directory trees and path tables in the new
+reservation. The UDF planner retires all removed FEs and virtual
+directory data blocks, leaving historical physical bytes intact.
+Directory-only mirrored namespaces remain eligible for later appends.
+Tests exercise nested external directories, repeated remasters,
+overlapping removals, similarly prefixed siblings, VAT map retirement,
+path table readback and cancellation. This does not authorize
+partitioned VAT, split-tree recursive shared deletion, or Type-1
+interpretation of a VAT-only recursive plan.

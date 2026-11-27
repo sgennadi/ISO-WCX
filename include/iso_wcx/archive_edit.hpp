@@ -33,6 +33,10 @@ struct CoordinatedIsoUpdate {
     std::set<std::string> shared_deletions;
     std::set<std::string> shared_additions;
     std::set<std::string> shared_directories;
+    // Only for sequential mirrored-tree mastering: independently
+    // expanded, canonical directory/file removals, including roots.
+    // shared_deletions retains the explicit user selections.
+    std::set<std::string> vat_tree_deletions;
     std::uint64_t iso_metadata_blocks=0;
     EditProtectedRanges metadata_writes;
 };

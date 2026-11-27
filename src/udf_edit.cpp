@@ -3275,7 +3275,8 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         const bool remaster=coordinated->iso_metadata_blocks!=0;
         vat_need(coordinated->iso_metadata_blocks<=32768 &&
                  (remaster || (coordinated->shared_additions.empty() &&
-                               coordinated->shared_directories.empty())) &&
+                               coordinated->shared_directories.empty() &&
+                               coordinated->vat_tree_deletions.empty())) &&
                  coordinated->shared_replacements.size()+
                  coordinated->shared_deletions.size()+
                  coordinated->shared_additions.size()+
@@ -3286,7 +3287,7 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
             const auto& change=*request.change;
             const auto& key=request.key;
             const bool match=change.remove?
-                (!change.directory && coordinated->shared_deletions.count(key)):
+                ((remaster || !change.directory) && coordinated->shared_deletions.count(key)):
                 (change.directory?coordinated->shared_directories.count(key):
                  (coordinated->shared_replacements.count(key)+
                   coordinated->shared_additions.count(key)));
@@ -3674,6 +3675,15 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         }
     }
     vat_need(removals.size()<=max_items,"VAT recursive removal exceeds namespace limit");
+    if(coordinated && coordinated->iso_metadata_blocks) {
+        vat_need(removals.size()==coordinated->vat_tree_deletions.size(),
+                 "VAT and ISO expanded deletion counts differ");
+        for(const auto& [key,change]:removals) {
+            (void)change;
+            vat_need(coordinated->vat_tree_deletions.count(key)!=0,
+                     "VAT and ISO expanded deletion paths differ");
+        }
+    }
     std::vector<Request> expanded;
     expanded.reserve(requests.size()+removals.size());
     for(const auto& [key,change]:removals)
@@ -3747,8 +3757,11 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
             vat_need(!folded_names.count(fold(key)),
                      "new VAT filename collides case-insensitively");
         if(coordinated) {
+            const bool authorized_remove=coordinated->iso_metadata_blocks?
+                coordinated->vat_tree_deletions.count(key)!=0:
+                (!target_directory && coordinated->shared_deletions.count(key));
             vat_need(change.remove?
-                     (!creating && !target_directory && coordinated->shared_deletions.count(key)):
+                     (!creating && authorized_remove):
                      (creating?(making_directory?coordinated->shared_directories.count(key):
                                                  coordinated->shared_additions.count(key)):
                                coordinated->shared_replacements.count(key)),
@@ -4211,6 +4224,10 @@ void edit_udf(const std::filesystem::path& image,
         edit_vat_append(image,changes,progress,validate_stage,coordinated);
         return;
     }
+    // A mirrored sequential deletion contract cannot be interpreted
+    // by the physical Type-1 allocator if the mapping family changed.
+    need(!coordinated || coordinated->vat_tree_deletions.empty(),
+         "VAT-only recursive coordination plan cannot use Type-1");
     auto& volume=*owner;
     if(bounded_partitioned_bridge) {
         const bool rom=(mbr_append_alignment_blocks || gpt_append_trailer_blocks) &&

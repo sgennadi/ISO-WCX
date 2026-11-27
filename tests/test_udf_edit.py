@@ -1182,6 +1182,105 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
             run(editor,bridge,'batch','add','OK.BIN',replacement,
                 'add','MISSING/NEW.BIN',replacement,success=False)
             assert bridge.read_bytes()==third
+            # Exercise a recursive removal spanning external UDF
+            # directory blocks, repeated ISO remasters and overlapping
+            # selections. A similarly prefixed sibling must survive.
+            names=[f'F{j:03d}_'+'X'*58+'.BIN' for j in range(36)]
+            args=['batch','mkdir','SUB/DEEP','mkdir','SUBKEEP',
+                  'add','SUBKEEP/KEEP.BIN',replacement]
+            for name in names:args+=['add','SUB/DEEP/'+name,replacement]
+            run(editor,bridge,*args)
+            expected.update({'SUB/DEEP/':None,'SUBKEEP/':None,
+                             'SUBKEEP/KEEP.BIN':replacement.read_bytes()})
+            expected.update({'SUB/DEEP/'+name:replacement.read_bytes() for name in names})
+            fourth=verify(third,expected,4)
+
+            def vat_snapshot(data):
+                fe=len(data)-B
+                size=struct.unpack_from('<Q',data,fe+56)[0]
+                if struct.unpack_from('<H',data,fe+34)[0]==3:
+                    table=data[fe+176:fe+176+size]
+                else:
+                    length,lba=struct.unpack_from('<II',data,fe+176)
+                    assert length==size
+                    table=data[(PARTITION+lba)*B:(PARTITION+lba)*B+size]
+                header=struct.unpack_from('<H',table,0)[0]
+                mapping=struct.unpack_from('<'+'I'*((size-header)//4),table,header)
+                return table,mapping
+
+            _,old_map=vat_snapshot(fourth)
+            def sector(logical):
+                at=(PARTITION+old_map[logical])*B
+                return fourth[at:at+B]
+            def children(logical):
+                fe=sector(logical)
+                size=struct.unpack_from('<Q',fe,56)[0]
+                mode=struct.unpack_from('<H',fe,34)[0]
+                data_lbas=[]
+                if mode==3:
+                    body=fe[176:176+size]
+                else:
+                    assert mode==0 and struct.unpack_from('<I',fe,172)[0]==8
+                    length,first=struct.unpack_from('<II',fe,176)
+                    assert length==size
+                    data_lbas=list(range(first,first+(size+B-1)//B))
+                    body=b''.join(sector(x) for x in data_lbas)[:size]
+                entries={}
+                at=0
+                while at<len(body):
+                    n=body[at+19]
+                    count=(38+n+3)&~3
+                    assert count<=len(body)-at
+                    if n:
+                        assert body[at+38]==8
+                        label=body[at+39:at+38+n].decode('ascii')
+                        entries[label]=(struct.unpack_from('<I',body,at+24)[0],
+                                        body[at+18]==2)
+                    at+=count
+                assert at==len(body)
+                return entries,data_lbas
+            roots,_=children(1)
+            retired=set()
+            def collect(logical,is_dir):
+                assert logical not in retired
+                retired.add(logical)
+                if is_dir:
+                    entries,data_lbas=children(logical)
+                    retired.update(data_lbas)
+                    for child,is_child_dir in entries.values():
+                        collect(child,is_child_dir)
+            sub,kind=roots['SUB']
+            collect(sub,kind)
+            deep,_=children(sub)
+            assert len(children(deep['DEEP'][0])[1])>=2
+            assert len(retired)>len(names)+3
+
+            for request in (
+                ('batch','delete','SUB','add','SUB/NEW.BIN',replacement),
+                ('batch','delete','SUB','delete','SUB/MISSING.BIN'),
+                ('batch','delete','SUB','delete','sub')):
+                run(editor,bridge,*request,success=False)
+                assert bridge.read_bytes()==fourth
+            cancelled=run(editor,bridge,'batchcancelstaged','delete','SUB',
+                          'delete','SUB/DEEP/'+names[0],success=False)
+            assert cancelled.returncode==3
+            assert bridge.read_bytes()==fourth
+            run(editor,bridge,'batch','delete','SUB',
+                'delete','SUB/DEEP','delete','SUB/DEEP/'+names[0])
+            expected={key:value for key,value in expected.items()
+                      if not key.startswith('SUB/')}
+            fifth=verify(fourth,expected,5)
+            table,new_map=vat_snapshot(fifth)
+            assert struct.unpack_from('<I',table,132)[0]==len(fourth)//B-PARTITION-1
+            assert all(new_map[x]==0xffffffff for x in retired)
+            assert new_map[roots['SUBKEEP'][0]]==old_map[roots['SUBKEEP'][0]]
+            assert struct.unpack_from('<II',table,136)==(2,2)
+            # Directory-only mirrored images must not lose editability
+            # after removal of the last ordinary shared file.
+            run(editor,bridge,'batch','delete','hello','delete','SUBKEEP/KEEP.BIN')
+            sixth=verify(fifth,{'SUBKEEP/':None},6)
+            run(editor,bridge,'add','SUBKEEP/NEW.BIN',replacement)
+            verify(sixth,{'SUBKEEP/':None,'SUBKEEP/NEW.BIN':replacement.read_bytes()},7)
             assert not list(root.glob('.iso-wcx-edit-*'))
 
 

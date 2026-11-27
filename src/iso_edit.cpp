@@ -2497,6 +2497,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
        (!sequential_vat && !std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
            return !c.remove && !iso_files.count(upper(edit_path(c.path)));
        })))return false;
+    std::map<std::string,bool> original_udf_paths;
     {
         const Disc udf(path);
         if(udf.format()!="UDF" || udf.items().size()!=iso_files.size())return false;
@@ -2507,6 +2508,8 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
             const auto at=iso_files.find(key);
             if(!seen.insert(key).second || at==iso_files.end() ||
                at->second->directory!=item.directory)return false;
+            if(sequential_vat &&
+               !original_udf_paths.emplace(item.path,item.directory).second)return false;
             if(item.directory)continue;
             const auto* n=at->second;
             if(n->size!=item.size || !item.size || !item.inline_data.empty() ||
@@ -2516,7 +2519,10 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                item.extents[0].length!=item.size)return false;
             common_data=true;
         }
-        if(!common_data && !(sequential_vat && iso_files.empty()))return false;
+        // A fully mirrored directory-only namespace remains writable
+        // after its last regular file is removed. Type-1 keeps its
+        // original requirement for a demonstrated shared payload.
+        if(!common_data && !sequential_vat)return false;
         if(sequential_vat && !udf.udf_has_virtual_partition())return false;
     }
     if(sequential_vat) {
@@ -2549,6 +2555,58 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         const auto inspection=inspect_udf_edit(path,true,image.hybrid_system_area);
         if(!inspection.parser_compatible || inspection.partition_access_type!=1 ||
            inspection.allocation_bitmap || inspection.allocation_table)return false;
+    }
+    // For a proven mirrored VAT namespace, expand selected directory
+    // removals independently from the strict UDF mutation planner.
+    // Keep the original exact requests as a distinct contract, so a
+    // case alias or a missing descendant cannot be silently coalesced.
+    std::vector<ArchiveChange> expanded;
+    if(sequential_vat) {
+        need(changes.size()<=4096,"VAT mirrored request exceeds batch limit");
+        std::set<std::string> names;
+        std::map<std::string,bool> selected;
+        for(const auto& change:changes) {
+            auto key=edit_path(change.path);
+            need(names.insert(upper(key)).second,
+                 "duplicate or case-colliding mirrored VAT request");
+            if(change.remove) {
+                const auto at=original_udf_paths.find(key);
+                need(at!=original_udf_paths.end() &&
+                     (!change.directory || at->second),
+                     "mirrored VAT removal target does not exist or has wrong type");
+                selected.emplace(key,at->second);
+                plan.shared_deletions.insert(key);
+            } else {
+                auto normalized=change;
+                normalized.path=std::move(key);
+                expanded.push_back(std::move(normalized));
+            }
+        }
+        for(const auto& [key,directory]:selected) {
+            if(!plan.vat_tree_deletions.insert(key).second)continue;
+            if(!directory)continue;
+            const auto prefix=key+"/";
+            for(auto at=original_udf_paths.lower_bound(prefix);
+                at!=original_udf_paths.end() && at->first.starts_with(prefix);++at)
+                plan.vat_tree_deletions.insert(at->first);
+        }
+        need(plan.vat_tree_deletions.size()<=200000,
+             "VAT mirrored recursive deletion exceeds namespace limit");
+        std::set<std::string> removed_folded;
+        for(const auto& key:plan.vat_tree_deletions)
+            removed_folded.insert(upper(key));
+        for(const auto& change:expanded) {
+            auto ancestor=upper(change.path);
+            for(;;) {
+                need(!removed_folded.count(ancestor),
+                     "VAT mirrored addition/replacement conflicts with deleted subtree");
+                const auto slash=ancestor.rfind('/');
+                if(slash==std::string::npos)break;
+                ancestor.resize(slash);
+            }
+        }
+        for(const auto& key:plan.vat_tree_deletions)
+            expanded.push_back({key,{},true,original_udf_paths.at(key)});
     }
     const unsigned views=image.joliet?2u:1u;
     std::map<std::string,Node*> index;
@@ -2609,7 +2667,9 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
     };
     tree.root=clone(clone,*image.root,nullptr,"");
     std::vector<const ArchiveChange*> sorted;
-    for(const auto& c:changes)sorted.push_back(&c);
+    const auto& operations=sequential_vat?expanded:changes;
+    sorted.reserve(operations.size());
+    for(const auto& c:operations)sorted.push_back(&c);
     std::stable_sort(sorted.begin(),sorted.end(),[](const auto* a,const auto* b){
         if(a->remove!=b->remove)return a->remove;
         const auto da=std::count(a->path.begin(),a->path.end(),'/');
@@ -2629,11 +2689,13 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
             const auto existing=index.find(upper(key));
             if(existing!=index.end()) {
                 auto* n=existing->second;
-                // Existing mirrored regular files can be remastered
-                // instead of rewriting historical directory sectors.
-                // Directory removals remain a separate profile.
-                need(!n->directory && !c->directory && n->parent==parent,
-                     "VAT mirrored tree only remasters existing regular files");
+                // Descendant removals were expanded before cloning.
+                // An existing directory can only be unlinked once its
+                // children have been removed from this private tree.
+                need(n->parent==parent &&
+                     (c->remove?(n->directory==c->directory && n->children.empty()):
+                                (!n->directory && !c->directory)),
+                     "VAT mirrored target has invalid type or surviving children");
                 protect_boot(*n,image.boot_lbas);
                 each_extent(*n,[&](auto start,auto length) {
                     for(const auto& [at,bytes]:image.boot_regions)
@@ -2641,7 +2703,22 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                              "VAT mirrored file overlaps protected boot data");
                 });
                 if(c->remove) {
-                    plan.shared_deletions.insert(key);
+                    need(plan.vat_tree_deletions.count(key)!=0,
+                         "VAT mirrored removal differs from expanded contract");
+                    if(n->directory) {
+                        // No path tables have been assigned yet. Remove
+                        // all non-owning references before freeing Node.
+                        if(image.joliet) {
+                            const auto at=std::uint64_t(le(n->joliet_record,2))*block;
+                            const auto bytes=le(n->joliet_record,10);
+                            for(const auto& [start,length]:image.boot_regions)
+                                need(!intersect(at,bytes,start,length),
+                                     "VAT mirrored Joliet directory overlaps boot data");
+                        }
+                        tree.dots.erase(n);
+                        tree.dirs.erase(std::remove(tree.dirs.begin(),tree.dirs.end(),n),
+                                        tree.dirs.end());
+                    }
                     ++tree.removed;
                     auto child=std::find_if(parent->children.begin(),parent->children.end(),
                         [&](const auto& p){return p.get()==n;});
