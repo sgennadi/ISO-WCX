@@ -2431,6 +2431,8 @@ struct SharedTreePlan {
     std::map<const Node*,std::array<std::pair<Bytes,Bytes>,2>> dots;
     std::map<std::string,Node*> added;
     std::map<std::string,Node*> replaced;
+    // Partial GPT mastering preserves every independent UDF entry.
+    std::map<std::string,bool> independent_udf_paths;
     std::size_t removed=0;
     std::array<std::vector<Node*>,2> path_dirs;
     std::array<std::uint32_t,2> table_size{};
@@ -2511,19 +2513,28 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
        (!sequential_vat && !std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
            return !c.remove && !iso_files.count(upper(edit_path(c.path)));
        })))return false;
-    std::map<std::string,bool> original_udf_paths;
+    std::map<std::string,bool> original_udf_paths,independent;
+    std::set<std::string> udf_names;
+    const bool partial_gpt=sequential_vat && image.gpt_hybrid;
     {
         const Disc udf(path);
-        if(udf.format()!="UDF" || udf.items().size()!=iso_files.size())return false;
-        std::set<std::string> seen;
+        if(udf.format()!="UDF" ||
+           (!partial_gpt && udf.items().size()!=iso_files.size()))return false;
+        std::size_t common_count=0;
         bool common_data=false;
         for(const auto& item:udf.items()) {
             const auto key=upper(item.path);
             const auto at=iso_files.find(key);
-            if(!seen.insert(key).second || at==iso_files.end() ||
-               at->second->directory!=item.directory)return false;
+            if(!udf_names.insert(key).second)return false;
             if(sequential_vat &&
                !original_udf_paths.emplace(item.path,item.directory).second)return false;
+            if(at==iso_files.end()) {
+                if(!partial_gpt)return false;
+                independent.emplace(item.path,item.directory);
+                continue;
+            }
+            if(at->second->directory!=item.directory)return false;
+            ++common_count;
             if(item.directory)continue;
             const auto* n=at->second;
             if(n->size!=item.size || !item.size || !item.inline_data.empty() ||
@@ -2536,8 +2547,39 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         // A fully mirrored directory-only namespace remains writable
         // after its last regular file is removed. Type-1 keeps its
         // original requirement for a demonstrated shared payload.
-        if(!common_data && !sequential_vat)return false;
+        if(common_count!=iso_files.size() ||
+           (!common_data && (!sequential_vat || !independent.empty())))return false;
         if(sequential_vat && !udf.udf_has_virtual_partition())return false;
+    }
+    if(!independent.empty()) {
+        // Root placement in a mixed image is ambiguous. Author only
+        // genuinely new entries within an already shared directory,
+        // or within new descendants of that directory in this batch.
+        // Existing-file edits retain the narrower shared-file route.
+        std::map<std::string,bool> additions;
+        for(const auto& change:changes) {
+            const auto key=edit_path(change.path);
+            const auto folded=upper(key);
+            if(change.remove || udf_names.count(folded) ||
+               !additions.emplace(folded,change.directory).second)return false;
+        }
+        for(const auto& [key,directory]:additions) {
+            (void)directory;
+            auto ancestor=key;
+            for(;;) {
+                const auto slash=ancestor.rfind('/');
+                if(slash==std::string::npos)return false;
+                ancestor.resize(slash);
+                const auto existing=iso_files.find(ancestor);
+                if(existing!=iso_files.end()) {
+                    if(!existing->second->directory)return false;
+                    break;
+                }
+                const auto created=additions.find(ancestor);
+                if(created==additions.end() || !created->second)return false;
+            }
+        }
+        tree.independent_udf_paths=std::move(independent);
     }
     if(sequential_vat) {
         // Do not infer a mirrored tree from the merged Joliet listing.
@@ -3094,13 +3136,22 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
          (!sequential_vat || udf.udf_has_virtual_partition()),
          "mirrored remaster lost UDF namespace");
     if(sequential_vat) {
-        need(udf.items().size()==wanted.size(),"VAT mirrored namespace size differs");
+        need(udf.items().size()==wanted.size()+tree.independent_udf_paths.size(),
+             "VAT coordinated namespace size differs");
         std::set<std::string> seen;
         for(const auto& item:udf.items()) {
             const auto key=upper(item.path);
             const auto found=wanted.find(key);
-            need(seen.insert(key).second && found!=wanted.end() &&
-                 found->second->directory==item.directory,
+            need(seen.insert(key).second,"duplicate staged VAT path");
+            const auto independent=tree.independent_udf_paths.find(item.path);
+            if(independent!=tree.independent_udf_paths.end()) {
+                need(found==wanted.end() && independent->second==item.directory,
+                     "independent VAT entry became a shared ISO entry");
+                // The VAT backend subsequently verifies its complete
+                // original layout and checks the protected old prefix.
+                continue;
+            }
+            need(found!=wanted.end() && found->second->directory==item.directory,
                  "VAT mirrored namespace differs from ISO plan");
             if(item.directory)continue;
             const auto* n=found->second;

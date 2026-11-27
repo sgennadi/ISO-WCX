@@ -1486,6 +1486,115 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
             assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def test_vat_partial_gpt_additions(editor,inspector,root,image,replacement):
+    from test_iso_edit import fixture, both, read_image, validate_path_tables
+    from test_images import iso_record
+    import zlib
+    bridge=root/'vat-partial-gpt.iso'
+    private=root/'vat-private-source.bin'
+    private.write_bytes(b'private content')
+    base_payload=b'BASE-GPT-SHARED-PAYLOAD!'*400
+    for joliet in (False,True):
+        for external in (False,True):
+            # First create a real sequential UDF tree. Then independently
+            # master an ISO view of COMMON/BASE.BIN only. The root's
+            # hello/keep and COMMON/PRIVATE.BIN remain UDF-only.
+            image.write_bytes(vat_append_image(capacity=8192,external_table=external))
+            replacement.write_bytes(base_payload)
+            run(editor,image,'batch','mkdir','COMMON','add','COMMON/BASE.BIN',replacement,
+                'add','COMMON/PRIVATE.BIN',private,'mkdir','OTHER')
+            raw=bytearray(image.read_bytes())
+            at=raw.find(base_payload)
+            assert at>=0 and at%B==0 and raw.find(base_payload,at+1)==-1
+            optical=fixture(joliet=joliet,boot=not joliet,boot_efi=not joliet)
+            raw[16*B:19*B]=optical[16*B:19*B]
+            if not joliet:
+                raw[24*B:27*B]=optical[24*B:27*B]
+                p16(raw,24*B+38,4);p16(raw,24*B+102,4)
+            else:raw[26*B:27*B]=b'E'*B
+            descriptors=[16,17] if joliet else [16]
+            for vd in descriptors:
+                view=vd==17
+                parent=22 if view else 20
+                child=31 if view else 30
+                def name(v):return v.encode('utf-16-be' if view else 'ascii')
+                directory=iso_record(parent,B,2,b'\0')+iso_record(parent,B,2,b'\1')
+                directory+=iso_record(child,B,2,name('COMMON'))
+                raw[parent*B:(parent+1)*B]=directory.ljust(B,b'\0')
+                directory=iso_record(child,B,2,b'\0')+iso_record(parent,B,2,b'\1')
+                directory+=iso_record(at//B,len(base_payload),0,name('BASE.BIN;1'))
+                raw[child*B:(child+1)*B]=directory.ljust(B,b'\0')
+                both(raw,vd*B+80,len(raw)//B)
+            vat_gpt_envelope(raw)
+            bridge.write_bytes(raw)
+            expected={'COMMON/':None,'COMMON/BASE.BIN':base_payload}
+            assert read_image(bridge)==expected
+            if joliet:assert read_image(bridge,True)==expected
+
+            def verify(before,number):
+                after=bridge.read_bytes()
+                assert len(after)>len(before)
+                restored=bytearray(after[:len(before)])
+                for vd in descriptors:
+                    for offset,n in ((80,8),(132,58)):
+                        pos=vd*B+offset
+                        restored[pos:pos+n]=before[pos:pos+n]
+                    assert struct.unpack_from('<I',after,vd*B+80)[0]==len(after)//B-9
+                restored[458:462]=before[458:462]
+                for offset,n in ((16,4),(32,8),(48,8)):
+                    pos=512+offset
+                    restored[pos:pos+n]=before[pos:pos+n]
+                retired=len(before)-33*512
+                assert not any(after[retired:len(before)])
+                restored[retired:]=before[retired:]
+                assert restored==before
+                last=len(after)//512-1
+                entries=before[1024:1024+16384]
+                assert struct.unpack_from('<I',after,458)[0]==last
+                for here,other,table in ((1,last,2),(last,1,last-32)):
+                    header=bytearray(after[here*512:(here+1)*512])
+                    assert header[:8]==b'EFI PART'
+                    assert struct.unpack_from('<QQQQ',header,24)==(here,other,34,last-33)
+                    assert struct.unpack_from('<QIII',header,72)==(table,128,128,zlib.crc32(entries))
+                    crc=struct.unpack_from('<I',header,16)[0]
+                    p32(header,16,0)
+                    assert crc==zlib.crc32(header[:92])
+                    assert after[table*512:table*512+16384]==entries
+                assert read_image(bridge)==expected
+                if joliet:assert read_image(bridge,True)==expected
+                validate_path_tables(bridge)
+                out=root/f'vat-partial-{joliet}-{external}-{number}'
+                check_disc(inspector,bridge,out)
+                files={p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}
+                dirs={p.relative_to(out).as_posix()+'/':None for p in out.rglob('*') if p.is_dir()}
+                assert {**files,**dirs}=={**expected,'hello':b'world','keep':b'keep me',
+                                          'COMMON/PRIVATE.BIN':private.read_bytes(),'OTHER/':None}
+                return after
+
+            replacement.write_bytes(b'new mirrored data')
+            run(editor,bridge,'batch','mkdir','COMMON/SUB',
+                'add','COMMON/SUB/NEW.BIN',replacement,'add','COMMON/TOP.BIN',replacement)
+            expected.update({'COMMON/SUB/':None,'COMMON/SUB/NEW.BIN':replacement.read_bytes(),
+                             'COMMON/TOP.BIN':replacement.read_bytes()})
+            first=verify(raw,1)
+            replacement.write_bytes(b'next')
+            run(editor,bridge,'add','COMMON/SUB/NEXT.BIN',replacement)
+            expected['COMMON/SUB/NEXT.BIN']=replacement.read_bytes()
+            second=verify(first,2)
+            for args in (
+                ('add','ROOT.BIN',replacement),
+                ('add','OTHER/NEW.BIN',replacement),
+                ('add','COMMON/PRIVATE.BIN',replacement),
+                ('batch','add','COMMON/OK.BIN',replacement,'add','ROOT.BIN',replacement),
+                ('batch','mkdir','COMMON/PRIVATE.BIN','add','COMMON/PRIVATE.BIN/X',replacement)):
+                run(editor,bridge,*args,success=False)
+                assert bridge.read_bytes()==second
+            result=run(editor,bridge,'batchcancelstaged','mkdir','COMMON/ABORT',
+                       'add','COMMON/ABORT/NEW.BIN',replacement,success=False)
+            assert result.returncode==3 and bridge.read_bytes()==second
+            assert not list(root.glob('.iso-wcx-edit-*'))
+
+
 def test_vat_mbr_bridge(editor,inspector,root,image,replacement):
     from test_iso_edit import fixture, both, read_image
     bridge=root/'vat-mbr.iso'
@@ -1696,6 +1805,7 @@ def main(editor,inspector):
         test_vat_150(editor,inspector,root,image,replacement)
         test_vat_bridge(editor,inspector,root,image,replacement)
         test_vat_shared_bridge(editor,inspector,root,image,replacement)
+        test_vat_partial_gpt_additions(editor,inspector,root,image,replacement)
         test_vat_mirrored_tree(editor,inspector,root,image,replacement)
         test_vat_mbr_bridge(editor,inspector,root,image,replacement)
         test_vat_gpt_bridge(editor,inspector,root,image,replacement)

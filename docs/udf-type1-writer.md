@@ -458,6 +458,28 @@ remaining namespace entries. Repeated edits are supported while the
 original ISO directory fields remain in the permitted area. Tests cover
 embedded and external VAT, with and without Joliet, repeated replacement,
 delete, cancellation, mismatched shared extents, corrupt GPT/VAT and
-a CRC-valid GPT partition alias of the shared payload. New mixed shared
-paths, partially shared MBR coordination and directory-tree removal in
+a CRC-valid GPT partition alias of the shared payload. Partially shared MBR coordination and directory-tree removal in
 partially shared bridges remain unsupported.
+
+### Shared-subtree additions in partially shared GPT VAT
+
+For the standard sequential GPT profile, the ISO/Joliet tree may be a
+verified strict subset of the UDF tree. Every existing ISO path must
+have a corresponding UDF entry of the same type and each regular ISO
+file must have the same nonempty, single contiguous extent in all
+applicable views. At least one common regular file must establish the
+shared namespace. In this profile a batch may create new files and
+directories only beneath an existing shared non-root directory,
+including explicitly created descendants in the same batch. The
+coordinator independently records all original UDF-only paths and
+requires them to remain UDF-only with the same type after remastering;
+the VAT backend validates their complete preserved layouts. New root
+paths, existing-file changes mixed with additions, conflicts with
+independent UDF entries, ISO-only trees and unsupported mappings
+fail closed. Regression fixtures cover repeated nested creation,
+preservation of independent UDF files both at root and within a
+shared directory, GPT CRCs, path tables, invalid batches and staged
+cancellation, with and without Joliet and external VAT storage.
+Shared replacements and removals in this partial profile still use
+the narrower original-record coordinator with its pre-anchor bound;
+they are not yet supported on newly appended ISO directory records.
