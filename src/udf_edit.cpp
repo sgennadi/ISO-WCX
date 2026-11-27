@@ -3075,6 +3075,7 @@ struct VatPayload {
 };
 struct VatAppendPlan {
     std::uint64_t original_size{},final_size{},payload_blocks{};
+    std::uint64_t iso_reservation_at{},iso_reservation_bytes{};
     std::vector<VatPayload> payloads;
     std::vector<Bytes> append;
     std::map<std::string,VatFileLayout> expected;
@@ -3271,19 +3272,25 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     std::ifstream in(image,std::ios::binary);
     vat_need(bool(in),"cannot open sequential image");
     if(coordinated) {
-        vat_need(coordinated->shared_additions.empty() &&
-                 coordinated->shared_directories.empty() &&
-                 coordinated->iso_metadata_blocks==0 &&
+        const bool remaster=coordinated->iso_metadata_blocks!=0;
+        vat_need(coordinated->iso_metadata_blocks<=32768 &&
+                 (remaster || (coordinated->shared_additions.empty() &&
+                               coordinated->shared_directories.empty())) &&
                  coordinated->shared_replacements.size()+
-                 coordinated->shared_deletions.size()==changes.size() &&
+                 coordinated->shared_deletions.size()+
+                 coordinated->shared_additions.size()+
+                 coordinated->shared_directories.size()==changes.size() &&
                  !coordinated->metadata_writes.empty(),
                  "unsupported VAT shared ISO coordination plan");
         for(const auto& request:requests) {
             const auto& change=*request.change;
-            vat_need(!change.directory &&
-                     (change.remove?coordinated->shared_deletions.count(request.key):
-                                    coordinated->shared_replacements.count(request.key)),
-                     "VAT shared ISO request differs from plan");
+            const auto& key=request.key;
+            const bool match=change.remove?
+                (!change.directory && coordinated->shared_deletions.count(key)):
+                (change.directory?coordinated->shared_directories.count(key):
+                 (coordinated->shared_replacements.count(key)+
+                  coordinated->shared_additions.count(key)));
+            vat_need(match,"VAT shared ISO request differs from plan");
         }
         std::uint64_t end=16ull*block;
         // The only mutable historical bytes are ISO record fields
@@ -3739,6 +3746,14 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         if(creating)
             vat_need(!folded_names.count(fold(key)),
                      "new VAT filename collides case-insensitively");
+        if(coordinated) {
+            vat_need(change.remove?
+                     (!creating && !target_directory && coordinated->shared_deletions.count(key)):
+                     (creating?(making_directory?coordinated->shared_directories.count(key):
+                                                 coordinated->shared_additions.count(key)):
+                               coordinated->shared_replacements.count(key)),
+                     "VAT coordinated target state differs from ISO plan");
+        }
         if(change.remove) {
             if(target_directory)
                 vat_need(directories.at(key).children==0,
@@ -3868,8 +3883,9 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         const auto size=std::filesystem::file_size(change.source);
         vat_need(size<=vat_max_ad*((block-176)/16),
                  "replacement exceeds FE long_ad capacity");
-        const bool shared=coordinated && coordinated->shared_replacements.count(key);
-        vat_need(!shared || (!creating && size && size<=0xffffffffull),
+        const bool shared=coordinated && (coordinated->shared_replacements.count(key) ||
+                                         coordinated->shared_additions.count(key));
+        vat_need(!shared || (size && size<=0xffffffffull),
                  "VAT shared replacement requires a nonempty ISO-compatible file");
         // Even small shared files must remain externally addressable
         // by ISO9660. Never embed a common payload in its new UDF FE.
@@ -3956,8 +3972,9 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     // appending it to the mutable mapping until all addresses are assigned.
     const auto final_vat_bytes=vat.size()+legacy_trailer.size();
     const auto vat_blocks=final_vat_bytes<=block-176?0:(final_vat_bytes+block-1)/block;
+    const auto iso_blocks=coordinated?coordinated->iso_metadata_blocks:0u;
     const auto required=plan->payload_blocks+file_entries.size()+
-                        dirty_directories.size()+directory_blocks+vat_blocks+1u;
+                        dirty_directories.size()+directory_blocks+iso_blocks+vat_blocks+1u;
     vat_need(required<=available && required<(max_image-plan->original_size)/block,
              "insufficient unrecorded partition capacity for VAT append");
     plan->final_size=plan->original_size+required*block;
@@ -4012,6 +4029,14 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         put32(vat,header+std::size_t(dir.lba)*4,static_cast<std::uint32_t>(physical++));
         if(!key.empty())plan->expected.at(key)=std::move(layout);
         plan->append.push_back(std::move(fe));
+    }
+    // Keep ISO metadata unmapped in the VAT. The final table/ICB follow
+    // the private zero-filled reservation; historical bytes are untouched.
+    if(iso_blocks) {
+        plan->iso_reservation_at=(std::uint64_t(partition)+physical)*block;
+        plan->iso_reservation_bytes=iso_blocks*block;
+        plan->append.emplace_back(static_cast<std::size_t>(plan->iso_reservation_bytes),0);
+        physical+=iso_blocks;
     }
     const auto new_table=physical;
     const auto new_vat=new_table+vat_blocks;
@@ -4113,15 +4138,18 @@ void edit_vat_append(const std::filesystem::path& image,
             at=start+length;
         }
         guard.protect(at,plan->original_size-at);
-        // The callback owns only original ISO metadata fields, never
-        // newly appended VAT data. Recheck every staged metadata run.
+        // The callback owns only original ISO metadata fields and the
+        // explicitly reserved new ISO tree. Recheck every VAT run.
         std::fstream in(tx.output,std::ios::binary|std::ios::in);
         vat_need(bool(in),"cannot reopen coordinated VAT stage");
         auto pos=plan->original_size+plan->payload_blocks*block;
         for(const auto& bytes:plan->append) {
             edit_tick(progress);
-            vat_need(staged_read(in,pos,bytes.size())==bytes,
-                     "ISO coordination modified appended VAT metadata");
+            if(plan->iso_reservation_bytes && pos==plan->iso_reservation_at)
+                vat_need(bytes.size()==plan->iso_reservation_bytes,
+                         "VAT ISO reservation differs from planned range");
+            else vat_need(staged_read(in,pos,bytes.size())==bytes,
+                          "ISO coordination modified appended VAT metadata");
             pos+=bytes.size();
         }
     } else guard.protect(0,plan->original_size);

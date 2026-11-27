@@ -1097,6 +1097,94 @@ def test_vat_shared_bridge(editor,inspector,root,image,replacement):
         assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
+    from test_iso_edit import fixture, both, read_image, validate_path_tables
+    from test_images import iso_record
+    import binascii
+    bridge=root/'vat-mirrored-tree.iso'
+    for joliet in (False,True):
+        for external in (False,True):
+            raw=vat_append_image(capacity=8192,external_table=external)
+            # Remove the independent second file from this synthetic
+            # namespace, leaving an exactly mirrored regular file.
+            fe=301*B
+            end=176+40+44
+            raw[fe+end:fe+B]=bytes(B-end)
+            p64(raw,fe+56,end-176);p32(raw,fe+172,end-176)
+            p16(raw,fe+10,end-16)
+            p16(raw,fe+8,binascii.crc_hqx(raw[fe+16:fe+end],0))
+            checksum(raw,fe)
+            vat_fe=549*B
+            vat_at=547*B if external else vat_fe+176
+            p32(raw,vat_at+136,1);p32(raw,vat_at+152+12,0xffffffff)
+            if not external:
+                p16(raw,vat_fe+8,binascii.crc_hqx(raw[vat_fe+16:vat_fe+344],0))
+                checksum(raw,vat_fe)
+            fe=302*B
+            raw[fe+176:fe+B]=bytes(B-176)
+            p16(raw,fe+34,1);p64(raw,fe+56,5);p64(raw,fe+64,1)
+            p32(raw,fe+172,16);p32(raw,fe+176,5);p32(raw,fe+180,4)
+            p16(raw,fe+10,176)
+            p16(raw,fe+8,binascii.crc_hqx(raw[fe+16:fe+192],0))
+            checksum(raw,fe)
+            raw[304*B:304*B+5]=b'world'
+            optical=fixture(joliet=joliet,boot=not joliet,boot_efi=not joliet)
+            raw[16*B:19*B]=optical[16*B:19*B]
+            if not joliet:
+                raw[24*B:27*B]=optical[24*B:27*B]
+                p16(raw,24*B+38,4);p16(raw,24*B+102,4)
+            for sector in ([20,22] if joliet else [20]):
+                label='hello;1'.encode('utf-16-be') if sector==22 else b'HELLO;1'
+                body=iso_record(sector,B,2,b'\0')+iso_record(sector,B,2,b'\1')+iso_record(304,5,0,label)
+                raw[sector*B:(sector+1)*B]=body.ljust(B,b'\0')
+            descriptors=[16,17] if joliet else [16]
+            for sector in descriptors:both(raw,sector*B+80,len(raw)//B)
+            bridge.write_bytes(raw)
+            def verify(before,expected,number):
+                after=bridge.read_bytes()
+                assert len(after)>len(before)
+                restored=bytearray(after[:len(before)])
+                for sector in descriptors:
+                    for at,n in ((80,8),(132,58)):
+                        offset=sector*B+at
+                        restored[offset:offset+n]=before[offset:offset+n]
+                assert restored==before
+                assert read_image(bridge)=={k.upper():v for k,v in expected.items()}
+                if joliet:assert read_image(bridge,True)==expected
+                validate_path_tables(bridge)
+                out=root/f'vat-mirror-{joliet}-{external}-{number}'
+                check_disc(inspector,bridge,out)
+                files={p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}
+                dirs={p.relative_to(out).as_posix()+'/':None for p in out.rglob('*') if p.is_dir()}
+                assert {**files,**dirs}==expected
+                return after
+            replacement.write_bytes(b'TINY')
+            before=bridge.read_bytes()
+            run(editor,bridge,'batch','add','SUB/NEW.TXT',replacement,
+                'mkdir','SUB','add','TOP.BIN',replacement)
+            expected={'hello':b'world','SUB/':None,'SUB/NEW.TXT':b'TINY','TOP.BIN':b'TINY'}
+            first=verify(before,expected,1)
+            replacement.write_bytes(b'X'*8000)
+            run(editor,bridge,'batch','add','SUB/NEW.TXT',replacement,
+                'delete','TOP.BIN','add','SUB/SECOND.BIN',replacement)
+            expected={'hello':b'world','SUB/':None,'SUB/NEW.TXT':replacement.read_bytes(),
+                      'SUB/SECOND.BIN':replacement.read_bytes()}
+            second=verify(first,expected,2)
+            run(editor,bridge,'delete','SUB/NEW.TXT')
+            del expected['SUB/NEW.TXT']
+            third=verify(second,expected,3)
+            cancelled=run(editor,bridge,'batchcancelstaged','add','SUB/ABORT.TXT',
+                          replacement,success=False)
+            assert cancelled.returncode==3
+            assert bridge.read_bytes()==third
+            # A failed member of a mirrored batch cannot silently create
+            # UDF-only data or publish a partial ISO namespace.
+            run(editor,bridge,'batch','add','OK.BIN',replacement,
+                'add','MISSING/NEW.BIN',replacement,success=False)
+            assert bridge.read_bytes()==third
+            assert not list(root.glob('.iso-wcx-edit-*'))
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
         root=pathlib.Path(temp)
@@ -1131,6 +1219,7 @@ def main(editor,inspector):
         test_vat_150(editor,inspector,root,image,replacement)
         test_vat_bridge(editor,inspector,root,image,replacement)
         test_vat_shared_bridge(editor,inspector,root,image,replacement)
+        test_vat_mirrored_tree(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),
