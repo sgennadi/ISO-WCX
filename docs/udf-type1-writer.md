@@ -533,7 +533,32 @@ use one atomic transaction. The expanded matrix covers MBR and GPT,
 embedded and external VAT, primary ISO and Joliet, ISO-only root files
 and directories, ISO-only children of shared directories, colliding
 names, aliasing payload extents, repeated remastering and rollback.
-Independent primary/Joliet trees that disagree with each other,
-multi-extent ISO-only records, and independent-path editing in a
-mixed bridge remain outside this profile. Physical boot behavior is
-not established by the image-level tests.
+Independent primary/Joliet trees that disagree with each other and
+multi-extent ISO-only records remain outside this profile. The next
+profile adds independent UDF-only transactions. Physical boot behavior
+is not established by the image-level tests.
+
+### Independent UDF-only transactions inside mixed MBR/GPT bridges
+
+A pure UDF-only batch in a partially shared partitioned VAT bridge may
+replace or remove existing independent entries (including an existing
+private file below a shared directory), recursively remove independent
+directories, or create new entries under an existing independent UDF
+directory and its new descendants. Exact existing names and folded
+uniqueness are required. Both ISO views must agree with the original
+ISO tree, every shared regular file must have its matching physical
+extent, independent UDF extents must avoid the protected ISO layout,
+and shared extents must not alias independent ISO payloads. Synthetic
+boot paths and shared descendants are protected.
+
+This route appends a VAT transaction without reauthoring ISO volume
+descriptors, directory records or path tables. The existing MBR and
+GPT growth checks, byte-exact historical guard, strict VAT planner and
+readback remain mandatory. Mixed shared/private batches and ambiguous
+new root paths remain unsupported; new entries below shared directories
+retain the shared-tree policy. The original disjoint-namespace route
+is unchanged. Regression tests exercise repeated private replacement
+including zero length, creation, recursive deletion with overlapping
+selections, subsequent shared remastering, invalid paths, aliases,
+staged cancellation and byte-identical optical metadata across the
+MBR/GPT, embedded/external VAT and ISO/Joliet fixture matrix.

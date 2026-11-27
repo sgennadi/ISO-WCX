@@ -3739,12 +3739,191 @@ void validate_vat_gpt_bridge(const std::filesystem::path& staged,
          "staged VAT GPT geometry differs from independent growth plan");
 }
 
+EditProtectedRanges merge_vat_bridge_ranges(EditProtectedRanges ranges,std::uint64_t size) {
+    std::sort(ranges.begin(),ranges.end());
+    EditProtectedRanges merged;
+    for(const auto& [at,length]:ranges) {
+        need(at<=size && length<=size-at,
+             "VAT bridge protected extent outside recorded image");
+        if(!length)continue;
+        if(!merged.empty() && at<=merged.back().first+merged.back().second)
+            merged.back().second=std::max(merged.back().first+merged.back().second,
+                                         at+length)-merged.back().first;
+        else merged.emplace_back(at,length);
+    }
+    return merged;
+}
+bool vat_bridge_range_disjoint(const EditProtectedRanges& merged,
+                               std::uint64_t start,std::uint64_t length) {
+    if(!length)return true;
+    const auto at=std::lower_bound(merged.begin(),merged.end(),start,
+        [](const auto& range,std::uint64_t offset) {
+            return range.first+range.second<=offset;
+        });
+    return at==merged.end() || at->first>=start+length;
+}
+
+// Pure UDF-only transactions may append without changing the ISO tree.
+// Keep this distinct from mixed shared-tree batches: placement must be
+// proved from the original namespaces, not inferred from a missing name.
+bool try_edit_iso_vat_independent_udf(const std::filesystem::path& path,
+        Image& image,const Disc& udf,const std::vector<ArchiveChange>& changes,
+        const EditProgress& progress) {
+    if(!image.hybrid_system_area || changes.empty())return false;
+    const auto iso=index_iso_tree(*image.root);
+    std::map<std::string,const Item*> udf_paths;
+    for(const auto& item:udf.items()) {
+        edit_tick(progress);
+        need(udf_paths.emplace(upper(item.path),&item).second,
+             "ambiguous UDF path in VAT bridge");
+    }
+    std::map<std::string,bool> created;
+    std::set<std::string> selected;
+    for(const auto& change:changes) {
+        const auto key=edit_path(change.path);
+        const auto folded=upper(key);
+        if(iso.count(folded))return false;
+        if(!selected.insert(folded).second)return false;
+        const auto found=udf_paths.find(folded);
+        if(found!=udf_paths.end()) {
+            if(found->second->path!=key)return false;
+        } else {
+            if(change.remove)return false;
+            created.emplace(folded,change.directory);
+        }
+    }
+    for(const auto& [key,directory]:created) {
+        (void)directory;
+        auto ancestor=key;
+        for(;;) {
+            const auto slash=ancestor.rfind('/');
+            if(slash==std::string::npos)return false;
+            ancestor.resize(slash);
+            if(iso.count(ancestor))return false;
+            const auto old=udf_paths.find(ancestor);
+            if(old!=udf_paths.end()) {
+                if(!old->second->directory)return false;
+                break;
+            }
+            const auto added=created.find(ancestor);
+            if(added==created.end() || !added->second)return false;
+        }
+    }
+    // Do not replace the existing split-tree policy for new root paths.
+    // The new profile is needed only if some original top-level paths
+    // overlap between the two namespaces.
+    std::set<std::string> roots;
+    auto top=[](const std::string& key){return key.substr(0,key.find('/'));};
+    for(const auto& [key,node]:iso) {
+        (void)node;
+        roots.insert(top(key));
+    }
+    if(std::none_of(udf_paths.begin(),udf_paths.end(),[&](const auto& entry) {
+           return roots.count(top(entry.first))!=0;
+       }))return false;
+    // Both ISO views must prove that selected UDF-only paths really
+    // are absent. A synthetic boot.images listing is reserved as well.
+    auto immutable=bridge_metadata_protected_ranges(image);
+    for(bool primary:{true,false}) {
+        const auto view=inspect_iso_namespace(path,primary);
+        need(view.format=="ISO 9660" || view.format=="Joliet",
+             "independent VAT edit requires ordinary ISO/Joliet views");
+        std::set<std::string> seen;
+        for(const auto& item:view.items) {
+            edit_tick(progress);
+            const auto key=upper(item.path);
+            if(!image.boot_descriptor_lbas.empty() && !iso.count("BOOT.IMAGES") &&
+               (key=="BOOT.IMAGES" || key.starts_with("BOOT.IMAGES/"))) {
+                need(!udf_paths.count(key) && !selected.count(key),
+                     "UDF path collides with virtual boot namespace");
+                continue;
+            }
+            const auto old=iso.find(key);
+            need(seen.insert(key).second && old!=iso.end() &&
+                 old->second->directory==item.directory,
+                 "independent VAT edit requires matching ISO/Joliet paths");
+            if(!item.directory) {
+                const auto* n=old->second;
+                need(item.size==n->size && n->sections.size()==1 &&
+                     item.extents.size()==1 && !item.extents[0].sparse &&
+                     item.extents[0].offset==std::uint64_t(n->lba)*block &&
+                     item.extents[0].length==n->size,
+                     "independent VAT edit requires matching ISO/Joliet extents");
+            }
+            for(const auto& e:item.extents)
+                if(e.length && !e.sparse)immutable.emplace_back(e.offset,e.length);
+        }
+        need(seen.size()==iso.size(),"independent VAT edit lost an ISO path");
+    }
+    if(!image.boot_descriptor_lbas.empty())
+        for(const auto& key:selected)
+            need(top(key)!="BOOT.IMAGES","independent VAT edit targets virtual boot namespace");
+    // All UDF-only data must be disjoint from the entire protected ISO
+    // layout. Shared files may overlap only their corresponding ISO
+    // payload; an unrelated ISO-only extent alias is never independent.
+    EditProtectedRanges iso_only_ranges;
+    for(const auto& [key,node]:iso)
+        if(!node->directory && !udf_paths.count(key))
+            each_extent(*node,[&](auto at,auto length) {
+                if(length)iso_only_ranges.emplace_back(at,length);
+            });
+    const auto iso_only=merge_vat_bridge_ranges(std::move(iso_only_ranges),image.size);
+    std::optional<GptGrowthPlan> gpt;
+    if(image.gpt_hybrid)gpt=plan_vat_gpt_bridge(image,immutable);
+    const auto alignment=gpt?0u:vat_mbr_alignment(image,immutable);
+    const auto merged=merge_vat_bridge_ranges(std::move(immutable),image.size);
+    for(const auto& [key,item]:udf_paths) {
+        edit_tick(progress);
+        const auto found=iso.find(key);
+        const bool shared=found!=iso.end();
+        if(shared) {
+            const auto* n=found->second;
+            need(n->directory==item->directory,
+                 "shared VAT path has conflicting type");
+            if(!item->directory)
+                need(n->size==item->size && item->size && item->inline_data.empty() &&
+                     n->sections.size()==1 && item->extents.size()==1 &&
+                     !item->extents[0].sparse &&
+                     item->extents[0].offset==std::uint64_t(n->lba)*block &&
+                     item->extents[0].length==n->size,
+                     "shared VAT path has conflicting physical extent");
+        }
+        for(const auto& e:item->extents) {
+            if(e.sparse || !e.length)continue;
+            need(e.offset<=image.size && e.length<=image.size-e.offset,
+                 "VAT bridge UDF payload outside original image");
+            need(vat_bridge_range_disjoint(shared?iso_only:merged,e.offset,e.length),
+                 "independent VAT edit aliases protected ISO data");
+        }
+    }
+    // No selected subtree may contain a shared ISO descendant. Check
+    // exact prefix boundaries in the folded original ISO namespace.
+    for(const auto& change:changes) {
+        if(!change.remove)continue;
+        const auto key=upper(edit_path(change.path));
+        const auto prefix=key+"/";
+        const auto hit=iso.lower_bound(prefix);
+        need(hit==iso.end() || !hit->first.starts_with(prefix),
+             "independent VAT removal would delete a shared path");
+    }
+    const auto* gpt_plan=gpt?&*gpt:nullptr;
+    const EditStageValidator validate=[&image,gpt_plan](const std::filesystem::path& staged) {
+        if(gpt_plan)validate_vat_gpt_bridge(staged,image,*gpt_plan);
+        else validate_vat_bridge_envelope(staged,image,true);
+    };
+    image.file.close();
+    edit_udf(path,changes,progress,true,validate,merged,nullptr,true,
+             alignment,gpt_plan?gpt_plan->trailer_blocks:0);
+    return true;
+}
+
 void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
         const Disc& udf,const std::vector<ArchiveChange>& changes,
         const EditProgress& progress) {
     need(!image.iso_system_use &&
          image.boot_regions_bounded && udf.udf_has_virtual_partition(),
          "VAT bridge requires bounded plain ISO/Joliet");
+    if(try_edit_iso_vat_independent_udf(path,image,udf,changes,progress))return;
     if(try_edit_iso_vat_mirrored_tree(path,image,changes,progress))return;
     {
         const auto index=index_iso_tree(*image.root);
@@ -3777,20 +3956,7 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
     std::optional<GptGrowthPlan> gpt;
     if(image.gpt_hybrid)gpt=plan_vat_gpt_bridge(image,immutable);
     const auto mbr_alignment=gpt?0u:vat_mbr_alignment(image,immutable);
-    // Coalesce immutable ranges for efficient overlap checks. Even an
-    // ISO alias with a different name must not become a silently split
-    // shared payload. Historical source bytes are always protected.
-    std::sort(immutable.begin(),immutable.end());
-    EditProtectedRanges merged;
-    for(const auto& [at,length]:immutable) {
-        need(at<=image.size && length<=image.size-at,
-             "VAT bridge protected extent outside recorded image");
-        if(!length)continue;
-        if(!merged.empty() && at<=merged.back().first+merged.back().second)
-            merged.back().second=std::max(merged.back().first+merged.back().second,
-                                         at+length)-merged.back().first;
-        else merged.emplace_back(at,length);
-    }
+    const auto merged=merge_vat_bridge_ranges(std::move(immutable),image.size);
     for(const auto& item:udf.items()) {
         edit_tick(progress);
         need(!iso_roots.count(top(item.path)),
@@ -3799,11 +3965,7 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
             if(e.sparse || !e.length)continue;
             need(e.offset<=image.size && e.length<=image.size-e.offset,
                  "VAT bridge UDF payload outside original image");
-            const auto at=std::lower_bound(merged.begin(),merged.end(),e.offset,
-                [](const auto& range,std::uint64_t offset) {
-                    return range.first+range.second<=offset;
-                });
-            need(at==merged.end() || at->first>=e.offset+e.length,
+            need(vat_bridge_range_disjoint(merged,e.offset,e.length),
                  "VAT bridge UDF payload overlaps protected ISO/boot data");
         }
     }

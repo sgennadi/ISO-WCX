@@ -1580,15 +1580,20 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             assert read_image(bridge)=={**expected,**iso_expected}
             if joliet:assert read_image(bridge,True)=={**expected,**iso_expected}
 
-            def verify(before,number):
+            private_expected={'hello':b'world','keep':b'keep me',
+                              'COMMON/PRIVATE.BIN':private.read_bytes(),'OTHER/':None}
+            def verify(before,number,udf_only=False):
                 after=bridge.read_bytes()
                 assert len(after)>len(before)
                 restored=bytearray(after[:len(before)])
                 for vd in descriptors:
-                    for offset,n in ((80,8),(132,58)):
-                        pos=vd*B+offset
-                        restored[pos:pos+n]=before[pos:pos+n]
-                    assert struct.unpack_from('<I',after,vd*B+80)[0]==len(after)//B-(9 if gpt else 0)
+                    if udf_only:
+                        assert after[vd*B:(vd+1)*B]==before[vd*B:(vd+1)*B]
+                    else:
+                        for offset,n in ((80,8),(132,58)):
+                            pos=vd*B+offset
+                            restored[pos:pos+n]=before[pos:pos+n]
+                        assert struct.unpack_from('<I',after,vd*B+80)[0]==len(after)//B-(9 if gpt else 0)
                 restored[458:462]=before[458:462]
                 if gpt:
                     for offset,n in ((16,4),(32,8),(48,8)):
@@ -1627,8 +1632,7 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 check_disc(inspector,bridge,out)
                 files={p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}
                 dirs={p.relative_to(out).as_posix()+'/':None for p in out.rglob('*') if p.is_dir()}
-                assert {**files,**dirs}=={**expected,'hello':b'world','keep':b'keep me',
-                                          'COMMON/PRIVATE.BIN':private.read_bytes(),'OTHER/':None}
+                assert {**files,**dirs}=={**expected,**private_expected}
                 return after
 
             initial=raw
@@ -1665,9 +1669,8 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 second=verify(second,21)
             for args in (
                 ('add','ROOT.BIN',replacement),
-                ('add','OTHER/NEW.BIN',replacement),
-                ('add','COMMON/PRIVATE.BIN',replacement),
                 ('batch','add','COMMON/OK.BIN',replacement,'add','ROOT.BIN',replacement),
+                ('batch','add','COMMON/OK.BIN',replacement,'add','COMMON/PRIVATE.BIN',replacement),
                 ('batch','mkdir','COMMON/PRIVATE.BIN','add','COMMON/PRIVATE.BIN/X',replacement)):
                 run(editor,bridge,*args,success=False)
                 assert bridge.read_bytes()==second
@@ -1701,7 +1704,6 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             # recursive removal would destroy an unrelated namespace.
             for args in (
                 ('delete','COMMON'),
-                ('delete','COMMON/PRIVATE.BIN'),
                 ('batch','delete','COMMON','add','COMMON/NEW.BIN',replacement),
                 ('batch','delete','COMMON/NEST','add','COMMON/NEST/X.BIN',replacement),
                 ('batch','delete','COMMON/NEST','delete','COMMON/NEST/MISSING'),
@@ -1722,6 +1724,53 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             run(editor,bridge,'add','COMMON/AGAIN.BIN',replacement)
             expected['COMMON/AGAIN.BIN']=replacement.read_bytes()
             sixth=verify(fifth,6)
+
+            # UDF-only changes must not reauthor ISO descriptors or
+            # path tables. Test both inline/external payloads, a private
+            # path under a shared directory, and a new private subtree.
+            replacement.write_bytes(b'private large content'*1000)
+            run(editor,bridge,'add','COMMON/PRIVATE.BIN',replacement)
+            private_expected['COMMON/PRIVATE.BIN']=replacement.read_bytes()
+            seventh=verify(sixth,7,udf_only=True)
+            replacement.write_bytes(b'')
+            run(editor,bridge,'batch','add','COMMON/PRIVATE.BIN',replacement,
+                'mkdir','OTHER/NEST','add','OTHER/NEST/ZERO.BIN',replacement,
+                'delete','keep')
+            private_expected['COMMON/PRIVATE.BIN']=b''
+            private_expected['OTHER/NEST/']=None
+            private_expected['OTHER/NEST/ZERO.BIN']=b''
+            del private_expected['keep']
+            eighth=verify(seventh,8,udf_only=True)
+            replacement.write_bytes(b'next private payload')
+            run(editor,bridge,'batch','add','OTHER/NEXT.BIN',replacement,
+                'delete','OTHER/NEST','delete','OTHER/NEST/ZERO.BIN',
+                'delete','COMMON/PRIVATE.BIN')
+            del private_expected['OTHER/NEST/']
+            del private_expected['OTHER/NEST/ZERO.BIN']
+            del private_expected['COMMON/PRIVATE.BIN']
+            private_expected['OTHER/NEXT.BIN']=replacement.read_bytes()
+            ninth=verify(eighth,9,udf_only=True)
+            for args in (
+                ('add','ROOT.BIN',replacement),
+                ('batch','add','OTHER/NEW.BIN',replacement,'add','COMMON/BASE.BIN',replacement),
+                ('batch','delete','OTHER','add','OTHER/NEW.BIN',replacement),
+                ('batch','delete','OTHER','delete','OTHER/MISSING.BIN'),
+                ('add','other/NEXT.BIN',replacement),
+                ('delete','OTHER/next.bin')):
+                run(editor,bridge,*args,success=False)
+                assert bridge.read_bytes()==ninth
+            result=run(editor,bridge,'batchcancelstaged','delete','OTHER',
+                       'add','hello',replacement,success=False)
+            assert result.returncode==3 and bridge.read_bytes()==ninth
+            run(editor,bridge,'delete','OTHER')
+            del private_expected['OTHER/']
+            del private_expected['OTHER/NEXT.BIN']
+            tenth=verify(ninth,10,udf_only=True)
+            # A coordinated shared append after independent updates
+            # must still observe the exact current UDF namespace.
+            run(editor,bridge,'add','COMMON/LATER.BIN',replacement)
+            expected['COMMON/LATER.BIN']=replacement.read_bytes()
+            sixth=verify(tenth,11)
             if iso_only:
                 # A distinct ISO name pointing into a live shared UDF
                 # extent is not an independent file. Reject atomically.
@@ -1729,6 +1778,8 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 for field in alias_fields:both(bad,field,at//B)
                 bridge.write_bytes(bad)
                 run(editor,bridge,'add','COMMON/NEW.BIN',replacement,success=False)
+                assert bridge.read_bytes()==bad
+                run(editor,bridge,'add','COMMON/PRIVATE.BIN',replacement,success=False)
                 assert bridge.read_bytes()==bad
                 bridge.write_bytes(sixth)
             if not gpt:
