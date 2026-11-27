@@ -1592,6 +1592,54 @@ def test_vat_partial_gpt_additions(editor,inspector,root,image,replacement):
             result=run(editor,bridge,'batchcancelstaged','mkdir','COMMON/ABORT',
                        'add','COMMON/ABORT/NEW.BIN',replacement,success=False)
             assert result.returncode==3 and bridge.read_bytes()==second
+
+            # Replacing a shared entry after the ISO tree has moved
+            # beyond sector 256 must append a fresh directory tree.
+            replacement.write_bytes(b'updated shared file'*500)
+            run(editor,bridge,'add','COMMON/SUB/NEXT.BIN',replacement)
+            expected['COMMON/SUB/NEXT.BIN']=replacement.read_bytes()
+            third=verify(second,3)
+
+            # Mixed operations: replace, recursively delete a shared
+            # subtree, and create another shared subtree atomically.
+            replacement.write_bytes(b'mixed batch payload')
+            run(editor,bridge,'batch','delete','COMMON/SUB',
+                'delete','COMMON/SUB/NEW.BIN','add','COMMON/BASE.BIN',replacement,
+                'mkdir','COMMON/NEST','add','COMMON/NEST/FILE.BIN',replacement,
+                'delete','COMMON/TOP.BIN')
+            for key in list(expected):
+                if key.startswith('COMMON/SUB/') or key=='COMMON/TOP.BIN':
+                    del expected[key]
+            expected.update({'COMMON/BASE.BIN':replacement.read_bytes(),
+                             'COMMON/NEST/':None,
+                             'COMMON/NEST/FILE.BIN':replacement.read_bytes()})
+            fourth=verify(third,4)
+
+            # COMMON is shared, but its PRIVATE.BIN is UDF-only. Its
+            # recursive removal would destroy an unrelated namespace.
+            for args in (
+                ('delete','COMMON'),
+                ('delete','COMMON/PRIVATE.BIN'),
+                ('batch','delete','COMMON','add','COMMON/NEW.BIN',replacement),
+                ('batch','delete','COMMON/NEST','add','COMMON/NEST/X.BIN',replacement),
+                ('batch','delete','COMMON/NEST','delete','COMMON/NEST/MISSING'),
+                ('batch','delete','COMMON/NEST','delete','common/nest'),
+                ('batch','delete','COMMON/BASE.BIN','add','OTHER/NEW.BIN',replacement)):
+                run(editor,bridge,*args,success=False)
+                assert bridge.read_bytes()==fourth
+            result=run(editor,bridge,'batchcancelstaged','delete','COMMON/NEST',
+                       'add','COMMON/BASE.BIN',replacement,success=False)
+            assert result.returncode==3 and bridge.read_bytes()==fourth
+
+            # A shared recursive delete followed by another append
+            # preserves the independent file in its parent directory.
+            run(editor,bridge,'delete','COMMON/NEST')
+            del expected['COMMON/NEST/']
+            del expected['COMMON/NEST/FILE.BIN']
+            fifth=verify(fourth,5)
+            run(editor,bridge,'add','COMMON/AGAIN.BIN',replacement)
+            expected['COMMON/AGAIN.BIN']=replacement.read_bytes()
+            verify(fifth,6)
             assert not list(root.glob('.iso-wcx-edit-*'))
 
 

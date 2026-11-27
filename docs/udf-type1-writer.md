@@ -458,8 +458,8 @@ remaining namespace entries. Repeated edits are supported while the
 original ISO directory fields remain in the permitted area. Tests cover
 embedded and external VAT, with and without Joliet, repeated replacement,
 delete, cancellation, mismatched shared extents, corrupt GPT/VAT and
-a CRC-valid GPT partition alias of the shared payload. Partially shared MBR coordination and directory-tree removal in
-partially shared bridges remain unsupported.
+a CRC-valid GPT partition alias of the shared payload. Partially shared
+MBR coordination remains unsupported.
 
 ### Shared-subtree additions in partially shared GPT VAT
 
@@ -474,12 +474,31 @@ including explicitly created descendants in the same batch. The
 coordinator independently records all original UDF-only paths and
 requires them to remain UDF-only with the same type after remastering;
 the VAT backend validates their complete preserved layouts. New root
-paths, existing-file changes mixed with additions, conflicts with
-independent UDF entries, ISO-only trees and unsupported mappings
-fail closed. Regression fixtures cover repeated nested creation,
+paths, conflicts with independent UDF entries, ISO-only trees and
+unsupported mappings fail closed. Regression fixtures cover repeated nested creation,
 preservation of independent UDF files both at root and within a
 shared directory, GPT CRCs, path tables, invalid batches and staged
 cancellation, with and without Joliet and external VAT storage.
-Shared replacements and removals in this partial profile still use
-the narrower original-record coordinator with its pre-anchor bound;
-they are not yet supported on newly appended ISO directory records.
+Existing shared-file-only batches with original pre-anchor ISO records
+retain the narrower byte-minimal coordinator. Other supported mixed
+batches use the fresh-tree coordinator described below.
+
+### Shared-subtree mixed transactions and recursive deletion
+
+The partial GPT remaster also accepts replacement and deletion of
+existing shared paths, including paths whose ISO records were appended
+past the original UDF anchor. New entries still require an unambiguous
+shared non-root parent. A single transaction may replace a file,
+recursively unlink a fully shared subtree, and add another subtree.
+The planner checks exact UDF names and case-folded uniqueness; a
+directory removal is rejected if any independent UDF-only entry lies
+beneath it. The expanded deletion contract is checked again against
+the original shared tree before serialization. Both planners validate
+identical expanded deletions. The final staged namespace preserves all
+independent paths and the VAT backend verifies their original layouts.
+Regression coverage includes post-remaster replacements, mixed batches,
+overlapping recursive selections, conflicts with independent descendants,
+subsequent appends, cancellation, historical byte preservation and GPT
+integrity. A partial remaster still requires a demonstrably shared
+regular file in the source. New root paths remain ambiguous, and
+physical boot behavior remains unverified.

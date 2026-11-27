@@ -2552,17 +2552,50 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         if(sequential_vat && !udf.udf_has_virtual_partition())return false;
     }
     if(!independent.empty()) {
-        // Root placement in a mixed image is ambiguous. Author only
-        // genuinely new entries within an already shared directory,
-        // or within new descendants of that directory in this batch.
-        // Existing-file edits retain the narrower shared-file route.
+        // Root placement in a mixed image is ambiguous. Permit new
+        // entries only in an existing shared non-root directory or in
+        // its newly created descendants. Existing shared paths may be
+        // changed, but never consume independent UDF-only descendants.
         std::map<std::string,bool> additions;
+        std::set<std::string> requests,independent_folded;
+        for(const auto& [key,directory]:independent) {
+            (void)directory;
+            independent_folded.insert(upper(key));
+        }
+        bool original_records_only=true;
         for(const auto& change:changes) {
             const auto key=edit_path(change.path);
             const auto folded=upper(key);
-            if(change.remove || udf_names.count(folded) ||
-               !additions.emplace(folded,change.directory).second)return false;
+            need(requests.insert(folded).second,
+                 "duplicate or case-colliding partial VAT request");
+            if(independent_folded.count(folded))return false;
+            const auto existing=iso_files.find(folded);
+            if(existing!=iso_files.end()) {
+                const auto* node=existing->second;
+                const auto udf=original_udf_paths.find(key);
+                need(udf!=original_udf_paths.end() && udf->second==node->directory,
+                     "partial VAT target does not match exact shared path");
+                if(change.remove && node->directory) {
+                    const auto prefix=folded+"/";
+                    const auto child=independent_folded.lower_bound(prefix);
+                    need(child==independent_folded.end() || !child->starts_with(prefix),
+                         "partial VAT removal would delete independent UDF entries");
+                }
+                if(node->directory || change.directory ||
+                   node->record_at>=256ull*block ||
+                   (image.joliet && node->joliet_record_at>=256ull*block))
+                    original_records_only=false;
+                continue;
+            }
+            if(change.remove || udf_names.count(folded))return false;
+            additions.emplace(folded,change.directory);
+            original_records_only=false;
         }
+        // Preserve the already supported byte-minimal record update
+        // for batches of regular files in the original pre-anchor ISO
+        // directories. Appended directories and mixed operations use
+        // a fresh reservation instead of rewriting historical sectors.
+        if(original_records_only)return false;
         for(const auto& [key,directory]:additions) {
             (void)directory;
             auto ancestor=key;
@@ -2647,6 +2680,10 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         }
         need(plan.vat_tree_deletions.size()<=200000,
              "VAT mirrored recursive deletion exceeds namespace limit");
+        for(const auto& key:plan.vat_tree_deletions)
+            need(!tree.independent_udf_paths.count(key) &&
+                 iso_files.count(upper(key)),
+                 "VAT expanded deletion includes a nonshared entry");
         std::set<std::string> removed_folded;
         for(const auto& key:plan.vat_tree_deletions)
             removed_folded.insert(upper(key));
