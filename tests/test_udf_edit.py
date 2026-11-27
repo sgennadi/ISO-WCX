@@ -1695,9 +1695,10 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 second=bytes(patched)
 
                 replacement.write_bytes(b'CANCELLED')
-                result=run(editor,bridge,'batchcancelstaged','add','ISO_ROOT.BIN',
+                result=run(editor,bridge,'batchcancelstagedfixed','add','ISO_ROOT.BIN',
                            replacement,success=False)
                 assert result.returncode==3 and bridge.read_bytes()==second
+                assert not list(root.glob('.iso-wcx-edit-*'))
                 # A payload containing a VRS signature at the sector
                 # boundary must not become hidden UDF metadata.
                 replacement.write_bytes(b'\0NSR03xyz')

@@ -1,5 +1,8 @@
 #include "iso_wcx/archive_edit.hpp"
+#include <algorithm>
+#include <array>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -60,24 +63,53 @@ static int invoke(const std::filesystem::path& image,
 }
 
 
+// Test-only probe for fixed-size transactions. A complete sibling copy
+// is not enough: wait until readable staged bytes actually differ from
+// the source. A partial or temporarily locked stream is not proof.
+static bool fixed_stage_changed(const std::filesystem::path& image,
+                                const std::filesystem::path& staged,
+                                std::uintmax_t size) {
+    std::ifstream original(image,std::ios::binary);
+    std::ifstream candidate(staged,std::ios::binary);
+    if(!original || !candidate)return false;
+    std::array<char,4096> a{},b{};
+    bool changed=false;
+    while(size) {
+        const auto n=static_cast<std::streamsize>(
+            std::min<std::uintmax_t>(size,a.size()));
+        original.read(a.data(),n);
+        candidate.read(b.data(),n);
+        if(original.gcount()!=n || candidate.gcount()!=n)return false;
+        changed=changed || !std::equal(a.begin(),a.begin()+n,b.begin());
+        size-=static_cast<std::uintmax_t>(n);
+    }
+    return changed && original.peek()==std::char_traits<char>::eof() &&
+           candidate.peek()==std::char_traits<char>::eof();
+}
+
 static int invoke_batch(const std::filesystem::path& image,
                         const std::vector<iso_wcx::ArchiveChange>& changes,
-                        bool cancel,bool cancel_staged=false) {
+                        bool cancel,bool cancel_staged=false,
+                        bool cancel_staged_fixed=false) {
     try {
         unsigned ticks=0;
         const auto original_size=std::filesystem::file_size(image);
         const auto parent=std::filesystem::absolute(image).parent_path();
         route_edit(image,changes,[&] {
-            // Test-only stage-aware cancellation for append writers. A
-            // fixed tick threshold is not reliable on small or COW images.
-            if(cancel_staged) {
+            // Retain the growth-triggered probe for append writers.
+            // Fixed-size writers require a changed, complete stage.
+            // A fixed tick count is unreliable on small or COW images.
+            if(cancel_staged || cancel_staged_fixed) {
                 for(const auto& entry:std::filesystem::directory_iterator(parent)) {
                     if(!entry.path().filename().string().starts_with(".iso-wcx-edit-"))
                         continue;
                     std::error_code ec;
-                    const auto size=std::filesystem::file_size(
-                        entry.path()/image.filename(),ec);
-                    if(!ec && size>original_size)return false;
+                    const auto stage=entry.path()/image.filename();
+                    const auto size=std::filesystem::file_size(stage,ec);
+                    if(ec)continue;
+                    if(cancel_staged && size>original_size)return false;
+                    if(cancel_staged_fixed && size==original_size &&
+                       fixed_stage_changed(image,stage,original_size))return false;
                 }
                 return true;
             }
@@ -85,7 +117,7 @@ static int invoke_batch(const std::filesystem::path& image,
         });
         return 0; // Cancellation probes must fail by actually cancelling.
     } catch (const iso_wcx::EditCancelled&) {
-        return (cancel || cancel_staged) ? 3 : 2;
+        return (cancel || cancel_staged || cancel_staged_fixed) ? 3 : 2;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
@@ -99,7 +131,8 @@ int wmain(int argc, wchar_t** argv) {
     if (argc < 4) return 2;
     try {
         const auto operation=wide_to_utf8(argv[2]);
-        if(operation=="batch" || operation=="batchcancel" || operation=="batchcancelstaged") {
+        if(operation=="batch" || operation=="batchcancel" || operation=="batchcancelstaged" ||
+       operation=="batchcancelstagedfixed") {
             std::vector<iso_wcx::ArchiveChange> changes;
             for(int at=3;at<argc;) {
                 const auto kind=wide_to_utf8(argv[at++]);
@@ -115,7 +148,8 @@ int wmain(int argc, wchar_t** argv) {
                 changes.push_back(std::move(c));
             }
             return invoke_batch(std::filesystem::path(argv[1]),changes,
-                                operation=="batchcancel",operation=="batchcancelstaged");
+                                operation=="batchcancel",operation=="batchcancelstaged",
+                                operation=="batchcancelstagedfixed");
         }
         return invoke(std::filesystem::path(argv[1]),operation,
                       wide_to_utf8(argv[3]),
@@ -130,7 +164,8 @@ int wmain(int argc, wchar_t** argv) {
 int main(int argc, char** argv) {
     if (argc < 4) return 2;
     const std::string operation(argv[2]);
-    if(operation=="batch" || operation=="batchcancel" || operation=="batchcancelstaged") {
+    if(operation=="batch" || operation=="batchcancel" || operation=="batchcancelstaged" ||
+       operation=="batchcancelstagedfixed") {
         std::vector<iso_wcx::ArchiveChange> changes;
         for(int at=3;at<argc;) {
             const std::string kind(argv[at++]);
@@ -146,7 +181,8 @@ int main(int argc, char** argv) {
             changes.push_back(std::move(c));
         }
         return invoke_batch(std::filesystem::path(argv[1]),changes,
-                            operation=="batchcancel",operation=="batchcancelstaged");
+                            operation=="batchcancel",operation=="batchcancelstaged",
+                                operation=="batchcancelstagedfixed");
     }
     return invoke(std::filesystem::path(argv[1]),operation,argv[3],
                   argc >= 5 ? std::filesystem::path(argv[4]) : std::filesystem::path{},
