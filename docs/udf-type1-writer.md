@@ -562,3 +562,27 @@ including zero length, creation, recursive deletion with overlapping
 selections, subsequent shared remastering, invalid paths, aliases,
 staged cancellation and byte-identical optical metadata across the
 MBR/GPT, embedded/external VAT and ISO/Joliet fixture matrix.
+
+### Fixed-length independent ISO-only payloads in mixed VAT bridges
+
+A pure batch of existing nonempty regular ISO-only files may be
+replaced at exactly their original lengths, provided each is a unique,
+single physical extent wholly before the primary UDF anchor at sector
+256. Primary ISO and Joliet must independently agree on the selected
+extent and namespace. No shared UDF file, directory, EFI partition,
+boot resource, path table, VRS descriptor, or other file may overlap
+a selected payload. The strict VAT parser provides a read-only proof
+of the backing partition, descriptor sequences and current mapping
+before and after staging. No VAT session is appended, no partition is
+resized, and no UDF metadata or historical VAT payload is overwritten.
+The transaction verifies every byte outside the selected payloads
+and independently reads back the replacement sources before commit.
+
+This is deliberately a restricted fixed-length profile, not an
+ISO-only remasterer. Creation, deletion, resizing, payloads at or
+after the primary UDF anchor, mixed independent/shared batches and
+unsupported VAT or hybrid geometry remain outside this profile.
+Regression tests exercise MBR/GPT, primary/Joliet, embedded/external
+VAT, exact byte preservation, repeated shared remastering after an
+ISO-only patch, cancellation and protected extent rejection. Physical
+boot and Total Commander host behavior require separate verification.

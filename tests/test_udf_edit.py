@@ -1667,6 +1667,48 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 run(editor,bridge,'add','COMMON/ISOSUB/NEW.BIN',replacement)
                 expected['COMMON/ISOSUB/NEW.BIN']=replacement.read_bytes()
                 second=verify(second,21)
+                # Equal-size independent ISO payloads may be edited
+                # without appending VAT or changing any descriptor,
+                # path table, UDF payload or partition byte.
+                iso_source=root/'vat-iso-private-source.bin'
+                iso_source.write_bytes(b'ISO-EDIT')
+                replacement.write_bytes(b'ROOT-EDIT')
+                run(editor,bridge,'batch','add','ISO_ROOT.BIN',replacement,
+                    'add','COMMON/ISOSUB/KEEP.BIN',iso_source,
+                    'add','ONLY/KEEP.BIN',iso_source)
+                patched=bytearray(second)
+                patched[35*B:35*B+9]=replacement.read_bytes()
+                patched[34*B:34*B+8]=iso_source.read_bytes()
+                patched[38*B:38*B+8]=iso_source.read_bytes()
+                assert bridge.read_bytes()==patched
+                iso_expected.update({'ISO_ROOT.BIN':replacement.read_bytes(),
+                    'COMMON/ISOSUB/KEEP.BIN':iso_source.read_bytes(),
+                    'ONLY/KEEP.BIN':iso_source.read_bytes()})
+                assert read_image(bridge)=={**expected,**iso_expected}
+                if joliet:assert read_image(bridge,True)=={**expected,**iso_expected}
+                validate_path_tables(bridge)
+                out=root/f'vat-iso-patch-{envelope}-{joliet}-{external}'
+                check_disc(inspector,bridge,out)
+                files={p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}
+                dirs={p.relative_to(out).as_posix()+'/':None for p in out.rglob('*') if p.is_dir()}
+                assert {**files,**dirs}=={**expected,**private_expected}
+                second=bytes(patched)
+
+                replacement.write_bytes(b'CANCELLED')
+                result=run(editor,bridge,'batchcancelstaged','add','ISO_ROOT.BIN',
+                           replacement,success=False)
+                assert result.returncode==3 and bridge.read_bytes()==second
+                # A payload containing a VRS signature at the sector
+                # boundary must not become hidden UDF metadata.
+                replacement.write_bytes(b'\0NSR03xyz')
+                run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
+                assert bridge.read_bytes()==second
+                replacement.write_bytes(b'ROOT-EDIT')
+                run(editor,bridge,'batch','add','ISO_ROOT.BIN',replacement,
+                    'add','COMMON/PRIVATE.BIN',replacement,success=False)
+                assert bridge.read_bytes()==second
+                assert not list(root.glob('.iso-wcx-edit-*'))
+                replacement.write_bytes(b'next')
             for args in (
                 ('add','ROOT.BIN',replacement),
                 ('batch','add','COMMON/OK.BIN',replacement,'add','ROOT.BIN',replacement),
@@ -1781,6 +1823,30 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 assert bridge.read_bytes()==bad
                 run(editor,bridge,'add','COMMON/PRIVATE.BIN',replacement,success=False)
                 assert bridge.read_bytes()==bad
+                replacement.write_bytes(b'ROOT-EDIT')
+                run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
+                assert bridge.read_bytes()==bad
+                # An ISO-only record cannot point into the anchor,
+                # current or historical VAT, or an EFI partition.
+                for sector in (26,256,at//B):
+                    bad=bytearray(raw)
+                    for field in alias_fields:both(bad,field,sector)
+                    bridge.write_bytes(bad)
+                    run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
+                    assert bridge.read_bytes()==bad
+                # Damage the newest VAT rather than falling back to a
+                # historical mapping that merely permits file listing.
+                bad=bytearray(raw)
+                bad[-(10 if gpt else 1)*B+4]^=1
+                bridge.write_bytes(bad)
+                run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
+                assert bridge.read_bytes()==bad
+                if joliet:
+                    bad=bytearray(raw)
+                    both(bad,alias_fields[1],34)
+                    bridge.write_bytes(bad)
+                    run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
+                    assert bridge.read_bytes()==bad
                 bridge.write_bytes(sixth)
             if not gpt:
                 for defect in ('chs','partition','length','efi-alias'):

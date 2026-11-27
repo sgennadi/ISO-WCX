@@ -3410,15 +3410,19 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         const std::filesystem::path& image,
         const std::vector<ArchiveChange>& changes,const EditProgress& progress,
         const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment,
-        std::uint64_t gpt_trailer) {
+        std::uint64_t gpt_trailer,
+        const EditProtectedRanges* iso_payload_proof=nullptr) {
     edit_tick(progress);
     vat_need(!gpt_trailer || (gpt_trailer==9 && !mbr_alignment),
              "VAT GPT requires a standard trailer without MBR alignment");
     vat_need(!mbr_alignment ||
              (mbr_alignment<=65536 && (!coordinated || coordinated->iso_metadata_blocks)),
              "VAT MBR coordination requires a mirrored-tree reservation");
-    vat_need(!changes.empty() && changes.size()<=4096,
-             "VAT transaction requires 1..4096 changes");
+    vat_need(iso_payload_proof?
+                 (changes.empty() && !coordinated && !mbr_alignment &&
+                  !iso_payload_proof->empty() && iso_payload_proof->size()<=4096):
+                 (!changes.empty() && changes.size()<=4096),
+             "VAT transaction requires 1..4096 changes or a read-only ISO proof");
     auto plan=std::make_unique<VatAppendPlan>();
     struct Request {
         std::string key;
@@ -3509,8 +3513,9 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     vat_need(contents==(legacy?"+NSR02":"+NSR03") && u32(pd,184)==2 &&
              partition>256 && partition<recorded_sectors &&
              capacity<=0xffffffffu-partition &&
-             sectors-partition+2<=capacity,
-             "requires UDF 1.50/2.x write-once partition with unrecorded capacity");
+             (iso_payload_proof?recorded_sectors-partition<=capacity:
+                                sectors-partition+2<=capacity),
+             "requires a bounded UDF 1.50/2.x write-once partition and append capacity when writing");
     vat_need(std::all_of(pd.begin()+56,pd.begin()+96,[](auto c){return c==0;}),
              "write-once partition must not advertise free-space structures");
     const Location main_range{std::uint64_t(main_start)*block,main_bytes};
@@ -3546,6 +3551,32 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
              !intersects(integrity_range,main_range) &&
              !intersects(integrity_range,reserve_range),
              "unsupported integrity sequence");
+    if(iso_payload_proof) {
+        // The strict parser has proved the physical backing partition
+        // begins after the primary AVDP, with integrity after sector
+        // 256. A pre-anchor ISO payload cannot reach current or retired
+        // VAT mappings, even ones no longer reachable by Disc.
+        std::uint64_t end=16ull*block;
+        for(const auto& [at,length]:*iso_payload_proof) {
+            edit_tick(progress);
+            vat_need(length && at>=end && at%block==0 &&
+                     at<256ull*block && length<=256ull*block-at,
+                     "ISO-only VAT payload must be wholly before the primary anchor");
+            const Location range{at,length};
+            vat_need(!intersects(range,main_range) && !intersects(range,reserve_range) &&
+                     !intersects(range,integrity_range),
+                     "ISO-only VAT payload aliases a UDF descriptor sequence");
+            end=at+length;
+            for(auto sector=at/block;sector<=(end-1)/block;++sector) {
+                const auto b=vat_read_sector(in,sector,sectors);
+                const std::string_view id(reinterpret_cast<const char*>(b.data()+1),5);
+                vat_need(id!="CD001" && id!="BEA01" && id!="NSR02" &&
+                         id!="NSR03" && id!="TEA01" && id!="BOOT2" &&
+                         id!="CDW02",
+                         "ISO-only VAT payload overlaps or introduces a VRS descriptor");
+            }
+        }
+    }
     const auto lvid=vat_read_sector(in,integrity_start,sectors);
     const auto implementation=u32(lvid,76);
     vat_need(u32(lvid,72)==2 && implementation<=block-96 &&
@@ -3831,6 +3862,8 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                      "strict VAT input payload mismatch");
         }
     }
+    // Proof-only callers must stop before any mutation planning.
+    if(iso_payload_proof)return plan;
     // A WCX directory Delete denotes the entire selected subtree.
     // Resolve it from the validated namespace, never from arbitrary
     // wildcard matching. All explicit removals must exist even if a
@@ -4452,6 +4485,12 @@ void edit_vat_append(const std::filesystem::path& image,
     tx.commit(progress);
 }
 } // namespace
+
+void validate_udf_vat_iso_payloads(const std::filesystem::path& image,
+        const EditProtectedRanges& patches,std::uint64_t gpt_trailer,
+        const EditProgress& progress) {
+    (void)prepare_vat_append(image,{},progress,nullptr,0,gpt_trailer,&patches);
+}
 
 void edit_udf(const std::filesystem::path& image,
               const std::vector<ArchiveChange>& changes,

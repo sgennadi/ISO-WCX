@@ -3917,12 +3917,218 @@ bool try_edit_iso_vat_independent_udf(const std::filesystem::path& path,
     return true;
 }
 
+// Existing ISO-only payloads before the primary UDF anchor can be
+// patched at equal length without modifying any VAT session. The UDF
+// writer's read-only strict proof independently checks the physical
+// partition, VRS, descriptor sequences and current VAT mapping.
+bool try_edit_iso_vat_independent_iso_payloads(const std::filesystem::path& path,
+        Image& image,const Disc& udf,const std::vector<ArchiveChange>& changes,
+        const EditProgress& progress) {
+    if(!image.hybrid_system_area || changes.empty() || changes.size()>4096)return false;
+    {
+        const auto initial=index_iso_tree(*image.root);
+        std::set<std::string> udf_names;
+        for(const auto& item:udf.items())udf_names.insert(upper(item.path));
+        for(const auto& c:changes) {
+            const auto key=upper(edit_path(c.path));
+            const auto found=initial.find(key);
+            if(c.remove || c.directory || found==initial.end() ||
+               found->second->directory || udf_names.count(key))return false;
+        }
+    }
+    // Pin the source before the authoritative preflight and never
+    // base a byte-write exemption on a stale caller-side namespace.
+    EditTransaction tx(path);
+    Image before(path,true);
+    const Disc current(path);
+    need(before.udf_bridge && before.hybrid_system_area && !before.iso_system_use &&
+         before.boot_regions_bounded && current.format()=="UDF" &&
+         current.udf_has_virtual_partition(),
+         "ISO-only VAT patch requires a bounded sequential bridge");
+    const auto index=index_iso_tree(*before.root);
+    std::set<std::string> udf_names;
+    for(const auto& item:current.items())
+        need(udf_names.insert(upper(item.path)).second,
+             "ambiguous UDF path in ISO-only VAT patch");
+    std::map<std::string,const Node*> selected;
+    std::vector<BridgePatch> patches;
+    for(const auto& c:changes) {
+        edit_tick(progress);
+        const auto key=upper(edit_path(c.path));
+        const auto found=index.find(key);
+        need(found!=index.end() && !udf_names.count(key) &&
+             !found->second->directory && selected.emplace(key,found->second).second,
+             "ISO-only VAT target is missing, shared or ambiguous");
+        const auto* node=found->second;
+        need(node->size && node->sections.size()==1 &&
+             node->sections.front().lba==node->lba &&
+             node->sections.front().length==node->size,
+             "ISO-only VAT target requires one nonempty physical extent");
+        need(std::filesystem::is_regular_file(std::filesystem::symlink_status(c.source)) &&
+             std::filesystem::file_size(c.source)==node->size,
+             "ISO-only VAT replacement must be a regular file of exactly the original size");
+        const auto at=std::uint64_t(node->lba)*block;
+        const auto limit=std::uint64_t(before.declared_volume_blocks)*block;
+        need(at>=std::uint64_t(before.terminator_lba+1)*block &&
+             at<256ull*block && node->size<=256ull*block-at &&
+             at<=limit && node->size<=limit-at,
+             "ISO-only VAT target must be wholly before the UDF anchor");
+        protect_boot(*node,before.boot_lbas);
+        protect_hybrid_target(*node,before);
+        patches.push_back({key,c.source,at,node->size});
+    }
+    const auto envelope=bridge_metadata_protected_ranges(before);
+    const auto trailer=before.gpt_hybrid?
+        plan_vat_gpt_bridge(before,envelope).trailer_blocks:0u;
+    if(!trailer)(void)vat_mbr_alignment(before,envelope);
+    EditProtectedRanges forbidden;
+    forbidden.emplace_back(0,std::uint64_t(before.terminator_lba+1)*block);
+    for(const auto* ranges:{&before.hybrid_protected_regions,&before.boot_regions,
+                            &before.udf_metadata_regions,&before.iso_auxiliary_regions})
+        forbidden.insert(forbidden.end(),ranges->begin(),ranges->end());
+    // Protect the complete original directory tree, including root
+    // and separate Joliet directory locations, not merely its listing.
+    auto protect_node=[&](const Node& n,bool exempt) {
+        if(!exempt)each_extent(n,[&](auto at,auto length) {
+            if(length)forbidden.emplace_back(at,length);
+        });
+        if(before.joliet && n.directory) {
+            need(n.joliet_record.size()>=34,"missing Joliet directory record");
+            forbidden.emplace_back(std::uint64_t(le(n.joliet_record,2))*block,
+                                    le(n.joliet_record,10));
+        }
+    };
+    protect_node(*before.root,false);
+    for(const auto& [key,node]:index)protect_node(*node,selected.count(key)!=0);
+    for(const auto& item:current.items())
+        for(const auto& e:item.extents)
+            if(!e.sparse && e.length)forbidden.emplace_back(e.offset,e.length);
+    // Independently parse both ISO views. A target must be the same
+    // unique, single physical extent in each applicable view; all
+    // other payloads, even differently named aliases, are immutable.
+    auto check_views=[&](const std::filesystem::path& file,bool collect) {
+        for(bool primary:{true,false}) {
+            const auto view=inspect_iso_namespace(file,primary);
+            need(view.format=="ISO 9660" || view.format=="Joliet",
+                 "ISO-only VAT patch requires ordinary ISO/Joliet views");
+            std::set<std::string> seen;
+            for(const auto& item:view.items) {
+                edit_tick(progress);
+                const auto key=upper(item.path);
+                if(!before.boot_descriptor_lbas.empty() && !index.count("BOOT.IMAGES") &&
+                   (key=="BOOT.IMAGES" || key.starts_with("BOOT.IMAGES/"))) {
+                    need(!selected.count(key),"ISO-only patch targets virtual boot data");
+                    continue;
+                }
+                const auto original=index.find(key);
+                need(seen.insert(key).second && original!=index.end() &&
+                     original->second->directory==item.directory,
+                     "ISO-only VAT patch requires matching ISO/Joliet paths");
+                const auto* node=original->second;
+                if(!item.directory) {
+                    need(item.size==node->size && node->sections.size()==1 &&
+                         item.extents.size()==1 && !item.extents[0].sparse &&
+                         item.extents[0].offset==std::uint64_t(node->lba)*block &&
+                         item.extents[0].length==node->size,
+                         "ISO-only VAT patch requires matching ISO/Joliet extents");
+                }
+                if(collect && !selected.count(key))
+                    for(const auto& e:item.extents)
+                        if(e.length && !e.sparse)forbidden.emplace_back(e.offset,e.length);
+            }
+            need(seen.size()==index.size(),"ISO-only VAT patch lost an ISO path");
+        }
+    };
+    check_views(path,true);
+    const auto merged=merge_vat_bridge_ranges(std::move(forbidden),before.size);
+    std::sort(patches.begin(),patches.end(),[](const auto& a,const auto& b){return a.at<b.at;});
+    EditProtectedRanges writes;
+    std::uint64_t end=0;
+    for(const auto& patch:patches) {
+        need(end<=patch.at && vat_bridge_range_disjoint(merged,patch.at,patch.bytes),
+             "ISO-only VAT payload aliases protected metadata or another file");
+        writes.emplace_back(patch.at,patch.bytes);
+        end=patch.at+patch.bytes;
+    }
+    validate_udf_vat_iso_payloads(path,writes,trailer,progress);
+    tx.assert_source_unchanged();
+    {
+        std::fstream out(tx.output,std::ios::binary|std::ios::in|
+                         std::ios::out|std::ios::trunc);
+        need(bool(out),"cannot stage ISO-only VAT patch");
+        before.file.clear();before.file.seekg(0);
+        copy_bytes(before.file,out,before.size,progress);
+        for(const auto& patch:patches) {
+            edit_tick(progress);
+            std::ifstream input(patch.source,std::ios::binary);
+            need(bool(input),"cannot open ISO-only replacement source");
+            out.clear();out.seekp(static_cast<std::streamoff>(patch.at));
+            need(bool(out),"cannot seek staged ISO-only payload");
+            copy_bytes(input,out,patch.bytes,progress);
+            need(input.peek()==std::char_traits<char>::eof(),
+                 "ISO-only replacement source grew during staging");
+        }
+        out.flush();need(bool(out),"cannot flush ISO-only VAT stage");
+    }
+    before.file.close();
+    image.file.close();
+    {
+        const Image after(tx.output,true);
+        need(after.size==before.size && after.udf_bridge &&
+             after.hybrid_system_area==before.hybrid_system_area &&
+             after.gpt_hybrid==before.gpt_hybrid &&
+             after.hybrid_protected_regions==before.hybrid_protected_regions &&
+             after.descriptors==before.descriptors &&
+             after.boot_regions==before.boot_regions &&
+             after.boot_entries==before.boot_entries &&
+             after.boot_lbas==before.boot_lbas &&
+             after.boot_descriptor_lbas==before.boot_descriptor_lbas,
+             "staged ISO-only VAT envelope changed");
+    }
+    check_views(tx.output,false);
+    validate_udf_vat_iso_payloads(tx.output,writes,trailer,progress);
+    OpticalEditGuard unchanged(before.size);
+    end=0;
+    for(const auto& patch:patches) {
+        unchanged.protect(end,patch.at-end);
+        end=patch.at+patch.bytes;
+    }
+    unchanged.protect(end,before.size-end);
+    unchanged.verify(path,tx.output,progress);
+    {
+        std::ifstream staged(tx.output,std::ios::binary);
+        need(bool(staged),"cannot reopen ISO-only VAT stage");
+        Bytes a(256u*1024u),b(a.size());
+        for(const auto& patch:patches) {
+            std::ifstream source(patch.source,std::ios::binary);
+            need(bool(source),"cannot reopen ISO-only replacement source");
+            staged.clear();staged.seekg(static_cast<std::streamoff>(patch.at));
+            need(bool(staged),"cannot seek staged ISO-only verification payload");
+            for(auto left=patch.bytes;left;) {
+                edit_tick(progress);
+                const auto n=static_cast<std::streamsize>(std::min<std::uint64_t>(left,a.size()));
+                source.read(reinterpret_cast<char*>(a.data()),n);
+                staged.read(reinterpret_cast<char*>(b.data()),n);
+                need(source.gcount()==n && staged.gcount()==n &&
+                     std::memcmp(a.data(),b.data(),static_cast<std::size_t>(n))==0,
+                     "staged ISO-only payload differs from source");
+                left-=static_cast<std::uint64_t>(n);
+            }
+            need(source.peek()==std::char_traits<char>::eof(),
+                 "ISO-only replacement grew during verification");
+        }
+    }
+    tx.commit(progress);
+    return true;
+}
+
 void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
         const Disc& udf,const std::vector<ArchiveChange>& changes,
         const EditProgress& progress) {
     need(!image.iso_system_use &&
          image.boot_regions_bounded && udf.udf_has_virtual_partition(),
          "VAT bridge requires bounded plain ISO/Joliet");
+    if(try_edit_iso_vat_independent_iso_payloads(path,image,udf,changes,progress))return;
     if(try_edit_iso_vat_independent_udf(path,image,udf,changes,progress))return;
     if(try_edit_iso_vat_mirrored_tree(path,image,changes,progress))return;
     {

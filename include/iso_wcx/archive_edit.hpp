@@ -50,6 +50,11 @@ void edit_udf(const std::filesystem::path&, const std::vector<ArchiveChange>&,
               bool bounded_partitioned_bridge = false,
               std::uint64_t mbr_append_alignment_blocks = 0,
               std::uint64_t gpt_append_trailer_blocks = 0);
+// Read-only proof for fixed-length ISO-only patches in a sequential VAT
+// bridge. Reuse the strict VAT input parser; never authorize UDF sectors.
+void validate_udf_vat_iso_payloads(const std::filesystem::path&,
+              const EditProtectedRanges&,std::uint64_t gpt_trailer_blocks,
+              const EditProgress& = {});
 // Transactional native FAT12/16/32 editor: exact raw/fixed VHD filesystems.
 void edit_dynamic_vhd(const std::filesystem::path&,
                       const std::vector<ArchiveChange>&,
