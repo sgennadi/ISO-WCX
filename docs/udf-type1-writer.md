@@ -442,4 +442,22 @@ before atomic commit. Regression coverage extends mirrored create,
 replace, recursive delete, cancellation and repeated growth across
 embedded and external VAT, with and without Joliet; checks GPT CRCs and
 unchanged EFI partition data; and rejects corrupt GPT, trailer or latest
-VAT bytes. Partially shared GPT namespaces remain unsupported.
+VAT bytes.
+
+### Partially shared sequential GPT VAT bridge
+
+For a partially shared ISO/Joliet/UDF namespace, a regular file already
+present in all applicable views with the same verified nonempty physical
+extent may be replaced or removed atomically. The ISO coordinator
+changes only the explicitly planned original record fields (or checked
+directory-sector compaction on deletion) and volume lengths. All mutable
+historical ISO metadata must precede the UDF anchor at sector 256.
+The VAT writer appends a new mapping and verifies the exact relocated
+GPT envelope, independent partition contents, old VAT history and all
+remaining namespace entries. Repeated edits are supported while the
+original ISO directory fields remain in the permitted area. Tests cover
+embedded and external VAT, with and without Joliet, repeated replacement,
+delete, cancellation, mismatched shared extents, corrupt GPT/VAT and
+a CRC-valid GPT partition alias of the shared payload. New mixed shared
+paths, partially shared MBR coordination and directory-tree removal in
+partially shared bridges remain unsupported.

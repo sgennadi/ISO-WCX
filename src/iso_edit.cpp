@@ -2214,6 +2214,10 @@ void validate_vat_bridge_envelope(const std::filesystem::path& staged,
          after.boot_descriptor_lbas==image.boot_descriptor_lbas,
          "staged VAT bridge changed ISO/El Torito geometry");
 }
+GptGrowthPlan plan_vat_gpt_bridge(Image& image,const EditProtectedRanges& immutable);
+void validate_vat_gpt_bridge(const std::filesystem::path& staged,
+                             const Image& before,GptGrowthPlan plan,bool remastered=false);
+
 void coordinate_shared_bridge_stage(
         const std::filesystem::path& path,const std::filesystem::path& staged,
         const Image& image,const std::map<std::string,const Node*>& targets,
@@ -2224,14 +2228,19 @@ void coordinate_shared_bridge_stage(
         const GptGrowthPlan* gpt_growth=nullptr,
         bool sequential_vat=false) {
     if(sequential_vat) {
-        need(!mbr_growth && !gpt_growth && !image.hybrid_system_area,
-             "partitioned VAT coordination is not supported");
-        validate_vat_bridge_envelope(staged,image);
+        need(!mbr_growth && image.hybrid_system_area==(gpt_growth!=nullptr) &&
+             image.gpt_hybrid==(gpt_growth!=nullptr),
+             "unsupported sequential shared-file envelope");
+        if(gpt_growth)validate_vat_gpt_bridge(staged,image,*gpt_growth);
+        else validate_vat_bridge_envelope(staged,image);
     } else protect_iso_udf_stage(path,staged,image,progress,mbr_growth,gpt_growth);
     const auto size=std::filesystem::file_size(staged);
-    const auto volume_blocks=gpt_growth?gpt_growth->logical_blocks:size/block;
     need(size>image.size && size%block==0 && size/block<0xffffffffu,
          "shared ISO/UDF resize did not produce bounded append mastering");
+    const auto volume_blocks=gpt_growth?
+        (sequential_vat?size/block-gpt_growth->trailer_blocks:gpt_growth->logical_blocks):
+        size/block;
+    const auto payload_limit=volume_blocks*block;
     std::map<const Node*,FileSection> sections;
     std::set<const Node*> deleted;
     {
@@ -2251,8 +2260,8 @@ void coordinate_shared_bridge_stage(
                  "staged shared UDF file lacks an ISO-compatible extent");
             const auto start=item->extents.front().offset;
             need(start>=image.size && start%block==0 &&
-                 start<=size && item->size<=size-start,
-                 "shared replacement must occupy newly appended blocks");
+                 start<=payload_limit && item->size<=payload_limit-start,
+                 "shared replacement must occupy newly appended optical blocks");
             auto next=start;
             for(const auto& extent:item->extents) {
                 need(!extent.sparse && extent.offset==next &&
@@ -2352,6 +2361,8 @@ void coordinate_shared_bridge_stage(
          checked.boot_lbas==image.boot_lbas &&
          checked.boot_descriptor_lbas==image.boot_descriptor_lbas,
          "coordinated ISO descriptors or boot resources changed");
+    if(sequential_vat && gpt_growth)
+        validate_vat_gpt_bridge(staged,image,*gpt_growth,true);
     auto verify=[&](auto&& self,const Node& a,const Node& b)->void {
         const auto found=sections.find(&a);
         const auto lba=found==sections.end()?a.lba:found->second.lba;
@@ -2834,10 +2845,6 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
     }
     return true;
 }
-
-GptGrowthPlan plan_vat_gpt_bridge(Image& image,const EditProtectedRanges& immutable);
-void validate_vat_gpt_bridge(const std::filesystem::path& staged,
-                             const Image& before,GptGrowthPlan plan,bool remastered=false);
 
 void coordinate_shared_add_stage(const std::filesystem::path& path,
         const std::filesystem::path& staged,const Image& image,
@@ -3468,15 +3475,29 @@ void edit_iso_vat_shared_bridge(const std::filesystem::path& path,Image& image,
             need(matches==1,"VAT shared target missing or ambiguous in ISO view");
         }
     }
-    const auto immutable=bridge_metadata_protected_ranges(image);
+    auto immutable=bridge_metadata_protected_ranges(image);
+    std::optional<GptGrowthPlan> gpt;
+    if(image.gpt_hybrid) {
+        // The primary and Joliet views may contain different independent
+        // ISO-only resources. Include both before retiring the old GPT.
+        for(bool primary:{true,false}) {
+            const auto view=inspect_iso_namespace(path,primary);
+            for(const auto& item:view.items)
+                for(const auto& e:item.extents)
+                    if(e.length && !e.sparse)immutable.emplace_back(e.offset,e.length);
+        }
+        gpt=plan_vat_gpt_bridge(image,immutable);
+    }
     auto* owner=edit.get();
+    const auto* gpt_plan=gpt?&*gpt:nullptr;
     const EditStageValidator validate=
-        [&path,&image,&progress,owner](const std::filesystem::path& staged) {
+        [&path,&image,&progress,owner,gpt_plan](const std::filesystem::path& staged) {
             coordinate_shared_bridge_stage(path,staged,image,owner->shared,
-                owner->plan,owner->deletion_sectors,progress,nullptr,nullptr,true);
+                owner->plan,owner->deletion_sectors,progress,nullptr,gpt_plan,true);
         };
     image.file.close();
-    edit_udf(path,changes,progress,true,validate,immutable,&edit->plan);
+    edit_udf(path,changes,progress,true,validate,immutable,&edit->plan,
+             gpt_plan!=nullptr,0,gpt_plan?gpt_plan->trailer_blocks:0);
 }
 
 // Fully mirrored VAT trees use a fresh ISO directory/path-table
@@ -3587,8 +3608,8 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
         const bool shared=std::any_of(changes.begin(),changes.end(),
             [&](const ArchiveChange& c){return index.count(upper(edit_path(c.path)))!=0;});
         if(shared) {
-            need(!image.hybrid_system_area,
-                 "partitioned VAT shared edits require a supported mirrored namespace");
+            need(!image.hybrid_system_area || image.gpt_hybrid,
+                 "MBR VAT shared edits require a supported mirrored namespace");
             edit_iso_vat_shared_bridge(path,image,changes,progress);
             return;
         }

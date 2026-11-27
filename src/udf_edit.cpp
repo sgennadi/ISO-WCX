@@ -3412,9 +3412,8 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment,
         std::uint64_t gpt_trailer) {
     edit_tick(progress);
-    vat_need(!gpt_trailer || (gpt_trailer==9 && !mbr_alignment &&
-                               (!coordinated || coordinated->iso_metadata_blocks)),
-             "VAT GPT requires a standard trailer and mirrored-tree reservation when coordinated");
+    vat_need(!gpt_trailer || (gpt_trailer==9 && !mbr_alignment),
+             "VAT GPT requires a standard trailer without MBR alignment");
     vat_need(!mbr_alignment ||
              (mbr_alignment<=65536 && (!coordinated || coordinated->iso_metadata_blocks)),
              "VAT MBR coordination requires a mirrored-tree reservation");
@@ -4484,10 +4483,9 @@ void edit_udf(const std::filesystem::path& image,
         // The VAT bridge provides the external ISO validator and
         // immutable ranges. Shared-file coordination may only change
         // the explicitly checked pre-anchor ISO metadata fields.
-        if((gpt_append_trailer_blocks && coordinated && !coordinated->iso_metadata_blocks) ||
-           (bounded_partitioned_bridge &&
+        if((bounded_partitioned_bridge &&
             ((!mbr_append_alignment_blocks && !gpt_append_trailer_blocks) ||
-             (coordinated && !coordinated->iso_metadata_blocks))) ||
+             (mbr_append_alignment_blocks && coordinated && !coordinated->iso_metadata_blocks))) ||
            (allow_bridge && (!validate_stage || protected_ranges.empty())) ||
            (!allow_bridge && (validate_stage || !protected_ranges.empty() || coordinated)))throw;
         edit_vat_append(image,changes,progress,validate_stage,coordinated,

@@ -1019,8 +1019,10 @@ def test_vat_shared_bridge(editor,inspector,root,image,replacement):
     from test_images import iso_record
     import binascii
     bridge=root/'vat-shared.iso'
-    for joliet in (False,True):
-        raw=vat_append_image(capacity=8192,external_table=True)
+    for joliet,gpt,external in ((False,False,True),(True,False,True),
+                                (False,True,False),(False,True,True),
+                                (True,True,False),(True,True,True)):
+        raw=vat_append_image(capacity=8192,external_table=external)
         optical=fixture(joliet=joliet,boot=not joliet,boot_efi=not joliet)
         raw[16*B:19*B]=optical[16*B:19*B]
         if not joliet:
@@ -1049,10 +1051,41 @@ def test_vat_shared_bridge(editor,inspector,root,image,replacement):
         for sector in descriptors:
             both(raw,sector*B+80,len(raw)//B)
             fields.append((sector*B+80,8))
+        if gpt:
+            if joliet:raw[26*B:27*B]=b'E'*B
+            vat_gpt_envelope(raw)
         bridge.write_bytes(raw)
         def assert_prefix(old,new,allowed):
             restored=bytearray(new[:len(old)])
             for at,n in allowed:restored[at:at+n]=old[at:at+n]
+            if gpt:
+                import zlib
+                restored[458:462]=old[458:462]
+                for at,n in ((16,4),(32,8),(48,8)):
+                    restored[512+at:512+at+n]=old[512+at:512+at+n]
+                retired=len(old)-33*512
+                assert not any(new[retired:len(old)])
+                restored[retired:]=old[retired:]
+                last=len(new)//512-1
+                assert struct.unpack_from('<I',new,458)[0]==last
+                entries=old[1024:1024+16384]
+                for here,other,table in ((1,last,2),(last,1,last-32)):
+                    header=bytearray(new[here*512:(here+1)*512])
+                    assert header[:8]==b'EFI PART'
+                    assert header[56:72]==old[512+56:512+72]
+                    assert struct.unpack_from('<QQQQ',header,24)==(here,other,34,last-33)
+                    assert struct.unpack_from('<QIII',header,72)==(table,128,128,zlib.crc32(entries))
+                    crc=struct.unpack_from('<I',header,16)[0]
+                    p32(header,16,0)
+                    assert crc==zlib.crc32(header[:92])
+                    assert new[table*512:table*512+16384]==entries
+                for sector in descriptors:
+                    assert struct.unpack_from('<I',new,sector*B+80)[0]==len(new)//B-9
+                assert new[26*B:27*B]==old[26*B:27*B]
+                fe=len(new)-10*B
+                assert new[fe+27]==248
+                assert struct.unpack_from('<I',new,fe+12)[0]==fe//B-PARTITION
+                assert not any(new[fe+B:len(new)-33*512])
             assert restored==old
         # Same size, larger, then tiny shared replacements. Small
         # replacements must not become inline data inaccessible to ISO.
@@ -1066,11 +1099,12 @@ def test_vat_shared_bridge(editor,inspector,root,image,replacement):
             assert after[304*B:304*B+5]==b'world'
             assert read_image(bridge)=={'HELLO':body}
             if joliet:assert read_image(bridge,True)=={'hello':body}
-            out=root/f'vat-shared-{joliet}-{k}'
+            out=root/f'vat-shared-{joliet}-{gpt}-{external}-{k}'
             check_disc(inspector,bridge,out)
             assert (out/'hello').read_bytes()==body
             assert (out/'keep').read_bytes()==b'keep me'
-            assert after[256*B:len(before)]==before[256*B:]
+            unchanged_end=len(before)-(33*512 if gpt else 0)
+            assert after[256*B:unchanged_end]==before[256*B:unchanged_end]
         before=bridge.read_bytes()
         for args in (('batch','add','hello',replacement,'add','NEW.BIN',replacement),
                      ('mkdir','hello')):
@@ -1084,7 +1118,7 @@ def test_vat_shared_bridge(editor,inspector,root,image,replacement):
         assert_prefix(before,deleted,[(x*B,B) for x in dirs]+[(x*B+80,8) for x in descriptors])
         assert read_image(bridge)=={}
         if joliet:assert read_image(bridge,True)=={}
-        out=root/f'vat-shared-deleted-{joliet}'
+        out=root/f'vat-shared-deleted-{joliet}-{gpt}-{external}'
         check_disc(inspector,bridge,out)
         assert sorted(p.name for p in out.iterdir())==['keep']
         # A same-name ISO entry with different extent is not shared.
@@ -1094,10 +1128,24 @@ def test_vat_shared_bridge(editor,inspector,root,image,replacement):
         bridge.write_bytes(bad)
         run(editor,bridge,'add','hello',replacement,success=False)
         assert bridge.read_bytes()==bad
+        if gpt:
+            for offset in (-512+16,-9*B,-10*B+4):
+                bad=bytearray(raw)
+                bad[offset]^=1
+                bridge.write_bytes(bad)
+                run(editor,bridge,'add','hello',replacement,success=False)
+                assert bridge.read_bytes()==bad
+            # A CRC-valid EFI partition alias of the original shared
+            # payload must not authorize unlink or replacement.
+            bad=vat_gpt_envelope(bytearray(raw[:-9*B]),efi_lba=304)
+            bridge.write_bytes(bad)
+            for args in (('add','hello',replacement),('delete','hello')):
+                run(editor,bridge,*args,success=False)
+                assert bridge.read_bytes()==bad
         assert not list(root.glob('.iso-wcx-edit-*'))
 
 
-def vat_gpt_envelope(raw):
+def vat_gpt_envelope(raw,efi_lba=26):
     import zlib
     raw.extend(bytes(9*B))
     last=len(raw)//512-1
@@ -1107,7 +1155,7 @@ def vat_gpt_envelope(raw):
     entries=bytearray(128*128)
     entries[:16]=bytes.fromhex('28732ac11ff8d211ba4b00a0c93ec93b')
     entries[16:32]=bytes(range(1,17))
-    p64(entries,32,26*4);p64(entries,40,26*4+3)
+    p64(entries,32,efi_lba*4);p64(entries,40,efi_lba*4+3)
     for here,other,table in ((1,last,2),(last,1,last-32)):
         raw[table*512:table*512+len(entries)]=entries
         h=bytearray(512)
