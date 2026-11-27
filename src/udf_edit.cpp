@@ -3412,8 +3412,9 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment,
         std::uint64_t gpt_trailer) {
     edit_tick(progress);
-    vat_need(!gpt_trailer || (gpt_trailer==9 && !mbr_alignment && !coordinated),
-             "VAT GPT currently requires a split namespace and standard trailer");
+    vat_need(!gpt_trailer || (gpt_trailer==9 && !mbr_alignment &&
+                               (!coordinated || coordinated->iso_metadata_blocks)),
+             "VAT GPT requires a standard trailer and mirrored-tree reservation when coordinated");
     vat_need(!mbr_alignment ||
              (mbr_alignment<=65536 && (!coordinated || coordinated->iso_metadata_blocks)),
              "VAT MBR coordination requires a mirrored-tree reservation");
@@ -4371,14 +4372,17 @@ void edit_vat_append(const std::filesystem::path& image,
              "VAT ISO coordination changed the append size");
     OpticalEditGuard guard(plan->original_size);
     if(coordinated) {
-        // Independently checked exact MBR header is the only other
-        // mutable historical range besides planned ISO fields.
-        std::uint64_t at=plan->mbr.empty()?0u:512u;
+        // Only independently checked envelope metadata and explicitly
+        // planned ISO fields may change in the historical prefix.
+        std::uint64_t at=plan->gpt?1024u:(plan->mbr.empty()?0u:512u);
+        const auto end=plan->gpt?plan->gpt->old_backup:plan->original_size;
         for(const auto& [start,length]:coordinated->metadata_writes) {
+            vat_need(start>=at && start<=end && length<=end-start,
+                     "VAT ISO metadata field overlaps the validated envelope");
             if(start>at)guard.protect(at,start-at);
             at=start+length;
         }
-        guard.protect(at,plan->original_size-at);
+        if(end>at)guard.protect(at,end-at);
         // The callback owns only original ISO metadata fields and the
         // explicitly reserved new ISO tree. Recheck every VAT run.
         std::fstream in(tx.output,std::ios::binary|std::ios::in);
@@ -4386,6 +4390,10 @@ void edit_vat_append(const std::filesystem::path& image,
         if(!plan->mbr.empty())
             vat_need(staged_read(in,0,512)==plan->mbr,
                      "ISO coordination modified the validated MBR");
+        if(plan->gpt)
+            vat_need(staged_read(in,0,1024)==plan->gpt->prefix &&
+                     staged_read(in,plan->gpt->old_backup,plan->gpt->retired.size())==plan->gpt->retired,
+                     "ISO coordination modified validated GPT metadata");
         auto pos=plan->original_size+plan->payload_blocks*block;
         for(const auto& bytes:plan->append) {
             edit_tick(progress);
@@ -4476,7 +4484,7 @@ void edit_udf(const std::filesystem::path& image,
         // The VAT bridge provides the external ISO validator and
         // immutable ranges. Shared-file coordination may only change
         // the explicitly checked pre-anchor ISO metadata fields.
-        if((gpt_append_trailer_blocks && coordinated) ||
+        if((gpt_append_trailer_blocks && coordinated && !coordinated->iso_metadata_blocks) ||
            (bounded_partitioned_bridge &&
             ((!mbr_append_alignment_blocks && !gpt_append_trailer_blocks) ||
              (coordinated && !coordinated->iso_metadata_blocks))) ||

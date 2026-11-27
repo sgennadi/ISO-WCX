@@ -1097,13 +1097,44 @@ def test_vat_shared_bridge(editor,inspector,root,image,replacement):
         assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def vat_gpt_envelope(raw):
+    import zlib
+    raw.extend(bytes(9*B))
+    last=len(raw)//512-1
+    raw[510:512]=b'\x55\xaa'
+    raw[450]=0xee
+    p32(raw,454,1);p32(raw,458,last)
+    entries=bytearray(128*128)
+    entries[:16]=bytes.fromhex('28732ac11ff8d211ba4b00a0c93ec93b')
+    entries[16:32]=bytes(range(1,17))
+    p64(entries,32,26*4);p64(entries,40,26*4+3)
+    for here,other,table in ((1,last,2),(last,1,last-32)):
+        raw[table*512:table*512+len(entries)]=entries
+        h=bytearray(512)
+        h[:8]=b'EFI PART'
+        p32(h,8,0x10000);p32(h,12,92)
+        p64(h,24,here);p64(h,32,other)
+        p64(h,40,34);p64(h,48,last-33)
+        h[56:72]=bytes(range(16,32))
+        p64(h,72,table);p32(h,80,128);p32(h,84,128)
+        p32(h,88,zlib.crc32(entries))
+        p32(h,16,zlib.crc32(h[:92]))
+        raw[here*512:(here+1)*512]=h
+    return raw
+
+
 def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
     from test_iso_edit import fixture, both, read_image, validate_path_tables
     from test_images import iso_record
     import binascii
     bridge=root/'vat-mirrored-tree.iso'
     for joliet in (False,True):
-        for external,mbr in ((False,False),(True,False),(False,True),(True,True)):
+        for external,envelope in ((False,'plain'),(True,'plain'),
+                                  (False,'mbr'),(True,'mbr'),
+                                  (False,'gpt'),(True,'gpt')):
+            mbr=envelope=='mbr'
+            gpt=envelope=='gpt'
+            trailer=9 if gpt else 0
             raw=vat_append_image(capacity=8192,external_table=external)
             # Remove the independent second file from this synthetic
             # namespace, leaving an exactly mirrored regular file.
@@ -1149,6 +1180,9 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
                 p32(raw,470,26*4);p32(raw,474,4)
                 raw[510:512]=b'\x55\xaa'
                 if joliet:raw[26*B:27*B]=b'E'*B
+            if gpt:
+                if joliet:raw[26*B:27*B]=b'E'*B
+                vat_gpt_envelope(raw)
             bridge.write_bytes(raw)
             def verify(before,expected,number):
                 after=bridge.read_bytes()
@@ -1167,10 +1201,35 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
                     assert after[451:454]==bytes((9,4|((cylinder>>2)&0xc0),cylinder&255))
                     assert struct.unpack_from('<I',after,458)[0]==sectors
                     assert after[26*B:27*B]==before[26*B:27*B]
+                if gpt:
+                    import zlib
+                    restored[458:462]=before[458:462]
+                    for at,n in ((16,4),(32,8),(48,8)):
+                        restored[512+at:512+at+n]=before[512+at:512+at+n]
+                    old_backup=len(before)-33*512
+                    assert not any(after[old_backup:len(before)])
+                    restored[old_backup:]=before[old_backup:]
+                    last=len(after)//512-1
+                    assert struct.unpack_from('<I',after,458)[0]==last
+                    entries=before[1024:1024+16384]
+                    for here,other,table in ((1,last,2),(last,1,last-32)):
+                        header=bytearray(after[here*512:(here+1)*512])
+                        assert header[:8]==b'EFI PART'
+                        assert header[56:72]==before[512+56:512+72]
+                        assert struct.unpack_from('<QQQQ',header,24)==(here,other,34,last-33)
+                        assert struct.unpack_from('<QIII',header,72)==(table,128,128,zlib.crc32(entries))
+                        crc=struct.unpack_from('<I',header,16)[0]
+                        p32(header,16,0)
+                        assert crc==zlib.crc32(header[:92])
+                        assert after[table*512:table*512+16384]==entries
+                    for vd in descriptors:
+                        assert struct.unpack_from('<I',after,vd*B+80)[0]==len(after)//B-trailer
+                    assert after[26*B:27*B]==before[26*B:27*B]
                 assert restored==before
-                fe=len(after)-B
+                fe=len(after)-(1+trailer)*B
+                if gpt:assert not any(after[fe+B:len(after)-33*512])
                 assert after[fe+27]==248
-                assert struct.unpack_from('<I',after,fe+12)[0]==len(after)//B-PARTITION-1
+                assert struct.unpack_from('<I',after,fe+12)[0]==len(after)//B-PARTITION-1-trailer
                 # All alignment padding must precede the new ISO
                 # metadata reservation, not the final VAT ICB.
                 vat_size=struct.unpack_from('<Q',after,fe+56)[0]
@@ -1183,7 +1242,7 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
                 else:
                     vat_at=fe+176
                     reservation_end=fe
-                assert struct.unpack_from('<I',after,vat_at+132)[0]==len(before)//B-PARTITION-1
+                assert struct.unpack_from('<I',after,vat_at+132)[0]==len(before)//B-PARTITION-1-trailer
                 # Every new path table/root record belongs to the
                 # appended ISO metadata before the VAT table.
                 for vd in descriptors:
@@ -1194,7 +1253,7 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
                 assert read_image(bridge)=={k.upper():v for k,v in expected.items()}
                 if joliet:assert read_image(bridge,True)==expected
                 validate_path_tables(bridge)
-                out=root/f'vat-mirror-{joliet}-{external}-{mbr}-{number}'
+                out=root/f'vat-mirror-{joliet}-{external}-{envelope}-{number}'
                 check_disc(inspector,bridge,out)
                 files={p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}
                 dirs={p.relative_to(out).as_posix()+'/':None for p in out.rglob('*') if p.is_dir()}
@@ -1238,7 +1297,7 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
             fourth=verify(third,expected,4)
 
             def vat_snapshot(data):
-                fe=len(data)-B
+                fe=len(data)-(1+trailer)*B
                 size=struct.unpack_from('<Q',data,fe+56)[0]
                 if struct.unpack_from('<H',data,fe+34)[0]==3:
                     table=data[fe+176:fe+176+size]
@@ -1313,7 +1372,7 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
                       if not key.startswith('SUB/')}
             fifth=verify(fourth,expected,5)
             table,new_map=vat_snapshot(fifth)
-            assert struct.unpack_from('<I',table,132)[0]==len(fourth)//B-PARTITION-1
+            assert struct.unpack_from('<I',table,132)[0]==len(fourth)//B-PARTITION-1-trailer
             assert all(new_map[x]==0xffffffff for x in retired)
             assert new_map[roots['SUBKEEP'][0]]==old_map[roots['SUBKEEP'][0]]
             assert struct.unpack_from('<II',table,136)==(2,2)
@@ -1323,6 +1382,13 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
             sixth=verify(fifth,{'SUBKEEP/':None},6)
             run(editor,bridge,'add','SUBKEEP/NEW.BIN',replacement)
             seventh=verify(sixth,{'SUBKEEP/':None,'SUBKEEP/NEW.BIN':replacement.read_bytes()},7)
+            if gpt:
+                for offset in (-512+16,-9*B,-10*B+4):
+                    bad=bytearray(seventh)
+                    bad[offset]^=1
+                    bridge.write_bytes(bad)
+                    run(editor,bridge,'add','SUBKEEP/ABORT.BIN',replacement,success=False)
+                    assert bridge.read_bytes()==bad
             if mbr:
                 bad=bytearray(seventh)
                 bad[453]^=1 # valid signature, wrong end cylinder
@@ -1469,27 +1535,7 @@ def test_vat_gpt_bridge(editor,inspector,root,image,replacement):
         raw[24*B:27*B]=optical[24*B:27*B]
         both(raw,16*B+80,len(raw)//B)
         p16(raw,24*B+38,4);p16(raw,24*B+102,4)
-        raw.extend(bytes(9*B))
-        last=len(raw)//512-1
-        raw[510:512]=b'\x55\xaa'
-        raw[450]=0xee
-        p32(raw,454,1);p32(raw,458,last)
-        entries=bytearray(128*128)
-        entries[:16]=bytes.fromhex('28732ac11ff8d211ba4b00a0c93ec93b')
-        entries[16:32]=bytes(range(1,17))
-        p64(entries,32,26*4);p64(entries,40,26*4+3)
-        for here,other,table in ((1,last,2),(last,1,last-32)):
-            raw[table*512:table*512+len(entries)]=entries
-            h=bytearray(512)
-            h[:8]=b'EFI PART'
-            p32(h,8,0x10000);p32(h,12,92)
-            p64(h,24,here);p64(h,32,other)
-            p64(h,40,34);p64(h,48,last-33)
-            h[56:72]=bytes(range(16,32))
-            p64(h,72,table);p32(h,80,128);p32(h,84,128)
-            p32(h,88,zlib.crc32(entries))
-            p32(h,16,zlib.crc32(h[:92]))
-            raw[here*512:(here+1)*512]=h
+        vat_gpt_envelope(raw)
         return raw
     for external in (False,True):
         initial=build(external)

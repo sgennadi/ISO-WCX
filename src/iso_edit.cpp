@@ -2533,7 +2533,6 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         // Independently confirm the same names and extents in BOTH views.
         // parse_iso can append a synthetic boot.images folder; it is not
         // an on-disc namespace entry when the ISO tree has no such root.
-        if(image.gpt_hybrid)return false;
         for(bool primary:{true,false}) {
             const auto view=inspect_iso_namespace(path,primary);
             if(view.format!="ISO 9660" && view.format!="Joliet")return false;
@@ -2836,6 +2835,10 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
     return true;
 }
 
+GptGrowthPlan plan_vat_gpt_bridge(Image& image,const EditProtectedRanges& immutable);
+void validate_vat_gpt_bridge(const std::filesystem::path& staged,
+                             const Image& before,GptGrowthPlan plan,bool remastered=false);
+
 void coordinate_shared_add_stage(const std::filesystem::path& path,
         const std::filesystem::path& staged,const Image& image,
         const IsoNodeIndex& original,const CoordinatedIsoUpdate& plan,
@@ -2844,16 +2847,19 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         const GptGrowthPlan* gpt_growth=nullptr,
         bool sequential_vat=false) {
     if(sequential_vat) {
-        // VAT has its own independently validated MBR header and
-        // alignment. Never use the ROM end-anchor growth coordinator.
-        need(!mbr_growth && !gpt_growth && !image.gpt_hybrid,
-             "GPT/ROM growth is not a sequential VAT remaster");
-        validate_vat_bridge_envelope(staged,image,image.hybrid_system_area);
+        // VAT already relocated and independently checked GPT.
+        // Never use ROM end-anchor growth for sequential media.
+        need(!mbr_growth && image.gpt_hybrid==(gpt_growth!=nullptr),
+             "invalid sequential VAT remaster envelope");
+        if(gpt_growth)validate_vat_gpt_bridge(staged,image,*gpt_growth);
+        else validate_vat_bridge_envelope(staged,image,image.hybrid_system_area);
     } else protect_iso_udf_stage(path,staged,image,progress,mbr_growth,gpt_growth);
     const auto size=std::filesystem::file_size(staged);
-    const auto volume_blocks=gpt_growth?gpt_growth->logical_blocks:size/block;
     need(size>image.size && size%block==0 && size/block<0xffffffffu,
          "shared addition requires append mastering");
+    const auto volume_blocks=gpt_growth?
+        (sequential_vat?size/block-gpt_growth->trailer_blocks:gpt_growth->logical_blocks):
+        size/block;
     const unsigned views=image.joliet?2u:1u;
     std::uint64_t first=0,main=0;
     if(sequential_vat) {
@@ -2861,7 +2867,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         // reservation immediately before the optional external VAT table
         // and final VAT ICB. Derive its location from that final ICB.
         Image mapped(staged,true);
-        const auto fe=mapped.read(size-block,block);
+        const auto fe=mapped.read((volume_blocks-1)*block,block);
         need(le(fe,0,2)==261 && (fe[27]==0 || fe[27]==248),
              "missing final sequential VAT ICB");
         const auto mode=le(fe,34,2);
@@ -2870,10 +2876,10 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         need((mode==3 && !count) ||
              (mode==0 && le(fe,172)==8 && count && count<=8192),
              "unsupported final sequential VAT storage");
-        need(count<size/block && plan.iso_metadata_blocks &&
-             plan.iso_metadata_blocks<=size/block-1-count,
+        need(count<volume_blocks && plan.iso_metadata_blocks &&
+             plan.iso_metadata_blocks<=volume_blocks-1-count,
              "invalid sequential ISO metadata reservation");
-        main=size/block-1-count;
+        main=volume_blocks-1-count;
         first=main-plan.iso_metadata_blocks;
         need(first>=image.size/block,"sequential ISO reservation overlaps source");
         if(mode==0) {
@@ -3034,11 +3040,13 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
          checked.boot_lbas==image.boot_lbas &&
          checked.boot_descriptor_lbas==image.boot_descriptor_lbas,
          "shared tree remaster changed boot descriptors");
-    if(sequential_vat)
-        need(checked.hybrid_system_area==image.hybrid_system_area &&
-             !checked.gpt_hybrid &&
-             checked.hybrid_protected_regions==image.hybrid_protected_regions,
-             "VAT mirrored remaster changed independent partitions");
+    if(sequential_vat) {
+        if(gpt_growth)validate_vat_gpt_bridge(staged,image,*gpt_growth,true);
+        else need(checked.hybrid_system_area==image.hybrid_system_area &&
+                  !checked.gpt_hybrid &&
+                  checked.hybrid_protected_regions==image.hybrid_protected_regions,
+                  "VAT mirrored remaster changed independent partitions");
+    }
     const auto after=index_iso_tree(*checked.root);
     const auto wanted=index_iso_tree(*tree.root);
     need(tree.removed<=original.size() &&
@@ -3491,16 +3499,20 @@ bool try_edit_iso_vat_mirrored_tree(const std::filesystem::path& path,Image& ima
     auto edit=prepare_bridge_metadata_edit(path,image,changes,true);
     if(!edit)return false;
     const auto immutable=bridge_metadata_protected_ranges(image);
-    const auto alignment=vat_mbr_alignment(image,immutable);
+    std::optional<GptGrowthPlan> gpt;
+    if(image.gpt_hybrid)gpt=plan_vat_gpt_bridge(image,immutable);
+    const auto alignment=gpt?0u:vat_mbr_alignment(image,immutable);
     auto* owner=edit.get();
+    const auto* gpt_plan=gpt?&*gpt:nullptr;
     const EditStageValidator validate=
-        [&path,&image,&progress,owner](const std::filesystem::path& staged) {
+        [&path,&image,&progress,owner,gpt_plan](const std::filesystem::path& staged) {
             coordinate_shared_add_stage(path,staged,image,owner->iso_files,
-                owner->plan,owner->add_tree,progress,nullptr,nullptr,true);
+                owner->plan,owner->add_tree,progress,nullptr,gpt_plan,true);
         };
     image.file.close();
     edit_udf(path,changes,progress,true,validate,immutable,&edit->plan,
-             alignment!=0,alignment);
+             alignment!=0 || gpt_plan!=nullptr,alignment,
+             gpt_plan?gpt_plan->trailer_blocks:0);
     return true;
 }
 
@@ -3537,7 +3549,7 @@ GptGrowthPlan plan_vat_gpt_bridge(Image& image,const EditProtectedRanges& immuta
     return plan;
 }
 void validate_vat_gpt_bridge(const std::filesystem::path& staged,
-                             const Image& before,GptGrowthPlan plan) {
+                             const Image& before,GptGrowthPlan plan,bool remastered) {
     const auto size=std::filesystem::file_size(staged);
     need(size>before.size && size%block==0 && size/block>plan.trailer_blocks,
          "invalid staged VAT GPT size");
@@ -3550,7 +3562,9 @@ void validate_vat_gpt_bridge(const std::filesystem::path& staged,
          after.hybrid_protected_regions==expected &&
          after.gpt_first_usable==before.gpt_first_usable &&
          after.gpt_last_usable==plan.new_table/512-1 &&
-         after.boot_regions_bounded && after.descriptors==before.descriptors &&
+         after.boot_regions_bounded &&
+         (remastered?after.declared_volume_blocks==plan.logical_blocks:
+                     after.descriptors==before.descriptors) &&
          after.boot_regions==before.boot_regions &&
          after.boot_entries==before.boot_entries &&
          after.boot_lbas==before.boot_lbas &&
@@ -3567,7 +3581,7 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
     need(!image.iso_system_use &&
          image.boot_regions_bounded && udf.udf_has_virtual_partition(),
          "VAT bridge requires bounded plain ISO/Joliet");
-    if(!image.gpt_hybrid && try_edit_iso_vat_mirrored_tree(path,image,changes,progress))return;
+    if(try_edit_iso_vat_mirrored_tree(path,image,changes,progress))return;
     {
         const auto index=index_iso_tree(*image.root);
         const bool shared=std::any_of(changes.begin(),changes.end(),

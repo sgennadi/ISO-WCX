@@ -424,7 +424,22 @@ GPT is independently reparsed and compared to the expected growth
 plan; the full unchanged prefix and appended bytes are verified.
 Regression tests cover embedded/external VAT, repeated appends, EFI
 payload preservation, cancellation, CRC corruption, nonzero trailer
-padding and refusal of damaged current VAT. This does not support GPT
-mirrored namespace mastering, nonstandard arrays, hybrid protective
-MBR entries, or physical recording. Physical BIOS/UEFI boot remains
+padding and refusal of damaged current VAT. This does not support nonstandard arrays, hybrid protective MBR
+entries, or physical recording. Physical BIOS/UEFI boot remains
 unverified.
+
+### Mirrored sequential GPT VAT bridge
+
+The same protective-only GPT profile supports a proven, fully mirrored
+ISO/Joliet/UDF tree. The coordinated remaster reserves new ISO directory
+and path-table sectors immediately before the final VAT table/ICB, not
+inside the trailing GPT. The recorded optical volume excludes the nine
+GPT trailer sectors. The VAT backend independently verifies the exact
+relocated GPT headers/arrays and all historical bytes outside the
+explicit ISO descriptor fields. It rechecks appended VAT metadata after
+ISO coordination, then independently validates all live UDF extents
+before atomic commit. Regression coverage extends mirrored create,
+replace, recursive delete, cancellation and repeated growth across
+embedded and external VAT, with and without Joliet; checks GPT CRCs and
+unchanged EFI partition data; and rejects corrupt GPT, trailer or latest
+VAT bytes. Partially shared GPT namespaces remain unsupported.
