@@ -2515,11 +2515,11 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
        })))return false;
     std::map<std::string,bool> original_udf_paths,independent;
     std::set<std::string> udf_names;
-    const bool partial_gpt=sequential_vat && image.gpt_hybrid;
+    const bool partial_partitioned=sequential_vat && image.hybrid_system_area;
     {
         const Disc udf(path);
         if(udf.format()!="UDF" ||
-           (!partial_gpt && udf.items().size()!=iso_files.size()))return false;
+           (!partial_partitioned && udf.items().size()!=iso_files.size()))return false;
         std::size_t common_count=0;
         bool common_data=false;
         for(const auto& item:udf.items()) {
@@ -2529,7 +2529,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
             if(sequential_vat &&
                !original_udf_paths.emplace(item.path,item.directory).second)return false;
             if(at==iso_files.end()) {
-                if(!partial_gpt)return false;
+                if(!partial_partitioned)return false;
                 independent.emplace(item.path,item.directory);
                 continue;
             }
@@ -2591,11 +2591,11 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
             additions.emplace(folded,change.directory);
             original_records_only=false;
         }
-        // Preserve the already supported byte-minimal record update
-        // for batches of regular files in the original pre-anchor ISO
-        // directories. Appended directories and mixed operations use
-        // a fresh reservation instead of rewriting historical sectors.
-        if(original_records_only)return false;
+        // GPT already supports a narrower original-record coordinator.
+        // MBR partial trees always use a fresh reservation, even for
+        // pre-anchor file-only batches; the VAT backend therefore keeps
+        // its existing requirement for a coordinated MBR tree append.
+        if(original_records_only && image.gpt_hybrid)return false;
         for(const auto& [key,directory]:additions) {
             (void)directory;
             auto ancestor=key;

@@ -380,9 +380,9 @@ in the old image; all UDF history, ISO descriptors, boot and EFI
 payloads and the remainder of the prefix stay byte-identical.
 Regression tests cover repeated append, external and embedded VAT
 tables, exact MBR geometry, rollback, protected ISO paths, capacity
-and malformed partition rejection. Partially mirrored MBR VAT and GPT
-VAT writing remain unsupported. Physical boot testing remains separate
-from image-level validation.
+and malformed partition rejection. See the later profiles below for
+partially shared MBR and GPT VAT support. Physical boot testing remains
+separate from image-level validation.
 
 
 ### Fully mirrored MBR VAT mastering
@@ -402,8 +402,8 @@ without Joliet, embedded and external VAT, repeated remastering,
 recursive deletion, cancellation, malformed CHS and EFI-alias
 rejection. A paired plain/MBR test proves that a transaction fitting
 the declared capacity without alignment is rejected when mandatory
-cylinder rounding would overflow it. Partially shared MBR namespaces
-and GPT remain unsupported.
+cylinder rounding would overflow it. Later sections extend this support
+to partially shared MBR namespaces and GPT.
 Physical boot behavior is not established by these image-level tests.
 
 
@@ -458,12 +458,12 @@ remaining namespace entries. Repeated edits are supported while the
 original ISO directory fields remain in the permitted area. Tests cover
 embedded and external VAT, with and without Joliet, repeated replacement,
 delete, cancellation, mismatched shared extents, corrupt GPT/VAT and
-a CRC-valid GPT partition alias of the shared payload. Partially shared
-MBR coordination remains unsupported.
+a CRC-valid GPT partition alias of the shared payload. Partial MBR
+coordination uses the fresh-tree profile described below.
 
-### Shared-subtree additions in partially shared GPT VAT
+### Shared-subtree additions in partially shared MBR/GPT VAT
 
-For the standard sequential GPT profile, the ISO/Joliet tree may be a
+For the supported sequential MBR and GPT profiles, the ISO/Joliet tree may be a
 verified strict subset of the UDF tree. Every existing ISO path must
 have a corresponding UDF entry of the same type and each regular ISO
 file must have the same nonempty, single contiguous extent in all
@@ -479,13 +479,14 @@ unsupported mappings fail closed. Regression fixtures cover repeated nested crea
 preservation of independent UDF files both at root and within a
 shared directory, GPT CRCs, path tables, invalid batches and staged
 cancellation, with and without Joliet and external VAT storage.
-Existing shared-file-only batches with original pre-anchor ISO records
-retain the narrower byte-minimal coordinator. Other supported mixed
-batches use the fresh-tree coordinator described below.
+GPT shared-file-only batches with original pre-anchor ISO records
+retain the narrower byte-minimal coordinator. MBR partial transactions
+always use a fresh ISO directory/path-table reservation, including
+replacement and deletion of files whose records precede the anchor.
 
 ### Shared-subtree mixed transactions and recursive deletion
 
-The partial GPT remaster also accepts replacement and deletion of
+The partial MBR/GPT remaster also accepts replacement and deletion of
 existing shared paths, including paths whose ISO records were appended
 past the original UDF anchor. New entries still require an unambiguous
 shared non-root parent. A single transaction may replace a file,
@@ -499,6 +500,12 @@ independent paths and the VAT backend verifies their original layouts.
 Regression coverage includes post-remaster replacements, mixed batches,
 overlapping recursive selections, conflicts with independent descendants,
 subsequent appends, cancellation, historical byte preservation and GPT
-integrity. A partial remaster still requires a demonstrably shared
-regular file in the source. New root paths remain ambiguous, and
-physical boot behavior remains unverified.
+integrity. The MBR matrix seeds the partial tree through the supported
+split-namespace MBR writer and verifies cylinder-aligned growth, exact
+container length and CHS, an unchanged independent EFI partition,
+the final VAT ICB at physical EOF, and rollback for invalid CHS,
+unknown partition type, inconsistent length and an EFI payload alias.
+The original MBR coordinator and its reservation requirement remain
+unchanged. A partial remaster still requires a demonstrably shared
+regular file in the source, with ISO/Joliet a subset of UDF. New root
+paths remain ambiguous, and physical boot behavior remains unverified.

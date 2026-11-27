@@ -1486,24 +1486,42 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
             assert not list(root.glob('.iso-wcx-edit-*'))
 
 
-def test_vat_partial_gpt_additions(editor,inspector,root,image,replacement):
+def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replacement):
     from test_iso_edit import fixture, both, read_image, validate_path_tables
     from test_images import iso_record
     import zlib
-    bridge=root/'vat-partial-gpt.iso'
+    bridge=root/'vat-partial-partitioned.iso'
     private=root/'vat-private-source.bin'
     private.write_bytes(b'private content')
     base_payload=b'BASE-GPT-SHARED-PAYLOAD!'*400
     for joliet in (False,True):
-        for external in (False,True):
-            # First create a real sequential UDF tree. Then independently
-            # master an ISO view of COMMON/BASE.BIN only. The root's
-            # hello/keep and COMMON/PRIVATE.BIN remain UDF-only.
-            image.write_bytes(vat_append_image(capacity=8192,external_table=external))
+        for external,envelope in ((False,'gpt'),(True,'gpt'),(False,'mbr'),(True,'mbr')):
+            gpt=envelope=='gpt'
+            # Seed MBR through the established split-namespace writer so
+            # the last VAT ICB remains at EOF with real cylinder padding.
+            # Then independently master COMMON/BASE.BIN in the ISO view;
+            # the root's hello/keep and COMMON/PRIVATE.BIN stay UDF-only.
+            seed=vat_append_image(capacity=8192,external_table=external)
+            seed_path=image if gpt else bridge
+            if not gpt:
+                optical=fixture(boot=True,boot_efi=True)
+                seed[16*B:19*B]=optical[16*B:19*B]
+                seed[20*B:22*B]=optical[20*B:22*B]
+                seed[24*B:27*B]=optical[24*B:27*B]
+                both(seed,16*B+80,len(seed)//B)
+                p16(seed,24*B+38,4);p16(seed,24*B+102,4)
+                assert len(seed)==550*B
+                seed[0:32]=bytes(range(32))
+                seed[446:454]=bytes((0x80,0,1,0,0x17,9,4,54))
+                p32(seed,454,0);p32(seed,458,len(seed)//512)
+                seed[466]=0xef
+                p32(seed,470,26*4);p32(seed,474,4)
+                seed[510:512]=b'\x55\xaa'
+            seed_path.write_bytes(seed)
             replacement.write_bytes(base_payload)
-            run(editor,image,'batch','mkdir','COMMON','add','COMMON/BASE.BIN',replacement,
+            run(editor,seed_path,'batch','mkdir','COMMON','add','COMMON/BASE.BIN',replacement,
                 'add','COMMON/PRIVATE.BIN',private,'mkdir','OTHER')
-            raw=bytearray(image.read_bytes())
+            raw=bytearray(seed_path.read_bytes())
             at=raw.find(base_payload)
             assert at>=0 and at%B==0 and raw.find(base_payload,at+1)==-1
             optical=fixture(joliet=joliet,boot=not joliet,boot_efi=not joliet)
@@ -1525,7 +1543,8 @@ def test_vat_partial_gpt_additions(editor,inspector,root,image,replacement):
                 directory+=iso_record(at//B,len(base_payload),0,name('BASE.BIN;1'))
                 raw[child*B:(child+1)*B]=directory.ljust(B,b'\0')
                 both(raw,vd*B+80,len(raw)//B)
-            vat_gpt_envelope(raw)
+            if gpt:vat_gpt_envelope(raw)
+            else:assert len(raw)%(10*B)==0
             bridge.write_bytes(raw)
             expected={'COMMON/':None,'COMMON/BASE.BIN':base_payload}
             assert read_image(bridge)==expected
@@ -1539,31 +1558,42 @@ def test_vat_partial_gpt_additions(editor,inspector,root,image,replacement):
                     for offset,n in ((80,8),(132,58)):
                         pos=vd*B+offset
                         restored[pos:pos+n]=before[pos:pos+n]
-                    assert struct.unpack_from('<I',after,vd*B+80)[0]==len(after)//B-9
+                    assert struct.unpack_from('<I',after,vd*B+80)[0]==len(after)//B-(9 if gpt else 0)
                 restored[458:462]=before[458:462]
-                for offset,n in ((16,4),(32,8),(48,8)):
-                    pos=512+offset
-                    restored[pos:pos+n]=before[pos:pos+n]
-                retired=len(before)-33*512
-                assert not any(after[retired:len(before)])
-                restored[retired:]=before[retired:]
+                if gpt:
+                    for offset,n in ((16,4),(32,8),(48,8)):
+                        pos=512+offset
+                        restored[pos:pos+n]=before[pos:pos+n]
+                    retired=len(before)-33*512
+                    assert not any(after[retired:len(before)])
+                    restored[retired:]=before[retired:]
+                    last=len(after)//512-1
+                    entries=before[1024:1024+16384]
+                    assert struct.unpack_from('<I',after,458)[0]==last
+                    for here,other,table in ((1,last,2),(last,1,last-32)):
+                        header=bytearray(after[here*512:(here+1)*512])
+                        assert header[:8]==b'EFI PART'
+                        assert struct.unpack_from('<QQQQ',header,24)==(here,other,34,last-33)
+                        assert struct.unpack_from('<QIII',header,72)==(table,128,128,zlib.crc32(entries))
+                        crc=struct.unpack_from('<I',header,16)[0]
+                        p32(header,16,0)
+                        assert crc==zlib.crc32(header[:92])
+                        assert after[table*512:table*512+16384]==entries
+                else:
+                    restored[451:454]=before[451:454]
+                    assert len(after)%(10*B)==0
+                    sectors=len(after)//512
+                    cylinder=min(sectors//40-1,1023)
+                    assert struct.unpack_from('<I',after,458)[0]==sectors
+                    assert after[451:454]==bytes((9,4|((cylinder>>2)&0xc0),cylinder&255))
+                    assert struct.unpack_from('<H',after,len(after)-B)[0]==261
+                    assert after[len(after)-B+27]==248
+                    assert struct.unpack_from('<I',after,len(after)-B+12)[0]==len(after)//B-PARTITION-1
                 assert restored==before
-                last=len(after)//512-1
-                entries=before[1024:1024+16384]
-                assert struct.unpack_from('<I',after,458)[0]==last
-                for here,other,table in ((1,last,2),(last,1,last-32)):
-                    header=bytearray(after[here*512:(here+1)*512])
-                    assert header[:8]==b'EFI PART'
-                    assert struct.unpack_from('<QQQQ',header,24)==(here,other,34,last-33)
-                    assert struct.unpack_from('<QIII',header,72)==(table,128,128,zlib.crc32(entries))
-                    crc=struct.unpack_from('<I',header,16)[0]
-                    p32(header,16,0)
-                    assert crc==zlib.crc32(header[:92])
-                    assert after[table*512:table*512+16384]==entries
                 assert read_image(bridge)==expected
                 if joliet:assert read_image(bridge,True)==expected
                 validate_path_tables(bridge)
-                out=root/f'vat-partial-{joliet}-{external}-{number}'
+                out=root/f'vat-partial-{envelope}-{joliet}-{external}-{number}'
                 check_disc(inspector,bridge,out)
                 files={p.relative_to(out).as_posix():p.read_bytes() for p in out.rglob('*') if p.is_file()}
                 dirs={p.relative_to(out).as_posix()+'/':None for p in out.rglob('*') if p.is_dir()}
@@ -1571,12 +1601,18 @@ def test_vat_partial_gpt_additions(editor,inspector,root,image,replacement):
                                           'COMMON/PRIVATE.BIN':private.read_bytes(),'OTHER/':None}
                 return after
 
+            initial=raw
+            if not gpt:
+                replacement.write_bytes(b'first MBR shared replacement')
+                run(editor,bridge,'add','COMMON/BASE.BIN',replacement)
+                expected['COMMON/BASE.BIN']=replacement.read_bytes()
+                initial=verify(raw,0)
             replacement.write_bytes(b'new mirrored data')
             run(editor,bridge,'batch','mkdir','COMMON/SUB',
                 'add','COMMON/SUB/NEW.BIN',replacement,'add','COMMON/TOP.BIN',replacement)
             expected.update({'COMMON/SUB/':None,'COMMON/SUB/NEW.BIN':replacement.read_bytes(),
                              'COMMON/TOP.BIN':replacement.read_bytes()})
-            first=verify(raw,1)
+            first=verify(initial,1)
             replacement.write_bytes(b'next')
             run(editor,bridge,'add','COMMON/SUB/NEXT.BIN',replacement)
             expected['COMMON/SUB/NEXT.BIN']=replacement.read_bytes()
@@ -1639,7 +1675,19 @@ def test_vat_partial_gpt_additions(editor,inspector,root,image,replacement):
             fifth=verify(fourth,5)
             run(editor,bridge,'add','COMMON/AGAIN.BIN',replacement)
             expected['COMMON/AGAIN.BIN']=replacement.read_bytes()
-            verify(fifth,6)
+            sixth=verify(fifth,6)
+            if not gpt:
+                for defect in ('chs','partition','length','efi-alias'):
+                    bad=bytearray(raw)
+                    if defect=='chs':bad[453]^=1
+                    elif defect=='partition':bad[466]=0x83
+                    elif defect=='length':p32(bad,458,len(bad)//512-1)
+                    else:p32(bad,470,at//512)
+                    bridge.write_bytes(bad)
+                    run(editor,bridge,'add','COMMON/BASE.BIN',replacement,success=False)
+                    assert bridge.read_bytes()==bad
+                    assert not list(root.glob('.iso-wcx-edit-*'))
+                bridge.write_bytes(sixth)
             assert not list(root.glob('.iso-wcx-edit-*'))
 
 
@@ -1853,7 +1901,7 @@ def main(editor,inspector):
         test_vat_150(editor,inspector,root,image,replacement)
         test_vat_bridge(editor,inspector,root,image,replacement)
         test_vat_shared_bridge(editor,inspector,root,image,replacement)
-        test_vat_partial_gpt_additions(editor,inspector,root,image,replacement)
+        test_vat_partial_partitioned_transactions(editor,inspector,root,image,replacement)
         test_vat_mirrored_tree(editor,inspector,root,image,replacement)
         test_vat_mbr_bridge(editor,inspector,root,image,replacement)
         test_vat_gpt_bridge(editor,inspector,root,image,replacement)
