@@ -1284,6 +1284,91 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
             assert not list(root.glob('.iso-wcx-edit-*'))
 
 
+def test_vat_mbr_bridge(editor,inspector,root,image,replacement):
+    from test_iso_edit import fixture, both, read_image
+    bridge=root/'vat-mbr.iso'
+    def build(external,capacity=8192):
+        raw=vat_append_image(capacity=capacity,external_table=external)
+        optical=fixture(boot=True,boot_efi=True)
+        raw[16*B:19*B]=optical[16*B:19*B]
+        raw[20*B:22*B]=optical[20*B:22*B]
+        raw[24*B:27*B]=optical[24*B:27*B]
+        both(raw,16*B+80,len(raw)//B)
+        p16(raw,24*B+38,4);p16(raw,24*B+102,4)
+        # 10 heads * 4 sectors = 10 optical sectors per cylinder.
+        # The clean initial fixture is exactly 550 optical sectors.
+        raw[0:32]=bytes(range(32))
+        raw[446:454]=bytes((0x80,0,1,0,0x17,9,4,54))
+        p32(raw,454,0);p32(raw,458,len(raw)//512)
+        raw[466]=0xef
+        p32(raw,470,26*4);p32(raw,474,4)
+        raw[510:512]=b'\x55\xaa'
+        return raw
+    for external in (False,True):
+        initial=build(external)
+        bridge.write_bytes(initial)
+        iso_before=read_image(bridge)
+        def verify(before,after):
+            assert len(after)>len(before)
+            assert len(after)%(10*B)==0
+            restored=bytearray(after[:len(before)])
+            restored[451:454]=before[451:454]
+            restored[458:462]=before[458:462]
+            assert restored==before
+            sectors=len(after)//512
+            assert struct.unpack_from('<I',after,458)[0]==sectors
+            c=min(sectors//40-1,1023)
+            assert after[451:454]==bytes((9,4|((c>>2)&0xc0),c&255))
+            at=len(after)-B
+            assert struct.unpack_from('<H',after,at)[0]==261
+            assert after[at+27]==248
+            assert struct.unpack_from('<I',after,at+12)[0]==len(after)//B-PARTITION-1
+            size=struct.unpack_from('<Q',after,at+56)[0]
+            if external:
+                assert struct.unpack_from('<H',after,at+34)[0]==0
+                length,lba=struct.unpack_from('<II',after,at+176)
+                assert length==size
+                table_at=(PARTITION+lba)*B
+                assert table_at+((size+B-1)//B)*B==at
+            else:
+                assert struct.unpack_from('<H',after,at+34)[0]==3
+                table_at=at+176
+            assert struct.unpack_from('<I',after,table_at+132)[0]==len(before)//B-PARTITION-1
+            assert read_image(bridge)==iso_before
+        replacement.write_bytes(b'MBR data'*1000)
+        run(editor,bridge,'batch','mkdir','TREE','add','TREE/FILE.BIN',replacement)
+        first=bridge.read_bytes();verify(initial,first)
+        out=root/f'vat-mbr-{external}-1'
+        check_disc(inspector,bridge,out)
+        assert (out/'TREE'/'FILE.BIN').read_bytes()==replacement.read_bytes()
+        replacement.write_bytes(b'next')
+        run(editor,bridge,'add','TREE/FILE.BIN',replacement)
+        second=bridge.read_bytes();verify(first,second)
+        out=root/f'vat-mbr-{external}-2'
+        check_disc(inspector,bridge,out)
+        assert (out/'TREE'/'FILE.BIN').read_bytes()==b'next'
+        cancelled=run(editor,bridge,'batchcancelstaged','delete','TREE',success=False)
+        assert cancelled.returncode==3
+        assert bridge.read_bytes()==second
+        run(editor,bridge,'delete','TREE')
+        third=bridge.read_bytes();verify(second,third)
+        out=root/f'vat-mbr-{external}-3'
+        check_disc(inspector,bridge,out)
+        assert sorted(p.name for p in out.iterdir())==['hello','keep']
+        # An ISO-only name cannot become a UDF-only alias.
+        run(editor,bridge,'add','HELLO.TXT',replacement,success=False)
+        assert bridge.read_bytes()==third
+        for defect in ('chs','partition','length','capacity'):
+            bad=build(external,253 if defect=='capacity' else 8192)
+            if defect=='chs':bad[453]^=1
+            elif defect=='partition':bad[466]=0x83
+            elif defect=='length':p32(bad,458,len(bad)//512-1)
+            bridge.write_bytes(bad)
+            run(editor,bridge,'add','hello',replacement,success=False)
+            assert bridge.read_bytes()==bad
+            assert not list(root.glob('.iso-wcx-edit-*'))
+
+
 def main(editor,inspector):
     with tempfile.TemporaryDirectory(prefix='iso-wcx-udf-writer-') as temp:
         root=pathlib.Path(temp)
@@ -1319,6 +1404,7 @@ def main(editor,inspector):
         test_vat_bridge(editor,inspector,root,image,replacement)
         test_vat_shared_bridge(editor,inspector,root,image,replacement)
         test_vat_mirrored_tree(editor,inspector,root,image,replacement)
+        test_vat_mbr_bridge(editor,inspector,root,image,replacement)
         cases=[
             ('embedded',False,False,b'EXTENDED UDF FILE CONTENT', 'hello'),
             ('embedded',False,False,b'hi', 'hello'),

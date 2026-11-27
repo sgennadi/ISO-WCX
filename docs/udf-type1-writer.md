@@ -363,3 +363,23 @@ overlapping removals, similarly prefixed siblings, VAT map retirement,
 path table readback and cancellation. This does not authorize
 partitioned VAT, split-tree recursive shared deletion, or Type-1
 interpretation of a VAT-only recursive plan.
+
+
+### Split-namespace MBR VAT bridge
+
+A validated active LBA-zero isohybrid type-0x17 container with
+bounded, nonoverlapping independent EFI partitions may grow by an
+append-only VAT transaction. ISO and UDF namespaces must be disjoint.
+The existing ISO MBR preflight checks boot/partition geometry and
+live extents; the VAT writer independently checks the original MBR
+and derives the exact new header. Alignment padding is included in
+the partition-capacity calculation and inserted before the new VAT
+table and ICB, so the last physical optical sector remains the clean
+VAT ICB. Only the MBR container's ending CHS and length fields change
+in the old image; all UDF history, ISO descriptors, boot and EFI
+payloads and the remainder of the prefix stay byte-identical.
+Regression tests cover repeated append, external and embedded VAT
+tables, exact MBR geometry, rollback, protected ISO paths, capacity
+and malformed partition rejection. Mirrored/shared MBR VAT and GPT
+VAT writing remain unsupported. Physical boot testing remains separate
+from image-level validation.

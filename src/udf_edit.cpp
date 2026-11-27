@@ -3076,6 +3076,7 @@ struct VatPayload {
 struct VatAppendPlan {
     std::uint64_t original_size{},final_size{},payload_blocks{};
     std::uint64_t iso_reservation_at{},iso_reservation_bytes{};
+    Bytes mbr; // exact independently validated replacement header, or empty
     std::vector<VatPayload> payloads;
     std::vector<Bytes> append;
     std::map<std::string,VatFileLayout> expected;
@@ -3234,11 +3235,75 @@ void vat_reserve_physical(const VatFileLayout& layout,std::uint32_t partition,
         allocated.emplace(start,end);
     }
 }
+// Validate the exact supported MBR geometry independently from the
+// ISO planner. Only the container's CHS end and sector count can change.
+// Never round after the VAT ICB: alignment belongs before the VAT.
+Bytes vat_grown_mbr(std::ifstream& in,std::uint64_t original,
+        std::uint64_t final,std::uint64_t alignment) {
+    auto mbr=vat_read_sector(in,0,original/block);
+    mbr.resize(512);
+    vat_need(mbr[510]==0x55 && mbr[511]==0xaa &&
+             original%block==0 && final%block==0 && final>original &&
+             final/512<=0xffffffffull && alignment && alignment<=65536,
+             "invalid MBR VAT growth envelope");
+    const auto old_sectors=original/512;
+    const auto new_sectors=final/512;
+    std::optional<std::size_t> container;
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> esp;
+    for(std::size_t at=446;at<510;at+=16) {
+        const auto type=mbr[at+4];
+        if(!type) {
+            vat_need(std::all_of(mbr.begin()+at,mbr.begin()+at+16,
+                                 [](auto c){return c==0;}),
+                     "nonempty unused VAT MBR partition");
+            continue;
+        }
+        const auto first=std::uint64_t(u32(mbr,at+8));
+        const auto count=std::uint64_t(u32(mbr,at+12));
+        if(type==0x17 && !first) {
+            vat_need(!container && mbr[at]==0x80 && count==old_sectors &&
+                     mbr[at+1]==0 && mbr[at+2]==1 && mbr[at+3]==0,
+                     "VAT MBR requires a whole-image active ISO container");
+            container=at;
+        } else {
+            vat_need(type==0xef && mbr[at]==0 && first>=64 && count &&
+                     first<old_sectors && count<=old_sectors-first,
+                     "VAT MBR contains unsupported independent partition");
+            for(const auto& [begin,length]:esp)
+                vat_need(first>=begin+length || begin>=first+count,
+                         "overlapping VAT EFI partitions");
+            esp.emplace_back(first,count);
+        }
+    }
+    vat_need(container.has_value(),"missing VAT MBR ISO container");
+    const auto at=*container;
+    const auto heads=std::uint64_t(mbr[at+5])+1;
+    const auto sectors=std::uint64_t(mbr[at+6]&0x3fu);
+    const auto old_cylinder=std::uint64_t(mbr[at+7]) |
+                           (std::uint64_t(mbr[at+6]&0xc0u)<<2);
+    vat_need(heads>=2 && heads<=255 && sectors && sectors<=63,
+             "invalid VAT MBR CHS geometry");
+    const auto geometry=heads*sectors;
+    const auto expected_alignment=geometry*(geometry%4==0?1u:geometry%2==0?2u:4u)/4;
+    vat_need(alignment==expected_alignment &&
+             old_sectors%geometry==0 && old_sectors/geometry>0 &&
+             old_cylinder==std::min<std::uint64_t>(old_sectors/geometry-1,1023) &&
+             new_sectors%geometry==0 && final/block%alignment==0,
+             "VAT MBR alignment or recorded CHS mismatch");
+    const auto cylinder=std::min<std::uint64_t>(new_sectors/geometry-1,1023);
+    mbr[at+6]=static_cast<std::uint8_t>(sectors|((cylinder>>2)&0xc0u));
+    mbr[at+7]=static_cast<std::uint8_t>(cylinder&255u);
+    put32(mbr,at+12,static_cast<std::uint32_t>(new_sectors));
+    return mbr;
+}
+
 std::unique_ptr<VatAppendPlan> prepare_vat_append(
         const std::filesystem::path& image,
         const std::vector<ArchiveChange>& changes,const EditProgress& progress,
-        const CoordinatedIsoUpdate* coordinated) {
+        const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment) {
     edit_tick(progress);
+    vat_need(!mbr_alignment || (!coordinated && mbr_alignment<=65536),
+             "VAT MBR is limited to a split namespace");
     vat_need(!changes.empty() && changes.size()<=4096,
              "VAT transaction requires 1..4096 changes");
     auto plan=std::make_unique<VatAppendPlan>();
@@ -3986,11 +4051,20 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     const auto final_vat_bytes=vat.size()+legacy_trailer.size();
     const auto vat_blocks=final_vat_bytes<=block-176?0:(final_vat_bytes+block-1)/block;
     const auto iso_blocks=coordinated?coordinated->iso_metadata_blocks:0u;
-    const auto required=plan->payload_blocks+file_entries.size()+
+    const auto minimum=plan->payload_blocks+file_entries.size()+
                         dirty_directories.size()+directory_blocks+iso_blocks+vat_blocks+1u;
+    const auto padding=mbr_alignment?
+        (mbr_alignment-(sectors+minimum)%mbr_alignment)%mbr_alignment:0u;
+    const auto required=minimum+padding;
     vat_need(required<=available && required<(max_image-plan->original_size)/block,
-             "insufficient unrecorded partition capacity for VAT append");
+             "insufficient unrecorded partition capacity for VAT append/alignment");
     plan->final_size=plan->original_size+required*block;
+    if(mbr_alignment) {
+        std::ifstream mbr_source(image,std::ios::binary);
+        vat_need(bool(mbr_source),"cannot reopen original VAT MBR");
+        plan->mbr=vat_grown_mbr(mbr_source,plan->original_size,
+                               plan->final_size,mbr_alignment);
+    }
     auto physical=next_physical();
     for(auto& [logical,fe]:file_entries) {
         put32(vat,header+std::size_t(logical)*4,static_cast<std::uint32_t>(physical++));
@@ -4051,6 +4125,10 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
         plan->append.emplace_back(static_cast<std::size_t>(plan->iso_reservation_bytes),0);
         physical+=iso_blocks;
     }
+    if(padding) {
+        plan->append.emplace_back(static_cast<std::size_t>(padding*block),0);
+        physical+=padding;
+    }
     const auto new_table=physical;
     const auto new_vat=new_table+vat_blocks;
     if(legacy) {
@@ -4089,10 +4167,10 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
 void edit_vat_append(const std::filesystem::path& image,
         const std::vector<ArchiveChange>& changes,const EditProgress& progress,
         const EditStageValidator& validate_stage,
-        const CoordinatedIsoUpdate* coordinated) {
+        const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment) {
     // Pin source identity before reading any plan data.
     EditTransaction tx(image);
-    const auto plan=prepare_vat_append(image,changes,progress,coordinated);
+    const auto plan=prepare_vat_append(image,changes,progress,coordinated,mbr_alignment);
     tx.assert_source_unchanged();
     prepare_udf_stage(image,tx.output,plan->original_size,progress);
     {
@@ -4140,6 +4218,15 @@ void edit_vat_append(const std::filesystem::path& image,
         whole.protect(0,plan->original_size);
         whole.verify_appended(image,tx.output,progress);
     }
+    if(!plan->mbr.empty()) {
+        // All original bytes except the independently derived 512-byte
+        // header must remain unchanged. Only CHS end/count differ in it.
+        edit_tick(progress);
+        std::fstream out(tx.output,std::ios::binary|std::ios::in|std::ios::out);
+        vat_need(bool(out),"cannot open staged VAT MBR");
+        staged_write(out,0,plan->mbr);
+        vat_need(staged_read(out,0,512)==plan->mbr,"staged VAT MBR readback differs");
+    }
     if(validate_stage)validate_stage(tx.output);
     vat_need(std::filesystem::file_size(tx.output)==plan->final_size,
              "VAT ISO coordination changed the append size");
@@ -4163,6 +4250,20 @@ void edit_vat_append(const std::filesystem::path& image,
                          "VAT ISO reservation differs from planned range");
             else vat_need(staged_read(in,pos,bytes.size())==bytes,
                           "ISO coordination modified appended VAT metadata");
+            pos+=bytes.size();
+        }
+    } else if(!plan->mbr.empty()) {
+        std::fstream in(tx.output,std::ios::binary|std::ios::in);
+        vat_need(bool(in) && staged_read(in,0,512)==plan->mbr,
+                 "staged ISO validation changed VAT MBR");
+        guard.protect(512,plan->original_size-512);
+        // Validate every appended metadata/padding byte after the
+        // bridge callback as well as the independently parsed payload.
+        auto pos=plan->original_size+plan->payload_blocks*block;
+        for(const auto& bytes:plan->append) {
+            edit_tick(progress);
+            vat_need(staged_read(in,pos,bytes.size())==bytes,
+                     "MBR VAT append readback changed");
             pos+=bytes.size();
         }
     } else guard.protect(0,plan->original_size);
@@ -4218,10 +4319,12 @@ void edit_udf(const std::filesystem::path& image,
         // The VAT bridge provides the external ISO validator and
         // immutable ranges. Shared-file coordination may only change
         // the explicitly checked pre-anchor ISO metadata fields.
-        if(bounded_partitioned_bridge ||
+        if(gpt_append_trailer_blocks ||
+           (bounded_partitioned_bridge && (!mbr_append_alignment_blocks || coordinated)) ||
            (allow_bridge && (!validate_stage || protected_ranges.empty())) ||
            (!allow_bridge && (validate_stage || !protected_ranges.empty() || coordinated)))throw;
-        edit_vat_append(image,changes,progress,validate_stage,coordinated);
+        edit_vat_append(image,changes,progress,validate_stage,coordinated,
+                        mbr_append_alignment_blocks);
         return;
     }
     // A mirrored sequential deletion contract cannot be interpreted

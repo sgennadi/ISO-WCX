@@ -8,6 +8,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <set>
@@ -2200,9 +2201,11 @@ void plan_shared_iso_delete(Image& image,const Node& node,bool joliet,
 // Unlike ROM mastering, a clean VAT transaction ends in a VAT ICB,
 // not an AVDP. Do not require or manufacture ROM end anchors here.
 void validate_vat_bridge_envelope(const std::filesystem::path& staged,
-                                   const Image& image) {
+                                   const Image& image,bool mbr=false) {
     Image after(staged,true);
-    need(after.udf_bridge && !after.hybrid_system_area &&
+    need(after.udf_bridge && after.hybrid_system_area==mbr &&
+         image.hybrid_system_area==mbr && !after.gpt_hybrid && !image.gpt_hybrid &&
+         after.hybrid_protected_regions==image.hybrid_protected_regions &&
          after.boot_regions_bounded && after.size>image.size &&
          after.descriptors==image.descriptors &&
          after.boot_regions==image.boot_regions &&
@@ -3484,15 +3487,18 @@ bool try_edit_iso_vat_mirrored_tree(const std::filesystem::path& path,Image& ima
 void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
         const Disc& udf,const std::vector<ArchiveChange>& changes,
         const EditProgress& progress) {
-    need(!image.hybrid_system_area && !image.iso_system_use &&
+    need(!image.gpt_hybrid && !image.iso_system_use &&
          image.boot_regions_bounded && udf.udf_has_virtual_partition(),
-         "VAT bridge requires bounded nonpartitioned plain ISO/Joliet");
-    if(try_edit_iso_vat_mirrored_tree(path,image,changes,progress))return;
+         "VAT bridge requires bounded plain ISO/Joliet; GPT is not yet supported");
+    if(!image.hybrid_system_area &&
+       try_edit_iso_vat_mirrored_tree(path,image,changes,progress))return;
     {
         const auto index=index_iso_tree(*image.root);
         const bool shared=std::any_of(changes.begin(),changes.end(),
             [&](const ArchiveChange& c){return index.count(upper(edit_path(c.path)))!=0;});
         if(shared) {
+            need(!image.hybrid_system_area,
+                 "MBR VAT shared namespace mastering is not yet supported");
             edit_iso_vat_shared_bridge(path,image,changes,progress);
             return;
         }
@@ -3513,6 +3519,19 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
             for(const auto& e:item.extents)
                 if(e.length && !e.sparse)immutable.emplace_back(e.offset,e.length);
         }
+    }
+    std::uint64_t mbr_alignment=0;
+    if(image.hybrid_system_area) {
+        // The first range is the entire protected ISO system area. Its
+        // MBR fields are deliberately excluded from the live-extent
+        // snapshot, but every actual ISO/UDF/EFI/boot extent is retained.
+        need(!immutable.empty() && immutable.front().first==0 &&
+             immutable.front().second==256ull*block,
+             "missing VAT bridge system-area protection");
+        HybridTailPlan tail;
+        tail.original_extents.assign(std::next(immutable.begin()),immutable.end());
+        const auto geometry=plan_mbr_growth(image,tail,1,true);
+        mbr_alignment=geometry.alignment_blocks;
     }
     // Coalesce immutable ranges for efficient overlap checks. Even an
     // ISO alias with a different name must not become a silently split
@@ -3551,11 +3570,12 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
     // not just these ranges. Reparse the staged ISO/boot structures as an
     // additional independent contract; do NOT require ROM end anchors,
     // since a sequential VAT ICB, rather than AVDP, occupies the last LBA.
-    const EditStageValidator validate=[&image](const std::filesystem::path& staged) {
-        validate_vat_bridge_envelope(staged,image);
+    const bool mbr=mbr_alignment!=0;
+    const EditStageValidator validate=[&image,mbr](const std::filesystem::path& staged) {
+        validate_vat_bridge_envelope(staged,image,mbr);
     };
     image.file.close();
-    edit_udf(path,changes,progress,true,validate,merged);
+    edit_udf(path,changes,progress,true,validate,merged,nullptr,mbr,mbr_alignment);
 }
 
 void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
