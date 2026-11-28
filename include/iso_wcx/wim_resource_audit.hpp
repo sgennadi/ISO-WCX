@@ -71,6 +71,7 @@ inline std::vector<std::uint8_t> load(
 [[nodiscard]] inline WimResourceAudit audit_wim_resource_links(
         const std::filesystem::path& image) {
     WimResourceAudit result;
+    std::ifstream in;
     try {
         const auto probe=probe_fast_edit_metadata(image);
         result.images=probe.images;
@@ -88,7 +89,7 @@ inline std::vector<std::uint8_t> load(
             result.reason="incomplete: "+probe.reason;
             return result;
         }
-        std::ifstream in(image,std::ios::binary);
+        in.open(image,std::ios::binary);
         if(!in)throw std::runtime_error("cannot open WIM for resource audit");
         std::array<std::uint8_t,208> hdr{};
         if(!fast_probe_detail::read_at(in,0,hdr.data(),hdr.size()))
@@ -261,6 +262,8 @@ inline std::vector<std::uint8_t> load(
             "bounded SHA-1/resource-link audit complete; fast writer DISABLED" :
             "incomplete: unsupported codec or oversized WIM payloads remain unverified";
     }catch(const std::exception& error) {
+        // Close the WIM stream before building the diagnostic result.
+        if(in.is_open())in.close();
         // Preserve already verified stages in the diagnostic result. A
         // missing ADS link must not erase a successfully verified metadata
         // SHA-1, and a bad payload must not erase resolved lookup references.
@@ -269,6 +272,7 @@ inline std::vector<std::uint8_t> load(
         result.limited_audit_complete=false;
         result.reason=error.what();
     }
+    if(in.is_open())in.close();
     return result;
 }
 } // namespace iso_wcx::wim_detail

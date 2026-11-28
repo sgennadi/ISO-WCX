@@ -1,6 +1,8 @@
 #include "iso_wcx/wim_resource_audit.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <thread>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -10,6 +12,14 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#include <RestartManager.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "Rstrtmgr.lib")
+#endif
+#endif
 
 using namespace iso_wcx::wim_detail;
 namespace fs=std::filesystem;
@@ -253,10 +263,86 @@ static void write(const fs::path& path,
     out.write(reinterpret_cast<const char*>(input.data()),
               static_cast<std::streamsize>(input.size()));
     require(bool(out),"cannot finish disposable WIM fixture");
+    out.close();
+    require(bool(out),"cannot close disposable WIM fixture");
+}
+#ifdef _WIN32
+static void probe_fixture_lock(const fs::path& path,const char* phase) {
+    const HANDLE handle=CreateFileW(path.c_str(),GENERIC_READ,0,nullptr,
+                                    OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    const DWORD error=handle==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
+    if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);
+    std::cerr<<"WIM_EXCLUSIVE_PHASE "<<phase<<" error="<<error<<"\n";
+}
+#else
+static void probe_fixture_lock(const fs::path&,const char*) {}
+#endif
+static void remove_fixture(const fs::path& path) {
+    probe_fixture_lock(path,"before-cleanup");
+    std::error_code ec;
+    for (unsigned attempt=0;attempt<20;++attempt) {
+        ec.clear();
+        if (fs::remove(path,ec) || !fs::exists(path)) return;
+        // Windows ERROR_SHARING_VIOLATION (32) is not consistently mapped
+        // to std::errc::device_or_resource_busy by std::filesystem.
+        // Retry this transient case too; do not swallow other I/O failures.
+        bool retryable=ec==std::errc::permission_denied ||
+                       ec==std::errc::device_or_resource_busy;
+#ifdef _WIN32
+        retryable=retryable || (ec.category()==std::system_category() &&
+                                ec.value()==32);
+#endif
+        if (!retryable) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+#ifdef _WIN32
+    DWORD rm_handle=0;
+    WCHAR rm_key[CCH_RM_SESSION_KEY+1]{};
+    const DWORD rm_start=RmStartSession(&rm_handle,0,rm_key);
+    if(rm_start==ERROR_SUCCESS) {
+        LPCWSTR files[]={path.c_str()};
+        const DWORD registered=RmRegisterResources(rm_handle,1,files,0,nullptr,0,nullptr);
+        if(registered==ERROR_SUCCESS) {
+            UINT needed=0,provided=0;
+            DWORD reboot=0;
+            DWORD result=RmGetList(rm_handle,&needed,&provided,nullptr,&reboot);
+            std::vector<RM_PROCESS_INFO> owners(needed);
+            if(result==ERROR_MORE_DATA && needed) {
+                provided=needed;
+                result=RmGetList(rm_handle,&needed,&provided,owners.data(),&reboot);
+            }
+            std::cerr<<"WIM_RESTART_MANAGER result="<<result
+                     <<" owners="<<(result==ERROR_SUCCESS?provided:0)<<"\n";
+            if(result==ERROR_SUCCESS)
+                for(UINT i=0;i<provided;++i)
+                    std::cerr<<"WIM_LOCK_OWNER pid="<<owners[i].Process.dwProcessId
+                             <<" self="<<(owners[i].Process.dwProcessId==GetCurrentProcessId())<<"\n";
+        } else std::cerr<<"WIM_RESTART_MANAGER register_error="<<registered<<"\n";
+        RmEndSession(rm_handle);
+    } else std::cerr<<"WIM_RESTART_MANAGER start_error="<<rm_start<<"\n";
+    const auto shared=CreateFileW(path.c_str(),GENERIC_READ,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(shared==INVALID_HANDLE_VALUE)
+        std::cerr<<"WIM_LOCK_PROBE shared_error="<<GetLastError()<<"\n";
+    else {
+        CloseHandle(shared);
+        const auto exclusive=CreateFileW(path.c_str(),GENERIC_READ,
+            0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(exclusive==INVALID_HANDLE_VALUE)
+            std::cerr<<"WIM_LOCK_PROBE exclusive_error="<<GetLastError()<<"\n";
+        else {
+            std::cerr<<"WIM_LOCK_PROBE exclusive_open=OK\n";
+            CloseHandle(exclusive);
+        }
+    }
+#endif
+    throw fs::filesystem_error("cannot remove WIM audit fixture",path,ec);
 }
 int main(){
     const auto path=fs::temp_directory_path()/
-        "iso-wcx-wim-resource-audit-readonly-fixture.wim";
+        ("iso-wcx-wim-resource-audit-readonly-fixture-"+
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".fixture");
     try {
         const auto empty=wim_sha1(std::span<const std::uint8_t>{});
         require(hex(empty)=="da39a3ee5e6b4b0d3255bfef95601890afd80709",
@@ -270,7 +356,10 @@ int main(){
                 "SHA-1 multi-block vector mismatch");
         auto original=image();
         write(path,original);
+        probe_fixture_lock(path,"write-1");
+        probe_fixture_lock(path,"after-first-write");
         auto good=audit_wim_resource_links(path);
+        probe_fixture_lock(path,"after-first-audit");
         if(!good.limited_audit_complete)
             std::cerr<<"Unexpected incomplete audit: "<<good.reason<<"\n";
         require(good.metadata_verified && good.references_resolved &&
@@ -289,10 +378,13 @@ int main(){
         auto broken=original;
         broken[208+184]^=0x80u; // metadata child file stream hash
         write(path,broken);
+        probe_fixture_lock(path,"write-2");
         require(!audit_wim_resource_links(path).metadata_verified,
                 "metadata resource SHA-1 corruption accepted");
+        probe_fixture_lock(path,"after-corrupt-metadata-audit");
         broken=image(0,2,true);
         write(path,broken);
+        probe_fixture_lock(path,"write-3");
         const auto missing=audit_wim_resource_links(path);
         require(missing.metadata_verified && !missing.references_resolved &&
                 !missing.limited_audit_complete,
@@ -300,6 +392,7 @@ int main(){
         broken=original;
         broken[208+320]^=0x01u; // corrupt plain file payload, not lookup
         write(path,broken);
+        probe_fixture_lock(path,"write-4");
         const auto payload=audit_wim_resource_links(path);
         require(payload.metadata_verified && payload.references_resolved &&
                 !payload.limited_audit_complete &&
@@ -307,6 +400,7 @@ int main(){
                 "payload SHA-1 corruption accepted");
         broken=image(4); // content is marked compressed: refuse full hash claim
         write(path,broken);
+        probe_fixture_lock(path,"write-5");
         const auto compressed=audit_wim_resource_links(path);
         require(compressed.metadata_verified && compressed.references_resolved &&
                 compressed.requires_decompression &&
@@ -319,6 +413,7 @@ int main(){
             std::vector<std::uint8_t>(
                 original.begin()+208,original.begin()+208+320));
         write(path,chunked_raw);
+        probe_fixture_lock(path,"write-6");
         const auto raw_result=audit_wim_resource_links(path);
         if(!raw_result.limited_audit_complete)
             std::cerr<<"Chunked raw WIM audit: "<<raw_result.reason<<"\n";
@@ -336,6 +431,7 @@ int main(){
                 original.begin()+208,original.begin()+208+320),
             0x00040002u);
         write(path,lzx);
+        probe_fixture_lock(path,"write-7");
         const auto lzx_result=audit_wim_resource_links(path);
         require(lzx_result.requires_decompression &&
                 !lzx_result.metadata_verified &&
@@ -352,6 +448,7 @@ int main(){
         const auto compressed_wim=chunked_metadata_image(
             original,compressed_bytes,0x00020002u,expanded.size());
         write(path,compressed_wim);
+        probe_fixture_lock(path,"write-8");
         const auto compressed_metadata=audit_wim_resource_links(path);
         if(!compressed_metadata.limited_audit_complete)
             std::cerr<<"Genuine XPRESS WIM metadata audit: "
@@ -372,6 +469,7 @@ int main(){
         auto corrupt=compressed_wim;
         corrupt[208u+compressed_bytes.size()/2u]^=0x40u;
         write(path,corrupt);
+        probe_fixture_lock(path,"write-9");
         const auto bad_xpress=audit_wim_resource_links(path);
         require(!bad_xpress.limited_audit_complete &&
                 !bad_xpress.metadata_verified &&
@@ -385,6 +483,7 @@ int main(){
         const auto payload_wim=chunked_file_image(
             original,large_payload,compressed_payload);
         write(path,payload_wim);
+        probe_fixture_lock(path,"write-10");
         const auto audited_payload=audit_wim_resource_links(path);
         if(!audited_payload.limited_audit_complete)
             std::cerr<<"XPRESS file/ADS audit: "
@@ -398,6 +497,7 @@ int main(){
         auto corrupt_file=payload_wim;
         corrupt_file[208u+320u+compressed_payload.size()/2u]^=0x80u;
         write(path,corrupt_file);
+        probe_fixture_lock(path,"write-11");
         const auto failed_file=audit_wim_resource_links(path);
         require(!failed_file.limited_audit_complete &&
                 failed_file.metadata_verified &&
@@ -409,9 +509,12 @@ int main(){
         // Truncated lookup entry must be rejected before metadata traversal.
         broken.resize(broken.size()-1);
         write(path,broken);
+        probe_fixture_lock(path,"write-12");
+        probe_fixture_lock(path,"after-final-write");
         require(!audit_wim_resource_links(path).limited_audit_complete,
                 "truncated lookup entry accepted");
-        fs::remove(path);
+        probe_fixture_lock(path,"after-final-audit");
+        remove_fixture(path);
         std::cout<<"PASS: WIM SHA-1, normal streams, ADS, missing links, "
                     "truncation and compressed-resource refusal\n";
     }catch(const std::exception& e) {

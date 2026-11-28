@@ -2,6 +2,7 @@
 #include "iso_wcx/udf_edit_inspection.hpp"
 #include "iso_wcx/disc.hpp"
 #include "iso_wcx/edit_transaction.hpp"
+#include "iso_wcx/optical_edit_guard.hpp"
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -10,6 +11,8 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <iterator>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <map>
@@ -216,16 +219,33 @@ void bitmap_reserve(Bitmap& bitmap,std::uint32_t logical) {
         static_cast<std::uint8_t>(~(1u<<(logical%8)));
 }
 
+struct ReadonlyAppendPlan {
+    std::uint64_t original_size{};
+    std::vector<std::pair<std::uint64_t,Bytes>> descriptors;
+};
+
+// This signal is consumed only by the standalone edit dispatcher.
+// Inspection and all bridge callers still see an explicit Type-2 refusal.
+struct VatWriteRequired : EditUnsupported {
+    using EditUnsupported::EditUnsupported;
+};
+
 class Type1 {
 public:
-    explicit Type1(const std::filesystem::path& path,bool allow_bridge=false)
-        :file_(path,std::ios::binary),size_(std::filesystem::file_size(path)) {
+    explicit Type1(const std::filesystem::path& path,bool allow_bridge=false,
+                   bool bounded_partitioned_bridge=false)
+        :file_(path,std::ios::binary),size_(std::filesystem::file_size(path)),
+         bounded_partitioned_bridge_(bounded_partitioned_bridge) {
+        need(!bounded_partitioned_bridge || allow_bridge,
+             "partitioned UDF writes require an ISO bridge validator");
         need(file_.good() && size_%block==0 && size_>=300*block &&
              size_<max_image,"unsupported UDF image size/sector geometry");
         const auto system=read(0,16*block);
-        need(std::all_of(system.begin(),system.end(),
-                         [](std::uint8_t x){return x==0;}),
-             "UDF system-area hybrid image is read-only");
+        need(bounded_partitioned_bridge ?
+                 (system[510]==0x55 && system[511]==0xaa) :
+                 std::all_of(system.begin(),system.end(),
+                             [](std::uint8_t x){return x==0;}),
+             "UDF system-area hybrid image requires validated partition protection");
         bool vrs=false;
         for(std::uint64_t i=16;i<256 && (i+1)*block<=size_;++i) {
             const auto b=read(i*block,8);
@@ -253,6 +273,35 @@ public:
             if(tag==5) {need(pd.empty(),"multiple UDF partitions unsupported");pd=b;}
             if(tag==6) {need(lvd.empty(),"multiple UDF logical volumes unsupported");lvd=b;}
             if(tag==8) break;
+        }
+        // Identify recognized Type-2 maps before falling back to the
+        // generic Type-1 rejection. This is a read-only diagnostic, not
+        // permission to write through virtual or remapped logical LBAs.
+        if(!lvd.empty()) {
+            const auto bytes=u32(lvd,264), count=u32(lvd,268);
+            if(bytes<=lvd.size()-440 && count<=64) {
+                std::size_t at=440;
+                for(std::uint32_t index=0;index<count;++index) {
+                    const auto end=std::size_t(440)+bytes;
+                    if(at>end || end-at<2)break;
+                    const auto length=lvd[at+1];
+                    if(length<2 || length>end-at)break;
+                    if(lvd[at]==2 && length==64) {
+                        const std::string_view identifier(
+                            reinterpret_cast<const char*>(lvd.data()+at+5),23);
+                        if(identifier.substr(0,22)=="*UDF Virtual Partition")
+                            throw VatWriteRequired("UDF VAT virtual partition requires a validated "
+                                "standalone sequential append transaction");
+                        if(identifier=="*UDF Sparable Partition")
+                            throw EditUnsupported("UDF Sparable Partition is read-only; "
+                                "packet-aware allocator not yet supported");
+                        if(identifier=="*UDF Metadata Partition")
+                            throw EditUnsupported("UDF Metadata Partition is read-only; "
+                                "metadata/mirror allocator not yet supported");
+                    }
+                    at+=length;
+                }
+            }
         }
         need(!pd.empty() && !lvd.empty() && u32(lvd,212)==block &&
              u32(lvd,264)==6 && u32(lvd,268)==1 &&
@@ -549,6 +598,9 @@ public:
     [[nodiscard]] Bytes directory_payload(const Fe& directory) {
         return directory_data(directory);
     }
+    [[nodiscard]] bool bounded_partitioned_bridge() const noexcept {
+        return bounded_partitioned_bridge_;
+    }
     [[nodiscard]] bool has_bitmap() const noexcept {
         return bitmap_.has_value() && !table_.has_value();
     }
@@ -642,16 +694,19 @@ public:
     // A single ShortAD requires one contiguous allocation. Reserve a
     // validated run before writing any staged file content; bitmap changes
     // stay in memory until the entire image transaction is committed.
-    [[nodiscard]] std::uint32_t allocate_blocks(std::uint32_t count) {
+    [[nodiscard]] std::uint32_t allocate_blocks(std::uint32_t count,
+            std::uint64_t limit_lba=std::numeric_limits<std::uint64_t>::max()) {
         need(bitmap_.has_value(),
              "UDF creation requires a validated bitmap or Unallocated Space Table");
         need(count>0 && count<=partition_blocks_,
              "UDF requested allocation exceeds partition");
         auto& bitmap=*bitmap_;
-        for(std::uint32_t start=0;start<bitmap.bits;) {
+        const auto end=static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            bitmap.bits,limit_lba>partition_?limit_lba-partition_:0));
+        for(std::uint32_t start=allocation_start_;start<end;) {
             if(!allocatable_block(start)){++start;continue;}
             std::uint32_t run=0;
-            while(run<count && run<bitmap.bits-start &&
+            while(run<count && run<end-start &&
                   allocatable_block(start+run))++run;
             if(run==count) {
                 const Location candidate{
@@ -665,6 +720,7 @@ public:
                 reserved_.push_back({candidate,0});
                 return start;
             }
+            if(run==end-start)break;
             start+=run+1;
         }
         throw EditUnsupported(external_blocks_.empty()?
@@ -689,7 +745,7 @@ public:
         std::priority_queue<Candidate,std::vector<Candidate>,
                             std::greater<Candidate>> best;
         const auto& bitmap=*bitmap_;
-        for(std::uint32_t at=0;at<bitmap.bits;) {
+        for(std::uint32_t at=allocation_start_;at<bitmap.bits;) {
             if(!allocatable_block(at)) {++at;continue;}
             const auto start=at;
             do {++at;} while(at<bitmap.bits && allocatable_block(at));
@@ -783,7 +839,7 @@ public:
     // Reclaim a uniquely owned regular file or EMPTY directory. Its parent
     // FID must first be tombstoned. Blocks stay unavailable in this batch.
     [[nodiscard]] std::vector<Location> reclaim_entry_blocks(
-            const File& file,bool directory) {
+            const File& file,bool directory,bool preserve=false) {
         need(bitmap_ && integrity_,"UDF reclamation needs a closed allocation map/LVID");
         const auto owner=file.fe.at;
         const auto found=references_.find(owner);
@@ -824,6 +880,10 @@ public:
                 need(!bitmap_free(*bitmap_,first+static_cast<std::uint32_t>(j)),
                      "UDF reclaim sector is already free");
         }
+        // A coordinated ROM deletion unlinks the FID but leaves the
+        // former FE and shared data immutable. Ownership was still
+        // checked above; no reclaimed sectors enter the virtual bitmap.
+        if(preserve)return {};
         for(const auto& range:reclaimed) {
             const auto first=logical_of(range.at);
             for(std::uint64_t j=0;j<range.bytes/block;++j) {
@@ -950,12 +1010,265 @@ public:
         return static_cast<std::uint32_t>(
             (at-std::uint64_t(partition_)*block)/block);
     }
+    // Read-only mastering: only newly appended sectors are allocatable.
+    // The virtual bitmap is never serialized into a read-only partition.
+    // Relocate descriptor sequences and integrity data beyond the expanded
+    // partition, preserving every original payload offset and ISO boot LBA.
+    ReadonlyAppendPlan prepare_readonly_append(
+            const std::vector<ArchiveChange>& changes,
+            const EditProtectedRanges& protected_ranges,
+            std::uint64_t iso_metadata_blocks=0,
+            std::uint64_t mbr_append_alignment_blocks=0,
+            std::uint64_t gpt_append_trailer_blocks=0) {
+        need(partition_access_type_==1 && !bitmap_ && !changes.empty() &&
+             changes.size()<=max_items,"unsupported read-only UDF mastering");
+        ReadonlyAppendPlan plan;
+        plan.original_size=size_;
+        const auto old_sectors=size_/block;
+        std::uint64_t extra=1;
+        std::set<std::string> parents;
+        for(const auto& change:changes) {
+            const auto key=edit_path(change.path);
+            const bool existing_file=files_.count(key)!=0;
+            const bool existing_directory=directory_links_.count(key)!=0;
+            need(!change.remove || existing_file || existing_directory,
+                 "read-only UDF mastering cannot delete a nonexistent entry");
+            need(change.remove ||
+                 (!existing_directory && (!existing_file || !change.directory)),
+                 "read-only UDF mastering cannot replace an existing directory");
+            const auto slash=key.rfind('/');
+            const auto parent=slash==std::string::npos?
+                std::string{}:key.substr(0,slash);
+            if(parents.insert(parent).second) {
+                const auto it=directory_files_.find(parent);
+                if(it!=directory_files_.end())
+                    extra+=(it->second.size+block-1)/block+1;
+            }
+            // One FE, plus a conservative allowance for new FIDs and
+            // directory relocation. File bytes are allocated separately.
+            extra+=3;
+            if(!change.remove && !change.directory) {
+                need(std::filesystem::is_regular_file(
+                        std::filesystem::symlink_status(change.source)),
+                     "UDF mastering source must be a regular file");
+                const auto bytes=std::filesystem::file_size(change.source);
+                need(bytes<max_image,"UDF mastering source too large");
+                extra+=(bytes+block-1)/block;
+            }
+            need(extra<max_image/block-old_sectors,
+                 "UDF mastering exceeds optical address space");
+        }
+        const auto new_end=old_sectors+extra;
+        const auto new_blocks=new_end-partition_;
+        need(24+(new_blocks+7)/8<=max_dir,
+             "UDF mastering virtual allocation map exceeds safety budget");
+        auto anchor=read(256*block,block);
+        const auto vds_bytes=u32(anchor,16);
+        const auto vds_start=u32(anchor,20);
+        need(vds_bytes%block==0 && vds_bytes>=3*block &&
+             vds_bytes<=16u*1024u*1024u,
+             "unsupported read-only UDF descriptor sequence");
+        std::vector<Bytes> sequence;
+        Bytes lvid;
+        bool pd_found=false,lvd_found=false,terminated=false;
+        for(std::uint64_t j=0;j<vds_bytes/block;++j) {
+            auto d=read((std::uint64_t(vds_start)+j)*block,block);
+            const auto type=u16(d,0);
+            tag_check(d,0,type);
+            need(u32(d,12)==vds_start+j,
+                 "UDF mastering descriptor location mismatch");
+            if(type==5) {
+                need(!pd_found && u32(d,184)==1 &&
+                     u32(d,188)==partition_ && u32(d,192)==partition_blocks_,
+                     "ambiguous read-only UDF partition");
+                for(std::size_t p=56;p<96;p+=4)
+                    need(u32(d,p)==0,
+                         "read-only UDF has conflicting partition allocation data");
+                put32(d,192,static_cast<std::uint32_t>(new_blocks));
+                pd_found=true;
+            } else if(type==6) {
+                need(!lvd_found,"multiple UDF mastering logical volumes");
+                const auto n=u32(d,432),at=u32(d,436);
+                need(n>=block && n%block==0 && n<=16u*1024u*1024u &&
+                     at<old_sectors && n/block<=old_sectors-at,
+                     "read-only UDF access type 1 mastering requires a bounded integrity sequence");
+                lvid=read(std::uint64_t(at)*block,block);
+                tag_check(lvid,0,9);
+                need(u32(lvid,12)==at && u32(lvid,28)==1 &&
+                     u32(lvid,32)==0 && u32(lvid,36)==0 &&
+                     u32(lvid,72)==1,
+                     "read-only UDF mastering requires closed single-partition integrity");
+                const auto impl=u32(lvid,76);
+                need((impl==0 || impl>=40) && 88ull+impl<=block &&
+                     (u32(lvid,84)==partition_blocks_ ||
+                      u32(lvid,84)==0xffffffffu),
+                     "invalid read-only UDF integrity counters");
+                bool ended=false;
+                for(std::uint64_t j=1;j<n/block;++j) {
+                    auto tail=read((std::uint64_t(at)+j)*block,block);
+                    if(std::all_of(tail.begin(),tail.end(),
+                            [](std::uint8_t c){return c==0;})) {
+                        ended=true;
+                        continue;
+                    }
+                    need(!ended && u16(tail,0)==8,
+                         "unsupported chained read-only UDF integrity sequence");
+                    tag_check(tail,0,8);
+                    need(u32(tail,12)==std::uint64_t(at)+j,
+                         "invalid UDF integrity terminator location");
+                    ended=true;
+                }
+                lvd_found=true;
+            } else if(type==7) {
+                // No volume-space free extents are advertised after mastering.
+                const auto count=u32(d,20);
+                need(count<=(block-24)/8,
+                     "unsupported UDF unallocated volume space descriptor");
+                put32(d,20,0);
+                std::fill(d.begin()+24,d.end(),std::uint8_t{0});
+            } else need(type==1 || type==4 || type==8,
+                        "unsupported UDF mastering volume descriptor");
+            sequence.push_back(std::move(d));
+            if(type==8) {terminated=true;break;}
+        }
+        need(pd_found && lvd_found && terminated,
+             "incomplete UDF mastering descriptor sequence");
+        // The coordinator's new ISO directory/path-table area lies
+        // strictly after the UDF partition, but before the relocated VDS.
+        // It is never represented by a free bit in the UDF virtual map.
+        need(iso_metadata_blocks<=32768 &&
+             iso_metadata_blocks<max_image/block-new_end,
+             "ISO metadata reservation exceeds mastering budget");
+        const auto main=new_end+iso_metadata_blocks;
+        const auto reserve=main+vds_bytes/block;
+        const auto integrity_lba=reserve+vds_bytes/block;
+        auto last=integrity_lba+2+256;
+        if(mbr_append_alignment_blocks) {
+            // Keep the UDF physical-end anchors at N and N-256 after
+            // rounding to the validated MBR CHS/optical-sector alignment.
+            need(mbr_append_alignment_blocks<=65536 &&
+                 old_sectors%mbr_append_alignment_blocks==0,
+                 "invalid MBR/UDF append alignment");
+            const auto aligned=((last+1+mbr_append_alignment_blocks-1)/
+                 mbr_append_alignment_blocks)*mbr_append_alignment_blocks;
+            need(aligned<=0xffffffffull/4,
+                 "MBR/UDF growth exceeds 32-bit partition length");
+            last=aligned-1;
+        }
+        // GPT reserves the last physical sector for its backup header.
+        // The second UDF anchor must be exactly N-256 relative to the
+        // FINAL disk, and must remain before the GPT trailer. ECMA-167
+        // allows the two-anchor combination 256 and N-256.
+        need(!gpt_append_trailer_blocks ||
+             (!mbr_append_alignment_blocks && gpt_append_trailer_blocks<256),
+             "GPT backup leaves no room for an independent UDF end anchor");
+        need(last+1<max_image/block &&
+             gpt_append_trailer_blocks<max_image/block-(last+1),
+             "UDF mastering descriptor addresses exceed optical limit");
+        for(std::size_t j=0;j<sequence.size();++j) {
+            auto d=sequence[j];
+            const auto type=u16(d,0);
+            auto crc_bytes=std::size_t(16u+u16(d,10));
+            if(type==5)crc_bytes=std::max<std::size_t>(crc_bytes,512);
+            if(type==6) {
+                put32(d,432,2*block);
+                put32(d,436,static_cast<std::uint32_t>(integrity_lba));
+                crc_bytes=std::max<std::size_t>(crc_bytes,446);
+            }
+            if(type==7)crc_bytes=24;
+            for(const auto start:{main,reserve}) {
+                auto copy=d;
+                put32(copy,12,static_cast<std::uint32_t>(start+j));
+                tag_update(copy,0,crc_bytes);
+                plan.descriptors.emplace_back((start+j)*block,std::move(copy));
+            }
+        }
+        // The main/reserve copies are both reachable from all original
+        // valid anchors, as well as the new physical-end anchor pair.
+        std::set<std::uint64_t> anchors{256};
+        if(gpt_append_trailer_blocks)
+            anchors.insert(last+gpt_append_trailer_blocks-256);
+        else {
+            anchors.insert(last-256);
+            anchors.insert(last);
+        }
+        // Physical-end discovery is independent of any ISO namespace.
+        // Standalone UDF and padded bridge volumes share this backend.
+        std::set<std::uint64_t> candidates{256,512,old_sectors-1,
+                                           old_sectors-257,old_sectors-256};
+        for(const auto& [at,length]:protected_ranges)
+            if(length==block && at%block==0 && at>=256*block &&
+               at<plan.original_size)candidates.insert(at/block);
+        for(const auto lba:candidates) {
+            if(lba>=old_sectors)continue;
+            const auto at=lba*block;
+            auto d=read(at,block);
+            if(u16(d,0)!=2 || u32(d,12)!=lba)continue;
+            tag_check(d,0,2);
+            need(u32(d,16)==u32(anchor,16) && u32(d,20)==u32(anchor,20) &&
+                 u32(d,24)==u32(anchor,24) && u32(d,28)==u32(anchor,28),
+                 "inconsistent UDF anchor copies");
+            for(const auto& occupied:reserved_)
+                need(!occupied.owner ||
+                     !intersects({at,block},occupied.range),
+                     "UDF mastering anchor overlaps a referenced file or directory");
+            anchors.insert(lba);
+        }
+        for(const auto at:anchors) {
+            auto d=anchor;
+            put32(d,12,static_cast<std::uint32_t>(at));
+            put32(d,16,vds_bytes);
+            put32(d,20,static_cast<std::uint32_t>(main));
+            put32(d,24,vds_bytes);
+            put32(d,28,static_cast<std::uint32_t>(reserve));
+            tag_update(d,0,std::max<std::size_t>(512,16u+u16(d,10)));
+            plan.descriptors.emplace_back(at*block,std::move(d));
+        }
+        Bytes td(block,0);
+        put16(td,0,8);put16(td,2,u16(lvid,2));
+        put32(td,12,static_cast<std::uint32_t>(integrity_lba+1));
+        tag_update(td,0,512);
+        plan.descriptors.emplace_back((integrity_lba+1)*block,std::move(td));
+        Integrity integrity;
+        integrity.at=integrity_lba*block;
+        integrity.impl_bytes=u32(lvid,76);
+        auto next=std::max<std::uint64_t>(16,u64(lvid,40));
+        auto consider=[&](const Fe& fe) {
+            const auto id=u64(fe.bytes,u16(fe.bytes,0)==266?200u:160u);
+            need(id<std::numeric_limits<std::uint64_t>::max(),
+                 "UDF mastering unique-ID overflow");
+            next=std::max(next,id+1);
+        };
+        for(const auto& [key,file]:files_) {(void)key;consider(file.fe);}
+        for(const auto& [key,dir]:directory_files_) {(void)key;consider(dir);}
+        need(next<std::numeric_limits<std::uint64_t>::max(),
+             "UDF mastering unique-ID overflow");
+        integrity.next_id=next;
+        put64(lvid,40,next);
+        put32(lvid,12,static_cast<std::uint32_t>(integrity_lba));
+        put32(lvid,80,static_cast<std::uint32_t>(extra));
+        put32(lvid,84,static_cast<std::uint32_t>(new_blocks));
+        integrity.bytes=std::move(lvid);
+        integrity_=std::move(integrity);
+        Bitmap virtual_map;
+        virtual_map.bits=static_cast<std::uint32_t>(new_blocks);
+        virtual_map.byte_count=(virtual_map.bits+7u)/8u;
+        virtual_map.bytes.assign(24u+virtual_map.byte_count,0);
+        allocation_start_=static_cast<std::uint32_t>(old_sectors-partition_);
+        for(auto j=allocation_start_;j<virtual_map.bits;++j)
+            virtual_map.bytes[24u+j/8u]|=static_cast<std::uint8_t>(1u<<(j%8u));
+        bitmap_=std::move(virtual_map);
+        partition_blocks_=static_cast<std::uint32_t>(new_blocks);
+        size_=(last+1)*block;
+        return plan;
+    }
     void close() {file_.close();}
 private:
     std::ifstream file_;
     std::uint64_t size_{};
+    bool bounded_partitioned_bridge_{};
     std::uint32_t partition_{},partition_blocks_{};
-    std::uint32_t partition_access_type_{};
+    std::uint32_t partition_access_type_{},allocation_start_{};
     std::map<std::string,File> files_;
     std::map<std::string,Fe> directory_files_;
     std::map<std::string,File> directory_links_;
@@ -1251,7 +1564,16 @@ void copy_image_sparse(std::ifstream& in,std::fstream& out,std::uint64_t n,
 bool try_clone_udf_stage(const std::filesystem::path& original,
                          const std::filesystem::path& staged,
                          std::uint64_t size) {
+    #ifdef _WIN32
+    char* force_sparse=nullptr;
+    std::size_t force_sparse_length=0;
+    const errno_t env_status=_dupenv_s(&force_sparse,&force_sparse_length,"ISO_WCX_UDF_FORCE_SPARSE_STAGE");
+    const bool forced=(env_status==0 && force_sparse!=nullptr);
+    std::free(force_sparse);
+    if(forced)return false;
+#else
     if(std::getenv("ISO_WCX_UDF_FORCE_SPARSE_STAGE")!=nullptr)return false;
+#endif
 #ifdef __linux__
     const int source=::open(original.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
     if(source<0)return false;
@@ -1570,7 +1892,9 @@ std::optional<ReusedFid> choose_reused_fid(
 void create_udf_type1_batch(const std::filesystem::path& image,Type1& volume,
                             const std::vector<ArchiveChange>& changes,
                             const EditProgress& progress,bool allow_bridge,
-                            const EditStageValidator& validate_stage);
+                            const EditStageValidator& validate_stage,
+                            const ReadonlyAppendPlan* mastering=nullptr,
+                            const CoordinatedIsoUpdate* coordinated=nullptr);
 
 // Allocate one FE and optionally a contiguous ShortAD run for file data.
 // Embedded or external parent directories may grow to a larger contiguous
@@ -1836,7 +2160,7 @@ void create_udf_type1(const std::filesystem::path& image,Type1& volume,
     // Full strict structural parse plus independent extraction of changed
     // file bytes. Newly allocated FEs must also be discoverable by name.
     {
-        Type1 strict(tx.output,allow_bridge);
+        Type1 strict(tx.output,allow_bridge,volume.bounded_partitioned_bridge());
         need( (strict.files().count(key)!=0)==(!change.directory),
              "staged UDF file map was not updated");
         need( (strict.directories().count(key)!=0)==change.directory,
@@ -1927,8 +2251,22 @@ void write_udf_existing_replacement(std::fstream& out,const File& target,
         }
 }
 
+// The only in-place growth possible is within the final recorded
+// ShortAD's last allocated sector (or within an embedded FE).
+std::uint64_t replacement_capacity(const Fe& fe) {
+    if(fe.runs.empty())return fe.capacity;
+    const auto& last=fe.runs.back();
+    const auto last_limit=std::min<std::uint64_t>(
+        std::uint64_t(last.blocks)*block,0x3fffffffull);
+    need(last.recorded<=last_limit,
+         "UDF final ShortAD exceeds its allocated blocks or recorded length");
+    return std::min(fe.capacity,fe.recorded+(last_limit-last.recorded));
+}
+
 void validate_udf_existing_change(const Type1& volume,
-                                  const ArchiveChange& change) {
+                                  const ArchiveChange& change,
+                                  bool allow_relocation=false,
+                                  bool preserve_shared_payload=false) {
         const auto name=edit_path(change.path);
         const auto file_it=volume.files().find(name);
         const auto dir_it=volume.directory_links().find(name);
@@ -1960,7 +2298,7 @@ void validate_udf_existing_change(const Type1& volume,
         need(!volume.overlaps_external(target.fe.at,block),
              "UDF file descriptor intersects immutable ISO/boot metadata");
         for(const auto& run:target.fe.runs)
-            need(!volume.overlaps_external(
+            need(preserve_shared_payload || !volume.overlaps_external(
                      run.at,std::uint64_t(run.blocks)*block),
                  "UDF file data intersects immutable ISO/boot extent");
         if(!change.remove) {
@@ -1972,19 +2310,8 @@ void validate_udf_existing_change(const Type1& volume,
             // moving data or changing the order of existing logical runs.
             // Earlier runs may have padding but extending them would shift
             // every subsequent file offset. Keep the growth fully in place.
-            std::uint64_t available=target.fe.capacity;
-            if(!target.fe.runs.empty()) {
-                const auto& last=target.fe.runs.back();
-                const auto last_allocated=std::uint64_t(last.blocks)*block;
-                need(last.recorded<=last_allocated,
-                     "UDF final ShortAD exceeds its allocated blocks");
-                const auto last_limit=std::min<std::uint64_t>(
-                    last_allocated,0x3fffffffull);
-                need(last.recorded<=last_limit,
-                     "UDF final ShortAD exceeds 30-bit recorded length");
-                available=target.fe.recorded+(last_limit-last.recorded);
-            }
-            need(len<=target.fe.capacity && len<=available,
+            const auto available=replacement_capacity(target.fe);
+            need(allow_relocation || len<=available,
                  "UDF replacement exceeds existing ShortAD allocation");
             for(const auto& run:target.fe.runs) {
                 const Location dest{run.at,std::uint64_t(run.blocks)*block};
@@ -1996,6 +2323,29 @@ void validate_udf_existing_change(const Type1& volume,
         }
 }
 
+// Independent strict-parse proof that the fixed ISO metadata allocation
+// is persistent in the free-space map and not owned by any UDF object.
+void validate_fixed_iso_metadata(const Type1& volume,
+                                 const CoordinatedIsoUpdate& plan) {
+    const auto* reservation=plan.type1_fixed_metadata;
+    need(reservation && plan.iso_metadata_blocks && reservation->first_lba>=257 &&
+         reservation->first_lba<=reservation->limit_lba &&
+         plan.iso_metadata_blocks<=reservation->limit_lba-reservation->first_lba &&
+         reservation->limit_lba<=volume.image_size()/block,
+         "invalid fixed ISO metadata reservation readback");
+    const Location range{reservation->first_lba*block,plan.iso_metadata_blocks*block};
+    const auto start=volume.logical_of(range.at);
+    const auto last=volume.logical_of(range.at+range.bytes-block);
+    need(std::uint64_t(last)-start+1==plan.iso_metadata_blocks,
+         "fixed ISO reservation outside UDF allocation map");
+    for(std::uint64_t i=0;i<plan.iso_metadata_blocks;++i)
+        need(!volume.is_free(start+static_cast<std::uint32_t>(i)),
+             "fixed ISO metadata sector was not reserved in UDF map");
+    for(const auto& object:volume.intervals())
+        need(!intersects(range,object.range),
+             "fixed ISO metadata reservation aliases a UDF object");
+}
+
 // Plan every new child FE, file run and parent FID before editing a single
 // byte of the source. Each modified parent is relocated at most once.
 // The staged image is copied once, validated once and atomically committed
@@ -2004,7 +2354,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                             Type1& volume,
                             const std::vector<ArchiveChange>& changes,
                             const EditProgress& progress,bool allow_bridge,
-                            const EditStageValidator& validate_stage) {
+                            const EditStageValidator& validate_stage,
+                            const ReadonlyAppendPlan* mastering,
+                            const CoordinatedIsoUpdate* coordinated) {
     need(!changes.empty() && changes.size()<=max_items &&
          volume.has_allocation_map(),
          "UDF transaction needs a valid allocation map and changes");
@@ -2041,7 +2393,16 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         need(changed_names.insert(fold(key)).second,
              "UDF batch contains duplicate or case-colliding changes");
         if(volume.files().count(key) || volume.directory_links().count(key)) {
-            validate_udf_existing_change(volume,change);
+            const bool shared=coordinated &&
+                (coordinated->shared_replacements.count(key)!=0 ||
+                 coordinated->shared_deletions.count(key)!=0);
+            need(!shared || (!change.directory &&
+                 ((mastering && (change.remove?coordinated->shared_deletions.count(key):
+                                               coordinated->shared_replacements.count(key))) ||
+                  (!mastering && coordinated->type1_fixed_shared_delete &&
+                   change.remove && coordinated->shared_deletions.count(key)))),
+                 "shared ISO/UDF edit needs matching mastering or fixed unlink plan");
+            validate_udf_existing_change(volume,change,mastering!=nullptr,shared);
             existing_changes.push_back(change);
             continue;
         }
@@ -2133,6 +2494,20 @@ void create_udf_type1_batch(const std::filesystem::path& image,
              "UDF batch block counter overflow");
         allocated+=count;
     };
+    if(coordinated && coordinated->type1_fixed_metadata) {
+        auto& reservation=*coordinated->type1_fixed_metadata;
+        need(!mastering && coordinated->type1_fixed_shared_add &&
+             !reservation.first_lba && coordinated->iso_metadata_blocks &&
+             coordinated->iso_metadata_blocks<=32768 &&
+             reservation.limit_lba<=volume.image_size()/block,
+             "invalid fixed Type-1 ISO metadata allocation request");
+        const auto count=static_cast<std::uint32_t>(coordinated->iso_metadata_blocks);
+        const auto logical=volume.allocate_blocks(count,reservation.limit_lba);
+        reservation.first_lba=volume.absolute(logical)/block;
+        need(reservation.first_lba>=257,
+             "fixed ISO metadata reservation precedes optical data area");
+        record_allocation(count);
+    }
     for(const auto& p:prepared) {
         edit_tick(progress);
         auto parent_it=parents.find(p.parent);
@@ -2168,7 +2543,13 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         child.length=p.length;
         child.lba=volume.allocate_block();
         record_allocation(1);
-        const auto embedded=p.length<=block-fe_header;
+        const bool shared=coordinated &&
+            coordinated->shared_additions.count(p.key)!=0;
+        need(!shared || ((mastering || coordinated->type1_fixed_shared_add) &&
+                         !p.change.directory && p.length>0 &&
+                         (p.length<=0xffffffffull || coordinated->iso_metadata_blocks)),
+             "shared ISO/UDF creation requires external ISO-compatible data and Level-3 tree");
+        const auto embedded=!shared && p.length<=block-fe_header;
         const auto file_blocks=embedded?
             0ull:(p.length+block-1u)/block;
         need(file_blocks<=std::numeric_limits<std::uint32_t>::max(),
@@ -2176,6 +2557,10 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         if(file_blocks) {
             child.runs=volume.allocate_file_data(
                 p.length,(block-fe_header)/8u);
+            if(shared && coordinated->type1_fixed_shared_add)
+                for(std::size_t i=1;i<child.runs.size();++i)
+                    need(child.runs[i].at==child.runs[i-1].at+child.runs[i-1].recorded,
+                         "fixed shared addition requires contiguous UDF payload");
             record_allocation(file_blocks);
         }
         child.fe.assign(block,0);
@@ -2247,6 +2632,70 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         children.push_back(std::move(child));
     }
 
+    // DVD-ROM mastering can resize a file beyond its original allocation.
+    // Keep its FE/ICB identity, unique ID, attributes and timestamps. New
+    // payload runs are exclusively in the append area. The obsolete
+    // payload remains unadvertised and is never reused by this mastering.
+    struct ReplacementPlan {
+        std::filesystem::path source;
+        std::uint64_t at{},length{};
+        Bytes fe;
+        std::vector<DataRun> runs;
+    };
+    std::vector<ReplacementPlan> replacements;
+    if(mastering)for(const auto& change:existing_changes) {
+        if(change.remove)continue;
+        edit_tick(progress);
+        const auto& old=volume.files().at(edit_path(change.path)).fe;
+        ReplacementPlan plan;
+        plan.source=change.source;
+        plan.at=old.at;
+        plan.length=std::filesystem::file_size(change.source);
+        plan.fe=old.bytes;
+        const bool extended=u16(plan.fe,0)==266;
+        const auto header=old.ad_offset;
+        need(header<=block,"UDF replacement FE allocation header exceeds sector");
+        std::fill(plan.fe.begin()+static_cast<std::ptrdiff_t>(header),
+                  plan.fe.end(),std::uint8_t{0});
+        const bool shared=coordinated &&
+            coordinated->shared_replacements.count(edit_path(change.path))!=0;
+        need(!shared || (plan.length>0 && (plan.length<=0xffffffffull ||
+                                         coordinated->iso_metadata_blocks)),
+             "shared replacement requires an ISO-compatible size and Level-3 tree");
+        const bool embedded=!shared && plan.length<=block-header;
+        const auto blocks=embedded?0ull:(plan.length+block-1u)/block;
+        if(!embedded) {
+            need(header+8u<=block,"UDF replacement FE has no ShortAD slots");
+            plan.runs=volume.allocate_file_data(plan.length,(block-header)/8u);
+            record_allocation(blocks);
+        }
+        put16(plan.fe,34,static_cast<std::uint16_t>(
+              (u16(plan.fe,34)&~7u)|(embedded?3u:0u)));
+        put64(plan.fe,56,plan.length);
+        if(extended)put64(plan.fe,64,plan.length);
+        put64(plan.fe,extended?72u:64u,blocks);
+        const auto ads=embedded?static_cast<std::size_t>(plan.length):
+                                plan.runs.size()*8u;
+        put32(plan.fe,extended?212u:172u,static_cast<std::uint32_t>(ads));
+        if(embedded) {
+            std::ifstream input(plan.source,std::ios::binary);
+            need(bool(input),"cannot open remastered UDF replacement");
+            if(plan.length) {
+                input.read(reinterpret_cast<char*>(plan.fe.data()+header),
+                           static_cast<std::streamsize>(plan.length));
+                need(bool(input),"remastered UDF replacement source shortened");
+            }
+            need(input.peek()==std::char_traits<char>::eof(),
+                 "remastered UDF replacement source grew");
+        } else for(std::size_t i=0;i<plan.runs.size();++i) {
+            put32(plan.fe,header+i*8u,
+                  static_cast<std::uint32_t>(plan.runs[i].recorded));
+            put32(plan.fe,header+i*8u+4u,plan.runs[i].logical);
+        }
+        tag_update(plan.fe,0,header+ads);
+        replacements.push_back(std::move(plan));
+    }
+
     // Apply logical deletes to the same in-memory directory payload used
     // for FID appends and relocations. Never write a stale parent FE later:
     // an embedded parent checksum must cover both mutations together.
@@ -2302,6 +2751,13 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         (void)key;
         edit_tick(progress);
         const auto& fe=parent.original;
+        if(parent.preexisting) {
+            need(!volume.overlaps_external(fe.at,block),
+                 "UDF parent descriptor overlaps immutable ISO metadata");
+            for(const auto& run:fe.runs)
+                need(!volume.overlaps_external(run.at,std::uint64_t(run.blocks)*block),
+                     "UDF parent directory overlaps immutable ISO data");
+        }
         std::uint64_t length=parent.payload.size();
         for(const auto& fid:parent.children) {
             if(fid.reused)continue;
@@ -2430,6 +2886,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         }
     }
     std::vector<Location> deleted_regions;
+    std::set<std::pair<std::uint64_t,std::uint64_t>> retained_shared_bytes;
     std::uint64_t deleted_blocks=0;
     std::uint32_t deleted_files=0,deleted_dirs=0;
     for(const auto& change:existing_changes) {
@@ -2439,7 +2896,16 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         const bool is_directory=volume.directory_links().count(key)!=0;
         const auto& entry=is_directory?
             volume.directory_links().at(key):volume.files().at(key);
-        const auto regions=volume.reclaim_entry_blocks(entry,is_directory);
+        const bool preserve=mastering && coordinated &&
+            coordinated->shared_deletions.count(key)!=0;
+        const auto regions=volume.reclaim_entry_blocks(entry,is_directory,preserve);
+        if(coordinated && coordinated->type1_fixed_shared_delete &&
+           coordinated->shared_deletions.count(key)) {
+            need(!mastering && !is_directory && !entry.fe.runs.empty(),
+                 "fixed shared unlink requires external regular-file data");
+            for(const auto& run:entry.fe.runs)
+                retained_shared_bytes.emplace(run.at,std::uint64_t(run.blocks)*block);
+        }
         for(const auto& region:regions) {
             need(region.bytes%block==0 &&
                  region.bytes/block<=
@@ -2459,11 +2925,16 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     released+=deleted_blocks;
 
     EditTransaction tx(image);
-    prepare_udf_stage(image,tx.output,volume.image_size(),progress);
+    prepare_udf_stage(image,tx.output,
+                      mastering?mastering->original_size:volume.image_size(),progress);
+    if(mastering)std::filesystem::resize_file(tx.output,volume.image_size());
     std::fstream out(tx.output,std::ios::binary|std::ios::in|
                      std::ios::out);
     need(bool(out),"cannot open prepared UDF transaction stage");
     volume.close();
+    if(coordinated && coordinated->type1_fixed_metadata)
+        staged_zero(out,coordinated->type1_fixed_metadata->first_lba*block,
+                    coordinated->iso_metadata_blocks*block,progress);
     for(const auto& child:children) {
         edit_tick(progress);
         staged_write(out,volume.absolute(child.lba),child.fe);
@@ -2487,7 +2958,29 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                  "UDF batch data source length changed during writing");
         }
     }
-    for(const auto& change:existing_changes) {
+    for(const auto& plan:replacements) {
+        edit_tick(progress);
+        if(!plan.runs.empty()) {
+            std::ifstream source(plan.source,std::ios::binary);
+            need(bool(source),"cannot open remastered UDF data");
+            std::uint64_t copied=0;
+            for(const auto& run:plan.runs) {
+                out.clear();
+                out.seekp(static_cast<std::streamoff>(run.at));
+                need(bool(out),"cannot seek remastered UDF data extent");
+                copy(source,out,run.recorded,progress);
+                copied+=run.recorded;
+                const auto tail=std::uint64_t(run.blocks)*block-run.recorded;
+                if(tail)staged_write(out,run.at+run.recorded,
+                                      Bytes(static_cast<std::size_t>(tail),0));
+            }
+            need(copied==plan.length &&
+                 source.peek()==std::char_traits<char>::eof(),
+                 "remastered UDF replacement length changed");
+        }
+        staged_write(out,plan.at,plan.fe);
+    }
+    if(!mastering)for(const auto& change:existing_changes) {
         edit_tick(progress);
         if(change.remove)continue; // FID was patched in its parent payload.
         write_udf_existing_replacement(
@@ -2505,26 +2998,65 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                          parent.content_write);
         staged_write(out,parent.original.at,parent.fe_write);
     }
-    // Wipe the released FE and every recorded ShortAD sector only after
-    // parent FIDs have lost their ICB pointers. No new allocation reuses
-    // these blocks in the current transaction.
+    // Wipe released FE and data after FIDs lose their ICB pointers.
+    // Fixed shared unlink retains only the original optical payload
+    // bytes until ISO compaction is verified; they become free in the
+    // committed map, but are never reused within this transaction.
     for(const auto& region:deleted_regions)
-        staged_zero(out,region.at,region.bytes,progress);
-    const auto [bitmap_at,bitmap_bytes]=volume.updated_bitmap();
-    staged_write(out,bitmap_at,bitmap_bytes);
-    const auto [lvid_at,lvid_bytes]=volume.updated_integrity_delta(
+        if(!retained_shared_bytes.count({region.at,region.bytes}))
+            staged_zero(out,region.at,region.bytes,progress);
+    if(mastering) {
+        for(const auto& [at,bytes]:mastering->descriptors) {
+            edit_tick(progress);
+            staged_write(out,at,bytes);
+        }
+    } else {
+        const auto [bitmap_at,bitmap_bytes]=volume.updated_bitmap();
+        staged_write(out,bitmap_at,bitmap_bytes);
+    }
+    auto [lvid_at,lvid_bytes]=volume.updated_integrity_delta(
         files_added,dirs_added,deleted_files,deleted_dirs,allocated,released);
+    if(mastering) {
+        put32(lvid_bytes,80,0); // read-only: no advertised writable space
+        tag_update(lvid_bytes,0,16u+u16(lvid_bytes,10));
+    }
     staged_write(out,lvid_at,lvid_bytes);
     out.flush();
     need(bool(out),"cannot flush staged UDF batch image");
     out.close();
 
+    if(mastering) {
+        // Type1 validates the main sequence and namespace, but the
+        // read-only parser does not consume the LVID or reserve VDS.
+        // Independently read back all newly written mastering metadata.
+        std::ifstream check(tx.output,std::ios::binary);
+        need(bool(check),"cannot reopen mastered UDF metadata");
+        auto verify=[&](std::uint64_t at,const Bytes& expected) {
+            edit_tick(progress);
+            Bytes actual(expected.size());
+            check.clear();
+            check.seekg(static_cast<std::streamoff>(at));
+            check.read(reinterpret_cast<char*>(actual.data()),
+                       static_cast<std::streamsize>(actual.size()));
+            need(bool(check) && actual==expected,
+                 "UDF mastering metadata readback differs");
+            tag_check(actual,0,u16(expected,0));
+        };
+        for(const auto& [at,bytes]:mastering->descriptors)verify(at,bytes);
+        verify(lvid_at,lvid_bytes);
+        check.close();
+    }
+
     // A strict second parse detects invalid tag CRC/location, FE/FID aliases,
     // bitmap/LVID mismatches and parent allocation errors. Read every new
     // file through Disc extents and compare its complete source stream.
     {
-        Type1 strict(tx.output,allow_bridge);
-        for(const auto& region:deleted_regions) {
+        Type1 strict(tx.output,allow_bridge,volume.bounded_partitioned_bridge());
+        if(coordinated && coordinated->type1_fixed_metadata)
+            validate_fixed_iso_metadata(strict,*coordinated);
+        // A mastered ROM intentionally has no persistent free-space map.
+        // Its deletion is checked by namespace and data verification below.
+        if(!mastering)for(const auto& region:deleted_regions) {
             const auto start=strict.logical_of(region.at);
             for(std::uint64_t i=0;i<region.bytes/block;++i)
                 need(strict.is_free(start+static_cast<std::uint32_t>(i)),
@@ -2586,29 +3118,1675 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         }
     }
     if(validate_stage)validate_stage(tx.output);
+    if(coordinated && coordinated->type1_fixed_metadata) {
+        Type1 final_volume(tx.output,allow_bridge,volume.bounded_partitioned_bridge());
+        validate_fixed_iso_metadata(final_volume,*coordinated);
+    }
     tx.commit(progress);
 }
 
+
+// Standalone open write-once UDF 1.50 / 2.x images with a clean
+// VAT ICB at actual EOF and declared unrecorded partition capacity.
+// No original sector is overwritten. Directory metadata uses virtual
+// addresses; bulk file data and external VAT storage use physical ADs.
+// Keep each revision's on-disc VAT layout and FID conventions distinct.
+struct VatFileLayout {
+    bool directory=false;
+    std::uint64_t size{};
+    Bytes embedded;
+    std::vector<Extent> extents;
+};
+struct VatPayload {
+    std::filesystem::path source;
+    std::uint64_t size{},blocks{};
+};
+struct VatGptEdit {
+    std::uint64_t old_backup{};
+    Bytes prefix,retired,tail;
+};
+struct VatAppendPlan {
+    std::uint64_t original_size{},final_size{},payload_blocks{};
+    std::uint64_t iso_reservation_at{},iso_reservation_bytes{};
+    Bytes mbr; // exact independently validated replacement header, or empty
+    std::optional<VatGptEdit> gpt;
+    std::vector<VatPayload> payloads;
+    std::vector<Bytes> append;
+    std::map<std::string,VatFileLayout> expected;
+    std::map<std::string,std::filesystem::path> verify_sources;
+};
+constexpr std::uint64_t vat_max_table=16u*1024u*1024u;
+constexpr std::uint64_t vat_max_ad=0x3ffff800ull;
+
+bool vat_layout_matches(const Item& item,const VatFileLayout& wanted) {
+    if(item.directory!=wanted.directory || !item.direct_source.empty() ||
+       item.size!=wanted.size || item.inline_data!=wanted.embedded ||
+       item.extents.size()!=wanted.extents.size())return false;
+    for(std::size_t j=0;j<wanted.extents.size();++j) {
+        const auto& a=item.extents[j];
+        const auto& b=wanted.extents[j];
+        if(a.offset!=b.offset || a.length!=b.length || a.sparse!=b.sparse)
+            return false;
+    }
+    return true;
+}
+
+void vat_need(bool ok,const char* reason) {
+    if(!ok)throw EditUnsupported(std::string("UDF VAT virtual partition: ")+reason);
+}
+Bytes vat_read_sector(std::ifstream& in,std::uint64_t lba,std::uint64_t sectors) {
+    vat_need(lba<sectors,"descriptor outside recorded image");
+    Bytes b(block);
+    in.clear();in.seekg(static_cast<std::streamoff>(lba*block));
+    in.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(b.size()));
+    vat_need(bool(in),"cannot read descriptor sector");
+    return b;
+}
+void vat_tag(const Bytes& b,std::uint16_t type,std::uint32_t lba,
+             std::size_t used) {
+    tag_check(b,0,type);
+    vat_need(used>=16 && used<=b.size() &&
+             u32(b,12)==lba && u16(b,10)>=used-16,
+             "descriptor tag location or CRC coverage mismatch");
+}
+struct VatVolumeDescriptors {
+    Bytes pd,lvd;
+};
+VatVolumeDescriptors vat_vds(std::ifstream& in,std::uint64_t sectors,
+        std::uint32_t start,std::uint32_t bytes) {
+    vat_need(bytes>=3*block && bytes%block==0 && bytes<=16u*1024u*1024u &&
+             start>=257 && start<sectors && bytes/block<=sectors-start,
+             "unsupported descriptor sequence geometry");
+    VatVolumeDescriptors v;
+    bool terminated=false;
+    for(std::uint32_t j=0;j<bytes/block;++j) {
+        auto b=vat_read_sector(in,std::uint64_t(start)+j,sectors);
+        const auto id=u16(b,0);
+        vat_tag(b,id,start+j,id==6?510u:512u);
+        if(id==5) {
+            vat_need(v.pd.empty(),"multiple physical partitions");
+            v.pd=std::move(b);
+        } else if(id==6) {
+            vat_need(v.lvd.empty(),"multiple logical volumes");
+            v.lvd=std::move(b);
+        } else if(id==8) {
+            terminated=true;break;
+        } else vat_need(id==1 || id==4 || id==7,
+                        "unsupported or chained volume descriptor");
+    }
+    vat_need(terminated && !v.pd.empty() && !v.lvd.empty(),
+             "incomplete volume descriptor sequence");
+    return v;
+}
+Bytes vat_embedded_fe(Bytes b,std::uint32_t lba,std::uint8_t type) {
+    vat_need(u16(b,0)==261 && b[27]==type && u16(b,20)==4 &&
+             u16(b,24)==1 &&
+             (type==4?u16(b,48)>=1:(type==0?u16(b,48)==0:u16(b,48)==1)) &&
+             u16(b,34)==3 &&
+             u32(b,168)==0 && u64(b,64)==0 &&
+             u64(b,56)==u32(b,172) && u32(b,172)<=block-176,
+             "requires an ordinary embedded FE with no extended attributes");
+    vat_tag(b,261,lba,176u+u32(b,172));
+    return b;
+}
+// Validate FE and every physical data run independently from the
+// permissive Disc reader. Reject unrecorded extents, continuations,
+// virtual data references and references beyond the current VAT ICB.
+VatFileLayout vat_physical_file(const Bytes& b,std::uint32_t lba,
+        std::uint8_t type,std::uint32_t partition,std::uint32_t old_vat) {
+    vat_need(u16(b,0)==261 && b[27]==type && u16(b,20)==4 &&
+             u16(b,24)==1 && u16(b,48)==(type==0?0:1) && u32(b,168)==0,
+             "requires a single-link ordinary FE without extended attributes");
+    const auto mode=u16(b,34);
+    VatFileLayout layout;
+    layout.size=u64(b,56);
+    if(mode==3) {
+        vat_embedded_fe(b,lba,type);
+        layout.embedded.assign(b.begin()+176,b.begin()+176+u32(b,172));
+        return layout;
+    }
+    vat_need(mode==1 || ((type==248 || type==0) && mode==0),
+             "external VAT file data must use physical allocation descriptors");
+    const std::size_t step=mode==0?8u:16u;
+    const auto ads=u32(b,172);
+    vat_need(ads && ads<=block-176 && ads%step==0 && layout.size,
+             "invalid external file allocation descriptors");
+    vat_tag(b,261,lba,176u+ads);
+    std::uint64_t total=0,recorded=0;
+    for(std::size_t at=176;at<176u+ads;at+=step) {
+        const auto length=u32(b,at);
+        const auto logical=u32(b,at+4);
+        const auto blocks=(std::uint64_t(length)+block-1)/block;
+        vat_need(length && length<=0x3fffffffu &&
+                 total<=layout.size && length<=layout.size-total &&
+                 (total+length==layout.size || length%block==0) &&
+                 logical<old_vat && blocks<=old_vat-logical,
+                 "external file extent exceeds recorded partition or information length");
+        if(mode==1)
+            vat_need(u16(b,at+8)==0 &&
+                     std::all_of(b.begin()+at+10,b.begin()+at+16,
+                                 [](auto c){return c==0;}),
+                     "external file extent must reference the physical partition");
+        layout.extents.push_back({(std::uint64_t(partition)+logical)*block,
+                                   length,false});
+        total+=length;recorded+=blocks;
+    }
+    vat_need(total==layout.size && recorded==u64(b,64),
+             "external FE information length or recorded blocks disagree");
+    return layout;
+}
+Bytes vat_table_bytes(std::ifstream& in,const VatFileLayout& layout) {
+    vat_need(layout.size<=vat_max_table,"VAT table exceeds 16 MiB limit");
+    if(layout.extents.empty())return layout.embedded;
+    Bytes data(static_cast<std::size_t>(layout.size));
+    std::size_t pos=0;
+    for(const auto& run:layout.extents) {
+        in.clear();in.seekg(static_cast<std::streamoff>(run.offset));
+        in.read(reinterpret_cast<char*>(data.data()+pos),
+                static_cast<std::streamsize>(run.length));
+        vat_need(bool(in),"cannot read external VAT table");
+        pos+=static_cast<std::size_t>(run.length);
+    }
+    return data;
+}
+// Reserve rounded physical spans; a data run may not alias a virtual
+// descriptor, VAT storage, or any other live external file.
+void vat_reserve_physical(const VatFileLayout& layout,std::uint32_t partition,
+        const std::set<std::uint32_t>& mapped,std::uint32_t previous,
+        std::map<std::uint32_t,std::uint64_t>& allocated) {
+    for(const auto& run:layout.extents) {
+        const auto start=static_cast<std::uint32_t>(run.offset/block-partition);
+        const auto end=std::uint64_t(start)+(run.length+block-1)/block;
+        const auto hit=mapped.lower_bound(start);
+        vat_need((hit==mapped.end() || *hit>=end) &&
+                 (previous==0xffffffffu || previous<start || previous>=end),
+                 "external data aliases VAT metadata");
+        const auto next=allocated.lower_bound(start);
+        vat_need((next==allocated.end() || next->first>=end) &&
+                 (next==allocated.begin() || std::prev(next)->second<=start),
+                 "external physical extents overlap");
+        allocated.emplace(start,end);
+    }
+}
+// Validate the exact supported MBR geometry independently from the
+// ISO planner. Only the container's CHS end and sector count can change.
+// Never round after the VAT ICB: alignment belongs before the VAT.
+Bytes vat_grown_mbr(std::ifstream& in,std::uint64_t original,
+        std::uint64_t final,std::uint64_t alignment) {
+    auto mbr=vat_read_sector(in,0,original/block);
+    mbr.resize(512);
+    vat_need(mbr[510]==0x55 && mbr[511]==0xaa &&
+             original%block==0 && final%block==0 && final>original &&
+             final/512<=0xffffffffull && alignment && alignment<=65536,
+             "invalid MBR VAT growth envelope");
+    const auto old_sectors=original/512;
+    const auto new_sectors=final/512;
+    std::optional<std::size_t> container;
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> esp;
+    for(std::size_t at=446;at<510;at+=16) {
+        const auto type=mbr[at+4];
+        if(!type) {
+            vat_need(std::all_of(mbr.begin()+at,mbr.begin()+at+16,
+                                 [](auto c){return c==0;}),
+                     "nonempty unused VAT MBR partition");
+            continue;
+        }
+        const auto first=std::uint64_t(u32(mbr,at+8));
+        const auto count=std::uint64_t(u32(mbr,at+12));
+        if(type==0x17 && !first) {
+            vat_need(!container && mbr[at]==0x80 && count==old_sectors &&
+                     mbr[at+1]==0 && mbr[at+2]==1 && mbr[at+3]==0,
+                     "VAT MBR requires a whole-image active ISO container");
+            container=at;
+        } else {
+            vat_need(type==0xef && mbr[at]==0 && first>=64 && count &&
+                     first<old_sectors && count<=old_sectors-first,
+                     "VAT MBR contains unsupported independent partition");
+            for(const auto& [begin,length]:esp)
+                vat_need(first>=begin+length || begin>=first+count,
+                         "overlapping VAT EFI partitions");
+            esp.emplace_back(first,count);
+        }
+    }
+    vat_need(container.has_value(),"missing VAT MBR ISO container");
+    const auto at=*container;
+    const auto heads=std::uint64_t(mbr[at+5])+1;
+    const auto sectors=std::uint64_t(mbr[at+6]&0x3fu);
+    const auto old_cylinder=std::uint64_t(mbr[at+7]) |
+                           (std::uint64_t(mbr[at+6]&0xc0u)<<2);
+    vat_need(heads>=2 && heads<=255 && sectors && sectors<=63,
+             "invalid VAT MBR CHS geometry");
+    const auto geometry=heads*sectors;
+    const auto expected_alignment=geometry*(geometry%4==0?1u:geometry%2==0?2u:4u)/4;
+    vat_need(alignment==expected_alignment &&
+             old_sectors%geometry==0 && old_sectors/geometry>0 &&
+             old_cylinder==std::min<std::uint64_t>(old_sectors/geometry-1,1023) &&
+             new_sectors%geometry==0 && final/block%alignment==0,
+             "VAT MBR alignment or recorded CHS mismatch");
+    const auto cylinder=std::min<std::uint64_t>(new_sectors/geometry-1,1023);
+    mbr[at+6]=static_cast<std::uint8_t>(sectors|((cylinder>>2)&0xc0u));
+    mbr[at+7]=static_cast<std::uint8_t>(cylinder&255u);
+    put32(mbr,at+12,static_cast<std::uint32_t>(new_sectors));
+    return mbr;
+}
+
+// Independent byte-level derivation of the limited GPT VAT profile.
+// No GPT partition entries or data addresses may be changed. Only the
+// protective MBR length, the two headers, and the old/new backup array
+// location change. The retired backup is strictly after the old VAT.
+std::uint32_t vat_gpt_crc(const Bytes& bytes,std::size_t count) {
+    std::uint32_t crc=0xffffffffu;
+    for(std::size_t j=0;j<count;++j) {
+        crc^=bytes[j];
+        for(unsigned bit=0;bit<8;++bit)
+            crc=(crc>>1)^((crc&1u)?0xedb88320u:0u);
+    }
+    return ~crc;
+}
+VatGptEdit vat_gpt_edit(std::ifstream& in,std::uint64_t original,
+                       std::uint64_t final,std::uint64_t trailer) {
+    vat_need(trailer==9 && original>=310*block && original%block==0 &&
+             final>original && final%block==0,
+             "unsupported sequential GPT envelope");
+    auto read=[&](std::uint64_t at,std::size_t n) {
+        vat_need(at<=original && n<=original-at,"GPT metadata outside source");
+        Bytes b(n);
+        in.clear();in.seekg(static_cast<std::streamoff>(at));
+        in.read(reinterpret_cast<char*>(b.data()),static_cast<std::streamsize>(n));
+        vat_need(bool(in),"cannot read GPT metadata");
+        return b;
+    };
+    const auto old_last=original/512-1,new_last=final/512-1;
+    const auto old_table=old_last-32,new_table=new_last-32;
+    const auto recorded=(original/block-trailer)*block;
+    auto mbr=read(0,512);
+    vat_need(mbr[510]==0x55 && mbr[511]==0xaa,
+             "invalid GPT protective MBR signature");
+    std::optional<std::size_t> protective;
+    for(std::size_t at=446;at<510;at+=16) {
+        if(mbr[at+4]==0xee) {
+            vat_need(!protective && mbr[at]==0 && u32(mbr,at+8)==1 &&
+                     u32(mbr,at+12)==std::min<std::uint64_t>(old_last,0xffffffffull),
+                     "invalid GPT protective partition");
+            protective=at;
+        } else vat_need(std::all_of(mbr.begin()+at,mbr.begin()+at+16,
+                                   [](auto c){return c==0;}),
+                        "VAT GPT requires a protective-only MBR");
+    }
+    vat_need(protective.has_value(),"missing GPT protective partition");
+    auto primary=read(512,512);
+    auto backup=read(old_last*512,512);
+    auto entries=read(1024,16384);
+    const auto crc=vat_gpt_crc(entries,entries.size());
+    auto validate_header=[&](Bytes h,std::uint64_t self,std::uint64_t alternate,
+                             std::uint64_t table) {
+        vat_need(std::string_view(reinterpret_cast<const char*>(h.data()),8)=="EFI PART" &&
+                 u32(h,8)==0x10000 && u32(h,12)==92 && u32(h,20)==0 &&
+                 u64(h,24)==self && u64(h,32)==alternate && u64(h,40)>=34 &&
+                 u64(h,40)<=u64(h,48) && u64(h,48)==old_table-1 &&
+                 u64(h,72)==table && u32(h,80)==128 && u32(h,84)==128 &&
+                 u32(h,88)==crc,
+                 "invalid standard GPT header geometry");
+        const auto expected=u32(h,16);
+        put32(h,16,0);
+        vat_need(vat_gpt_crc(h,92)==expected,"GPT header CRC32 mismatch");
+    };
+    validate_header(primary,1,old_last,2);
+    validate_header(backup,old_last,1,old_table);
+    vat_need(u64(primary,40)==u64(backup,40) &&
+             std::equal(primary.begin()+56,primary.begin()+72,backup.begin()+56) &&
+             read(old_table*512,entries.size())==entries &&
+             old_table*512>=recorded,
+             "GPT headers or partition arrays disagree");
+    std::size_t used=0;
+    for(std::size_t at=0;at<entries.size();at+=128) {
+        if(std::all_of(entries.begin()+at,entries.begin()+at+16,
+                       [](auto c){return c==0;}))continue;
+        ++used;
+        const auto first=u64(entries,at+32),last=u64(entries,at+40);
+        vat_need(first>=u64(primary,40) && first<=last &&
+                 last<recorded/512,
+                 "GPT partition extends into sequential VAT trailer");
+    }
+    vat_need(used!=0,"GPT has no independent partitions");
+    // The padding before the old GPT backup is outside recorded UDF
+    // space. Require it to be empty rather than infer unknown records.
+    const auto gap=read(recorded,static_cast<std::size_t>(old_table*512-recorded));
+    vat_need(std::all_of(gap.begin(),gap.end(),[](auto c){return c==0;}),
+             "nonzero bytes between final VAT and GPT backup");
+    put32(mbr,*protective+12,static_cast<std::uint32_t>(
+                                 std::min<std::uint64_t>(new_last,0xffffffffull)));
+    put64(primary,32,new_last);put64(primary,48,new_table-1);
+    put64(backup,24,new_last);put64(backup,48,new_table-1);
+    put64(backup,72,new_table);
+    for(auto* h:{&primary,&backup}) {
+        put32(*h,16,0);put32(*h,16,vat_gpt_crc(*h,92));
+    }
+    VatGptEdit result;
+    result.old_backup=old_table*512;
+    result.retired.assign(static_cast<std::size_t>(original-result.old_backup),0);
+    result.prefix=std::move(mbr);
+    result.prefix.insert(result.prefix.end(),primary.begin(),primary.end());
+    result.tail.assign(static_cast<std::size_t>(trailer*block),0);
+    const auto offset=static_cast<std::size_t>(trailer*block-33*512);
+    std::copy(entries.begin(),entries.end(),result.tail.begin()+offset);
+    std::copy(backup.begin(),backup.end(),result.tail.end()-512);
+    return result;
+}
+
+std::unique_ptr<VatAppendPlan> prepare_vat_append(
+        const std::filesystem::path& image,
+        const std::vector<ArchiveChange>& changes,const EditProgress& progress,
+        const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment,
+        std::uint64_t gpt_trailer,
+        const EditProtectedRanges* iso_payload_proof=nullptr) {
+    edit_tick(progress);
+    vat_need(!gpt_trailer || (gpt_trailer==9 && !mbr_alignment),
+             "VAT GPT requires a standard trailer without MBR alignment");
+    vat_need(!mbr_alignment ||
+             (mbr_alignment<=65536 && (!coordinated || coordinated->iso_metadata_blocks)),
+             "VAT MBR coordination requires a mirrored-tree reservation");
+    vat_need(iso_payload_proof?
+                 (changes.empty() && !coordinated && !mbr_alignment &&
+                  !iso_payload_proof->empty() && iso_payload_proof->size()<=4096):
+                 ((!changes.empty() && changes.size()<=4096) ||
+                  (changes.empty() && coordinated && coordinated->vat_iso_only_remaster &&
+                   coordinated->iso_metadata_blocks && (mbr_alignment || gpt_trailer))),
+             "VAT transaction requires changes, an ISO-only remaster or a read-only ISO proof");
+    auto plan=std::make_unique<VatAppendPlan>();
+    struct Request {
+        std::string key;
+        const ArchiveChange* change{};
+    };
+    auto fold=[](std::string key) {
+        for(auto& c:key)if(c>='a' && c<='z')c=static_cast<char>(c-'a'+'A');
+        return key;
+    };
+    auto depth=[](const std::string& key) {
+        return std::count(key.begin(),key.end(),'/');
+    };
+    std::vector<Request> requests;
+    requests.reserve(changes.size());
+    std::set<std::string> changed_names;
+    for(const auto& change:changes) {
+        auto key=edit_path(change.path);
+        vat_need(depth(key)<max_depth &&
+                 changed_names.insert(fold(key)).second,
+                 "duplicate, case-colliding or too-deep VAT batch path");
+        requests.push_back({std::move(key),&change});
+    }
+    // Expand recursive removals only after validating the complete
+    // on-disc tree and comparing it with the public reader.
+    plan->original_size=std::filesystem::file_size(image);
+    const auto sectors=plan->original_size/block;
+    vat_need(sectors>=300+gpt_trailer,"truncated sequential GPT image");
+    const auto recorded_sectors=sectors-gpt_trailer;
+    vat_need(plan->original_size%block==0 && sectors>=300 &&
+             plan->original_size<max_image-2*block,"unsupported recorded image size");
+    std::ifstream in(image,std::ios::binary);
+    vat_need(bool(in),"cannot open sequential image");
+    if(coordinated) {
+        const bool remaster=coordinated->iso_metadata_blocks!=0;
+        const auto private_count=coordinated->vat_private_replacements.size()+
+            coordinated->vat_private_deletions.size()+
+            coordinated->vat_private_additions.size()+
+            coordinated->vat_private_directories.size();
+        vat_need((!coordinated->vat_mixed_remaster ||
+                  (remaster && !coordinated->vat_iso_only_remaster &&
+                   (mbr_alignment || gpt_trailer))) &&
+                 (coordinated->vat_mixed_remaster || !private_count) &&
+                 (!coordinated->vat_iso_only_remaster ||
+                  (changes.empty() && remaster && (mbr_alignment || gpt_trailer) &&
+                   coordinated->vat_tree_deletions.empty())) &&
+                 coordinated->iso_metadata_blocks<=32768 &&
+                 coordinated->iso_payload_blocks<=0xffffffffull-coordinated->iso_metadata_blocks &&
+                 (!coordinated->iso_payload_blocks ||
+                  ((coordinated->vat_iso_only_remaster || coordinated->vat_mixed_remaster) &&
+                   remaster)) &&
+                 (remaster || (coordinated->shared_additions.empty() &&
+                               coordinated->shared_directories.empty() &&
+                               coordinated->vat_tree_deletions.empty())) &&
+                 coordinated->shared_replacements.size()+
+                 coordinated->shared_deletions.size()+
+                 coordinated->shared_additions.size()+
+                 coordinated->shared_directories.size()+private_count==changes.size() &&
+                 !coordinated->metadata_writes.empty(),
+                 "unsupported VAT shared ISO coordination plan");
+        for(const auto& request:requests) {
+            const auto& change=*request.change;
+            const auto& key=request.key;
+            const auto shared=change.remove?
+                std::size_t((remaster || !change.directory) && coordinated->shared_deletions.count(key)):
+                (change.directory?coordinated->shared_directories.count(key):
+                 (coordinated->shared_replacements.count(key)+
+                  coordinated->shared_additions.count(key)));
+            const auto private_match=change.remove?coordinated->vat_private_deletions.count(key):
+                (change.directory?coordinated->vat_private_directories.count(key):
+                 coordinated->vat_private_replacements.count(key)+
+                 coordinated->vat_private_additions.count(key));
+            vat_need(shared+private_match==1,"VAT coordinated request differs from plan");
+        }
+        std::uint64_t end=16ull*block;
+        // The only mutable historical bytes are ISO record fields
+        // before the primary AVDP. VRS, boot, UDF VDS, LVID, FSD and
+        // all physical partition bytes remain immutable.
+        for(const auto& [at,length]:coordinated->metadata_writes) {
+            vat_need(length && at>=end && at<256ull*block &&
+                     length<=256ull*block-at,
+                     "VAT shared ISO metadata is not safely before the UDF anchor");
+            end=at+length;
+            for(auto sector=at/block;sector<=(end-1)/block;++sector) {
+                const auto b=vat_read_sector(in,sector,sectors);
+                const std::string_view id(reinterpret_cast<const char*>(b.data()+1),5);
+                vat_need(id!="NSR02" && id!="NSR03" && id!="BEA01" &&
+                         id!="TEA01","VAT shared ISO metadata overlaps VRS");
+            }
+        }
+    }
+    const auto anchor=vat_read_sector(in,256,sectors);
+    vat_tag(anchor,2,256,512);
+    const auto main_start=u32(anchor,20),main_bytes=u32(anchor,16);
+    const auto reserve_start=u32(anchor,28),reserve_bytes=u32(anchor,24);
+    auto main=vat_vds(in,sectors,main_start,main_bytes);
+    const auto reserve=vat_vds(in,sectors,reserve_start,reserve_bytes);
+    vat_need(std::equal(main.pd.begin()+16,main.pd.end(),reserve.pd.begin()+16) &&
+             std::equal(main.lvd.begin()+16,main.lvd.end(),reserve.lvd.begin()+16),
+             "main and reserve partition/volume descriptors disagree");
+    const auto& pd=main.pd;
+    const auto& lvd=main.lvd;
+    const auto partition=u32(pd,188),capacity=u32(pd,192);
+    const auto part_number=u16(pd,22);
+    const std::string_view contents(reinterpret_cast<const char*>(pd.data()+25),6);
+    const auto revision=u16(lvd,240);
+    const bool legacy=revision==0x0150;
+    vat_need(contents==(legacy?"+NSR02":"+NSR03") && u32(pd,184)==2 &&
+             partition>256 && partition<recorded_sectors &&
+             capacity<=0xffffffffu-partition &&
+             (iso_payload_proof?recorded_sectors-partition<=capacity:
+                                sectors-partition+2<=capacity),
+             "requires a bounded UDF 1.50/2.x write-once partition and append capacity when writing");
+    vat_need(std::all_of(pd.begin()+56,pd.begin()+96,[](auto c){return c==0;}),
+             "write-once partition must not advertise free-space structures");
+    const Location main_range{std::uint64_t(main_start)*block,main_bytes};
+    const Location reserve_range{std::uint64_t(reserve_start)*block,reserve_bytes};
+    vat_need(main_range.at+main_range.bytes<=std::uint64_t(partition)*block &&
+             reserve_range.at+reserve_range.bytes<=std::uint64_t(partition)*block &&
+             !intersects(main_range,reserve_range),
+             "volume descriptor sequences overlap the backing partition");
+    vat_need(u32(lvd,212)==block && u32(lvd,264)==70 &&
+             u32(lvd,268)==2 && lvd[440]==1 && lvd[441]==6 &&
+             u16(lvd,442)==1 && u16(lvd,444)==part_number &&
+             lvd[446]==2 && lvd[447]==64 &&
+             std::string_view(reinterpret_cast<const char*>(lvd.data()+451),22)==
+                 "*UDF Virtual Partition" &&
+             u16(lvd,482)==1 && u16(lvd,484)==part_number,
+             "requires exactly one physical map and its virtual map");
+    vat_need(std::string_view(reinterpret_cast<const char*>(lvd.data()+217),19)==
+                 "*OSTA UDF Compliant" &&
+             (legacy || (revision>=0x0200 && revision<=0x0260)) &&
+             lvd[242]==0,"unsupported or write-protected UDF domain");
+    if(legacy) {
+        vat_need(u16(lvd,2)==2 && u16(pd,2)==2 &&
+                 u16(lvd,474)==0x0150 && lvd[450]==0,
+                 "UDF 1.50 virtual partition revision mismatch");
+    }
+    // Open integrity plus a valid VAT at the final recorded sector is
+    // the clean sequential state. Never recover an old VAT for writing.
+    const auto integrity_start=u32(lvd,436),integrity_bytes=u32(lvd,432);
+    const Location integrity_range{std::uint64_t(integrity_start)*block,integrity_bytes};
+    vat_need(integrity_bytes>=block && integrity_bytes%block==0 &&
+             integrity_bytes<=16u*1024u*1024u && integrity_start>=257 &&
+             integrity_range.at+integrity_range.bytes<=std::uint64_t(partition)*block &&
+             !intersects(integrity_range,main_range) &&
+             !intersects(integrity_range,reserve_range),
+             "unsupported integrity sequence");
+    if(iso_payload_proof) {
+        // The strict parser has proved the physical backing partition
+        // begins after the primary AVDP, with integrity after sector
+        // 256. A pre-anchor ISO payload cannot reach current or retired
+        // VAT mappings, even ones no longer reachable by Disc.
+        std::uint64_t end=16ull*block;
+        for(const auto& [at,length]:*iso_payload_proof) {
+            edit_tick(progress);
+            vat_need(length && at>=end && at%block==0 &&
+                     at<256ull*block && length<=256ull*block-at,
+                     "ISO-only VAT payload must be wholly before the primary anchor");
+            const Location range{at,length};
+            vat_need(!intersects(range,main_range) && !intersects(range,reserve_range) &&
+                     !intersects(range,integrity_range),
+                     "ISO-only VAT payload aliases a UDF descriptor sequence");
+            end=at+length;
+            for(auto sector=at/block;sector<=(end-1)/block;++sector) {
+                const auto b=vat_read_sector(in,sector,sectors);
+                const std::string_view id(reinterpret_cast<const char*>(b.data()+1),5);
+                vat_need(id!="CD001" && id!="BEA01" && id!="NSR02" &&
+                         id!="NSR03" && id!="TEA01" && id!="BOOT2" &&
+                         id!="CDW02",
+                         "ISO-only VAT payload overlaps or introduces a VRS descriptor");
+            }
+        }
+    }
+    const auto lvid=vat_read_sector(in,integrity_start,sectors);
+    const auto implementation=u32(lvid,76);
+    vat_need(u32(lvid,72)==2 && implementation<=block-96 &&
+             u32(lvid,28)==0 && u32(lvid,32)==0 && u32(lvid,36)==0,
+             "requires open unchained two-map logical volume integrity");
+    vat_tag(lvid,9,integrity_start,96u+implementation);
+    for(std::uint32_t j=1;j<integrity_bytes/block;++j) {
+        const auto tail=vat_read_sector(in,std::uint64_t(integrity_start)+j,sectors);
+        if(std::all_of(tail.begin(),tail.end(),[](auto c){return c==0;}))continue;
+        vat_need(j==1,"unsupported integrity sequence continuation");
+        vat_tag(tail,8,integrity_start+j,512);
+    }
+    // In GPT images the clean VAT ends the recorded optical volume,
+    // not the whole hybrid file. No search/fallback is allowed to write.
+    const auto old_vat=static_cast<std::uint32_t>(recorded_sectors-partition-1);
+    auto vat_fe=vat_read_sector(in,recorded_sectors-1,sectors);
+    const auto vat_layout=vat_physical_file(vat_fe,old_vat,
+                                            legacy?0:248,partition,old_vat);
+    auto vat=vat_table_bytes(in,vat_layout);
+    Bytes legacy_trailer;
+    std::uint32_t previous=0xffffffffu;
+    std::size_t header=0;
+    if(legacy) {
+        // UDF 1.50 section 2.2.10: entries followed by EntityID
+        // (32 bytes) and PreviousVAT ICB (4 bytes), not a 2.x header.
+        // Exclude this trailer during mapping allocation so newly
+        // allocated virtual addresses can never overwrite the EntityID.
+        vat_need(vat.size()>=40 && (vat.size()-36)%4==0 &&
+                 u16(vat_fe,2)==2,
+                 "invalid UDF 1.50 VAT size or descriptor version");
+        const auto at=vat.size()-36;
+        vat_need(vat[at]==0 && vat[at+23]==0 &&
+                 std::string_view(reinterpret_cast<const char*>(vat.data()+at+1),22)==
+                     "*UDF Virtual Alloc Tbl" &&
+                 u16(vat,at+24)==0x0150 &&
+                 std::all_of(vat.begin()+at+28,vat.begin()+at+32,
+                             [](auto c){return c==0;}),
+                 "invalid UDF 1.50 VAT EntityID");
+        previous=u32(vat,at+32);
+        legacy_trailer.assign(vat.begin()+at,vat.end());
+        vat.resize(at);
+    } else {
+        vat_need(vat.size()>=156 && u16(vat,0)==152u+u16(vat,2) &&
+                 u16(vat,0)<=vat.size()-4 && (vat.size()-u16(vat,0))%4==0 &&
+                 std::equal(vat.begin()+4,vat.begin()+132,lvd.begin()+84) &&
+                 u16(vat,144)>=0x0200 && u16(vat,144)<=0x0260 &&
+                 u16(vat,146)>=0x0200 && u16(vat,146)<=0x0260 &&
+                 u16(vat,148)>=u16(vat,146) && u16(vat,148)<=0x0260 &&
+                 u16(vat,150)==0,"invalid UDF 2.x VAT header");
+        previous=u32(vat,132);
+        header=u16(vat,0);
+    }
+    const auto table_limit=vat_max_table-legacy_trailer.size();
+    vat_need(previous==0xffffffffu || previous<old_vat,
+             "invalid previous VAT ICB location");
+    std::vector<std::uint32_t> mapping;
+    std::set<std::uint32_t> used;
+    for(std::size_t pos=header;pos<vat.size();pos+=4) {
+        const auto physical=u32(vat,pos);
+        vat_need(physical==0xffffffffu ||
+                 (physical<old_vat && physical!=previous &&
+                  used.insert(physical).second),
+                 "VAT mapping is outside recorded data or aliases another block");
+        mapping.push_back(physical);
+    }
+    std::map<std::uint32_t,std::uint64_t> allocated;
+    vat_reserve_physical(vat_layout,partition,used,previous,allocated);
+    auto read_virtual=[&](std::uint32_t logical) {
+        vat_need(logical<mapping.size() && mapping[logical]!=0xffffffffu,
+                 "unmapped virtual descriptor");
+        return vat_read_sector(in,std::uint64_t(partition)+mapping[logical],sectors);
+    };
+    vat_need(u32(lvd,248)>=512 && u32(lvd,248)<=block &&
+             u16(lvd,256)==1,"unsupported virtual file-set sequence");
+    const auto fsd_lba=u32(lvd,252);
+    const auto fsd=read_virtual(fsd_lba);
+    vat_tag(fsd,256,fsd_lba,512);
+    vat_need(u32(fsd,400)==block && u16(fsd,408)==1 &&
+             u32(fsd,448)==0 && u32(fsd,464)==0 &&
+             fsd[442]==0,"unsupported virtual root or system-stream geometry");
+    const auto root_lba=u32(fsd,404);
+    vat_need(root_lba!=fsd_lba,"virtual root aliases file set");
+    // Each directory retains its virtual address. A copy-on-write FE
+    // remap therefore changes no ancestor reference. Traverse the whole
+    // tree before planning any mutation, rejecting aliasing and cycles.
+    struct Directory {
+        std::uint32_t lba{};
+        Bytes fe;
+        Bytes body; // dense FIDs, independent of the FE allocation mode
+        std::vector<std::uint32_t> old_data;
+        std::size_t children{};
+    };
+    struct Pending {
+        std::string path;
+        std::uint32_t lba{},parent{};
+        std::uint64_t parent_uid{};
+        unsigned depth{};
+    };
+    std::map<std::string,Directory> directories;
+    std::vector<Pending> pending{{"",root_lba,root_lba,0,0}};
+    std::set<std::uint32_t> visited{fsd_lba,root_lba};
+    std::set<std::uint64_t> live_ids;
+    std::set<std::string> folded_names;
+    const auto vat_uid=u64(vat_fe,160);
+    std::map<std::string,std::uint32_t> objects;
+    std::size_t file_count=0;
+    std::uint64_t directory_bytes_total=0;
+    constexpr std::uint64_t max_directory_metadata=64u*1024u*1024u;
+    // Reserve every virtual directory-data block in the same set as
+    // FSD and FE addresses. The already checked VAT is injective, so
+    // this also prevents physical aliasing between metadata objects.
+    auto read_directory=[&](const Bytes& fe,std::uint32_t logical,
+                            std::vector<std::uint32_t>& data_lbas,
+                            VatFileLayout& layout) {
+        layout.directory=true;
+        const auto mode=u16(fe,34);
+        if(mode==3) {
+            vat_embedded_fe(fe,logical,4);
+            layout.embedded.assign(fe.begin()+176,fe.begin()+176+u32(fe,172));
+            return layout.embedded;
+        }
+        vat_need(u16(fe,0)==261 && fe[27]==4 && u16(fe,20)==4 &&
+                 u16(fe,24)==1 && u16(fe,48)>=1 && u32(fe,168)==0 &&
+                 (mode==0 || mode==1),
+                 "unsupported external VAT directory FE");
+        const auto size=u64(fe,56);
+        const auto ads=u32(fe,172);
+        const std::size_t step=mode==0?8u:16u;
+        vat_need(size>=40 && size<=max_dir &&
+                 ads && ads<=block-176 && ads%step==0,
+                 "invalid external VAT directory allocation size");
+        vat_tag(fe,261,logical,176u+ads);
+        Bytes data;
+        data.reserve(static_cast<std::size_t>(size));
+        for(std::size_t at=176;at<176u+ads;at+=step) {
+            const auto length=u32(fe,at);
+            const auto first=u32(fe,at+4);
+            const auto count=(std::uint64_t(length)+block-1)/block;
+            vat_need(length && length<=0x3fffffffu && length<=size-data.size() &&
+                     (length==size-data.size() || length%block==0) &&
+                     first<mapping.size() && count<=mapping.size()-first,
+                     "external VAT directory extent outside virtual space");
+            if(mode==1)
+                vat_need(u16(fe,at+8)==1 &&
+                         std::all_of(fe.begin()+at+10,fe.begin()+at+16,
+                                     [](auto c){return c==0;}),
+                         "directory long_ad must reference virtual partition");
+            std::uint64_t remaining=length;
+            for(std::uint64_t j=0;j<count;++j) {
+                edit_tick(progress);
+                const auto lba=static_cast<std::uint32_t>(first+j);
+                vat_need(visited.insert(lba).second && visited.size()<=max_items,
+                         "VAT directory data aliases another live object");
+                const auto sector=read_virtual(lba);
+                const auto n=std::min<std::uint64_t>(remaining,block);
+                data.insert(data.end(),sector.begin(),sector.begin()+static_cast<std::ptrdiff_t>(n));
+                data_lbas.push_back(lba);
+                layout.extents.push_back({(std::uint64_t(partition)+mapping[lba])*block,n,false});
+                remaining-=n;
+            }
+        }
+        vat_need(data.size()==size && data_lbas.size()==u64(fe,64),
+                 "external VAT directory recorded block count mismatch");
+        return data;
+    };
+    for(std::size_t cursor=0;cursor<pending.size();++cursor) {
+        edit_tick(progress);
+        const auto current=pending[cursor]; // vector may grow in this loop
+        vat_need(current.depth<max_depth && pending.size()<=4096 &&
+                 visited.size()<=max_items,
+                 "VAT directory tree exceeds safe traversal limit");
+        auto dir=read_virtual(current.lba);
+        std::vector<std::uint32_t> data_lbas;
+        VatFileLayout layout;
+        const auto body=read_directory(dir,current.lba,data_lbas,layout);
+        vat_need(body.size()<=max_directory_metadata-directory_bytes_total,
+                 "VAT directory metadata limit exceeded");
+        directory_bytes_total+=body.size();
+        Bytes dense;
+        dense.reserve(body.size());
+        if(!current.path.empty())
+            vat_need(plan->expected.emplace(current.path,std::move(layout)).second,
+                     "duplicate VAT directory path");
+        const auto uid=u64(dir,160);
+        vat_need(!current.path.empty() || uid==0,
+                 "VAT root UniqueID must be zero");
+        const auto end=body.size();
+        bool have_parent=false;
+        std::size_t child_count=0,subdirectories=0;
+        for(std::size_t pos=0;pos<end;) {
+            // External directories may contain sector-end zero padding.
+            if(!data_lbas.empty() && body[pos]==0 &&
+               (end-pos<2 || body[pos+1]==0)) {
+                const auto padding=std::min<std::size_t>(end-pos,block-pos%block);
+                vat_need(std::all_of(body.begin()+pos,body.begin()+pos+padding,
+                                     [](auto c){return c==0;}),
+                         "invalid VAT directory sector padding");
+                pos+=padding;continue;
+            }
+            vat_need(end-pos>=38,"truncated embedded directory");
+            const auto n=body[pos+19];
+            const auto implementation_bytes=u16(body,pos+36);
+            const auto fid_size=(38u+std::size_t(implementation_bytes)+n+3u)&~std::size_t(3);
+            vat_need(fid_size<=end-pos && implementation_bytes==0,
+                     "unsupported FID length or implementation use");
+            tag_check(body,pos,257);
+            vat_need(u16(body,pos+2)>=2 && u16(body,pos+2)<=3 &&
+                     u16(body,pos+10)==fid_size-16 &&
+                     u32(body,pos+12)==(data_lbas.empty()?current.lba:data_lbas.at(pos/block)) &&
+                     u16(body,pos+16)==1 && u32(body,pos+20)==block &&
+                     u16(body,pos+28)==1,"invalid virtual directory reference");
+            const auto child=u32(body,pos+24);
+            const auto flags=body[pos+18];
+            if(flags==10) {
+                vat_need(dense.empty() && !have_parent && !n &&
+                         child==current.parent &&
+                         (legacy || u32(body,pos+32)==static_cast<std::uint32_t>(current.parent_uid)),
+                         "invalid VAT parent directory FID");
+                have_parent=true;
+            } else {
+                vat_need(have_parent && (flags==0 || flags==2) && n &&
+                         visited.insert(child).second && visited.size()<=max_items,
+                         "duplicate, cyclic or unsupported VAT directory reference");
+                const auto filename=name(body,pos+38,n);
+                vat_need(filename.find('/')==std::string::npos,
+                         "VAT FID must identify a single path component");
+                const auto key=current.path.empty()?filename:current.path+"/"+filename;
+                vat_need(edit_path(key)==key && folded_names.insert(fold(key)).second,
+                         "case-insensitive VAT name collision");
+                auto fe=read_virtual(child);
+                const auto unique=u64(fe,160);
+                vat_need(unique>=16 && unique<vat_uid &&
+                         live_ids.insert(unique).second &&
+                         (legacy || u32(body,pos+32)==static_cast<std::uint32_t>(unique)),
+                         "VAT object has invalid or duplicate unique ID");
+                const bool is_directory=flags==2;
+                if(is_directory) {
+                    vat_need(fe[27]==4,"VAT directory FID refers to non-directory");
+                    ++subdirectories;
+                    vat_need(pending.size()<4096,"too many VAT directories");
+                    pending.push_back({key,child,current.lba,uid,current.depth+1});
+                } else {
+                    auto layout=vat_physical_file(fe,child,5,partition,old_vat);
+                    vat_reserve_physical(layout,partition,used,previous,allocated);
+                    vat_need(plan->expected.emplace(key,std::move(layout)).second,
+                             "duplicate VAT file path");
+                    ++file_count;
+                }
+                ++child_count;
+                vat_need(objects.emplace(key,child).second,
+                         "duplicate VAT object path");
+            }
+            dense.insert(dense.end(),body.begin()+pos,body.begin()+pos+fid_size);
+            pos+=fid_size;
+        }
+        vat_need(have_parent && subdirectories<65535 &&
+                 u16(dir,48)==subdirectories+1,
+                 "VAT directory parent reference or FileLinkCount mismatch");
+        vat_need(directories.emplace(current.path,
+                     Directory{current.lba,std::move(dir),std::move(dense),
+                               std::move(data_lbas),child_count}).second,
+                 "duplicate directory during VAT traversal");
+    }
+    // OSTA UDF 2.01 and later count the root directory itself in VAT
+    // NumberOfDirectories. Earlier synthetic fixtures omitted this one.
+    // Legacy VAT has no count fields. Limit its writer to images
+    // already carrying a valid monotonic FE UniqueID counter; do not
+    // infer a new counter from a potentially incomplete historical tree.
+    vat_need(vat_uid>=16 && (legacy ||
+             (u32(vat,136)==file_count && u32(vat,140)==directories.size())),
+             "VAT unique ID or file/directory counts disagree with namespace");
+    // Independent public reader must agree with every strict input entry.
+    // No hidden special files, physical payload references or fallback
+    // interpretation may silently become a writable namespace.
+    {
+        const Disc before(image);
+        vat_need(before.format()=="UDF" && before.items().size()==plan->expected.size(),
+                 "strict VAT and public reader namespaces disagree");
+        for(const auto& item:before.items()) {
+            const auto found=plan->expected.find(item.path);
+            vat_need(found!=plan->expected.end() &&
+                     vat_layout_matches(item,found->second),
+                     "strict VAT input payload mismatch");
+        }
+    }
+    // Proof-only callers must stop before any mutation planning.
+    if(iso_payload_proof)return plan;
+    // A WCX directory Delete denotes the entire selected subtree.
+    // Resolve it from the validated namespace, never from arbitrary
+    // wildcard matching. All explicit removals must exist even if a
+    // selected ancestor would otherwise cover them. The lexical map
+    // orders each exact parent before its descendants, allowing nested
+    // selections to be coalesced without walking the same tree twice.
+    std::map<std::string,const ArchiveChange*> selected_removals;
+    for(const auto& request:requests) {
+        if(!request.change->remove)continue;
+        vat_need(objects.count(request.key)!=0,
+                 "deletion target does not exist");
+        selected_removals.emplace(request.key,request.change);
+    }
+    std::map<std::string,const ArchiveChange*> removals;
+    for(const auto& [key,change]:selected_removals) {
+        edit_tick(progress);
+        if(!removals.emplace(key,change).second)continue;
+        if(!directories.count(key))continue;
+        const auto prefix=key+"/";
+        for(auto it=objects.lower_bound(prefix);
+            it!=objects.end() && it->first.starts_with(prefix);++it) {
+            edit_tick(progress);
+            removals.emplace(it->first,change);
+        }
+    }
+    vat_need(removals.size()<=max_items,"VAT recursive removal exceeds namespace limit");
+    if(coordinated && coordinated->iso_metadata_blocks) {
+        vat_need(removals.size()==coordinated->vat_tree_deletions.size(),
+                 "VAT and ISO expanded deletion counts differ");
+        for(const auto& [key,change]:removals) {
+            (void)change;
+            vat_need(coordinated->vat_tree_deletions.count(key)!=0,
+                     "VAT and ISO expanded deletion paths differ");
+        }
+    }
+    std::vector<Request> expanded;
+    expanded.reserve(requests.size()+removals.size());
+    for(const auto& [key,change]:removals)
+        expanded.push_back({key,change});
+    for(auto& request:requests) {
+        if(request.change->remove)continue;
+        // Reject additions/replacements inside a removed subtree up
+        // front, including targets that did not exist in the original.
+        // ASCII case aliases are already rejected by namespace checks.
+        auto ancestor=request.key;
+        for(;;) {
+            vat_need(!removals.count(ancestor),
+                     "VAT cannot add or replace within a deleted subtree");
+            const auto slash=ancestor.rfind('/');
+            if(slash==std::string::npos)break;
+            ancestor.resize(slash);
+        }
+        expanded.push_back(std::move(request));
+    }
+    requests=std::move(expanded);
+    // Descendants precede removed parents; additions are parent-first.
+    std::stable_sort(requests.begin(),requests.end(),[&](const Request& a,const Request& b) {
+        if(a.change->remove!=b.change->remove)return a.change->remove;
+        return a.change->remove?depth(a.key)>depth(b.key):depth(a.key)<depth(b.key);
+    });
+    // Create a new virtual address rather than reusing an address from
+    // a deleted object. The prior transaction remains independently
+    // readable. VAT ICB UniqueID is the sequential volume's ID counter.
+    auto next_uid=[](std::uint64_t id) {
+        vat_need(id<std::numeric_limits<std::uint64_t>::max(),
+                 "VAT UniqueID exhausted");
+        ++id;
+        if(static_cast<std::uint32_t>(id)<16u) {
+            vat_need(id<=std::numeric_limits<std::uint64_t>::max()-16u,
+                     "VAT UniqueID exhausted");
+            id+=16u-static_cast<std::uint32_t>(id);
+        }
+        return id;
+    };
+    auto new_uid=next_uid(vat_uid);
+    std::set<std::string> dirty_directories;
+    std::vector<std::pair<std::uint32_t,Bytes>> file_entries;
+    file_entries.reserve(requests.size());
+    const auto next_physical=[&]() {
+        // Preserve the prior VAT and its complete trailer. Append
+        // payloads at physical EOF, even when GPT follows the old VAT.
+        return sectors-partition+plan->payload_blocks;
+    };
+    const auto available=std::uint64_t(capacity)-(sectors-partition);
+    for(const auto& request:requests) {
+        edit_tick(progress);
+        const auto& key=request.key;
+        const auto& change=*request.change;
+        const bool making_directory=change.directory && !change.remove;
+        const auto slash=key.rfind('/');
+        const auto parent_key=slash==std::string::npos?std::string{}:key.substr(0,slash);
+        const auto component=slash==std::string::npos?key:key.substr(slash+1);
+        const auto parent_it=directories.find(parent_key);
+        vat_need(parent_it!=directories.end(),"VAT parent directory does not exist");
+        auto& parent=parent_it->second;
+        auto& parent_fe=parent.fe;
+        const auto parent_lba=parent.lba;
+        auto& parent_body=parent.body;
+        const auto end=parent_body.size();
+        const auto found=objects.find(key);
+        const bool creating=found==objects.end();
+        vat_need(!change.remove || !creating,"deletion target does not exist");
+        const bool target_directory=!creating && plan->expected.at(key).directory;
+        vat_need(change.remove || creating || (!target_directory && !making_directory),
+                 "VAT cannot replace a directory or create an existing directory");
+        std::uint32_t target_lba=creating?0:found->second;
+        if(creating)
+            vat_need(!folded_names.count(fold(key)),
+                     "new VAT filename collides case-insensitively");
+        if(coordinated) {
+            const bool authorized_remove=coordinated->iso_metadata_blocks?
+                coordinated->vat_tree_deletions.count(key)!=0:
+                (!target_directory && coordinated->shared_deletions.count(key));
+            const auto shared_write=creating?
+                (making_directory?coordinated->shared_directories.count(key):
+                                  coordinated->shared_additions.count(key)):
+                coordinated->shared_replacements.count(key);
+            const auto private_write=creating?
+                (making_directory?coordinated->vat_private_directories.count(key):
+                                  coordinated->vat_private_additions.count(key)):
+                coordinated->vat_private_replacements.count(key);
+            vat_need(change.remove?(!creating && authorized_remove):
+                     (shared_write+private_write==1),
+                     "VAT coordinated target state differs from ISO plan");
+        }
+        if(change.remove) {
+            if(target_directory)
+                vat_need(directories.at(key).children==0,
+                         "VAT recursive deletion did not cover every descendant");
+            vat_need(parent.children>0,"VAT parent child count underflow");
+            const bool retire_parent=removals.count(parent_key)!=0;
+            if(!retire_parent) {
+                // Resolve the current FID offset: earlier operations
+                // may have compacted the surviving parent's body.
+                std::size_t pos=0;
+                std::size_t fid_bytes=0;
+                for(;pos<end;pos+=fid_bytes) {
+                    vat_need(end-pos>=38,"truncated staged VAT directory");
+                    fid_bytes=(38u+std::size_t(u16(parent_body,pos+36))+parent_body[pos+19]+3u)&~std::size_t(3);
+                    vat_need(fid_bytes<=end-pos,"invalid staged VAT FID");
+                    if(!(parent_body[pos+18]&8u) && u32(parent_body,pos+24)==target_lba)break;
+                }
+                vat_need(pos<end && fid_bytes<=end-pos,
+                         "VAT deletion FID missing from surviving parent");
+                parent_body.erase(parent_body.begin()+pos,parent_body.begin()+pos+fid_bytes);
+                if(target_directory) {
+                    vat_need(u16(parent_fe,48)>1,"VAT parent directory link count underflow");
+                    put16(parent_fe,48,static_cast<std::uint16_t>(u16(parent_fe,48)-1));
+                }
+                dirty_directories.insert(parent_key);
+            }
+            // Internal FIDs in a doomed directory need no rewrite.
+            // The full original tree was checked above; retire all its
+            // FE/data mappings without modifying those physical bytes.
+            if(target_directory) {
+                dirty_directories.erase(key);
+                for(const auto logical:directories.at(key).old_data)
+                    put32(vat,header+std::size_t(logical)*4,0xffffffffu);
+                directories.erase(key);
+            }
+            --parent.children;
+            put32(vat,header+std::size_t(target_lba)*4,0xffffffffu);
+            plan->expected.erase(key);
+            folded_names.erase(fold(key));
+            objects.erase(found);
+            continue;
+        }
+        Bytes target;
+        if(creating) {
+            vat_need(vat.size()+4<=table_limit &&
+                     (vat.size()-header)/4<0xffffffffu &&
+                     objects.size()<max_items,
+                     "VAT virtual address or namespace limit exhausted");
+            target_lba=static_cast<std::uint32_t>((vat.size()-header)/4);
+            vat.resize(vat.size()+4,0xff);
+            const auto encoded=encode_udf_cs0(component);
+            const auto fid_bytes=(38u+encoded.size()+3u)&~std::size_t(3);
+            vat_need(end<=max_dir && fid_bytes<=max_dir-end &&
+                     fid_bytes<=max_directory_metadata-directory_bytes_total,
+                     "VAT directory metadata limit exceeded");
+            directory_bytes_total+=fid_bytes;
+            Bytes fid(fid_bytes,0);
+            put16(fid,0,257);put16(fid,2,u16(parent_fe,2));
+            put16(fid,6,u16(parent_fe,6));put32(fid,12,parent_lba);
+            put16(fid,16,1);fid[18]=making_directory?2u:0u;
+            fid[19]=static_cast<std::uint8_t>(encoded.size());
+            put32(fid,20,static_cast<std::uint32_t>(block));
+            put32(fid,24,target_lba);put16(fid,28,1);
+            // The FID long_ad implementation bytes are not the
+            // mandatory UDF UniqueID field introduced in UDF 2.x.
+            // Preserve old legacy FIDs; new 1.50 FIDs leave them zero.
+            if(!legacy)put32(fid,32,static_cast<std::uint32_t>(new_uid));
+            std::copy(encoded.begin(),encoded.end(),fid.begin()+38);
+            tag_update(fid,0,fid.size());
+            parent_body.insert(parent_body.end(),fid.begin(),fid.end());
+            if(making_directory) {
+                vat_need(u16(parent_fe,48)<65535 && directories.size()<4096,
+                         "VAT directory link count or directory limit exceeded");
+                put16(parent_fe,48,static_cast<std::uint16_t>(u16(parent_fe,48)+1));
+            }
+            ++parent.children;
+            dirty_directories.insert(parent_key);
+            target.assign(block,0);
+            put16(target,0,261);put16(target,2,u16(parent_fe,2));
+            put16(target,6,u16(parent_fe,6));put32(target,12,target_lba);
+            put16(target,20,4);put16(target,24,1);target[27]=making_directory?4u:5u;
+            put32(target,28,parent_lba);put16(target,32,1);
+            put32(target,36,0xffffffffu);put32(target,40,0xffffffffu);
+            put32(target,44,making_directory?0x000001ffu:0x000001b6u);
+            put16(target,48,1);
+            std::copy(parent_fe.begin()+72,parent_fe.begin()+108,target.begin()+72);
+            put32(target,108,1);
+            std::copy(parent_fe.begin()+128,parent_fe.begin()+160,target.begin()+128);
+            put64(target,160,new_uid);
+            new_uid=next_uid(new_uid);
+            vat_need(objects.emplace(key,target_lba).second &&
+                     folded_names.insert(fold(key)).second,
+                     "duplicate newly created VAT path");
+            if(making_directory) {
+                Bytes parent_fid(40,0);
+                put16(parent_fid,0,257);put16(parent_fid,2,u16(target,2));
+                put16(parent_fid,6,u16(target,6));put32(parent_fid,12,target_lba);
+                put16(parent_fid,16,1);parent_fid[18]=10;
+                put32(parent_fid,20,static_cast<std::uint32_t>(block));
+                put32(parent_fid,24,parent_lba);put16(parent_fid,28,1);
+                if(!legacy)put32(parent_fid,32,static_cast<std::uint32_t>(u64(parent_fe,160)));
+                tag_update(parent_fid,0,parent_fid.size());
+                put16(target,34,3);put64(target,56,parent_fid.size());
+                put32(target,172,static_cast<std::uint32_t>(parent_fid.size()));
+                std::copy(parent_fid.begin(),parent_fid.end(),target.begin()+176);
+                tag_update(target,0,176+parent_fid.size());
+                VatFileLayout layout;
+                layout.directory=true;layout.embedded=parent_fid;
+                plan->expected.emplace(key,std::move(layout));
+                vat_need(parent_fid.size()<=max_directory_metadata-directory_bytes_total,
+                         "VAT directory metadata limit exceeded");
+                directory_bytes_total+=parent_fid.size();
+                vat_need(directories.emplace(key,Directory{target_lba,std::move(target),
+                                                          std::move(parent_fid),{},0}).second,
+                         "duplicate new VAT directory");
+                dirty_directories.insert(key);
+                continue;
+            }
+        } else {
+            // Duplicate paths in one batch are rejected, so a replacement
+            // can only refer to a regular FE from the original map.
+            target=read_virtual(target_lba);
+        }
+        vat_need(std::filesystem::is_regular_file(
+                 std::filesystem::symlink_status(change.source)),
+                 "VAT file source must be a regular non-symlink file");
+        const auto size=std::filesystem::file_size(change.source);
+        vat_need(size<=vat_max_ad*((block-176)/16),
+                 "replacement exceeds FE long_ad capacity");
+        const bool shared=coordinated && (coordinated->shared_replacements.count(key) ||
+                                         coordinated->shared_additions.count(key));
+        // A full ISO tree remaster can describe the same contiguous
+        // payload using Level-3 records. The original-record coordinator
+        // still has exactly one 32-bit ISO length field.
+        vat_need(!shared || (size && (size<=0xffffffffull ||
+                                      coordinated->iso_metadata_blocks)),
+                 "VAT shared replacement requires an ISO-compatible file and tree for Level-3");
+        // Even small shared files must remain externally addressable
+        // by ISO9660. Never embed a common payload in its new UDF FE.
+        const bool embedded=!shared && size<=block-176;
+        const auto payload_blocks=embedded?0:(size+block-1)/block;
+        vat_need(plan->payload_blocks<=available &&
+                 payload_blocks<=available-plan->payload_blocks,
+                 "insufficient unrecorded capacity for VAT batch payload");
+        VatFileLayout output;
+        output.size=size;
+        std::fill(target.begin()+176,target.end(),std::uint8_t{0});
+        put64(target,56,size);
+        if(embedded) {
+            Bytes incoming(static_cast<std::size_t>(size));
+            std::ifstream source(change.source,std::ios::binary);
+            vat_need(bool(source),"cannot open replacement");
+            if(!incoming.empty())source.read(reinterpret_cast<char*>(incoming.data()),
+                                             static_cast<std::streamsize>(incoming.size()));
+            vat_need(bool(source) && source.peek()==std::char_traits<char>::eof(),
+                     "replacement source changed during read");
+            put16(target,34,3);put64(target,64,0);
+            put32(target,172,static_cast<std::uint32_t>(size));
+            std::copy(incoming.begin(),incoming.end(),target.begin()+176);
+            tag_update(target,0,176+incoming.size());
+            output.embedded=std::move(incoming);
+        } else {
+            put16(target,34,1);put64(target,64,payload_blocks);
+            std::uint64_t remaining=size,logical=next_physical();
+            std::size_t at=176;
+            while(remaining) {
+                const auto n=std::min(remaining,vat_max_ad);
+                vat_need(at<=block-16,"replacement long_ad capacity exceeded");
+                put32(target,at,static_cast<std::uint32_t>(n));
+                put32(target,at+4,static_cast<std::uint32_t>(logical));
+                output.extents.push_back({(std::uint64_t(partition)+logical)*block,n,false});
+                remaining-=n;logical+=(n+block-1)/block;at+=16;
+            }
+            vat_need(logical==next_physical()+payload_blocks,
+                     "VAT payload allocation plan differs");
+            put32(target,172,static_cast<std::uint32_t>(at-176));
+            tag_update(target,0,at);
+            plan->payloads.push_back({change.source,size,payload_blocks});
+            plan->payload_blocks+=payload_blocks;
+        }
+        file_entries.emplace_back(target_lba,std::move(target));
+        plan->expected.insert_or_assign(key,std::move(output));
+        plan->verify_sources.emplace(key,change.source);
+    }
+    in.close();
+    // Stream all external data once. Emit each changed regular FE and
+    // each dirty directory exactly once, followed by ONE VAT ICB.
+    std::uint64_t directory_blocks=0;
+    // Retire old directory-data addresses and allocate fresh contiguous
+    // virtual ranges. Pre-size VAT before computing its own allocation.
+    for(const auto& key:dirty_directories) {
+        auto& dir=directories.at(key);
+        for(const auto logical:dir.old_data)
+            put32(vat,header+std::size_t(logical)*4,0xffffffffu);
+        dir.old_data.clear();
+        if(dir.body.size()>block-176) {
+            const auto count=(dir.body.size()+block-1)/block;
+            vat_need(count<=(table_limit-vat.size())/4 &&
+                     count<=max_items-directory_blocks,
+                     "VAT directory virtual address limit exceeded");
+            const auto first=(vat.size()-header)/4;
+            for(std::size_t j=0;j<count;++j)
+                dir.old_data.push_back(static_cast<std::uint32_t>(first+j));
+            vat.resize(vat.size()+count*4,0xff);
+            directory_blocks+=count;
+        }
+    }
+    // The strict reader counts both directory-data blocks and FE/FSD
+    // addresses against the live metadata traversal limit. Keep the
+    // newly published namespace within the same limit.
+    std::uint64_t live_metadata=objects.size()+2u; // root and FSD
+    for(const auto& [key,dir]:directories) {
+        (void)key;
+        vat_need(live_metadata<=max_items &&
+                 dir.old_data.size()<=max_items-live_metadata,
+                 "VAT live metadata traversal limit exceeded");
+        live_metadata+=dir.old_data.size();
+    }
+    // Include the legacy trailer in the final VAT allocation, without
+    // appending it to the mutable mapping until all addresses are assigned.
+    const auto final_vat_bytes=vat.size()+legacy_trailer.size();
+    const auto vat_blocks=final_vat_bytes<=block-176?0:(final_vat_bytes+block-1)/block;
+    const auto iso_blocks=coordinated?
+        coordinated->iso_metadata_blocks+coordinated->iso_payload_blocks:0u;
+    const auto minimum=plan->payload_blocks+file_entries.size()+
+                        dirty_directories.size()+directory_blocks+iso_blocks+vat_blocks+1u;
+    const auto padding=mbr_alignment?
+        (mbr_alignment-(sectors+minimum)%mbr_alignment)%mbr_alignment:0u;
+    const auto required=minimum+padding+gpt_trailer;
+    vat_need(required<=available && required<(max_image-plan->original_size)/block,
+             "insufficient unrecorded partition capacity for VAT append/alignment");
+    plan->final_size=plan->original_size+required*block;
+    if(mbr_alignment) {
+        std::ifstream mbr_source(image,std::ios::binary);
+        vat_need(bool(mbr_source),"cannot reopen original VAT MBR");
+        plan->mbr=vat_grown_mbr(mbr_source,plan->original_size,
+                               plan->final_size,mbr_alignment);
+    }
+    if(gpt_trailer) {
+        std::ifstream gpt_source(image,std::ios::binary);
+        vat_need(bool(gpt_source),"cannot reopen original VAT GPT");
+        plan->gpt=vat_gpt_edit(gpt_source,plan->original_size,plan->final_size,gpt_trailer);
+    }
+    auto physical=next_physical();
+    for(auto& [logical,fe]:file_entries) {
+        put32(vat,header+std::size_t(logical)*4,static_cast<std::uint32_t>(physical++));
+        plan->append.push_back(std::move(fe));
+    }
+    for(const auto& key:dirty_directories) {
+        auto& dir=directories.at(key);
+        auto& body=dir.body;
+        auto& fe=dir.fe;
+        VatFileLayout layout;
+        layout.directory=true;
+        // TagLocation is the virtual block holding the start of each FID.
+        // Packed descriptors may cross block boundaries. Their CRCs cover
+        // the complete record, including required four-byte alignment.
+        for(std::size_t pos=0;pos<body.size();) {
+            vat_need(body.size()-pos>=38,"invalid planned VAT FID");
+            const auto count=(38u+std::size_t(u16(body,pos+36))+body[pos+19]+3u)&~std::size_t(3);
+            vat_need(count<=body.size()-pos,"planned VAT FID exceeds directory");
+            put32(body,pos+12,dir.old_data.empty()?dir.lba:dir.old_data.at(pos/block));
+            tag_update(body,pos,count);
+            pos+=count;
+        }
+        std::fill(fe.begin()+176,fe.end(),std::uint8_t{0});
+        put64(fe,56,body.size());
+        if(dir.old_data.empty()) {
+            put16(fe,34,3);put64(fe,64,0);
+            put32(fe,172,static_cast<std::uint32_t>(body.size()));
+            std::copy(body.begin(),body.end(),fe.begin()+176);
+            tag_update(fe,0,176+body.size());
+            layout.embedded=std::move(body);
+        } else {
+            put16(fe,34,0);put64(fe,64,dir.old_data.size());
+            put32(fe,172,8);put32(fe,176,static_cast<std::uint32_t>(body.size()));
+            put32(fe,180,dir.old_data.front());
+            tag_update(fe,0,184);
+            std::size_t pos=0;
+            for(const auto logical:dir.old_data) {
+                const auto n=std::min<std::size_t>(block,body.size()-pos);
+                put32(vat,header+std::size_t(logical)*4,static_cast<std::uint32_t>(physical));
+                layout.extents.push_back({(std::uint64_t(partition)+physical)*block,n,false});
+                ++physical;
+                Bytes sector(block,0);
+                std::copy_n(body.begin()+pos,n,sector.begin());
+                plan->append.push_back(std::move(sector));
+                pos+=n;
+            }
+            vat_need(pos==body.size(),"VAT directory allocation plan differs");
+        }
+        put32(vat,header+std::size_t(dir.lba)*4,static_cast<std::uint32_t>(physical++));
+        if(!key.empty())plan->expected.at(key)=std::move(layout);
+        plan->append.push_back(std::move(fe));
+    }
+    // Alignment precedes the ISO reservation. This keeps the
+    // reservation immediately before the VAT table/ICB, so the ISO
+    // coordinator can independently derive its exact physical bounds.
+    if(padding) {
+        plan->append.emplace_back(static_cast<std::size_t>(padding*block),0);
+        physical+=padding;
+    }
+    // Keep ISO metadata unmapped in the VAT. The final table/ICB follow
+    // the private zero-filled reservation; historical bytes are untouched.
+    if(iso_blocks) {
+        plan->iso_reservation_at=(std::uint64_t(partition)+physical)*block;
+        plan->iso_reservation_bytes=iso_blocks*block;
+        // An empty run is an explicit reservation marker, not a buffer.
+        // Its physical length is tracked as uint64_t and streamed below.
+        plan->append.emplace_back();
+        physical+=iso_blocks;
+    }
+    const auto new_table=physical;
+    const auto new_vat=new_table+vat_blocks;
+    if(legacy) {
+        put32(legacy_trailer,32,old_vat);
+        vat.insert(vat.end(),legacy_trailer.begin(),legacy_trailer.end());
+    } else {
+        put32(vat,132,old_vat);
+        const auto directory_count=static_cast<std::size_t>(std::count_if(
+            plan->expected.begin(),plan->expected.end(),
+            [](const auto& item){return item.second.directory;}));
+        put32(vat,136,static_cast<std::uint32_t>(plan->expected.size()-directory_count));
+        put32(vat,140,static_cast<std::uint32_t>(directory_count+1));
+    }
+    vat_need(vat.size()==final_vat_bytes,"VAT serialization size mismatch");
+    put64(vat_fe,160,new_uid);
+    std::fill(vat_fe.begin()+176,vat_fe.end(),std::uint8_t{0});
+    put64(vat_fe,56,vat.size());
+    put32(vat_fe,12,static_cast<std::uint32_t>(new_vat));
+    if(vat_blocks) {
+        put16(vat_fe,34,0);put64(vat_fe,64,vat_blocks);
+        put32(vat_fe,172,8);
+        put32(vat_fe,176,static_cast<std::uint32_t>(vat.size()));
+        put32(vat_fe,180,static_cast<std::uint32_t>(new_table));
+        tag_update(vat_fe,0,184);
+        vat.resize(static_cast<std::size_t>(vat_blocks*block),0);
+        plan->append.push_back(std::move(vat));
+    } else {
+        put16(vat_fe,34,3);put64(vat_fe,64,0);
+        put32(vat_fe,172,static_cast<std::uint32_t>(vat.size()));
+        std::copy(vat.begin(),vat.end(),vat_fe.begin()+176);
+        tag_update(vat_fe,0,176+vat.size());
+    }
+    plan->append.push_back(std::move(vat_fe));
+    if(plan->gpt)plan->append.push_back(std::move(plan->gpt->tail));
+    return plan;
+}
+void edit_vat_append(const std::filesystem::path& image,
+        const std::vector<ArchiveChange>& changes,const EditProgress& progress,
+        const EditStageValidator& validate_stage,
+        const CoordinatedIsoUpdate* coordinated,std::uint64_t mbr_alignment,
+        std::uint64_t gpt_trailer) {
+    // Pin source identity before reading any plan data.
+    EditTransaction tx(image);
+    const auto plan=prepare_vat_append(image,changes,progress,coordinated,mbr_alignment,gpt_trailer);
+    tx.assert_source_unchanged();
+    prepare_udf_stage(image,tx.output,plan->original_size,progress);
+    {
+        std::fstream out(tx.output,std::ios::binary|std::ios::in|std::ios::out);
+        vat_need(bool(out),"cannot open private append stage");
+        auto at=plan->original_size;
+        for(const auto& payload:plan->payloads) {
+            edit_tick(progress);
+            std::ifstream source(payload.source,std::ios::binary);
+            vat_need(bool(source) && std::filesystem::file_size(payload.source)==
+                     payload.size,"replacement source changed before streaming");
+            out.seekp(static_cast<std::streamoff>(at));
+            vat_need(bool(out),"cannot seek append payload");
+            copy(source,out,payload.size,progress);
+            vat_need(source.peek()==std::char_traits<char>::eof(),
+                     "replacement source grew during streaming");
+            const auto padding=payload.blocks*block-payload.size;
+            if(padding)staged_zero(out,at+payload.size,padding,progress);
+            at+=payload.blocks*block;
+        }
+        vat_need(at==plan->original_size+plan->payload_blocks*block,
+                 "VAT batch payload length differs from plan");
+        const auto metadata_start=at;
+        for(const auto& bytes:plan->append) {
+            edit_tick(progress);
+            if(bytes.empty()) {
+                vat_need(plan->iso_reservation_bytes && at==plan->iso_reservation_at &&
+                         at<=plan->final_size &&
+                         plan->iso_reservation_bytes<=plan->final_size-at,
+                         "invalid streamed ISO reservation marker");
+                staged_zero(out,at,plan->iso_reservation_bytes,progress);
+                at+=plan->iso_reservation_bytes;
+            } else {
+                staged_write(out,at,bytes);at+=bytes.size();
+            }
+        }
+        vat_need(at==plan->final_size,"VAT append write length differs from plan");
+        out.flush();vat_need(bool(out),"cannot flush VAT append");
+        at=metadata_start;
+        for(const auto& bytes:plan->append) {
+            edit_tick(progress);
+            if(bytes.empty()) {
+                vat_need(plan->iso_reservation_bytes && at==plan->iso_reservation_at,
+                         "invalid ISO reservation readback marker");
+                auto remaining=plan->iso_reservation_bytes;
+                while(remaining) {
+                    edit_tick(progress);
+                    const auto n=static_cast<std::size_t>(
+                        std::min<std::uint64_t>(remaining,1024u*1024u));
+                    const auto data=staged_read(out,at,n);
+                    vat_need(std::all_of(data.begin(),data.end(),[](auto c){return c==0;}),
+                             "streamed ISO reservation is not zero-filled");
+                    at+=n;remaining-=n;
+                }
+            } else {
+                vat_need(staged_read(out,at,bytes.size())==bytes,
+                         "appended VAT transaction failed byte readback");
+                at+=bytes.size();
+            }
+        }
+        vat_need(at==plan->final_size,"VAT append readback length differs from plan");
+    }
+    vat_need(std::filesystem::file_size(tx.output)==plan->final_size,
+             "unexpected VAT append size");
+    // Before any ISO coordination callback, the complete sequential
+    // stage must preserve the entire source prefix. Afterwards, only
+    // prevalidated ISO metadata fields may differ from that prefix.
+    if(coordinated || plan->gpt) {
+        OpticalEditGuard whole(plan->original_size);
+        whole.protect(0,plan->original_size);
+        whole.verify_appended(image,tx.output,progress);
+    }
+    if(!plan->mbr.empty()) {
+        // All original bytes except the independently derived 512-byte
+        // header must remain unchanged. Only CHS end/count differ in it.
+        edit_tick(progress);
+        std::fstream out(tx.output,std::ios::binary|std::ios::in|std::ios::out);
+        vat_need(bool(out),"cannot open staged VAT MBR");
+        staged_write(out,0,plan->mbr);
+        vat_need(staged_read(out,0,512)==plan->mbr,"staged VAT MBR readback differs");
+    }
+    if(plan->gpt) {
+        edit_tick(progress);
+        std::fstream out(tx.output,std::ios::binary|std::ios::in|std::ios::out);
+        vat_need(bool(out),"cannot open staged VAT GPT");
+        staged_write(out,0,plan->gpt->prefix);
+        staged_write(out,plan->gpt->old_backup,plan->gpt->retired);
+        vat_need(staged_read(out,0,1024)==plan->gpt->prefix &&
+                 staged_read(out,plan->gpt->old_backup,plan->gpt->retired.size())==plan->gpt->retired,
+                 "staged VAT GPT header readback differs");
+    }
+    if(validate_stage)validate_stage(tx.output);
+    vat_need(std::filesystem::file_size(tx.output)==plan->final_size,
+             "VAT ISO coordination changed the append size");
+    OpticalEditGuard guard(plan->original_size);
+    if(coordinated) {
+        // Only independently checked envelope metadata and explicitly
+        // planned ISO fields may change in the historical prefix.
+        std::uint64_t at=plan->gpt?1024u:(plan->mbr.empty()?0u:512u);
+        const auto end=plan->gpt?plan->gpt->old_backup:plan->original_size;
+        for(const auto& [start,length]:coordinated->metadata_writes) {
+            vat_need(start>=at && start<=end && length<=end-start,
+                     "VAT ISO metadata field overlaps the validated envelope");
+            if(start>at)guard.protect(at,start-at);
+            at=start+length;
+        }
+        if(end>at)guard.protect(at,end-at);
+        // The callback owns only original ISO metadata fields and the
+        // explicitly reserved new ISO tree. Recheck every VAT run.
+        std::fstream in(tx.output,std::ios::binary|std::ios::in);
+        vat_need(bool(in),"cannot reopen coordinated VAT stage");
+        if(!plan->mbr.empty())
+            vat_need(staged_read(in,0,512)==plan->mbr,
+                     "ISO coordination modified the validated MBR");
+        if(plan->gpt)
+            vat_need(staged_read(in,0,1024)==plan->gpt->prefix &&
+                     staged_read(in,plan->gpt->old_backup,plan->gpt->retired.size())==plan->gpt->retired,
+                     "ISO coordination modified validated GPT metadata");
+        auto pos=plan->original_size+plan->payload_blocks*block;
+        for(const auto& bytes:plan->append) {
+            edit_tick(progress);
+            if(bytes.empty()) {
+                vat_need(plan->iso_reservation_bytes && pos==plan->iso_reservation_at &&
+                         pos<=plan->final_size &&
+                         plan->iso_reservation_bytes<=plan->final_size-pos,
+                         "VAT ISO reservation differs from planned range");
+                pos+=plan->iso_reservation_bytes;
+            } else {
+                vat_need(staged_read(in,pos,bytes.size())==bytes,
+                         "ISO coordination modified appended VAT metadata");
+                pos+=bytes.size();
+            }
+        }
+        vat_need(pos==plan->final_size,"VAT coordinated append bounds differ");
+    } else if(plan->gpt) {
+        std::fstream in(tx.output,std::ios::binary|std::ios::in);
+        vat_need(bool(in) && staged_read(in,0,1024)==plan->gpt->prefix &&
+                 staged_read(in,plan->gpt->old_backup,plan->gpt->retired.size())==plan->gpt->retired,
+                 "staged validation changed VAT GPT metadata");
+        guard.protect(1024,plan->gpt->old_backup-1024);
+        auto pos=plan->original_size+plan->payload_blocks*block;
+        for(const auto& bytes:plan->append) {
+            edit_tick(progress);
+            vat_need(staged_read(in,pos,bytes.size())==bytes,
+                     "GPT VAT append readback changed");
+            pos+=bytes.size();
+        }
+    } else if(!plan->mbr.empty()) {
+        std::fstream in(tx.output,std::ios::binary|std::ios::in);
+        vat_need(bool(in) && staged_read(in,0,512)==plan->mbr,
+                 "staged ISO validation changed VAT MBR");
+        guard.protect(512,plan->original_size-512);
+        // Validate every appended metadata/padding byte after the
+        // bridge callback as well as the independently parsed payload.
+        auto pos=plan->original_size+plan->payload_blocks*block;
+        for(const auto& bytes:plan->append) {
+            edit_tick(progress);
+            vat_need(staged_read(in,pos,bytes.size())==bytes,
+                     "MBR VAT append readback changed");
+            pos+=bytes.size();
+        }
+    } else guard.protect(0,plan->original_size);
+    guard.verify_appended(image,tx.output,progress);
+    {
+        const Disc checked(tx.output);
+        vat_need(checked.format()=="UDF" && checked.items().size()==plan->expected.size(),
+                 "staged VAT namespace differs");
+        std::set<std::string> seen;
+        for(const auto& item:checked.items()) {
+            edit_tick(progress);
+            const auto found=plan->expected.find(item.path);
+            vat_need(found!=plan->expected.end() && seen.insert(item.path).second &&
+                     vat_layout_matches(item,found->second),
+                     "staged VAT payload differs");
+            const auto source=plan->verify_sources.find(item.path);
+            if(source!=plan->verify_sources.end())
+                vat_need(same_staged_item(tx.output,item,source->second,progress),
+                         "replacement changed during VAT transaction");
+        }
+    }
+    tx.commit(progress);
+}
 } // namespace
+
+void validate_udf_vat_iso_payloads(const std::filesystem::path& image,
+        const EditProtectedRanges& patches,std::uint64_t gpt_trailer,
+        const EditProgress& progress) {
+    (void)prepare_vat_append(image,{},progress,nullptr,0,gpt_trailer,&patches);
+}
 
 void edit_udf(const std::filesystem::path& image,
               const std::vector<ArchiveChange>& changes,
               const EditProgress& progress,bool allow_bridge,
               const EditStageValidator& validate_stage,
-              const EditProtectedRanges& protected_ranges) {
+              const EditProtectedRanges& protected_ranges,
+              const CoordinatedIsoUpdate* coordinated,
+              bool bounded_partitioned_bridge,
+              std::uint64_t mbr_append_alignment_blocks,
+              std::uint64_t gpt_append_trailer_blocks) {
     edit_tick(progress);
+    need((!mbr_append_alignment_blocks && !gpt_append_trailer_blocks) ||
+         (bounded_partitioned_bridge &&
+          !(mbr_append_alignment_blocks && gpt_append_trailer_blocks)),
+         "hybrid UDF mastering needs one validated partition geometry");
+    need(!bounded_partitioned_bridge ||
+         (allow_bridge && validate_stage &&
+          (!coordinated || mbr_append_alignment_blocks || gpt_append_trailer_blocks)),
+         "partitioned ISO/UDF coordinated edits need validated ROM growth");
     need(!allow_bridge || bool(validate_stage),
          "ISO/UDF Bridge writes require a staged ISO/boot validator");
     // Run the strict Type-1 write preflight before the permissive read-only
     // Disc parser. This preserves the precise FSD mapping failure reason
     // even when Disc's general UDF reader cannot resolve that map.
-    Type1 volume(image,allow_bridge);
+    std::unique_ptr<Type1> owner;
+    try {
+        owner=std::make_unique<Type1>(image,allow_bridge,bounded_partitioned_bridge);
+    } catch(const VatWriteRequired&) {
+        need(!coordinated || (!coordinated->type1_fixed_shared_delete &&
+                              !coordinated->type1_fixed_shared_add),
+             "fixed Type-1 coordination cannot use VAT");
+        // The VAT bridge provides the external ISO validator and
+        // immutable ranges. Shared-file coordination may only change
+        // the explicitly checked pre-anchor ISO metadata fields.
+        if((bounded_partitioned_bridge &&
+            ((!mbr_append_alignment_blocks && !gpt_append_trailer_blocks) ||
+             (mbr_append_alignment_blocks && coordinated && !coordinated->iso_metadata_blocks))) ||
+           (allow_bridge && (!validate_stage || protected_ranges.empty())) ||
+           (!allow_bridge && (validate_stage || !protected_ranges.empty() || coordinated)))throw;
+        edit_vat_append(image,changes,progress,validate_stage,coordinated,
+                        mbr_append_alignment_blocks,gpt_append_trailer_blocks);
+        return;
+    }
+    // A mirrored sequential deletion contract cannot be interpreted
+    // by the physical Type-1 allocator if the mapping family changed.
+    need(!coordinated || (!coordinated->vat_iso_only_remaster &&
+                           !coordinated->vat_mixed_remaster &&
+                           coordinated->vat_private_replacements.empty() &&
+                           coordinated->vat_private_deletions.empty() &&
+                           coordinated->vat_private_additions.empty() &&
+                           coordinated->vat_private_directories.empty() &&
+                           !coordinated->iso_payload_blocks &&
+                           coordinated->vat_tree_deletions.empty()),
+         "VAT-only coordination plan cannot use Type-1");
+    auto& volume=*owner;
+    if(bounded_partitioned_bridge) {
+        const bool rom=(mbr_append_alignment_blocks || gpt_append_trailer_blocks) &&
+            volume.partition_access_type()==1 && !volume.has_allocation_map();
+        need(rom || (volume.has_allocation_map() &&
+             (volume.partition_access_type()==3 ||
+              volume.partition_access_type()==4)),
+             "partitioned ISO/UDF requires a rewritable allocator or validated ROM mastering");
+        if(rom) {
+            need(gpt_append_trailer_blocks<256 &&
+                 gpt_append_trailer_blocks<=volume.image_size()/block,
+                 "invalid GPT/UDF trailer geometry");
+            for(const auto& object:volume.intervals()) {
+                need(!intersects({0,gpt_append_trailer_blocks?1024u:512u},object.range),
+                     "hybrid growth header aliases live UDF data");
+                if(gpt_append_trailer_blocks)
+                    need(!intersects({volume.image_size()-gpt_append_trailer_blocks*block,
+                                      gpt_append_trailer_blocks*block},object.range),
+                         "GPT backup trailer aliases live UDF data");
+            }
+        }
+    }
     const Disc before(image);
     need(before.format()=="UDF","not a plain readable UDF volume");
     need(!allow_bridge || !protected_ranges.empty(),
          "ISO/UDF Bridge metadata writes need protected ISO ranges");
     volume.protect_external_ranges(protected_ranges);
     need(!changes.empty(),"no UDF changes");
+    if(coordinated) {
+        const bool fixed_delete=coordinated->type1_fixed_shared_delete;
+        const bool fixed_add=coordinated->type1_fixed_shared_add;
+        const bool fixed=fixed_delete || fixed_add;
+        const bool fixed_tree=fixed_add && coordinated->iso_metadata_blocks!=0;
+        need((coordinated->type1_fixed_metadata!=nullptr)==fixed_tree &&
+             (!fixed_tree || (!coordinated->type1_fixed_metadata->first_lba &&
+                             coordinated->type1_fixed_metadata->limit_lba<=volume.image_size()/block &&
+                             coordinated->iso_metadata_blocks<=32768)),
+             "invalid fixed Type-1 metadata reservation contract");
+        need(allow_bridge && validate_stage && !(fixed_delete && fixed_add) &&
+             (fixed?(!bounded_partitioned_bridge &&
+                     volume.has_allocation_map() &&
+                     (volume.partition_access_type()==3 || volume.partition_access_type()==4) &&
+                     (!coordinated->iso_metadata_blocks || fixed_tree) &&
+                     coordinated->shared_replacements.empty() &&
+                     (fixed_delete?(coordinated->shared_additions.empty() &&
+                                    coordinated->shared_directories.empty() &&
+                                    coordinated->shared_deletions.size()==changes.size()):
+                                   (coordinated->shared_deletions.empty() &&
+                                    (fixed_tree || coordinated->shared_directories.empty()) &&
+                                    coordinated->shared_additions.size()+
+                                        coordinated->shared_directories.size()==changes.size()))):
+                    (volume.partition_access_type()==1 && !volume.has_allocation_map())) &&
+             coordinated->shared_replacements.size()+
+                 coordinated->shared_deletions.size()+
+                 coordinated->shared_additions.size()+
+                 coordinated->shared_directories.size()==changes.size() &&
+             !coordinated->metadata_writes.empty(),
+             "shared ISO/UDF edit requires read-only mastering or validated fixed Type-1 edit");
+        for(const auto& change:changes) {
+            const auto key=edit_path(change.path);
+            const bool existing=volume.files().count(key)!=0;
+            need(existing?
+                    (!change.directory &&
+                     (change.remove?coordinated->shared_deletions.count(key):
+                                    coordinated->shared_replacements.count(key))):
+                    (!change.remove && !volume.directories().count(key) &&
+                     (change.directory?coordinated->shared_directories.count(key):
+                                       coordinated->shared_additions.count(key))),
+                 "invalid coordinated edit target");
+        }
+        for(const auto& [at,bytes]:coordinated->metadata_writes) {
+            need(bytes && at<=volume.image_size() &&
+                 bytes<=volume.image_size()-at,
+                 "coordinated ISO field outside source image");
+            for(const auto& object:volume.intervals())
+                need(!intersects({at,bytes},object.range),
+                     "coordinated ISO field overlaps a live UDF object");
+        }
+        if(fixed) {
+            create_udf_type1_batch(image,volume,changes,progress,true,
+                                   validate_stage,nullptr,coordinated);
+            return;
+        }
+        auto plan=volume.prepare_readonly_append(changes,protected_ranges,
+                                                coordinated->iso_metadata_blocks,
+                                                mbr_append_alignment_blocks,
+                                                gpt_append_trailer_blocks);
+        create_udf_type1_batch(image,volume,changes,progress,true,
+                               validate_stage,&plan,coordinated);
+        return;
+    }
+    if(volume.partition_access_type()==1 &&
+       !volume.has_allocation_map() &&
+       std::any_of(changes.begin(),changes.end(),[&](const ArchiveChange& c) {
+           const auto key=edit_path(c.path);
+           if(c.remove)return volume.directory_links().count(key)!=0;
+           const auto it=volume.files().find(key);
+           if(it!=volume.files().end() && !c.directory &&
+              std::filesystem::is_regular_file(std::filesystem::symlink_status(c.source)))
+               return std::filesystem::file_size(c.source)>
+                      replacement_capacity(it->second.fe);
+           return !volume.files().count(key) && !volume.directories().count(key);
+       })) {
+        auto plan=volume.prepare_readonly_append(changes,protected_ranges,0,
+                                                mbr_append_alignment_blocks,
+                                                gpt_append_trailer_blocks);
+        create_udf_type1_batch(image,volume,changes,progress,allow_bridge,
+                               validate_stage,&plan);
+        return;
+    }
     for(const auto& change:changes)
         if(change.remove && volume.directory_links().count(edit_path(change.path)))
             need(volume.has_allocation_map(),
@@ -2658,16 +4836,34 @@ void edit_udf(const std::filesystem::path& image,
             need(!(fid[18]&0x0cu),"UDF directory entry is already deleted");
             fid[18]|=0x04; // UDF FID deleted characteristic.
             tag_update(fid,0,fid.size());
-            staged_write(out,target.fid_at,fid);
             if(target.parent_embedded) {
+                // The FID is part of the parent's allocation descriptor
+                // bytes and therefore covered by the FE/EFE CRC. Validate
+                // the OLD descriptor before mutating its payload; writing
+                // the FID separately first would invalidate that CRC.
                 auto parent=staged_read(out,target.parent_at,block);
                 const auto tag=u16(parent,0);
+                need(tag==261 || tag==266,"invalid UDF embedded parent descriptor");
                 tag_check(parent,0,tag);
                 const auto base=tag==261?176u:216u;
                 const auto ea=u32(parent,tag==261?168:208);
                 const auto ad=u32(parent,tag==261?172:212);
+                need((u16(parent,34)&7u)==3 && parent[27]==4 &&
+                     ea<=block-base && ad<=block-base-ea &&
+                     target.fid_at>=target.parent_at,
+                     "invalid UDF embedded parent allocation bounds");
+                const auto start=std::uint64_t(base)+ea;
+                const auto offset=target.fid_at-target.parent_at;
+                need(offset>=start && offset<=start+ad &&
+                     fid.size()<=start+ad-offset,
+                     "deleted UDF FID lies outside embedded parent payload");
+                std::copy(fid.begin(),fid.end(),
+                          parent.begin()+static_cast<std::ptrdiff_t>(offset));
                 tag_update(parent,0,base+ea+ad);
+                tag_check(parent,0,tag);
                 staged_write(out,target.parent_at,parent);
+            } else {
+                staged_write(out,target.fid_at,fid);
             }
             continue;
         }
@@ -2710,10 +4906,11 @@ void edit_udf(const std::filesystem::path& image,
 // deliberately does not claim that a standalone parse authorizes mutation
 // of shared ISO/El Torito extents or guarantees allocation for a file.
 UdfEditInspection inspect_udf_edit(
-    const std::filesystem::path& image,bool allow_bridge) {
+    const std::filesystem::path& image,bool allow_bridge,
+    bool bounded_partitioned_bridge) {
     UdfEditInspection result;
     try {
-        Type1 volume(image,allow_bridge);
+        Type1 volume(image,allow_bridge,bounded_partitioned_bridge);
         result.parser_compatible=true;
         result.allocation_bitmap=volume.has_bitmap();
         result.allocation_table=volume.has_unallocated_table();

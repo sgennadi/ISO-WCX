@@ -64,6 +64,11 @@ public:
                   ArchiveOpenProgress open_progress = {});
     [[nodiscard]] const std::vector<Item>& items() const noexcept { return entries_; }
     [[nodiscard]] const std::string& format() const noexcept { return format_; }
+    // Authoritative mapping family of the successfully parsed raw UDF
+    // filesystem. The bridge writer must never patch VAT data in place.
+    [[nodiscard]] bool udf_has_virtual_partition() const noexcept {
+        return udf_virtual_partition_;
+    }
     // Close idle native WIM file handles before a WCX write. No-op for ISO
     // and other formats, and never invalidates the cached panel listing.
     void release_wim_handles_for_edit();
@@ -74,6 +79,7 @@ private:
     std::filesystem::path image_;
     std::vector<Item> entries_;
     std::string format_;
+    bool udf_virtual_partition_=false;
     std::shared_ptr<VirtualArchive> virtual_archive_;
     std::shared_ptr<WimArchive> wim_archive_;
     std::shared_ptr<ChdStream> chd_audio_;

@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include "iso_wcx/operation_diagnostics.hpp"
+#include "iso_wcx/cleanup_failure.hpp"
 #include <windows.h>
 #include <shellapi.h>
 #include <algorithm>
@@ -421,6 +422,7 @@ std::string host_session_summary() noexcept {
 Operation::Operation(const char* action,const std::filesystem::path& image,
                      unsigned file_count,unsigned image_index) noexcept {
     try {
+        cleanup_diagnostics::reset();
         action_=action?action:"other";
         format_=format_name(image);
         id_=next_id.fetch_add(1,std::memory_order_relaxed);
@@ -455,6 +457,7 @@ void Operation::stage(std::wstring_view value,unsigned pct) noexcept {
 void Operation::complete(int code,std::string_view reason) noexcept {
     if(completed_)return;
     completed_=true;
+    const auto cleanup=cleanup_diagnostics::take();
     try {
         append(base_json("complete",action_,format_,id_)+
                ",\"code\":"+std::to_string(code)+
@@ -462,7 +465,13 @@ void Operation::complete(int code,std::string_view reason) noexcept {
                ",\"stage\":\""+(stage_.empty()?"unreported":stage_)+"\""+
                ",\"file_count\":"+std::to_string(count_)+
                ",\"image_index\":"+std::to_string(image_index_)+
-               ",\"elapsed_ms\":"+std::to_string(GetTickCount64()-start_)+"}");
+               ",\"elapsed_ms\":"+std::to_string(GetTickCount64()-start_)+
+               (cleanup.present ?
+                 ",\"cleanup_stage\":\""+std::string(cleanup_diagnostics::stage_name(cleanup.stage))+
+                 "\",\"cleanup_kind\":\""+cleanup.kind+
+                 "\",\"cleanup_os_code\":"+std::to_string(cleanup.os_code)+
+                 ",\"cleanup_attempts\":"+std::to_string(cleanup.attempts) : std::string{})+
+               "}");
     }catch(...) {}
 }
 std::filesystem::path log_directory() noexcept {

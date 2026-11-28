@@ -4,6 +4,7 @@
 #include <utility>
 #include <functional>
 #include <string>
+#include <set>
 #include <vector>
 #include <stdexcept>
 namespace iso_wcx {
@@ -26,12 +27,63 @@ using EditStageValidator = std::function<void(const std::filesystem::path&)>;
 // image validator remains mandatory independently of this preflight.
 using EditProtectedRanges =
     std::vector<std::pair<std::uint64_t,std::uint64_t>>;
+// Result of the synchronous fixed-size Type-1 allocator reservation.
+// The ISO plan owns this object until its staged-image callback returns.
+struct FixedIsoMetadataReservation {
+    std::uint64_t limit_lba=0; // exclusive common optical volume boundary
+    std::uint64_t first_lba=0; // allocator-selected absolute sector
+};
+// Explicit coordinator contract: old shared data remains immutable.
+struct CoordinatedIsoUpdate {
+    std::set<std::string> shared_replacements;
+    std::set<std::string> shared_deletions;
+    std::set<std::string> shared_additions;
+    std::set<std::string> shared_directories;
+    // Fixed-size writable physical Type-1 shared regular-file unlink.
+    // Reclaim uniquely owned blocks, but retain the old payload bytes
+    // through the optical byte-preservation check before ISO compaction.
+    bool type1_fixed_shared_delete=false;
+    // Fixed-size shared file/directory creation. Reuse existing optical
+    // directory capacity, or reserve fresh ISO metadata in the UDF map.
+    bool type1_fixed_shared_add=false;
+    FixedIsoMetadataReservation* type1_fixed_metadata=nullptr;
+    // Only for sequential mirrored-tree mastering: independently
+    // expanded, canonical directory/file removals, including roots.
+    // shared_deletions retains the explicit user selections.
+    std::set<std::string> vat_tree_deletions;
+    // VAT-only remaster with no UDF namespace mutations. The unmapped
+    // reservation contains a new ISO directory tree/path tables and,
+    // for this mode only, independent ISO replacement payloads.
+    bool vat_iso_only_remaster=false;
+    // Mixed VAT mastering uses one UDF append plan plus one ISO tree.
+    // Private UDF requests have separate exact authorizations; they
+    // must not be marked shared (which would force external payloads).
+    bool vat_mixed_remaster=false;
+    std::set<std::string> vat_private_replacements;
+    std::set<std::string> vat_private_deletions;
+    std::set<std::string> vat_private_additions;
+    std::set<std::string> vat_private_directories;
+    std::uint64_t iso_metadata_blocks=0;
+    // Independently bounded ISO-only payload sectors, not counted
+    // against the directory/path-table memory budget.
+    std::uint64_t iso_payload_blocks=0;
+    EditProtectedRanges metadata_writes;
+};
 // UDF Type-1 Preview: plain-UDF writes by default. Bridge writes are opt-in
 // and MUST supply an ISO/El Torito protection validator.
 void edit_udf(const std::filesystem::path&, const std::vector<ArchiveChange>&,
               const EditProgress& = {}, bool allow_bridge = false,
               const EditStageValidator& = {},
-              const EditProtectedRanges& = {});
+              const EditProtectedRanges& = {},
+              const CoordinatedIsoUpdate* = nullptr,
+              bool bounded_partitioned_bridge = false,
+              std::uint64_t mbr_append_alignment_blocks = 0,
+              std::uint64_t gpt_append_trailer_blocks = 0);
+// Read-only proof for fixed-length ISO-only patches in a sequential VAT
+// bridge. Reuse the strict VAT input parser; never authorize UDF sectors.
+void validate_udf_vat_iso_payloads(const std::filesystem::path&,
+              const EditProtectedRanges&,std::uint64_t gpt_trailer_blocks,
+              const EditProgress& = {});
 // Transactional native FAT12/16/32 editor: exact raw/fixed VHD filesystems.
 void edit_dynamic_vhd(const std::filesystem::path&,
                       const std::vector<ArchiveChange>&,

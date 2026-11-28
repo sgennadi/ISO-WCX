@@ -17,5 +17,6 @@ struct UdfEditInspection {
 // A positive result never bypasses the separate protected El Torito/ISO
 // staging validator, and it does not prove a particular file is writable.
 [[nodiscard]] UdfEditInspection inspect_udf_edit(
-    const std::filesystem::path& image, bool allow_bridge = false);
+    const std::filesystem::path& image, bool allow_bridge = false,
+    bool bounded_partitioned_bridge = false);
 } // namespace iso_wcx

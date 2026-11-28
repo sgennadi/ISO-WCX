@@ -67,36 +67,46 @@ private:
         std::ifstream copy(staged,std::ios::binary);
         if(!source||!copy)
             throw EditUnsupported("cannot reopen staged optical image");
-        // Do not allocate multi-megabyte buffers on the Win32 WCX call
-        // stack. Windows worker threads often have 1 MiB reserved stack;
-        // two 1 MiB std::array buffers caused STATUS_STACK_OVERFLOW in CI.
-        // Dynamic buffers are independent of TC's stack size and keep
-        // cancellation checks at each bounded read.
-        constexpr std::size_t buffer_size=256u*1024u;
-        std::vector<char> original_bytes(buffer_size);
-        std::vector<char> staged_bytes(buffer_size);
-        for(const auto& [begin,length]:merged) {
-            source.clear();copy.clear();
-            source.seekg(static_cast<std::streamoff>(begin));
-            copy.seekg(static_cast<std::streamoff>(begin));
-            if(!source||!copy)
-                throw EditUnsupported("cannot seek protected optical extent");
-            auto remaining=length;
-            while(remaining) {
-                if(progress && !progress())throw EditCancelled();
-                const auto amount=static_cast<std::streamsize>(
-                    std::min<std::uint64_t>(remaining,original_bytes.size()));
-                source.read(original_bytes.data(),amount);
-                copy.read(staged_bytes.data(),amount);
-                if(!source||!copy ||
-                   !std::equal(original_bytes.begin(),
-                               original_bytes.begin()+amount,
-                               staged_bytes.begin()))
-                    throw EditUnsupported(
-                        "staged writer changed protected ISO/El Torito data");
-                remaining-=static_cast<std::uint64_t>(amount);
+        // Close both streams before propagating verification errors. This also
+        // makes file lifetime deterministic in Windows ASan exception paths.
+        try {
+            // Do not allocate multi-megabyte buffers on the Win32 WCX call
+            // stack. Windows worker threads often have 1 MiB reserved stack;
+            // two 1 MiB std::array buffers caused STATUS_STACK_OVERFLOW in CI.
+            // Dynamic buffers are independent of TC's stack size and keep
+            // cancellation checks at each bounded read.
+            constexpr std::size_t buffer_size=256u*1024u;
+            std::vector<char> original_bytes(buffer_size);
+            std::vector<char> staged_bytes(buffer_size);
+            for(const auto& [begin,length]:merged) {
+                source.clear();copy.clear();
+                source.seekg(static_cast<std::streamoff>(begin));
+                copy.seekg(static_cast<std::streamoff>(begin));
+                if(!source||!copy)
+                    throw EditUnsupported("cannot seek protected optical extent");
+                auto remaining=length;
+                while(remaining) {
+                    if(progress && !progress())throw EditCancelled();
+                    const auto amount=static_cast<std::streamsize>(
+                        std::min<std::uint64_t>(remaining,original_bytes.size()));
+                    source.read(original_bytes.data(),amount);
+                    copy.read(staged_bytes.data(),amount);
+                    if(!source||!copy ||
+                       !std::equal(original_bytes.begin(),
+                                   original_bytes.begin()+amount,
+                                   staged_bytes.begin()))
+                        throw EditUnsupported(
+                            "staged writer changed protected ISO/El Torito data");
+                    remaining-=static_cast<std::uint64_t>(amount);
+                }
             }
+        } catch(...) {
+            source.close();
+            copy.close();
+            throw;
         }
+        source.close();
+        copy.close();
     }
 
     std::uint64_t size_;

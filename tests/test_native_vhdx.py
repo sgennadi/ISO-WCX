@@ -57,7 +57,10 @@ def run(executable: pathlib.Path, *args: object, ok: bool = True) -> bytes:
     if (proc.returncode == 0) != ok:
         raise AssertionError(
             f"{executable.name} {args!r}: code={proc.returncode}, "
-            f"stderr={proc.stderr[-1300:]!r}, stdout={proc.stdout[-650:]!r}"
+            # Preserve ASan diagnostics from both ends of stderr.
+            f"stderr_head={proc.stderr[:10000]!r}, "
+            f"stderr_tail={proc.stderr[-2000:]!r}, "
+            f"stdout={proc.stdout[-650:]!r}"
         )
     return proc.stdout
 

@@ -2,11 +2,21 @@
 // external tools, no Total Commander). No source files are modified.
 #include "iso_wcx/optical_edit_guard.hpp"
 #include <chrono>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#include <RestartManager.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "Rstrtmgr.lib")
+#endif
+#endif
 
 namespace fs=std::filesystem;
 
@@ -17,7 +27,21 @@ void put(const fs::path& path,const std::string& content) {
     std::ofstream out(path,std::ios::binary|std::ios::trunc);
     out.write(content.data(),static_cast<std::streamsize>(content.size()));
     require(bool(out),"cannot write optical fixture");
+    out.close();
+    require(bool(out),"cannot close optical fixture");
 }
+#ifdef _WIN32
+static void probe_exclusive(const fs::path& path,const char* phase) {
+    const HANDLE handle=CreateFileW(path.c_str(),GENERIC_READ,0,nullptr,
+                                    OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    const DWORD error=handle==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
+    if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);
+    std::cerr<<"OPTICAL_EXCLUSIVE_PHASE "<<phase<<" "<<path.filename().string()
+             <<" error="<<error<<"\\n";
+}
+#else
+static void probe_exclusive(const fs::path&,const char*) {}
+#endif
 int main() {
     const auto stamp=std::chrono::steady_clock::now().time_since_epoch().count();
     const auto folder=fs::temp_directory_path()/
@@ -31,29 +55,43 @@ int main() {
         auto altered=bytes;
         altered[4500]='X'; // Unprotected UDF-only data
         put(staged,altered);
+        probe_exclusive(original,"after-fixture-write");
+        probe_exclusive(staged,"after-fixture-write");
         iso_wcx::OpticalEditGuard guard(bytes.size());
         guard.protect(0,4096);
         guard.protect(8192,2048);
         guard.protect(10240,1024); // Adjacent regions merge
+        std::cerr<<"OPTICAL_ASAN_PHASE: initial verification\n"<<std::flush;
         guard.verify(original,staged);
+        probe_exclusive(original,"after-first-verify");
+        probe_exclusive(staged,"after-first-verify");
 
         // ISO9660 append-only writer grows the file, but all original boot
         // descriptor/catalog/image bytes must remain identical.
         altered=bytes+std::string(2048,'N');
         altered[4500]='X'; // unprotected original-prefix metadata
         put(staged,altered);
+        probe_exclusive(original,"append verification");
+        probe_exclusive(staged,"append verification");
+        std::cerr<<"OPTICAL_ASAN_PHASE: append verification\n"<<std::flush;
         guard.verify_appended(original,staged);
         altered[8192]='B'; // protected boot payload within original prefix
         put(staged,altered);
         bool append_refused=false;
         try{guard.verify_appended(original,staged);}
         catch(const iso_wcx::EditUnsupported&){append_refused=true;}
+        probe_exclusive(original,"boot mutation refusal");
+        probe_exclusive(staged,"boot mutation refusal");
+        std::cerr<<"OPTICAL_ASAN_PHASE: boot mutation refusal\n"<<std::flush;
         require(append_refused,"append-only guard accepted changed boot image");
         altered=bytes.substr(0,bytes.size()-1);
         put(staged,altered);
         append_refused=false;
         try{guard.verify_appended(original,staged);}
         catch(const iso_wcx::EditUnsupported&){append_refused=true;}
+        probe_exclusive(original,"truncation refusal");
+        probe_exclusive(staged,"truncation refusal");
+        std::cerr<<"OPTICAL_ASAN_PHASE: truncation refusal\n"<<std::flush;
         require(append_refused,"append-only guard accepted truncated original");
 
         altered=bytes;
@@ -63,6 +101,9 @@ int main() {
         bool refused=false;
         try{guard.verify(original,staged);}
         catch(const iso_wcx::EditUnsupported&){refused=true;}
+        probe_exclusive(original,"protected mutation refusal");
+        probe_exclusive(staged,"protected mutation refusal");
+        std::cerr<<"OPTICAL_ASAN_PHASE: protected mutation refusal\n"<<std::flush;
         require(refused,"protected boot-region mutation was accepted");
 
         altered=bytes;
@@ -70,11 +111,17 @@ int main() {
         refused=false;
         try{guard.protect(bytes.size()-2,4);}
         catch(const iso_wcx::EditUnsupported&){refused=true;}
+        probe_exclusive(original,"range validation");
+        probe_exclusive(staged,"range validation");
+        std::cerr<<"OPTICAL_ASAN_PHASE: range validation\n"<<std::flush;
         require(refused,"out-of-bounds protected region accepted");
 
         refused=false;
         try{guard.verify(original,staged,[]{return false;});}
         catch(const iso_wcx::EditCancelled&){refused=true;}
+        probe_exclusive(original,"cancellation");
+        probe_exclusive(staged,"cancellation");
+        std::cerr<<"OPTICAL_ASAN_PHASE: cancellation\n"<<std::flush;
         require(refused,"cancellation ignored");
 
         altered.pop_back();
@@ -82,16 +129,113 @@ int main() {
         refused=false;
         try{guard.verify(original,staged);}
         catch(const iso_wcx::EditUnsupported&){refused=true;}
+        probe_exclusive(original,"stage truncation");
+        probe_exclusive(staged,"stage truncation");
+        std::cerr<<"OPTICAL_ASAN_PHASE: stage truncation\n"<<std::flush;
         require(refused,"truncated stage accepted");
 
         require(fs::file_size(original)==bytes.size(),
                 "original fixture was damaged");
-        fs::remove_all(folder);
+        probe_exclusive(original,"before-cleanup");
+        probe_exclusive(staged,"before-cleanup");
+        std::cerr<<"OPTICAL_ASAN_PHASE: fixture cleanup\n"<<std::flush;
+        std::error_code cleanup_error;
+        std::uintmax_t removed=0;
+        // A Windows file scanner can briefly hold newly written ISO fixtures.
+        // Retry sharing violations, but never treat persistent locks as success.
+        for(unsigned attempt=0;attempt<20;++attempt) {
+            cleanup_error.clear();
+            removed+=fs::remove_all(folder,cleanup_error);
+            if(!cleanup_error) break;
+            bool retryable=cleanup_error==std::errc::permission_denied ||
+                           cleanup_error==std::errc::device_or_resource_busy;
+#ifdef _WIN32
+            retryable=retryable || cleanup_error.value()==32;
+#endif
+            if(!retryable) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if(cleanup_error) {
+            std::string remaining;
+            std::error_code scan_error;
+            for(fs::directory_iterator it(folder,scan_error),end;
+                !scan_error && it!=end;it.increment(scan_error)) {
+                remaining += " ["+it->path().filename().string()+"]";
+            }
+#ifdef _WIN32
+            DWORD rm_handle=0;
+            WCHAR rm_key[CCH_RM_SESSION_KEY+1]{};
+            const DWORD rm_start=RmStartSession(&rm_handle,0,rm_key);
+            if(rm_start==ERROR_SUCCESS) {
+                LPCWSTR rm_files[]={original.c_str(),staged.c_str()};
+                const DWORD rm_register=RmRegisterResources(rm_handle,2,rm_files,0,nullptr,0,nullptr);
+                if(rm_register==ERROR_SUCCESS) {
+                    UINT needed=0,provided=0;
+                    DWORD reboot_reasons=0;
+                    DWORD rm_list=RmGetList(rm_handle,&needed,&provided,nullptr,&reboot_reasons);
+                    std::vector<RM_PROCESS_INFO> owners(needed);
+                    if(rm_list==ERROR_MORE_DATA && needed) {
+                        provided=needed;
+                        rm_list=RmGetList(rm_handle,&needed,&provided,owners.data(),&reboot_reasons);
+                    }
+                    std::cerr<<"OPTICAL_RESTART_MANAGER result="<<rm_list
+                             <<" owner_count="<<(rm_list==ERROR_SUCCESS?provided:0)<<"\\n";
+                    if(rm_list==ERROR_SUCCESS)
+                        for(UINT i=0;i<provided;++i) {
+                            const DWORD pid=owners[i].Process.dwProcessId;
+                            std::cerr<<"OPTICAL_LOCK_OWNER pid="<<pid
+                                     <<" self="<<(pid==GetCurrentProcessId())<<"\\n";
+                            HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+                            if(process) {
+                                WCHAR name[32768]{};
+                                DWORD length=32768;
+                                if(QueryFullProcessImageNameW(process,0,name,&length))
+                                    std::wcerr<<L"OPTICAL_LOCK_OWNER_IMAGE "<<name<<L"\\n";
+                                else std::cerr<<"OPTICAL_LOCK_OWNER_IMAGE error="<<GetLastError()<<"\\n";
+                                CloseHandle(process);
+                            } else std::cerr<<"OPTICAL_LOCK_OWNER_OPEN error="<<GetLastError()<<"\\n";
+                        }
+                } else std::cerr<<"OPTICAL_RESTART_MANAGER register_error="<<rm_register<<"\\n";
+                RmEndSession(rm_handle);
+            } else std::cerr<<"OPTICAL_RESTART_MANAGER start_error="<<rm_start<<"\\n";
+            for(const auto& candidate : {original,staged}) {
+                const auto handle=CreateFileW(candidate.c_str(),GENERIC_READ,
+                    FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                    nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+                if(handle==INVALID_HANDLE_VALUE)
+                    std::cerr<<"OPTICAL_LOCK_PROBE "<<candidate.filename().string()
+                             <<" open_error="<<GetLastError()<<"\n";
+                else {
+                    CloseHandle(handle);
+                    const auto exclusive=CreateFileW(candidate.c_str(),GENERIC_READ,
+                        0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+                    if(exclusive==INVALID_HANDLE_VALUE)
+                        std::cerr<<"OPTICAL_LOCK_PROBE "<<candidate.filename().string()
+                                 <<" exclusive_error="<<GetLastError()<<"\n";
+                    else {
+                        std::cerr<<"OPTICAL_LOCK_PROBE "<<candidate.filename().string()
+                                 <<" exclusive_open=OK\n";
+                        CloseHandle(exclusive);
+                    }
+                }
+            }
+#endif
+            throw std::runtime_error("optical fixture cleanup failed: "+
+                                     cleanup_error.message()+
+                                     "; remaining entries:"+remaining+
+                                     (scan_error ? "; enumeration: "+scan_error.message() : ""));
+        }
+        std::cerr<<"OPTICAL_ASAN_PHASE: cleanup complete, entries removed="
+                 <<removed<<"\n"<<std::flush;
         std::cout<<"PASS: universal optical immutable spans, rollback, bounds, cancel\n";
         return 0;
     }catch(const std::exception& e){
-        fs::remove_all(folder);
-        std::cerr<<"FAIL: "<<e.what()<<"\n";
+        std::error_code cleanup_error;
+        fs::remove_all(folder,cleanup_error);
+        std::cerr<<"FAIL: "<<e.what();
+        if(cleanup_error)
+            std::cerr<<" (cleanup: "<<cleanup_error.message()<<")";
+        std::cerr<<"\n";
         return 1;
     }
 }

@@ -131,7 +131,7 @@ def read_image(path, joliet=False):
             if r[25]&2:out[name+'/']=None;visit(r,name+'/')
             else:
                 start=struct.unpack_from('<I',r,2)[0]*B;length=struct.unpack_from('<I',r,10)[0]
-                out[name]=data[start:start+length]
+                out[name]=out.get(name,b'')+data[start:start+length]
     visit(root)
     return out
 
@@ -242,6 +242,50 @@ def main(binary, reader=None):
               'add','DOCS/RECREATED.TXT',source,ok=False)
         batch('delete','DOCS/ONE.TXT',
               'add','DOCS/ONE.TXT',source,ok=False)
+
+        # Level-3 multi-extent file: noncontiguous sections and a
+        # terminal partial sector. Preserve the original stream in both
+        # views while editing unrelated files, then replace and delete it.
+        for j in (False, True):
+            multi=fixture(joliet=j)
+            first=b'A'*B
+            last=b'MULTI-EXTENT-TAIL'
+            multi[21*B:22*B]=first
+            multi[27*B:27*B+len(last)]=last
+            for lba in ((20,22) if j else (20,)):
+                label=('SPLIT.BIN;1'.encode('utf-16-be') if lba==22
+                       else b'SPLIT.BIN;1')
+                records=(iso_record(lba,B,2,b'\0')+
+                         iso_record(lba,B,2,b'\1')+
+                         iso_record(21,B,0x80,label)+
+                         iso_record(27,len(last),0,label))
+                multi[lba*B:(lba+1)*B]=records.ljust(B,b'\0')
+            image.write_bytes(multi)
+            source.write_bytes(b'level3-new-file')
+            run('add','NEW.TXT')
+            assert read_image(image)['SPLIT.BIN']==first+last
+            if j: assert read_image(image,True)['SPLIT.BIN']==first+last
+            if reader:
+                extracted=root/('multi-readback-'+str(j))
+                result=subprocess.run([reader,str(image),'--extract',str(extracted)],
+                                      capture_output=True)
+                assert result.returncode==0,(result.stdout,result.stderr)
+                assert (extracted/'SPLIT.BIN').read_bytes()==first+last
+            source.write_bytes(b'replacement of a multi-extent file')
+            run('add','SPLIT.BIN')
+            assert read_image(image)['SPLIT.BIN']==source.read_bytes()
+            if j: assert read_image(image,True)['SPLIT.BIN']==source.read_bytes()
+            run('delete','SPLIT.BIN')
+            assert 'SPLIT.BIN' not in read_image(image)
+            if j: assert 'SPLIT.BIN' not in read_image(image,True)
+            # Remove the terminating record, leaving an unterminated chain.
+            bad=bytearray(multi)
+            at=20*B
+            for _ in range(3): at+=bad[at]
+            bad[at:21*B]=bytes(21*B-at)
+            image.write_bytes(bad)
+            run('add','FAIL.TXT',False)
+        source.write_bytes(b'new content'*1000)
 
         # The physical ISO may contain a sector-aligned zero trailer not
         # included in the ISO9660 descriptor's Volume Space Size. This is
@@ -510,6 +554,286 @@ def main(binary, reader=None):
         run('add','HELLO.TXT',False)
         source.write_bytes(b'new content'*1000)
 
+        # Bounded tail authoring: a recognized whole-ISO MBR with
+        # independently verified zero padding can add/delete/resize files
+        # and create directories without changing the disk geometry.
+        padded=bytearray(fixture(boot=True,boot_efi=True))
+        struct.pack_into('<H',padded,24*B+38,4)
+        struct.pack_into('<H',padded,24*B+102,4)
+        padded.extend(bytes(120*B-len(padded)))
+        padded=hybrid_mbr(padded)
+        image.write_bytes(padded)
+        source.write_bytes(b'LONGER HYBRID DATA'*150)
+        run('add','HELLO.TXT')
+        assert read_image(image)['HELLO.TXT']==source.read_bytes()
+        run('mkdir','DATA')
+        run('add','DATA/NEW.TXT')
+        run('delete','HELLO.TXT')
+        assert read_image(image)=={'DATA/':None,'DATA/NEW.TXT':source.read_bytes()}
+        rebuilt=image.read_bytes()
+        assert len(rebuilt)==len(padded)
+        assert rebuilt[:16*B]==padded[:16*B]
+        assert rebuilt[17*B:36*B]==padded[17*B:36*B]
+        validate_path_tables(image)
+        source.write_bytes(bytes(120*B))
+        run('add','NO_SPACE.BIN',False)
+        assert image.read_bytes()==rebuilt
+        source.write_bytes(b'new content'*1000)
+
+        # Real CHS geometry (64 heads, 32 sectors) and an EFI entry.
+        cylinder_iso=bytearray(fixture(boot=True,boot_efi=True))
+        struct.pack_into('<H',cylinder_iso,24*B+38,4)
+        struct.pack_into('<H',cylinder_iso,24*B+102,4)
+        cylinder_iso.extend(bytes(512*B-len(cylinder_iso)))
+        both(cylinder_iso,16*B+80,len(cylinder_iso)//B)
+        cylinder_iso=hybrid_mbr(cylinder_iso)
+        cylinder_iso[447:450]=bytes((0,1,0))
+        cylinder_iso[451:454]=bytes((63,32,0))
+        cylinder_iso[466]=0xef
+        struct.pack_into('<II',cylinder_iso,470,26*4,4)
+        def verify_grown_mbr(old,raw):
+            assert len(raw)>len(old) and len(raw)%(512*B)==0
+            assert raw[:451]==old[:451]
+            assert raw[454:458]==old[454:458]
+            assert raw[462:16*B]==old[462:16*B]
+            assert raw[17*B:len(old)]==old[17*B:len(old)]
+            assert struct.unpack_from('<I',raw,458)[0]==len(raw)//512
+            c=len(raw)//512//(64*32)-1
+            assert raw[451:454]==bytes((63,32|((c>>2)&0xc0),c&255))
+            end=struct.unpack_from('<I',raw,16*B+80)[0]*B
+            assert end<=len(raw) and raw[end:]==bytes(len(raw)-end)
+        image.write_bytes(cylinder_iso)
+        source.write_bytes(b'MBR PAYLOAD'*1500)
+        run('add','HELLO.TXT')
+        first=image.read_bytes()
+        verify_grown_mbr(cylinder_iso,first)
+        assert read_image(image)['HELLO.TXT']==source.read_bytes()
+        validate_path_tables(image)
+        source.write_bytes(b'MBR SECOND PAYLOAD'*70000)
+        run('add','SECOND.BIN')
+        second=image.read_bytes()
+        verify_grown_mbr(first,second)
+        assert read_image(image)['SECOND.BIN']==source.read_bytes()
+        validate_path_tables(image)
+        run('cancel','THIRD.BIN',False)
+        assert image.read_bytes()==second
+        malformed=bytearray(cylinder_iso)
+        malformed[453]=1
+        image.write_bytes(malformed)
+        run('add','THIRD.BIN',False)
+        assert image.read_bytes()==malformed
+        source.write_bytes(b'new content'*1000)
+
+        # Strict, standard 512-byte GPT: valid protective MBR, CRC32
+        # headers and matching entry arrays, one independently bounded ESP.
+        # The GPT backup deliberately lies beyond the original ISO volume.
+        import zlib
+        def gpt_fixture(payload):
+            raw=bytearray(payload)
+            raw.extend(bytes(80*B-len(raw)))
+            n=len(raw)//512
+            raw[510:512]=b'\x55\xaa'
+            raw[450]=0xee
+            struct.pack_into('<II',raw,454,1,n-1)
+            entries=bytearray(128*128)
+            entries[:16]=bytes.fromhex('28732ac11ff8d211ba4b00a0c93ec93b')
+            entries[16:32]=bytes(range(1,17))
+            struct.pack_into('<QQ',entries,32,120,127)
+            entries_crc=zlib.crc32(entries)
+            disk_guid=bytes(range(16,32))
+            backup_table=n-33
+            for self_lba,alternate,table in ((1,n-1,2),(n-1,1,backup_table)):
+                raw[table*512:table*512+len(entries)]=entries
+                header=bytearray(512)
+                header[:8]=b'EFI PART'
+                struct.pack_into('<III',header,8,0x10000,92,0)
+                struct.pack_into('<QQQQ',header,24,self_lba,alternate,34,n-34)
+                header[56:72]=disk_guid
+                struct.pack_into('<QIII',header,72,table,128,128,entries_crc)
+                struct.pack_into('<I',header,16,zlib.crc32(header[:92]))
+                raw[self_lba*512:(self_lba+1)*512]=header
+            raw[120*512:128*512]=b'E'*(8*512)
+            return raw
+        # Level-3 hybrid remaster: existing sections need not be adjacent.
+        # Same-length split-file F5 uses the guarded rebuild instead of
+        # the one-extent payload patcher.
+        def split_hybrid_base():
+            raw=bytearray(fixture())
+            raw[21*B:22*B]=b'A'*B
+            raw[27*B:27*B+4]=b'TAIL'
+            records=(iso_record(20,B,2,b'\0')+
+                     iso_record(20,B,2,b'\1')+
+                     iso_record(21,B,0x80,b'SPLIT.BIN;1')+
+                     iso_record(27,4,0,b'SPLIT.BIN;1'))
+            raw[20*B:21*B]=records.ljust(B,b'\0')
+            return raw
+        for kind in ('MBR','GPT'):
+            base=split_hybrid_base()
+            if kind=='MBR':
+                base.extend(bytes(120*B-len(base)))
+                base=hybrid_mbr(base)
+            else:
+                base=gpt_fixture(base)
+            image.write_bytes(base)
+            source.write_bytes(b'new unrelated payload')
+            run('add','EXTRA.TXT')
+            assert read_image(image)['SPLIT.BIN']==b'A'*B+b'TAIL'
+            source.write_bytes(b'R'*(B+4))
+            run('add','SPLIT.BIN')
+            assert read_image(image)['SPLIT.BIN']==source.read_bytes()
+            run('delete','SPLIT.BIN')
+            assert read_image(image)=={'EXTRA.TXT':b'new unrelated payload'}
+            rebuilt=image.read_bytes()
+            assert len(rebuilt)==len(base)
+            assert rebuilt[:16*B]==base[:16*B]
+            assert rebuilt[21*B:22*B]==base[21*B:22*B]
+            assert rebuilt[27*B:27*B+4]==b'TAIL'
+            if kind=='GPT':
+                assert rebuilt[120*512:128*512]==base[120*512:128*512]
+                assert rebuilt[-33*512:]==base[-33*512:]
+            validate_path_tables(image)
+            # A single-extent target that aliases a later split section
+            # must never be patched in place.
+            alias=bytearray(base)
+            at=20*B
+            while alias[at]:at+=alias[at]
+            r=iso_record(27,4,0,b'ALIAS.BIN;1')
+            alias[at:at+len(r)]=r
+            image.write_bytes(alias)
+            source.write_bytes(b'NOPE')
+            run('add','ALIAS.BIN',False)
+            # The second section may be a malicious alias of a protected
+            # partition, even if the first section is harmless.
+            blocked=bytearray(base)
+            if kind=='MBR':
+                blocked[466]=0xef
+                struct.pack_into('<II',blocked,470,30*4,4)
+            at=20*B
+            for _ in range(3):at+=blocked[at]
+            both(blocked,at+2,30)
+            image.write_bytes(blocked)
+            run('delete','SPLIT.BIN',False)
+
+        gpt=gpt_fixture(fixture())
+        image.write_bytes(gpt)
+        source.write_bytes(b'RENEW')
+        run('add','HELLO.TXT')
+        current=image.read_bytes()
+        assert current[21*B:21*B+5]==b'RENEW'
+        assert current[:21*B]==gpt[:21*B]
+        assert current[21*B+5:]==gpt[21*B+5:]
+        assert read_image(image)['HELLO.TXT']==b'RENEW'
+        # With verified padding before the backup GPT, the COW writer
+        # may safely rebuild the ISO without moving any partitions.
+        source.write_bytes(b'TOO LONG')
+        run('add','HELLO.TXT')
+        run('add','NEW.TXT')
+        run('mkdir','NEWFOLDER')
+        run('delete','HELLO.TXT')
+        assert read_image(image)=={'NEW.TXT':b'TOO LONG','NEWFOLDER/':None}
+        rebuilt=image.read_bytes()
+        assert len(rebuilt)==len(gpt)
+        assert rebuilt[:16*B]==gpt[:16*B]
+        assert rebuilt[120*512:128*512]==gpt[120*512:128*512]
+        assert rebuilt[-33*512:]==gpt[-33*512:]
+        validate_path_tables(image)
+        # An unallocated but nonzero tail is NOT safe free space.
+        blocked=bytearray(gpt)
+        blocked[36*B+12]=1
+        image.write_bytes(blocked)
+        run('add','NEW.TXT',False)
+        assert image.read_bytes()==blocked
+        # A fully declared ISO volume has no tail allocation budget.
+        full=bytearray(gpt)
+        both(full,16*B+80,len(full)//B)
+        image.write_bytes(full)
+        run('add','NEW.TXT',False)
+        assert image.read_bytes()==full
+        source.write_bytes(b'RENEW')
+        # Exhaust the bounded tail on a standard protective-only GPT.
+        # Growth must relocate the backup but preserve partition entries,
+        # boot code, ESP payload, disk identity and all original ISO data.
+        old_table=len(gpt)//512-33
+        old_entries=gpt[old_table*512:old_table*512+128*128]
+        big_payload=b'G'*(120*B+37)
+        source.write_bytes(big_payload)
+        # A genuine original file alias of the primary GPT header must
+        # still be refused, even though an unallocated new file also has
+        # LBA zero in the editor's working tree.
+        header_alias=bytearray(gpt)
+        at=20*B
+        at+=header_alias[at]
+        at+=header_alias[at]
+        both(header_alias,at+2,0)
+        both(header_alias,at+10,1024)
+        image.write_bytes(header_alias)
+        run('add','GROW.BIN',False)
+        assert image.read_bytes()==header_alias
+        image.write_bytes(gpt)
+        run('add','GROW.BIN')
+        def verify_grown_gpt(raw,previous):
+            n=len(raw)//512
+            assert len(raw)>len(previous)
+            assert raw[:454]==previous[:454]
+            assert struct.unpack_from('<I',raw,458)[0]==n-1
+            assert raw[462:512]==previous[462:512]
+            assert raw[120*512:128*512]==gpt[120*512:128*512]
+            assert raw[2*512:2*512+128*128]==old_entries
+            for at,own,other in ((512,1,n-1),((n-1)*512,n-1,1)):
+                h=bytearray(raw[at:at+512])
+                assert h[:8]==b'EFI PART'
+                assert struct.unpack_from('<QQ',h,24)==(own,other)
+                assert h[56:72]==gpt[512+56:512+72]
+                crc=struct.unpack_from('<I',h,16)[0]
+                struct.pack_into('<I',h,16,0)
+                assert zlib.crc32(h[:92])==crc
+                table,num,entry_size,array_crc=struct.unpack_from('<QIII',h,72)
+                entries=raw[table*512:table*512+num*entry_size]
+                assert entries==old_entries and zlib.crc32(entries)==array_crc
+                assert struct.unpack_from('<Q',h,48)[0]==n-34
+            assert raw[len(previous)-33*512:len(previous)]==bytes(33*512)
+            assert struct.unpack_from('<I',raw,16*B+80)[0]*B<=len(raw)-33*512
+        first_growth=image.read_bytes()
+        verify_grown_gpt(first_growth,gpt)
+        assert read_image(image)=={'HELLO.TXT':b'world','GROW.BIN':big_payload}
+        validate_path_tables(image)
+        # A second edit has no usable ISO-block gap before the backup,
+        # so exercises growth again instead of relying on the first pad.
+        run('mkdir','GROW_DIR')
+        second_growth=image.read_bytes()
+        verify_grown_gpt(second_growth,first_growth)
+        assert read_image(image)=={'HELLO.TXT':b'world','GROW.BIN':big_payload,
+                                   'GROW_DIR/':None}
+        validate_path_tables(image)
+        before=image.read_bytes()
+        run('cancel','GROW.BIN',False)
+        assert image.read_bytes()==before
+        source.write_bytes(b'RENEW')
+        # Malformed primary/backup headers or tables must fail closed.
+        for offset in (512+16,len(gpt)-512+16,2*512+48,
+                       len(gpt)-33*512+48):
+            corrupt=bytearray(gpt)
+            corrupt[offset]^=1
+            image.write_bytes(corrupt)
+            run('add','HELLO.TXT',False)
+        # A file can maliciously alias a separately addressed ESP.
+        # Valid GPT CRCs do NOT authorize changing the ESP's contents.
+        alias=bytearray(gpt)
+        at=20*B
+        at+=alias[at]
+        at+=alias[at]
+        both(alias,at+2,30)
+        image.write_bytes(alias)
+        run('add','HELLO.TXT',False)
+        # Protect an extra MBR partition as well, even if the legacy
+        # whole-image container itself is a normal isohybrid entry.
+        mbr=hybrid_mbr(fixture())
+        mbr[466]=0xef
+        struct.pack_into('<II',mbr,470,84,4)
+        image.write_bytes(mbr)
+        run('add','HELLO.TXT',False)
+        source.write_bytes(b'new content'*1000)
+
         # A conventional ISO with newly generated path tables must remain
         # replaceable after gaining an MBR. The path tables must not move.
         image.write_bytes(fixture())
@@ -568,6 +892,77 @@ def main(binary, reader=None):
             source.write_bytes(b'TOO SMALL')
             run('add','rr-file',False)
             assert not list(root.glob('.iso-wcx-edit-*'))
+        source.write_bytes(b'new content'*1000)
+
+        # A validated RRIP hybrid with tail capacity can now rebuild
+        # directories without dropping its alternate NM names.
+        for kind in ('MBR','GPT'):
+            base=rrip_hybrid_fixture(joliet=False)
+            base[:16*B]=bytes(16*B)
+            if kind=='MBR':
+                base.extend(bytes(120*B-len(base)))
+                base=hybrid_mbr(base)
+            else:
+                base=gpt_fixture(base)
+            image.write_bytes(base)
+            source.write_bytes(b'longer RRIP hybrid payload')
+            run('add','rr-file')
+            run('mkdir','New-Directory')
+            run('add','New-Directory/nested-file.txt')
+            if reader:
+                out=root/('rr-hybrid-'+kind)
+                result=subprocess.run([reader,str(image),'--extract',str(out)],
+                                      capture_output=True)
+                assert result.returncode==0,(result.stdout,result.stderr)
+                assert (out/'rr-file').read_bytes()==source.read_bytes()
+                assert (out/'New-Directory'/'nested-file.txt').read_bytes()==source.read_bytes()
+            run('delete','rr-file')
+            run('delete','New-Directory')
+            assert read_image(image)=={}
+            raw=image.read_bytes()
+            assert raw[:16*B]==base[:16*B]
+            assert raw[24*B:27*B]==base[24*B:27*B]
+            if kind=='GPT':
+                assert raw[120*512:128*512]==base[120*512:128*512]
+                assert raw[-33*512:]==base[-33*512:]
+            validate_path_tables(image)
+            # Unknown SUSP semantics may not be silently dropped.
+            bad=bytearray(base)
+            at=20*B
+            at+=bad[at]
+            at+=bad[at]
+            end=at+bad[at]
+            bad[end:end+4]=b'ZZ\x04\x01'
+            bad[at]+=4
+            image.write_bytes(bad)
+            run('add','NEW.TXT',False)
+            assert image.read_bytes()==bad
+        source.write_bytes(b'new content'*1000)
+
+        # Ordinary (non-MBR) Rock Ridge with RRIP NM names: keep original
+        # SUSP records while appending replacement data and directory trees.
+        rr=rrip_hybrid_fixture(joliet=False)
+        rr[:16*B]=bytes(16*B)
+        image.write_bytes(rr)
+        source.write_bytes(b'longer RRIP replacement')
+        run('add','rr-file')
+        assert read_image(image)['HELLO.TXT']==source.read_bytes()
+        run('add','new-file.txt')
+        run('mkdir','New-Directory')
+        run('add','New-Directory/nested-file.txt')
+        if reader:
+            out=root/'rr-native-readback'
+            result=subprocess.run([reader,str(image),'--extract',str(out)],
+                                  capture_output=True)
+            assert result.returncode==0,(result.stdout,result.stderr)
+            assert (out/'rr-file').read_bytes()==source.read_bytes()
+            assert (out/'new-file.txt').read_bytes()==source.read_bytes()
+            assert (out/'New-Directory'/'nested-file.txt').read_bytes()==source.read_bytes()
+        assert image.read_bytes()[24*B:27*B]==rr[24*B:27*B]
+        run('delete','rr-file')
+        run('delete','New-Directory')
+        assert 'HELLO.TXT' not in read_image(image)
+        assert image.read_bytes()[24*B:27*B]==rr[24*B:27*B]
         source.write_bytes(b'new content'*1000)
 
         # Never accept direct replacement of an emulated El Torito floppy,

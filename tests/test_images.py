@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Self-generated ISO9660, Joliet, UDF Type-1 and corrupt-image smoke tests."""
 from __future__ import annotations
+import binascii
 import pathlib
 import struct
 import subprocess
@@ -140,24 +141,76 @@ def udf_metadata_image(fragmented=False,mirror=False,bad_mapping=False):
         image[310*B+4]^=0x1 # corrupt main Metadata FE, mirror should work
     return image
 
-def udf_vat_image(bad_vat=False):
+def udf_vat_image(bad_vat=False, *, legacy=False, external=False,
+                  fragmented=False, malformed=None, historic=False):
     image=udf_image()
+    image[19*B+1:19*B+6]=b'NSR02' if legacy else b'NSR03'
     udf_two_maps(image,'virtual',0)
     p16(image,300*B+408,1)  # FSD refers to virtual root directory
     update_tag_checksum(image,300)
     p16(image,301*B+176+28,1)
     update_tag_checksum(image,301)
     entries=[0,1,2 if not bad_vat else 0xffffffff]
-    vat=bytearray(152+len(entries)*4)
-    p16(vat,0,152);p16(vat,2,0)
-    p32(vat,132,0xffffffff)
-    for index,value in enumerate(entries):p32(vat,152+index*4,value)
-    fe=bytearray(B);p16(fe,0,261);p16(fe,2,2)
-    fe[27]=248;p16(fe,34,3)
-    p64(fe,56,len(vat));p32(fe,172,len(vat))
-    fe[176:176+len(vat)]=vat
-    fe[4]=sum(fe[i] for i in range(16) if i!=4)&255
-    image[549*B:550*B]=fe
+    if fragmented:
+        # The file's contiguous virtual addresses 3,4,5 map to three
+        # deliberately noncontiguous physical sectors.
+        entries.extend([14,6,30])
+        file=302*B
+        p16(image,file+34,0)
+        p64(image,file+56,2*B+3)
+        p32(image,file+172,8)
+        p32(image,file+176,2*B+3)
+        p32(image,file+180,3)
+        update_tag_checksum(image,302)
+        image[314*B:315*B]=b'A'*B
+        image[306*B:307*B]=b'Z'*B
+        image[330*B:330*B+3]=b'END'
+    if malformed=='unused-out-of-range':
+        entries.append(250)
+    if malformed=='self-mapping':
+        entries.append(249)
+    if legacy:
+        vat=bytearray(len(entries)*4+36)
+        end=len(entries)*4
+        vat[end+1:end+23]=b'*UDF Virtual Alloc Tbl'
+        p32(vat,end+32,0xffffffff)
+        for index,value in enumerate(entries):p32(vat,index*4,value)
+        if malformed=='bad-format':vat[end+1]=ord('!')
+    else:
+        vat=bytearray(152+len(entries)*4)
+        p16(vat,0,152);p16(vat,2,0)
+        p32(vat,132,249 if malformed=='previous-self' else 0xffffffff)
+        p16(vat,144,0x0200);p16(vat,146,0x0200);p16(vat,148,0x0201)
+        for index,value in enumerate(entries):p32(vat,152+index*4,value)
+        if malformed=='bad-format':p16(vat,0,153)
+    def icb(logical):
+        fe=bytearray(B);p16(fe,0,261);p16(fe,2,2)
+        fe[27]=0 if legacy else 248
+        if malformed=='wrong-type':fe[27]=248 if legacy else 0
+        p32(fe,12,logical if malformed!='wrong-location' else logical-1)
+        p64(fe,56,len(vat))
+        if external:
+            p16(fe,34,0)
+            p32(fe,172,8)
+            p32(fe,176,len(vat)|(0x40000000 if malformed=='sparse' else 0))
+            p32(fe,180,200)
+            fe_bytes=184
+            image[500*B:500*B+len(vat)]=vat
+        else:
+            p16(fe,34,3)
+            p32(fe,172,len(vat))
+            fe[176:176+len(vat)]=vat
+            fe_bytes=176+len(vat)
+        p16(fe,10,fe_bytes-16)
+        p16(fe,8,binascii.crc_hqx(fe[16:fe_bytes],0))
+        fe[4]=sum(fe[i] for i in range(16) if i!=4)&255
+        image[(300+logical)*B:(301+logical)*B]=fe
+    if historic:
+        # A damaged most-recent candidate must not erase the validated
+        # prior transaction's map. Both ICBs have relative TagLocation.
+        icb(248)
+    icb(249)
+    if historic:image[549*B+4]^=1
     return image
 
 
@@ -368,7 +421,19 @@ if __name__=='__main__':
     run(binary,udf_metadata_image(fragmented=True),'hello',b'world')
     run(binary,udf_metadata_image(mirror=True),'hello',b'world')
     run(binary,udf_metadata_image(bad_mapping=True),'unused',b'',fail=True)
-    run(binary,udf_vat_image(),'hello',b'world')
+    for legacy in (False,True):
+        for external in (False,True):
+            run(binary,udf_vat_image(legacy=legacy,external=external),
+                'hello',b'world')
+            run(binary,udf_vat_image(legacy=legacy,external=external,fragmented=True),
+                'hello',b'A'*B+b'Z'*B+b'END')
+        run(binary,udf_vat_image(legacy=legacy,historic=True),'hello',b'world')
+        for error in ('unused-out-of-range','self-mapping','bad-format',
+                      'wrong-type','wrong-location'):
+            run(binary,udf_vat_image(legacy=legacy,malformed=error),
+                'unused',b'',fail=True)
+    run(binary,udf_vat_image(malformed='previous-self'),'unused',b'',fail=True)
+    run(binary,udf_vat_image(external=True,malformed='sparse'),'unused',b'',fail=True)
     run(binary,udf_sparable_image(),'hello',b'world')
     run(binary,udf_sparable_image(replaced=True),'hello',b'world')
     run(binary,udf_sparable_image(bad_table=True),'unused',b'',fail=True)
