@@ -4123,8 +4123,12 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                  "replacement exceeds FE long_ad capacity");
         const bool shared=coordinated && (coordinated->shared_replacements.count(key) ||
                                          coordinated->shared_additions.count(key));
-        vat_need(!shared || (size && size<=0xffffffffull),
-                 "VAT shared replacement requires a nonempty ISO-compatible file");
+        // A full ISO tree remaster can describe the same contiguous
+        // payload using Level-3 records. The original-record coordinator
+        // still has exactly one 32-bit ISO length field.
+        vat_need(!shared || (size && (size<=0xffffffffull ||
+                                      coordinated->iso_metadata_blocks)),
+                 "VAT shared replacement requires an ISO-compatible file and tree for Level-3");
         // Even small shared files must remain externally addressable
         // by ISO9660. Never embed a common payload in its new UDF FE.
         const bool embedded=!shared && size<=block-176;

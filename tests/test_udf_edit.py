@@ -1544,6 +1544,7 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             iso_expected={}
             alias_fields=[]
             chain_fields=[]
+            shared_chain_fields=[]
             if iso_only:
                 raw[34*B:34*B+8]=b'ISO only'
                 raw[35*B:35*B+9]=b'ISO root!'
@@ -1576,7 +1577,14 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     raw[only*B:(only+1)*B]=only_data.ljust(B,b'\0')
                 raw[parent*B:(parent+1)*B]=directory.ljust(B,b'\0')
                 directory=iso_record(child,B,2,b'\0')+iso_record(parent,B,2,b'\1')
-                directory+=iso_record(at//B,len(base_payload),0,name('BASE.BIN;1'))
+                if iso_only:
+                    # Different descriptor boundaries, identical data:
+                    # one UDF allocation and two contiguous ISO records.
+                    directory+=iso_record(at//B,B,0x80,name('BASE.BIN;1'))
+                    shared_chain_fields.append(child*B+len(directory)+2)
+                    directory+=iso_record(at//B+1,len(base_payload)-B,0,name('BASE.BIN;1'))
+                else:
+                    directory+=iso_record(at//B,len(base_payload),0,name('BASE.BIN;1'))
                 if iso_only:
                     sub=33 if view else 32
                     directory+=iso_record(sub,B,2,name('ISOSUB'))
@@ -1592,6 +1600,24 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             if iso_only:expected['COMMON/ISOSUB/']=None
             assert read_image(bridge)=={**expected,**iso_expected}
             if joliet:assert read_image(bridge,True)=={**expected,**iso_expected}
+            if iso_only:
+                for view in ((False,True) if joliet else (False,)):
+                    assert records(bridge,'COMMON/BASE.BIN',view)==[(at//B,B),(at//B+1,len(base_payload)-B)]
+                # Matching ISO and Joliet chains must not authorize an
+                # inconsistent physical mapping with UDF.
+                for sector in (at//B,at//B+2):
+                    bad=bytearray(raw)
+                    for field in shared_chain_fields:both(bad,field,sector)
+                    bridge.write_bytes(bad)
+                    for args in (
+                        ('add','COMMON/BASE.BIN',replacement),
+                        ('delete','COMMON/BASE.BIN'),
+                        ('add','COMMON/NEW.BIN',replacement),
+                        ('add','COMMON/PRIVATE.BIN',replacement)):
+                        run(editor,bridge,*args,success=False)
+                        assert bridge.read_bytes()==bad
+                    assert not list(root.glob('.iso-wcx-edit-*'))
+                bridge.write_bytes(raw)
 
             private_expected={'hello':b'world','keep':b'keep me',
                               'COMMON/PRIVATE.BIN':private.read_bytes(),'OTHER/':None}
@@ -1654,6 +1680,10 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 run(editor,bridge,'add','COMMON/BASE.BIN',replacement)
                 expected['COMMON/BASE.BIN']=replacement.read_bytes()
                 initial=verify(raw,0)
+                if iso_only:
+                    for view in ((False,True) if joliet else (False,)):
+                        section,=records(bridge,'COMMON/BASE.BIN',view)
+                        assert section[1]==len(replacement.read_bytes())
             replacement.write_bytes(b'new mirrored data')
             run(editor,bridge,'batch','mkdir','COMMON/SUB',
                 'add','COMMON/SUB/NEW.BIN',replacement,'add','COMMON/TOP.BIN',replacement)

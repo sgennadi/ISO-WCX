@@ -415,8 +415,9 @@ def make_vat_bridge(editor, root, kind):
     return image,payload
 
 
-def vat_main(editor, inspector, xorriso, kind):
-    assert kind in ("MBR","GPT")
+def vat_main(editor, inspector, xorriso, kind, scope="iso-only"):
+    assert kind in ("MBR","GPT") and scope in ("iso-only","shared")
+    shared_mode=scope=="shared"
     with tempfile.TemporaryDirectory(prefix="iso-wcx-vat-level3-") as tmp:
         root=pathlib.Path(tmp)
         free=shutil.disk_usage(root).free
@@ -434,7 +435,16 @@ def vat_main(editor, inspector, xorriso, kind):
         original_size=image.stat().st_size
         initial_mbr=read_at(image,0,SECTOR)
         entries=read_at(image,2*SECTOR,128*128) if kind=="GPT" else b""
-        private_name="ONLY/BIG.BIN"
+        private_name="COMMON/BIG.BIN" if shared_mode else "ONLY/BIG.BIN"
+        def check_transaction(old, new):
+            if not shared_mode:
+                same_vat_mapping(old,new)
+            else:
+                old_icb,old_table=old
+                new_icb,new_table=new
+                assert new_icb>old_icb
+                assert struct.unpack_from("<I",new_table,132)[0]==old_icb
+                assert new_table[136:]!=old_table[136:], "shared operation did not update VAT mapping"
         def check_envelope():
             assert read_at(image,26*B,B)==b'E'*B
             mbr=read_at(image,0,SECTOR)
@@ -447,7 +457,7 @@ def vat_main(editor, inspector, xorriso, kind):
                 assert struct.unpack_from("<I",mbr,458)[0]==sectors
                 c=min(sectors//40-1,1023)
                 assert mbr[451:454]==bytes((9,4|((c>>2)&0xc0),c&255))
-        def check_udf(private):
+        def check_udf(private, big_state="large"):
             target=root/"udf-extracted"
             shutil.rmtree(target,ignore_errors=True)
             run(inspector,image,"--extract",target)
@@ -455,6 +465,13 @@ def vat_main(editor, inspector, xorriso, kind):
             assert (target/"hello").read_bytes()==private
             assert (target/"keep").read_bytes()==b'keep me'
             assert not (target/"ONLY").exists()
+            big=target/"COMMON"/"BIG.BIN"
+            if not shared_mode or big_state=="absent":
+                assert not big.exists()
+            elif big_state=="large":
+                assert big.stat().st_size==SIZE and digest(big)==expected
+            else:
+                assert big_state=="small" and big.read_bytes()==b'updated private data'
             shutil.rmtree(target)
         run(editor,image,"add",private_name,source)
         sections=records(image,private_name)
@@ -462,7 +479,7 @@ def vat_main(editor, inspector, xorriso, kind):
         assert [length for _,length in sections]==[MAX_SECTION,SIZE-MAX_SECTION]
         assert sections[0][0]*B>=original_size
         assert sections[1][0]==sections[0][0]+MAX_SECTION//B
-        same_vat_mapping(before,vat_snapshot(image,kind))
+        check_transaction(before,vat_snapshot(image,kind))
         check_envelope()
         check_udf(b'world')
         out=root/"independent-vat-extracted.bin"
@@ -489,19 +506,19 @@ def vat_main(editor, inspector, xorriso, kind):
             run(editor,image,"delete",private_name)
             assert not records(image,private_name)
         assert records(image,private_name)==records(image,private_name,True)
-        same_vat_mapping(before,vat_snapshot(image,kind))
-        check_udf(small.read_bytes())
+        check_transaction(before,vat_snapshot(image,kind))
+        check_udf(small.read_bytes(),"small" if kind=="MBR" else "absent")
         check_envelope()
         assert hash_sections(image,sections)==expected
         assert not list(root.glob(".iso-wcx-edit-*"))
-        print(f"PASS: {kind} VAT >4 GiB ISO-only Level-3, xorriso SHA256, "
+        print(f"PASS: {kind} VAT >4 GiB {scope} Level-3, xorriso SHA256, "
               "unchanged historical extents and independent UDF operations",flush=True)
 
 
 if __name__ == "__main__":
     args=(pathlib.Path(sys.argv[1]).resolve(),
           pathlib.Path(sys.argv[2]).resolve(),sys.argv[3])
-    if len(sys.argv)==5:
-        vat_main(*args,sys.argv[4])
+    if len(sys.argv) in (5,6):
+        vat_main(*args,*sys.argv[4:])
     else:
         main(*args)

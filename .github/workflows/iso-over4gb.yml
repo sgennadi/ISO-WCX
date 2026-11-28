@@ -57,13 +57,14 @@ jobs:
         run: python3 tests/test_iso_over4gb.py build/archive_edit_fixture build/disc_inspect xorriso
 
   vat-iso-over-4gib:
-    name: Sequential VAT ISO-only Level-3 >4 GiB (${{ matrix.envelope }})
+    name: Sequential VAT Level-3 >4 GiB (${{ matrix.envelope }}, ${{ matrix.scope }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         envelope: [MBR, GPT]
+        scope: [iso-only, shared]
     steps:
       - uses: actions/checkout@v7
       - name: Install independent ISO reader
@@ -75,5 +76,5 @@ jobs:
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --target archive_edit_fixture disc_inspect --parallel 2
-      - name: Write and read back a real >4 GiB ISO-only VAT payload
-        run: python3 tests/test_iso_over4gb.py build/archive_edit_fixture build/disc_inspect xorriso ${{ matrix.envelope }}
+      - name: Write and read back a real >4 GiB VAT payload
+        run: python3 tests/test_iso_over4gb.py build/archive_edit_fixture build/disc_inspect xorriso ${{ matrix.envelope }} ${{ matrix.scope }}

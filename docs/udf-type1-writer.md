@@ -711,8 +711,7 @@ retain their original raw continuation records in each view when
 unrelated files are edited. Independent namespace checks compare every
 section against the public reader; overlapping sections and aliases
 of live UDF payloads are rejected. Replacement may shrink a chain to
-one record, and recursive removal may unlink the entire chain. Shared
-ISO/UDF files retain the existing single-extent policy. Existing
+one record, and recursive removal may unlink the entire chain. The next profile extends multi-extent support to shared VAT files. Existing
 capacity, address-space, metadata budget, boot and partition protection
 and historical byte checks remain mandatory.
 
@@ -724,3 +723,35 @@ including primary and Joliet section records, independent xorriso
 SHA-256 extraction, preserved UDF files and VAT mappings, subsequent
 private-UDF replacement and ISO-only shrink or deletion. Physical boot
 and Total Commander host behavior still require separate validation.
+
+### Shared ISO/UDF Level-3 payloads in sequential VAT bridges
+
+The full sequential VAT tree remaster can create and replace nonempty
+shared files exceeding 4 GiB. The UDF writer allocates and streams the
+data once using its existing bounded long_ad chain. The ISO/Joliet
+planner sizes its directory records in advance and maps consecutive
+Level-3 records onto the same physical data, not a second copy.
+Different ISO and UDF allocation boundaries are valid only when the
+entire nonempty logical payload maps to the same contiguous physical
+byte sequence, with no holes, sparse extents, inline data, overlap or
+reordering. Existing shared Level-3 raw continuation records remain
+unchanged for unrelated edits. Later replacements may shrink the
+chain or delete it from both views. The original-record coordinator
+and non-VAT Type-1 path retain their single-record bounds.
+
+The fixture matrix includes a shared two-section ISO chain backed by
+one contiguous UDF allocation and rejects conflicting physical
+mappings. Dedicated >4 GiB MBR/GPT jobs cover both independent and
+shared Level-3 authoring, primary/Joliet section equality, SHA-256
+readback through xorriso and the UDF extractor, subsequent UDF-only
+replacement, shared shrink/delete, unchanged historical payloads
+and partition geometry. The Windows ASan test budget for the expanded
+UDF regression matrix is 600 seconds rather than the job default
+180 seconds; no sanitizer checks or test cases are disabled.
+
+This profile requires the existing write-once VAT contract, nonempty
+shared payloads, contiguous physical allocation, remaining partition
+capacity and bounded UDF FE long_ad capacity. It does not generalize
+to arbitrary fragmented shared physical mappings, mixed mutation
+scopes, sparable or metadata partitions, or prove bootability on
+physical systems.

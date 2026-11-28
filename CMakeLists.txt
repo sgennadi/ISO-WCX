@@ -224,6 +224,10 @@ if(BUILD_TESTING)
   add_test(NAME udf_type1_native_resize_delete
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_edit.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
+  # Includes the full sequential VAT MBR/GPT/Joliet transaction matrix.
+  # The instrumented Windows x64 run exceeded the ASan job's 180s default.
+  # Keep every case and sanitizer check enabled with a bounded test budget.
+  set_tests_properties(udf_type1_native_resize_delete PROPERTIES TIMEOUT 600)
   add_test(NAME udf_type1_space_bitmap_allocator
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_udf_allocator.py"
       "$<TARGET_FILE:archive_edit_fixture>" "$<TARGET_FILE:disc_inspect>")
