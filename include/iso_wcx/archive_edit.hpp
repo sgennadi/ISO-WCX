@@ -42,6 +42,9 @@ struct CoordinatedIsoUpdate {
     // for this mode only, independent ISO replacement payloads.
     bool vat_iso_only_remaster=false;
     std::uint64_t iso_metadata_blocks=0;
+    // Independently bounded ISO-only payload sectors, not counted
+    // against the directory/path-table memory budget.
+    std::uint64_t iso_payload_blocks=0;
     EditProtectedRanges metadata_writes;
 };
 // UDF Type-1 Preview: plain-UDF writes by default. Bridge writes are opt-in

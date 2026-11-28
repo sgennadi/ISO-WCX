@@ -1505,7 +1505,10 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             # the last VAT ICB remains at EOF with real cylinder padding.
             # Then independently master COMMON/BASE.BIN in the ISO view;
             # the root's hello/keep and COMMON/PRIVATE.BIN stay UDF-only.
-            seed=vat_append_image(capacity=8192,external_table=external)
+            large_case=iso_only and ((gpt and joliet and external) or
+                                      (not gpt and not joliet and not external))
+            capacity=80000 if large_case else 8192
+            seed=vat_append_image(capacity=capacity,external_table=external)
             seed_path=image if gpt else bridge
             if not gpt:
                 optical=fixture(boot=True,boot_efi=True)
@@ -1929,14 +1932,46 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     run(editor,bridge,*args,success=False)
                     assert bridge.read_bytes()==sixth
                 replacement.write_bytes(b'')
-                run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
-                assert bridge.read_bytes()==sixth
-                # The reservation has a strict combined data/metadata
-                # budget even if the file is sparse.
-                with replacement.open('wb') as oversized:oversized.truncate(64*1024*1024)
+                run(editor,bridge,'batch','add','ISO_ROOT.BIN',replacement,
+                    'add','ONLY/ZERO.BIN',replacement)
+                iso_expected['ISO_ROOT.BIN']=b''
+                iso_expected['ONLY/ZERO.BIN']=b''
+                sixth=verify_iso_remaster(sixth,22)
+                # Repeat a zero-length replacement and then populate
+                # the formerly empty record with real data.
+                run(editor,bridge,'add','ISO_ROOT.BIN',replacement)
+                sixth=verify_iso_remaster(sixth,23)
+                replacement.write_bytes(b'formerly empty')
+                run(editor,bridge,'add','ISO_ROOT.BIN',replacement)
+                iso_expected['ISO_ROOT.BIN']=replacement.read_bytes()
+                sixth=verify_iso_remaster(sixth,24)
+
+                # Capacity, not the old 64 MiB buffer limit, bounds the
+                # stream. This sparse source exceeds every fixture.
+                with replacement.open('wb') as oversized:oversized.truncate((capacity+1)*B)
                 run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
                 assert bridge.read_bytes()==sixth
                 assert not list(root.glob('.iso-wcx-edit-*'))
+
+                # Exercise both MBR and GPT with a >64 MiB payload.
+                # Restore the small snapshot afterwards so subsequent
+                # matrix cases need not repeatedly copy a large image.
+                if large_case:
+                    import hashlib
+                    with replacement.open('wb') as large:
+                        chunk=b'VAT ISO stream payload!'*4096
+                        for _ in range(750):large.write(chunk)
+                        large.write(b'tail')
+                    assert replacement.stat().st_size>64*1024*1024
+                    payload=replacement.read_bytes()
+                    iso_expected['ONLY/LARGE.BIN']=payload
+                    run(editor,bridge,'add','ONLY/LARGE.BIN',replacement)
+                    grown=verify_iso_remaster(sixth,25)
+                    assert grown.find(payload,len(sixth))>=len(sixth)
+                    assert hashlib.sha256(read_image(bridge)['ONLY/LARGE.BIN']).digest()==hashlib.sha256(payload).digest()
+                    del iso_expected['ONLY/LARGE.BIN'],grown,payload
+                    bridge.write_bytes(sixth)
+                    assert not list(root.glob('.iso-wcx-edit-*'))
                 replacement.write_bytes(b'ISO-only new subtree payload'*700)
                 iso_source.write_bytes(b'new short file')
                 # Add nested files/directories only below a proven

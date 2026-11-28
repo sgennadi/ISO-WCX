@@ -2984,13 +2984,14 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                              std::filesystem::symlink_status(c->source)),
                          "VAT shared replacement source must be a regular file");
                     n->size=std::filesystem::file_size(c->source);
-                    need(n->size>0 && n->size<=0xffffffffull,
+                    need((iso_only_remaster || n->size>0) && n->size<=0xffffffffull,
                          "VAT mirrored replacement exceeds single ISO extent");
                     if(iso_only_remaster) {
                         n->source=c->source;
                         const auto blocks=(n->size+block-1)/block;
-                        need(blocks<=32768-tree.iso_payload_blocks,
-                             "ISO-only replacement exceeds reserved 64 MiB budget");
+                        need(tree.iso_payload_blocks<=0xffffffffull &&
+                             blocks<=0xffffffffull-tree.iso_payload_blocks,
+                             "ISO-only replacement exceeds optical block address space");
                         tree.iso_payload_blocks+=blocks;
                         need(tree.iso_only_payloads.emplace(upper(key),n).second,
                              "duplicate ISO-only replacement");
@@ -3013,8 +3014,8 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                      std::filesystem::symlink_status(c->source)),
                  "shared addition source must be a regular file");
             n->size=std::filesystem::file_size(c->source);
-            need(n->size>0 && n->size<=0xffffffffull,
-                 "shared addition requires nonempty single-extent ISO file");
+            need((iso_only_remaster || n->size>0) && n->size<=0xffffffffull,
+                 "ISO addition exceeds single-extent bounds");
         }
         auto collision=[&](const Bytes& id,unsigned view) {
             const auto name=upper(decode(id,view!=0,n->directory));
@@ -3055,8 +3056,9 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         } else if(iso_only_remaster) {
             n->source=c->source;
             const auto blocks=(n->size+block-1)/block;
-            need(blocks<=32768-tree.iso_payload_blocks,
-                 "ISO-only addition exceeds reserved 64 MiB budget");
+            need(tree.iso_payload_blocks<=0xffffffffull &&
+                 blocks<=0xffffffffull-tree.iso_payload_blocks,
+                 "ISO-only addition exceeds optical block address space");
             tree.iso_payload_blocks+=blocks;
             need(tree.iso_only_payloads.emplace(upper(key),n.get()).second,
                  "duplicate independent ISO payload");
@@ -3097,9 +3099,12 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         for(const auto* dir:tree.dirs)blocks+=dir->new_size[view]/block;
         blocks+=2*((size+block-1)/block);
     }
-    need(blocks && blocks<=32768 && tree.iso_payload_blocks<=32768-blocks,
-         "ISO tree and independent payload reservation exceeds 64 MiB budget");
-    plan.iso_metadata_blocks=blocks+tree.iso_payload_blocks;
+    need(blocks && blocks<=32768,"ISO metadata exceeds 64 MiB budget");
+    need(tree.iso_payload_blocks<=0xffffffffull-blocks &&
+         (iso_only_remaster || !tree.iso_payload_blocks),
+         "ISO payload and metadata exceed optical block address space");
+    plan.iso_metadata_blocks=blocks;
+    plan.iso_payload_blocks=tree.iso_payload_blocks;
     for(const auto& [lba,vd]:image.descriptors) {
         (void)vd;
         plan.metadata_writes.emplace_back(std::uint64_t(lba)*block+132,58);
@@ -3145,10 +3150,13 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
              (mode==0 && le(fe,172)==8 && count && count<=8192),
              "unsupported final sequential VAT storage");
         need(count<volume_blocks && plan.iso_metadata_blocks &&
-             plan.iso_metadata_blocks<=volume_blocks-1-count,
-             "invalid sequential ISO metadata reservation");
+             plan.iso_metadata_blocks<=volume_blocks-1-count &&
+             plan.iso_payload_blocks<=volume_blocks-1-count-plan.iso_metadata_blocks &&
+             plan.iso_payload_blocks==tree.iso_payload_blocks &&
+             (!plan.iso_payload_blocks || plan.vat_iso_only_remaster),
+             "invalid sequential ISO metadata/payload reservation");
         main=volume_blocks-1-count;
-        first=main-plan.iso_metadata_blocks;
+        first=main-plan.iso_metadata_blocks-plan.iso_payload_blocks;
         need(first>=image.size/block,"sequential ISO reservation overlaps source");
         if(mode==0) {
             const auto anchor=mapped.read(256ull*block,block);
@@ -3239,10 +3247,12 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
          (sequential_vat && plan.vat_iso_only_remaster),
          "independent ISO payloads require the VAT-only remaster contract");
     for(const auto& [key,n]:tree.iso_only_payloads) {
-        need(tree.independent_iso_paths.count(key) && n->size &&
+        need(tree.independent_iso_paths.count(key) &&
              n->size<=0xffffffffull && next<=main &&
              (n->size+block-1)/block<=main-next,
              "independent ISO replacement outside reservation");
+        // A zero-length record names a valid optical LBA but consumes
+        // no physical sectors; it cannot alias a nonempty data extent.
         n->lba=static_cast<std::uint32_t>(next);
         n->sections={{n->lba,static_cast<std::uint32_t>(n->size)}};
         // Existing records retain all fields except address/length.
@@ -3257,7 +3267,8 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         }
         next+=(n->size+block-1)/block;
     }
-    need(next-first==tree.iso_payload_blocks,
+    need(next-first==tree.iso_payload_blocks &&
+         next<=main && main-next==plan.iso_metadata_blocks,
          "independent ISO payload reservation mismatch");
     // Assign every directory and path table LBA before serializing any
     // parent, child, '.' or '..' reference.
@@ -4141,7 +4152,7 @@ bool try_edit_iso_vat_independent_iso_payloads(const std::filesystem::path& path
             // payload needs a fresh tree and reserved data sectors.
             if(!std::filesystem::is_regular_file(std::filesystem::symlink_status(c.source)) ||
                std::filesystem::file_size(c.source)!=found->second->size ||
-               found->second->lba>=256)return false;
+               !found->second->size || found->second->lba>=256)return false;
         }
     }
     // Pin the source before the authoritative preflight and never

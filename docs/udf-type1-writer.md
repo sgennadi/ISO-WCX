@@ -665,3 +665,32 @@ out-of-order parent selections, subsequent private edits, cancellation,
 mixed-operation rejection and recursive deletion of newly created
 ISO-only subtrees. Zero-length payloads and larger reservations remain
 outside this profile.
+
+### Streamed independent ISO-only payload reservations and empty files
+
+The independent ISO-only remaster separates its data-sector count
+from the directory and path-table reservation. The 32768-block
+(64 MiB) metadata budget remains; independent payloads are instead
+bounded by the remaining backing-partition capacity, the optical
+block address space, and the single ISO extent length field
+(0xffffffff bytes per file). Multi-extent ISO-only authoring above
+that individual file limit remains unsupported.
+
+The VAT append plan records the reservation as a 64-bit physical
+range, not a full-size in-memory zero buffer. Staging and zero
+readback use bounded chunks. The ISO coordinator streams replacement
+and new file data, verifies each destination is zero-filled before
+writing, and independently reads back file data and sector padding.
+The subsequent VAT validation still checks all appended metadata
+outside the explicit reservation and all historical protected bytes.
+The Type-1 writer rejects this VAT-only payload contract.
+
+Independent ISO-only files can now be empty, whether newly created,
+truncated to zero, or replaced while empty. Their directory record
+has a valid LBA and a zero length, allocating no data sectors.
+The pre-anchor equal-size patch route remains restricted to nonempty
+payloads; zero-length operations use the remaster route. Regression
+cases cover empty creation, truncation, repeated empty replacement,
+refilling a formerly empty file, insufficient partition capacity,
+and >64 MiB payloads in MBR and GPT variants with preserved VAT maps.
+Physical boot and host behavior remain separately unverified.

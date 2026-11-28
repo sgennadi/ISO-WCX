@@ -3463,6 +3463,9 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
                   (changes.empty() && remaster && (mbr_alignment || gpt_trailer) &&
                    coordinated->vat_tree_deletions.empty())) &&
                  coordinated->iso_metadata_blocks<=32768 &&
+                 coordinated->iso_payload_blocks<=0xffffffffull-coordinated->iso_metadata_blocks &&
+                 (!coordinated->iso_payload_blocks ||
+                  (coordinated->vat_iso_only_remaster && remaster)) &&
                  (remaster || (coordinated->shared_additions.empty() &&
                                coordinated->shared_directories.empty() &&
                                coordinated->vat_tree_deletions.empty())) &&
@@ -4207,7 +4210,8 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     // appending it to the mutable mapping until all addresses are assigned.
     const auto final_vat_bytes=vat.size()+legacy_trailer.size();
     const auto vat_blocks=final_vat_bytes<=block-176?0:(final_vat_bytes+block-1)/block;
-    const auto iso_blocks=coordinated?coordinated->iso_metadata_blocks:0u;
+    const auto iso_blocks=coordinated?
+        coordinated->iso_metadata_blocks+coordinated->iso_payload_blocks:0u;
     const auto minimum=plan->payload_blocks+file_entries.size()+
                         dirty_directories.size()+directory_blocks+iso_blocks+vat_blocks+1u;
     const auto padding=mbr_alignment?
@@ -4291,7 +4295,9 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     if(iso_blocks) {
         plan->iso_reservation_at=(std::uint64_t(partition)+physical)*block;
         plan->iso_reservation_bytes=iso_blocks*block;
-        plan->append.emplace_back(static_cast<std::size_t>(plan->iso_reservation_bytes),0);
+        // An empty run is an explicit reservation marker, not a buffer.
+        // Its physical length is tracked as uint64_t and streamed below.
+        plan->append.emplace_back();
         physical+=iso_blocks;
     }
     const auto new_table=physical;
@@ -4363,17 +4369,42 @@ void edit_vat_append(const std::filesystem::path& image,
         const auto metadata_start=at;
         for(const auto& bytes:plan->append) {
             edit_tick(progress);
-            staged_write(out,at,bytes);at+=bytes.size();
+            if(bytes.empty()) {
+                vat_need(plan->iso_reservation_bytes && at==plan->iso_reservation_at &&
+                         at<=plan->final_size &&
+                         plan->iso_reservation_bytes<=plan->final_size-at,
+                         "invalid streamed ISO reservation marker");
+                staged_zero(out,at,plan->iso_reservation_bytes,progress);
+                at+=plan->iso_reservation_bytes;
+            } else {
+                staged_write(out,at,bytes);at+=bytes.size();
+            }
         }
         vat_need(at==plan->final_size,"VAT append write length differs from plan");
         out.flush();vat_need(bool(out),"cannot flush VAT append");
         at=metadata_start;
         for(const auto& bytes:plan->append) {
             edit_tick(progress);
-            vat_need(staged_read(out,at,bytes.size())==bytes,
-                     "appended VAT transaction failed byte readback");
-            at+=bytes.size();
+            if(bytes.empty()) {
+                vat_need(plan->iso_reservation_bytes && at==plan->iso_reservation_at,
+                         "invalid ISO reservation readback marker");
+                auto remaining=plan->iso_reservation_bytes;
+                while(remaining) {
+                    edit_tick(progress);
+                    const auto n=static_cast<std::size_t>(
+                        std::min<std::uint64_t>(remaining,1024u*1024u));
+                    const auto data=staged_read(out,at,n);
+                    vat_need(std::all_of(data.begin(),data.end(),[](auto c){return c==0;}),
+                             "streamed ISO reservation is not zero-filled");
+                    at+=n;remaining-=n;
+                }
+            } else {
+                vat_need(staged_read(out,at,bytes.size())==bytes,
+                         "appended VAT transaction failed byte readback");
+                at+=bytes.size();
+            }
         }
+        vat_need(at==plan->final_size,"VAT append readback length differs from plan");
     }
     vat_need(std::filesystem::file_size(tx.output)==plan->final_size,
              "unexpected VAT append size");
@@ -4434,13 +4465,19 @@ void edit_vat_append(const std::filesystem::path& image,
         auto pos=plan->original_size+plan->payload_blocks*block;
         for(const auto& bytes:plan->append) {
             edit_tick(progress);
-            if(plan->iso_reservation_bytes && pos==plan->iso_reservation_at)
-                vat_need(bytes.size()==plan->iso_reservation_bytes,
+            if(bytes.empty()) {
+                vat_need(plan->iso_reservation_bytes && pos==plan->iso_reservation_at &&
+                         pos<=plan->final_size &&
+                         plan->iso_reservation_bytes<=plan->final_size-pos,
                          "VAT ISO reservation differs from planned range");
-            else vat_need(staged_read(in,pos,bytes.size())==bytes,
-                          "ISO coordination modified appended VAT metadata");
-            pos+=bytes.size();
+                pos+=plan->iso_reservation_bytes;
+            } else {
+                vat_need(staged_read(in,pos,bytes.size())==bytes,
+                         "ISO coordination modified appended VAT metadata");
+                pos+=bytes.size();
+            }
         }
+        vat_need(pos==plan->final_size,"VAT coordinated append bounds differ");
     } else if(plan->gpt) {
         std::fstream in(tx.output,std::ios::binary|std::ios::in);
         vat_need(bool(in) && staged_read(in,0,1024)==plan->gpt->prefix &&
@@ -4539,6 +4576,7 @@ void edit_udf(const std::filesystem::path& image,
     // A mirrored sequential deletion contract cannot be interpreted
     // by the physical Type-1 allocator if the mapping family changed.
     need(!coordinated || (!coordinated->vat_iso_only_remaster &&
+                           !coordinated->iso_payload_blocks &&
                            coordinated->vat_tree_deletions.empty()),
          "VAT-only coordination plan cannot use Type-1");
     auto& volume=*owner;
