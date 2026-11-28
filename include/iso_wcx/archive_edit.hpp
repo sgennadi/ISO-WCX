@@ -33,6 +33,10 @@ struct CoordinatedIsoUpdate {
     std::set<std::string> shared_deletions;
     std::set<std::string> shared_additions;
     std::set<std::string> shared_directories;
+    // Fixed-size writable physical Type-1 shared regular-file unlink.
+    // Reclaim uniquely owned blocks, but retain the old payload bytes
+    // through the optical byte-preservation check before ISO compaction.
+    bool type1_fixed_shared_delete=false;
     // Only for sequential mirrored-tree mastering: independently
     // expanded, canonical directory/file removals, including roots.
     // shared_deletions retains the explicit user selections.

@@ -2294,8 +2294,12 @@ void coordinate_shared_bridge_stage(
         else validate_vat_bridge_envelope(staged,image);
     } else protect_iso_udf_stage(path,staged,image,progress,mbr_growth,gpt_growth);
     const auto size=std::filesystem::file_size(staged);
-    need(size>image.size && size%block==0 && size/block<0xffffffffu,
-         "shared ISO/UDF resize did not produce bounded append mastering");
+    const bool fixed=plan.type1_fixed_shared_delete;
+    need(size%block==0 && size/block<0xffffffffu &&
+         (fixed?(size==image.size && !sequential_vat &&
+                 !mbr_growth && !gpt_growth &&
+                 plan.shared_replacements.empty()):size>image.size),
+         "shared ISO/UDF stage has unplanned physical size");
     const auto volume_blocks=gpt_growth?
         (sequential_vat?size/block-gpt_growth->trailer_blocks:gpt_growth->logical_blocks):
         size/block;
@@ -2405,7 +2409,9 @@ void coordinate_shared_bridge_stage(
         return at;
     };
     auto expected=image.descriptors;
-    for(auto& [lba,vd]:expected) {
+    // Fixed-size writable unlink never normalizes the original PVD/SVD
+    // volume lengths; only the approved directory sectors may change.
+    if(!fixed)for(auto& [lba,vd]:expected) {
         Bytes old(vd.begin()+80,vd.begin()+88);
         both(vd,80,static_cast<std::uint32_t>(volume_blocks));
         patch(std::uint64_t(lba)*block+80,std::move(old),
@@ -3967,6 +3973,17 @@ std::unique_ptr<BridgeMetadataEdit> prepare_bridge_metadata_edit(
         need(!image.iso_system_use,
              "shared ISO/UDF resize needs a plain ISO/Joliet bridge");
         const Disc udf(path);
+        // Start with fixed-size, nonpartitioned shared-file unlink only.
+        // A validated rewritable allocator must not be treated as ROM.
+        if(!sequential_vat && !image.hybrid_system_area &&
+           std::all_of(changes.begin(),changes.end(),[](const ArchiveChange& c) {
+               return c.remove && !c.directory;
+           })) {
+            const auto info=inspect_udf_edit(path,true,false);
+            plan.type1_fixed_shared_delete=info.parser_compatible &&
+                (info.partition_access_type==3 || info.partition_access_type==4) &&
+                (info.allocation_bitmap != info.allocation_table);
+        }
         for(const auto& change:changes) {
             const auto key=edit_path(change.path);
             const auto found=iso_files.find(upper(key));
@@ -3996,6 +4013,38 @@ std::unique_ptr<BridgeMetadataEdit> prepare_bridge_metadata_edit(
             for(const auto& [at,bytes]:image.boot_regions)
                 need(!intersect(item->extents[0].offset,item->size,at,bytes),
                      "shared replacement overlaps boot data");
+            if(plan.type1_fixed_shared_delete) {
+                // Reclamation is sector-based. Check the full allocation,
+                // including the final sector's padding, against every
+                // other optical file, directory, boot and metadata span.
+                const auto start=item->extents[0].offset;
+                const auto length=(item->size+block-1)/block*block;
+                need(start>=257ull*block && start<=image.size &&
+                     length<=image.size-start,
+                     "writable shared deletion exceeds payload bounds");
+                const auto exclusive=[&](std::uint64_t at,std::uint64_t bytes) {
+                    need(!intersect(start,length,at,bytes),
+                         "writable shared deletion aliases protected optical data");
+                };
+                for(const auto* ranges:{&image.boot_regions,&image.udf_metadata_regions,
+                                        &image.iso_auxiliary_regions,
+                                        &image.hybrid_protected_regions})
+                    for(const auto& [at,bytes]:*ranges)exclusive(at,bytes);
+                auto check_other=[&](const Node& other) {
+                    if(&other==node)return;
+                    each_extent(other,exclusive);
+                    if(other.directory && image.joliet)
+                        exclusive(std::uint64_t(le(other.joliet_record,2))*block,
+                                  le(other.joliet_record,10));
+                };
+                check_other(*image.root);
+                for(const auto& [other_key,other]:iso_files) {
+                    (void)other_key;
+                    check_other(*other);
+                }
+                // The strict UDF allocator independently checks every
+                // allocated run and FE for unique ownership.
+            }
             need(node->record_at && (!image.joliet || node->joliet_record_at),
                  "missing shared ISO directory record location");
             shared.emplace(key,node);
@@ -4019,7 +4068,7 @@ std::unique_ptr<BridgeMetadataEdit> prepare_bridge_metadata_edit(
             plan.metadata_writes.emplace_back(sector,entry.original.size());
     }
     if(adding_shared || !shared.empty()) {
-        for(const auto& [lba,vd]:image.descriptors) {
+        if(!plan.type1_fixed_shared_delete)for(const auto& [lba,vd]:image.descriptors) {
             (void)vd;
             plan.metadata_writes.emplace_back(std::uint64_t(lba)*block+80,8);
         }

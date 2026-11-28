@@ -2369,10 +2369,12 @@ void create_udf_type1_batch(const std::filesystem::path& image,
             const bool shared=coordinated &&
                 (coordinated->shared_replacements.count(key)!=0 ||
                  coordinated->shared_deletions.count(key)!=0);
-            need(!shared || (mastering && !change.directory &&
-                 (change.remove?coordinated->shared_deletions.count(key):
-                                coordinated->shared_replacements.count(key))),
-                 "shared ISO/UDF edit needs matching append mastering plan");
+            need(!shared || (!change.directory &&
+                 ((mastering && (change.remove?coordinated->shared_deletions.count(key):
+                                               coordinated->shared_replacements.count(key))) ||
+                  (!mastering && coordinated->type1_fixed_shared_delete &&
+                   change.remove && coordinated->shared_deletions.count(key)))),
+                 "shared ISO/UDF edit needs matching mastering or fixed unlink plan");
             validate_udf_existing_change(volume,change,mastering!=nullptr,shared);
             existing_changes.push_back(change);
             continue;
@@ -2839,6 +2841,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         }
     }
     std::vector<Location> deleted_regions;
+    std::set<std::pair<std::uint64_t,std::uint64_t>> retained_shared_bytes;
     std::uint64_t deleted_blocks=0;
     std::uint32_t deleted_files=0,deleted_dirs=0;
     for(const auto& change:existing_changes) {
@@ -2851,6 +2854,13 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         const bool preserve=mastering && coordinated &&
             coordinated->shared_deletions.count(key)!=0;
         const auto regions=volume.reclaim_entry_blocks(entry,is_directory,preserve);
+        if(coordinated && coordinated->type1_fixed_shared_delete &&
+           coordinated->shared_deletions.count(key)) {
+            need(!mastering && !is_directory && !entry.fe.runs.empty(),
+                 "fixed shared unlink requires external regular-file data");
+            for(const auto& run:entry.fe.runs)
+                retained_shared_bytes.emplace(run.at,std::uint64_t(run.blocks)*block);
+        }
         for(const auto& region:regions) {
             need(region.bytes%block==0 &&
                  region.bytes/block<=
@@ -2940,11 +2950,13 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                          parent.content_write);
         staged_write(out,parent.original.at,parent.fe_write);
     }
-    // Wipe the released FE and every recorded ShortAD sector only after
-    // parent FIDs have lost their ICB pointers. No new allocation reuses
-    // these blocks in the current transaction.
+    // Wipe released FE and data after FIDs lose their ICB pointers.
+    // Fixed shared unlink retains only the original optical payload
+    // bytes until ISO compaction is verified; they become free in the
+    // committed map, but are never reused within this transaction.
     for(const auto& region:deleted_regions)
-        staged_zero(out,region.at,region.bytes,progress);
+        if(!retained_shared_bytes.count({region.at,region.bytes}))
+            staged_zero(out,region.at,region.bytes,progress);
     if(mastering) {
         for(const auto& [at,bytes]:mastering->descriptors) {
             edit_tick(progress);
@@ -4585,6 +4597,8 @@ void edit_udf(const std::filesystem::path& image,
     try {
         owner=std::make_unique<Type1>(image,allow_bridge,bounded_partitioned_bridge);
     } catch(const VatWriteRequired&) {
+        need(!coordinated || !coordinated->type1_fixed_shared_delete,
+             "fixed Type-1 unlink cannot use VAT");
         // The VAT bridge provides the external ISO validator and
         // immutable ranges. Shared-file coordination may only change
         // the explicitly checked pre-anchor ISO metadata fields.
@@ -4637,14 +4651,23 @@ void edit_udf(const std::filesystem::path& image,
     volume.protect_external_ranges(protected_ranges);
     need(!changes.empty(),"no UDF changes");
     if(coordinated) {
+        const bool fixed=coordinated->type1_fixed_shared_delete;
         need(allow_bridge && validate_stage &&
-             volume.partition_access_type()==1 && !volume.has_allocation_map() &&
+             (fixed?(!bounded_partitioned_bridge &&
+                     volume.has_allocation_map() &&
+                     (volume.partition_access_type()==3 || volume.partition_access_type()==4) &&
+                     !coordinated->iso_metadata_blocks &&
+                     coordinated->shared_replacements.empty() &&
+                     coordinated->shared_additions.empty() &&
+                     coordinated->shared_directories.empty() &&
+                     coordinated->shared_deletions.size()==changes.size()):
+                    (volume.partition_access_type()==1 && !volume.has_allocation_map())) &&
              coordinated->shared_replacements.size()+
                  coordinated->shared_deletions.size()+
                  coordinated->shared_additions.size()+
                  coordinated->shared_directories.size()==changes.size() &&
              !coordinated->metadata_writes.empty(),
-             "shared ISO/UDF edit requires read-only Type-1 mastering");
+             "shared ISO/UDF edit requires read-only mastering or validated fixed Type-1 unlink");
         for(const auto& change:changes) {
             const auto key=edit_path(change.path);
             const bool existing=volume.files().count(key)!=0;
@@ -4664,6 +4687,11 @@ void edit_udf(const std::filesystem::path& image,
             for(const auto& object:volume.intervals())
                 need(!intersects({at,bytes},object.range),
                      "coordinated ISO field overlaps a live UDF object");
+        }
+        if(fixed) {
+            create_udf_type1_batch(image,volume,changes,progress,true,
+                                   validate_stage,nullptr,coordinated);
+            return;
         }
         auto plan=volume.prepare_readonly_append(changes,protected_ranges,
                                                 coordinated->iso_metadata_blocks,

@@ -833,3 +833,23 @@ layouts retain their existing policy. The small fixture exercises
 nonmonotonic physical order, different descriptor boundaries, malformed
 mappings, mixed add/replace/delete, independent extraction, path
 tables and staged cancellation for primary and Joliet ROMs.
+
+### Fixed-size writable Type-1 shared deletion
+
+For nonpartitioned, plain ISO/Joliet bridges with a validated Type-1
+rewritable/overwritable bitmap or Unallocated Space Table and closed
+LVID, an existing single-extent common regular file may be deleted
+from both namespaces in one transaction. The sector-rounded allocation
+must not overlap any other optical file, directory, boot, or descriptor
+range. The strict UDF allocator independently checks FE/run ownership.
+The UDF FID, FE, allocation map and LVID are updated, then ISO directory
+records are compacted in their existing sectors. No new allocation
+reuses the freed shared blocks during the same transaction. The former
+payload bytes are retained to allow the byte-exact optical guard to run
+before compaction, but are marked free for future transactions: this
+is not secure erasure. The FE is cleared normally. Original PVD/SVD,
+boot bytes and image size are unchanged. Bitmap/table and primary/Joliet
+fixtures check alias rejection, staged cancellation, reclamation,
+independent extraction and a subsequent allocation. Shared writable
+creation, relocation, multi-extent unlink and partitioned variants are
+not enabled by this first fixed-size profile.

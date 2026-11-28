@@ -293,6 +293,95 @@ def main(editor,inspector):
         assert image.read_bytes()==before, (
             'unknown El Torito boot extent allowed a UDF metadata edit')
 
+        # Writable, truly shared external file, unlike the older
+        # embedded-UDF/free-ISO-block collision fixture above. Exercise
+        # both independent free-space encodings and both optical views.
+        from test_iso_edit import fixture
+        for use_table in (False,True):
+            for joliet in (False,True):
+                raw=descriptor_bridge(boot=True,boot_count=4,writable=True)
+                fe=302*B
+                struct.pack_into('<H',raw,fe+34,0)
+                struct.pack_into('<III',raw,fe+172,8,5,3)
+                struct.pack_into('<Q',raw,fe+64,1)
+                update_tag(raw,fe,184,2)
+                raw[303*B:303*B+5]=b'world'
+                bm=(PARTITION+BITMAP_LOGICAL)*B
+                raw[bm+24]&=~(1<<3)
+                bitmap_bytes=struct.unpack_from('<I',raw,bm+20)[0]
+                update_tag(raw,bm,24+bitmap_bytes,BITMAP_LOGICAL)
+                original_free=struct.unpack_from('<I',raw,INTEGRITY_LBA*B+80)[0]-1
+                struct.pack_into('<I',raw,INTEGRITY_LBA*B+80,original_free)
+                update_tag(raw,INTEGRITY_LBA*B,88,INTEGRITY_LBA)
+                if use_table:
+                    # Replace tag-264 with a genuine bounded tag-263
+                    # ShortAD table. Logical 0..3 and 6 are occupied.
+                    struct.pack_into('<IIII',raw,260*B+56,B,BITMAP_LOGICAL,0,0)
+                    update_tag(raw,260*B,512)
+                    raw[bm:bm+B]=bytes(B)
+                    struct.pack_into('<HH',raw,bm,263,2)
+                    raw[bm+27]=1
+                    struct.pack_into('<IIIII',raw,bm+36,16,0x40000000|2*B,4,
+                                     0x40000000|243*B,7)
+                    update_tag(raw,bm,56,BITMAP_LOGICAL)
+                if joliet:
+                    raw[23*B:24*B]=raw[19*B:20*B]
+                    raw[19*B:20*B]=raw[18*B:19*B]
+                    raw[18*B:19*B]=raw[17*B:18*B]
+                    raw[17*B:18*B]=fixture(joliet=True)[17*B:18*B]
+                    both(raw,17*B+80,len(raw)//B)
+                    jr=iso_record(22,B,2,b'\0')+iso_record(22,B,2,b'\1')
+                    jr+=iso_record(303,5,0,'hello;1'.encode('utf-16-be'))
+                    raw[22*B:23*B]=jr.ljust(B,b'\0')
+                # Another optical filename sharing the same sector must
+                # prevent reclamation, even though UDF has no such alias.
+                bad=bytearray(raw)
+                for view in ((False,True) if joliet else (False,)):
+                    sector=22 if view else 20
+                    def enc(name):return name.encode('utf-16-be' if view else 'ascii')
+                    records=(iso_record(sector,B,2,b'\0')+
+                             iso_record(sector,B,2,b'\1')+
+                             iso_record(303,5,0,enc('hello;1'))+
+                             iso_record(303,5,0,enc('other;1')))
+                    bad[sector*B:(sector+1)*B]=records.ljust(B,b'\0')
+                image.write_bytes(bad)
+                run([editor,str(image),'delete','hello'],expected=1)
+                assert image.read_bytes()==bad
+                image.write_bytes(raw)
+                result=run([editor,str(image),'batchcancelstagedfixed','delete','hello'],expected=1)
+                assert result.returncode==3,result.stderr
+                assert image.read_bytes()==raw
+                run([editor,str(image),'delete','hello'])
+                after=image.read_bytes()
+                assert len(after)==len(raw)
+                assert after[24*B:26*B]==raw[24*B:26*B]
+                assert after[16*B:19*B]==raw[16*B:19*B]
+                assert after[303*B:304*B]==raw[303*B:304*B]
+                assert after[fe:fe+B]==bytes(B)
+                assert struct.unpack_from('<I',after,INTEGRITY_LBA*B+80)[0]==original_free+2
+                if use_table:
+                    assert struct.unpack_from('<H',after,bm)[0]==263
+                    n=struct.unpack_from('<I',after,bm+36)[0]
+                    free=set()
+                    for at in range(bm+40,bm+40+n,8):
+                        length,start=struct.unpack_from('<II',after,at)
+                        free.update(range(start,start+(length&0x3fffffff)//B))
+                    assert {2,3}<=free
+                else:
+                    assert after[bm+24]&0x0c==0x0c
+                assert read_image(image)=={}
+                if joliet:assert read_image(image,True)=={}
+                target=root/f'writable-shared-deleted-{use_table}-{joliet}'
+                run([inspector,str(image),'--extract',str(target)])
+                assert not (target/'hello').exists()
+                source.write_bytes(b'REUSED')
+                run([editor,str(image),'add','reused.bin',str(source)])
+                target=root/f'writable-shared-reused-{use_table}-{joliet}'
+                run([inspector,str(image),'--extract',str(target)])
+                assert (target/'reused.bin').read_bytes()==b'REUSED'
+                assert read_image(image)=={}
+                assert not list(root.glob('.iso-wcx-edit-*'))
+
         # Read-only shared extent with a real closed LVID. Exercise
         # both growth and shrink while retaining the original boot bytes.
         from test_iso_edit import fixture
