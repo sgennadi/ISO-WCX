@@ -1653,11 +1653,12 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             second=verify(first,2)
             if iso_only:
                 for args in (
-                    ('add','ISO_ROOT.BIN',replacement),
+                    ('batch','add','ISO_ROOT.BIN',replacement,'add','COMMON/BASE.BIN',replacement),
                     ('batch','delete','ISO_ROOT.BIN','delete','COMMON/BASE.BIN'),
                     ('batch','delete','ONLY','delete','hello'),
                     ('add','ONLY/NEW.BIN',replacement),
-                    ('add','COMMON/ISOSUB/KEEP.BIN',replacement),
+                    ('batch','add','COMMON/ISOSUB/KEEP.BIN',replacement,
+                     'add','COMMON/BASE.BIN',replacement),
                     ('delete','COMMON/ISOSUB'),
                     ('batch','delete','COMMON/ISOSUB','add','COMMON/NEW.BIN',replacement)):
                     run(editor,bridge,*args,success=False)
@@ -1883,7 +1884,7 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     assert len(table)==size and len(table)>=152
                     return icb-PARTITION,table
 
-                def verify_iso_delete(before,number):
+                def verify_iso_remaster(before,number):
                     after=verify(before,number)
                     old_icb,old_table=vat_mapping(before)
                     new_icb,new_table=vat_mapping(after)
@@ -1894,6 +1895,49 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     assert new_table[:132]==old_table[:132]
                     assert new_table[136:]==old_table[136:]
                     return after
+
+                # Independent ISO payloads are allocated in fresh
+                # unmapped sectors. Growing, shrinking and equal-size
+                # edits of an appended file must preserve the VAT map.
+                replacement.write_bytes(b'ISO-ONLY-RESIZED-PAYLOAD!'*17000)
+                iso_source.write_bytes(b'ISO-ONLY-SHORT')
+                run(editor,bridge,'batch','add','ISO_ROOT.BIN',replacement,
+                    'add','COMMON/ISOSUB/KEEP.BIN',iso_source)
+                iso_expected['ISO_ROOT.BIN']=replacement.read_bytes()
+                iso_expected['COMMON/ISOSUB/KEEP.BIN']=iso_source.read_bytes()
+                resized=verify_iso_remaster(sixth,15)
+                for data in (replacement.read_bytes(),iso_source.read_bytes()):
+                    assert resized.find(data,len(sixth))>=len(sixth)
+                replacement.write_bytes(b'shrunk')
+                run(editor,bridge,'add','ISO_ROOT.BIN',replacement)
+                iso_expected['ISO_ROOT.BIN']=replacement.read_bytes()
+                shrunk=verify_iso_remaster(resized,16)
+                replacement.write_bytes(b'newest')
+                run(editor,bridge,'add','ISO_ROOT.BIN',replacement)
+                iso_expected['ISO_ROOT.BIN']=replacement.read_bytes()
+                sixth=verify_iso_remaster(shrunk,17)
+
+                replacement.write_bytes(b'cancel resize'*400)
+                result=run(editor,bridge,'batchcancelstaged','add','ISO_ROOT.BIN',
+                           replacement,success=False)
+                assert result.returncode==3 and bridge.read_bytes()==sixth
+                for args in (
+                    ('batch','add','ISO_ROOT.BIN',replacement,'add','hello',replacement),
+                    ('batch','add','ISO_ROOT.BIN',replacement,'add','COMMON/BASE.BIN',replacement),
+                    ('batch','delete','ONLY','add','ONLY/KEEP.BIN',replacement),
+                    ('add','ONLY/NEW.BIN',replacement)):
+                    run(editor,bridge,*args,success=False)
+                    assert bridge.read_bytes()==sixth
+                replacement.write_bytes(b'')
+                run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
+                assert bridge.read_bytes()==sixth
+                # The reservation has a strict combined data/metadata
+                # budget even if the file is sparse.
+                with replacement.open('wb') as oversized:oversized.truncate(64*1024*1024)
+                run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
+                assert bridge.read_bytes()==sixth
+                assert not list(root.glob('.iso-wcx-edit-*'))
+                replacement.write_bytes(b'next')
 
                 for args in (
                     ('batch','delete','ONLY','delete','ONLY/MISSING.BIN'),
@@ -1914,12 +1958,12 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     'delete','ISO_ROOT.BIN')
                 for key in ('ONLY/','ONLY/KEEP.BIN','ISO_ROOT.BIN'):
                     del iso_expected[key]
-                removed=verify_iso_delete(sixth,12)
+                removed=verify_iso_remaster(sixth,12)
                 # An ISO-only child under a shared directory is also
                 # removable without unlinking its shared siblings.
                 run(editor,bridge,'delete','COMMON/ISOSUB/KEEP.BIN')
                 del iso_expected['COMMON/ISOSUB/KEEP.BIN']
-                removed=verify_iso_delete(removed,13)
+                removed=verify_iso_remaster(removed,13)
                 run(editor,bridge,'delete','ISO_ROOT.BIN',success=False)
                 assert bridge.read_bytes()==removed
                 replacement.write_bytes(b'shared after ISO-only deletion')

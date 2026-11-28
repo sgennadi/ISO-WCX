@@ -612,5 +612,35 @@ The contract is rejected by the Type-1 writer.
 The regression matrix adds nested/overlapping ISO-only removals,
 removal under a shared directory, cancellation after append, ambiguous
 mixed batches, aliases, unchanged VAT mappings, and a subsequent shared
-append. ISO-only creation and resizing remain unsupported, as do mixed
-ISO-only/UDF/shared mutation batches and unsupported map families.
+append. The next profile extends this remaster to independent payload
+replacement. ISO-only creation, mixed ISO-only/UDF/shared mutation
+batches and unsupported map families remain outside the profile.
+
+### Independent ISO-only payload resizing in sequential MBR/GPT bridges
+
+Existing independent regular ISO-only files may also be replaced by
+nonempty files of different lengths. A pure ISO-only batch may combine
+these replacements with the existing ISO-only deletion profile.
+The fixed-size pre-anchor route remains unchanged; a replacement of
+a previously appended ISO-only payload uses the append route even
+if its size is unchanged. The ISO coordinator reserves complete
+payload sectors before the directory and path-table sectors within
+the existing unmapped VAT reservation. No UDF file entry or virtual
+mapping is created for an ISO-only file. Each payload is streamed into
+verified zero-filled sectors, with zero padding in its final sector;
+its planned ISO and Joliet records point to the new physical extent.
+The final readback independently compares replacement data and padding
+with the source files, in addition to the existing metadata, namespace,
+partition-envelope and historical-byte checks.
+
+The combined independent payload and ISO metadata reservation is
+limited to 32768 optical blocks (64 MiB) and the remaining recorded
+capacity of the backing partition. Empty replacement files, new
+ISO-only names, mixed shared/private operations, and unsupported
+geometry remain outside this profile. No original payload sector is
+reclaimed or overwritten by this append operation. Regression tests
+cover growth, shrinkage, a second equal-size replacement of appended
+data, multiple independent replacements in one batch, unchanged VAT
+mapping, capacity and budget failure, conflicting operations, and
+cancellation, using both MBR/GPT and ISO/Joliet with embedded or external
+VAT. These are image-level tests, not physical boot validation.
