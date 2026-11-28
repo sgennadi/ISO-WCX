@@ -469,6 +469,66 @@ def main(editor,inspector):
                     section,=optical_records(image,name)
                     assert section[0]>=257 and section[1]==len(wanted[name])
                 assert not list(root.glob('.iso-wcx-edit-*'))
+                # Relocate the original shared regular file without
+                # changing its ICB, unique ID, or the optical envelope.
+                image.write_bytes(raw)
+                result=run([editor,str(image),'batchcancelstagedfixed',
+                            'add','hello',str(large)],expected=1)
+                assert result.returncode==3,result.stderr
+                assert image.read_bytes()==raw
+                image.write_bytes(cramped)
+                run([editor,str(image),'add','hello',str(large)],expected=1)
+                assert image.read_bytes()==cramped
+                image.write_bytes(raw)
+                run([editor,str(image),'add','hello',str(large)])
+                grown=image.read_bytes()
+                grown_lba,grown_size=optical_records(image,'hello')[0]
+                assert grown_size==large.stat().st_size and grown_lba!=303
+                grown_blocks=(grown_size+B-1)//B
+                assert len(grown)==len(raw)
+                assert grown[16*B:19*B]==raw[16*B:19*B]
+                assert grown[24*B:26*B]==raw[24*B:26*B]
+                assert grown[303*B:304*B]==raw[303*B:304*B]
+                assert grown[fe+160:fe+168]==raw[fe+160:fe+168]
+                assert struct.unpack_from('<I',grown,fe+180)[0]+PARTITION==grown_lba
+                assert free_blocks(grown)==((free_blocks(raw)-
+                        set(range(grown_lba-PARTITION,grown_lba-PARTITION+grown_blocks)))|{3})
+                assert struct.unpack_from('<I',grown,INTEGRITY_LBA*B+80)[0]==original_free-grown_blocks+1
+                assert grown[INTEGRITY_LBA*B+120:INTEGRITY_LBA*B+128]==raw[INTEGRITY_LBA*B+120:INTEGRITY_LBA*B+128]
+                assert read_image(image)=={'hello':large.read_bytes()}
+                if joliet:assert read_image(image,True)=={'hello':large.read_bytes()}
+                target=root/f'writable-shared-grown-{use_table}-{joliet}'
+                run([inspector,str(image),'--extract',str(target)])
+                assert (target/'hello').read_bytes()==large.read_bytes()
+                # Shrink to a small, still external shared file.
+                run([editor,str(image),'add','hello',str(source)])
+                shrunk=image.read_bytes()
+                small_lba,small_size=optical_records(image,'hello')[0]
+                assert small_lba!=grown_lba and small_size==source.stat().st_size
+                assert shrunk[grown_lba*B:(grown_lba+grown_blocks)*B]==grown[grown_lba*B:(grown_lba+grown_blocks)*B]
+                assert struct.unpack_from('<I',shrunk,INTEGRITY_LBA*B+80)[0]==original_free
+                assert set(range(grown_lba-PARTITION,grown_lba-PARTITION+grown_blocks))<=free_blocks(shrunk)
+                assert small_lba-PARTITION not in free_blocks(shrunk)
+                assert read_image(image)=={'hello':source.read_bytes()}
+                if joliet:assert read_image(image,True)=={'hello':source.read_bytes()}
+                # Existing-only mixed relocation+unlink; do not reuse
+                # any block freed by a different member of this batch.
+                image.write_bytes(added)
+                old_added_lba,_=optical_records(image,'ADDED.BIN')[0]
+                run([editor,str(image),'batch','delete','ADDED.BIN',
+                     'add','hello',str(large)])
+                mixed=image.read_bytes()
+                relocated_lba,_=optical_records(image,'hello')[0]
+                assert not (relocated_lba<=old_added_lba<relocated_lba+grown_blocks)
+                assert old_added_lba-PARTITION in free_blocks(mixed)
+                assert mixed[old_added_lba*B:(old_added_lba+1)*B]==added[old_added_lba*B:(old_added_lba+1)*B]
+                assert read_image(image)=={'hello':large.read_bytes(),'LARGE.BIN':large.read_bytes()}
+                if joliet:assert read_image(image,True)=={'hello':large.read_bytes(),'LARGE.BIN':large.read_bytes()}
+                target=root/f'writable-shared-mixed-replace-{use_table}-{joliet}'
+                run([inspector,str(image),'--extract',str(target)])
+                assert (target/'hello').read_bytes()==large.read_bytes()
+                assert (target/'LARGE.BIN').read_bytes()==large.read_bytes()
+                assert not (target/'ADDED.BIN').exists()
                 # Another optical filename sharing the same sector must
                 # prevent reclamation, even though UDF has no such alias.
                 bad=bytearray(raw)
@@ -483,6 +543,27 @@ def main(editor,inspector):
                 image.write_bytes(bad)
                 run([editor,str(image),'delete','hello'],expected=1)
                 assert image.read_bytes()==bad
+                run([editor,str(image),'add','hello',str(large)],expected=1)
+                assert image.read_bytes()==bad
+                # The visible five-byte file must not authorize freeing
+                # hidden allocation beyond its sector-rounded mapping.
+                excess=bytearray(raw)
+                struct.pack_into('<I',excess,fe+176,B+5)
+                struct.pack_into('<Q',excess,fe+64,2)
+                update_tag(excess,fe,184,2)
+                if use_table:
+                    struct.pack_into('<II',excess,bm+40,0x40000000|B,5)
+                    update_tag(excess,bm,56,BITMAP_LOGICAL)
+                else:
+                    excess[bm+24]&=~(1<<4)
+                    update_tag(excess,bm,24+bitmap_bytes,BITMAP_LOGICAL)
+                struct.pack_into('<I',excess,INTEGRITY_LBA*B+80,original_free-1)
+                update_tag(excess,INTEGRITY_LBA*B,88,INTEGRITY_LBA)
+                image.write_bytes(excess)
+                run([editor,str(image),'add','hello',str(large)],expected=1)
+                assert image.read_bytes()==excess
+                run([editor,str(image),'delete','hello'],expected=1)
+                assert image.read_bytes()==excess
                 image.write_bytes(raw)
                 result=run([editor,str(image),'batchcancelstagedfixed','delete','hello'],expected=1)
                 assert result.returncode==3,result.stderr

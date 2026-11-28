@@ -896,3 +896,26 @@ F5 and staged cancellation. Superseded optical metadata is deliberately
 not reclaimed, so repeated full tree remasters consume additional space.
 This extension is limited to the already-proven nonpartitioned shared
 namespace, available contiguous metadata capacity and portable names.
+
+### Fixed-size writable Type-1 shared replacement
+
+Existing nonempty common regular files with one optical record and a
+complete contiguous external UDF ShortAD mapping can be relocated on
+nonpartitioned writable Type-1 bitmap/table media. The same profile
+can unlink other existing common regular files in one atomic batch.
+The new file is allocated before any old allocation is released. Its
+payload is contiguous and at most 0xffffffff bytes; the original
+optical volume limits still apply. The old FE/FID and unique ID are
+retained for replacement, while old uniquely owned data sectors are
+released only after checking the complete recorded allocation, including
+sector padding and absence of hidden excess ShortAD bytes. The old
+payload bytes remain untouched (not secure erasure). LVID free space
+is updated without changing file counts for replacements, and all
+approved primary/Joliet record fields are retargeted after the original
+optical guard passes. No freed blocks are reused in the same batch.
+Tests cover growth, shrink, mixed replace/delete, alias and excess
+allocation refusal, lack of capacity and staged rollback on both
+bitmap/table and primary/Joliet fixtures. Equal-length existing-file
+patching retains its prior route. Shared writable relocation of
+fragmented ISO chains, >4 GiB, partitioned bridges, and batches also
+containing new files/directories remain separate work.

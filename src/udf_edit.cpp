@@ -839,7 +839,10 @@ public:
     // Reclaim a uniquely owned regular file or EMPTY directory. Its parent
     // FID must first be tombstoned. Blocks stay unavailable in this batch.
     [[nodiscard]] std::vector<Location> reclaim_entry_blocks(
-            const File& file,bool directory,bool preserve=false) {
+            const File& file,bool directory,bool preserve=false,
+            bool keep_fe=false) {
+        need(!keep_fe || (!directory && !preserve),
+             "UDF retained FE reclamation requires a relocated regular file");
         need(bitmap_ && integrity_,"UDF reclamation needs a closed allocation map/LVID");
         const auto owner=file.fe.at;
         const auto found=references_.find(owner);
@@ -884,6 +887,9 @@ public:
         // former FE and shared data immutable. Ownership was still
         // checked above; no reclaimed sectors enter the virtual bitmap.
         if(preserve)return {};
+        // Replacement keeps the original FID, unique ID and FE. Check
+        // ownership of the FE above, but release only its former data.
+        if(keep_fe)reclaimed.erase(reclaimed.begin());
         for(const auto& range:reclaimed) {
             const auto first=logical_of(range.at);
             for(std::uint64_t j=0;j<range.bytes/block;++j) {
@@ -2396,13 +2402,31 @@ void create_udf_type1_batch(const std::filesystem::path& image,
             const bool shared=coordinated &&
                 (coordinated->shared_replacements.count(key)!=0 ||
                  coordinated->shared_deletions.count(key)!=0);
+            const bool fixed_shared=shared && !mastering &&
+                                     coordinated->type1_fixed_shared_existing;
             need(!shared || (!change.directory &&
-                 ((mastering && (change.remove?coordinated->shared_deletions.count(key):
-                                               coordinated->shared_replacements.count(key))) ||
-                  (!mastering && coordinated->type1_fixed_shared_delete &&
-                   change.remove && coordinated->shared_deletions.count(key)))),
-                 "shared ISO/UDF edit needs matching mastering or fixed unlink plan");
-            validate_udf_existing_change(volume,change,mastering!=nullptr,shared);
+                 (mastering || fixed_shared) &&
+                 (change.remove?coordinated->shared_deletions.count(key):
+                                coordinated->shared_replacements.count(key))),
+                 "shared ISO/UDF edit needs matching mastering or fixed edit plan");
+            if(fixed_shared) {
+                const auto& fe=volume.files().at(key).fe;
+                // Disc's visible length may truncate excess ShortAD
+                // storage. Never reclaim allocation beyond the complete
+                // sector-rounded mapping authorized by the ISO planner.
+                need(fe.storage==0 && !fe.runs.empty() && fe.size &&
+                     fe.recorded==fe.size &&
+                     fe.capacity==(fe.size+block-1)/block*block,
+                     "fixed shared edit has excess or nonexternal UDF allocation");
+                auto next=fe.runs.front().at;
+                for(const auto& run:fe.runs) {
+                    need(run.at==next,
+                         "fixed shared edit requires contiguous original allocation");
+                    next+=run.recorded;
+                }
+            }
+            validate_udf_existing_change(volume,change,mastering!=nullptr ||
+                                         fixed_shared,shared);
             existing_changes.push_back(change);
             continue;
         }
@@ -2643,7 +2667,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         std::vector<DataRun> runs;
     };
     std::vector<ReplacementPlan> replacements;
-    if(mastering)for(const auto& change:existing_changes) {
+    const bool fixed_existing=coordinated && coordinated->type1_fixed_shared_existing;
+    const bool relocate_existing=mastering || fixed_existing;
+    if(relocate_existing)for(const auto& change:existing_changes) {
         if(change.remove)continue;
         edit_tick(progress);
         const auto& old=volume.files().at(edit_path(change.path)).fe;
@@ -2667,6 +2693,10 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         if(!embedded) {
             need(header+8u<=block,"UDF replacement FE has no ShortAD slots");
             plan.runs=volume.allocate_file_data(plan.length,(block-header)/8u);
+            if(fixed_existing)
+                for(std::size_t i=1;i<plan.runs.size();++i)
+                    need(plan.runs[i].at==plan.runs[i-1].at+plan.runs[i-1].recorded,
+                         "fixed shared replacement needs contiguous free blocks");
             record_allocation(blocks);
         }
         put16(plan.fe,34,static_cast<std::uint16_t>(
@@ -2890,7 +2920,8 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     std::uint64_t deleted_blocks=0;
     std::uint32_t deleted_files=0,deleted_dirs=0;
     for(const auto& change:existing_changes) {
-        if(!change.remove)continue;
+        const bool relocated=fixed_existing && !change.remove;
+        if(!change.remove && !relocated)continue;
         edit_tick(progress);
         const auto key=edit_path(change.path);
         const bool is_directory=volume.directory_links().count(key)!=0;
@@ -2898,11 +2929,11 @@ void create_udf_type1_batch(const std::filesystem::path& image,
             volume.directory_links().at(key):volume.files().at(key);
         const bool preserve=mastering && coordinated &&
             coordinated->shared_deletions.count(key)!=0;
-        const auto regions=volume.reclaim_entry_blocks(entry,is_directory,preserve);
-        if(coordinated && coordinated->type1_fixed_shared_delete &&
-           coordinated->shared_deletions.count(key)) {
+        const auto regions=volume.reclaim_entry_blocks(entry,is_directory,preserve,
+                                                       relocated);
+        if(fixed_existing) {
             need(!mastering && !is_directory && !entry.fe.runs.empty(),
-                 "fixed shared unlink requires external regular-file data");
+                 "fixed shared edit requires external regular-file data");
             for(const auto& run:entry.fe.runs)
                 retained_shared_bytes.emplace(run.at,std::uint64_t(run.blocks)*block);
         }
@@ -2914,10 +2945,12 @@ void create_udf_type1_batch(const std::filesystem::path& image,
             deleted_blocks+=region.bytes/block;
             deleted_regions.push_back(region);
         }
-        auto& deleted_count=is_directory?deleted_dirs:deleted_files;
-        need(deleted_count<std::numeric_limits<std::uint32_t>::max(),
-             "UDF deleted entry count overflow");
-        ++deleted_count;
+        if(change.remove) {
+            auto& deleted_count=is_directory?deleted_dirs:deleted_files;
+            need(deleted_count<std::numeric_limits<std::uint32_t>::max(),
+                 "UDF deleted entry count overflow");
+            ++deleted_count;
+        }
     }
     need(released<=std::numeric_limits<std::uint32_t>::max()-
          deleted_blocks,
@@ -2980,7 +3013,7 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         }
         staged_write(out,plan.at,plan.fe);
     }
-    if(!mastering)for(const auto& change:existing_changes) {
+    if(!relocate_existing)for(const auto& change:existing_changes) {
         edit_tick(progress);
         if(change.remove)continue; // FID was patched in its parent payload.
         write_udf_existing_replacement(
@@ -2999,9 +3032,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         staged_write(out,parent.original.at,parent.fe_write);
     }
     // Wipe released FE and data after FIDs lose their ICB pointers.
-    // Fixed shared unlink retains only the original optical payload
-    // bytes until ISO compaction is verified; they become free in the
-    // committed map, but are never reused within this transaction.
+    // Fixed shared edits retain former optical payload bytes until the
+    // ISO namespace is retargeted; they become free in the committed
+    // map, but are never reused within this transaction.
     for(const auto& region:deleted_regions)
         if(!retained_shared_bytes.count({region.at,region.bytes}))
             staged_zero(out,region.at,region.bytes,progress);
@@ -4651,7 +4684,7 @@ void edit_udf(const std::filesystem::path& image,
     try {
         owner=std::make_unique<Type1>(image,allow_bridge,bounded_partitioned_bridge);
     } catch(const VatWriteRequired&) {
-        need(!coordinated || (!coordinated->type1_fixed_shared_delete &&
+        need(!coordinated || (!coordinated->type1_fixed_shared_existing &&
                               !coordinated->type1_fixed_shared_add),
              "fixed Type-1 coordination cannot use VAT");
         // The VAT bridge provides the external ISO validator and
@@ -4706,25 +4739,26 @@ void edit_udf(const std::filesystem::path& image,
     volume.protect_external_ranges(protected_ranges);
     need(!changes.empty(),"no UDF changes");
     if(coordinated) {
-        const bool fixed_delete=coordinated->type1_fixed_shared_delete;
+        const bool fixed_existing=coordinated->type1_fixed_shared_existing;
         const bool fixed_add=coordinated->type1_fixed_shared_add;
-        const bool fixed=fixed_delete || fixed_add;
+        const bool fixed=fixed_existing || fixed_add;
         const bool fixed_tree=fixed_add && coordinated->iso_metadata_blocks!=0;
         need((coordinated->type1_fixed_metadata!=nullptr)==fixed_tree &&
              (!fixed_tree || (!coordinated->type1_fixed_metadata->first_lba &&
                              coordinated->type1_fixed_metadata->limit_lba<=volume.image_size()/block &&
                              coordinated->iso_metadata_blocks<=32768)),
              "invalid fixed Type-1 metadata reservation contract");
-        need(allow_bridge && validate_stage && !(fixed_delete && fixed_add) &&
+        need(allow_bridge && validate_stage && !(fixed_existing && fixed_add) &&
              (fixed?(!bounded_partitioned_bridge &&
                      volume.has_allocation_map() &&
                      (volume.partition_access_type()==3 || volume.partition_access_type()==4) &&
                      (!coordinated->iso_metadata_blocks || fixed_tree) &&
-                     coordinated->shared_replacements.empty() &&
-                     (fixed_delete?(coordinated->shared_additions.empty() &&
+                     (fixed_existing?(coordinated->shared_additions.empty() &&
                                     coordinated->shared_directories.empty() &&
-                                    coordinated->shared_deletions.size()==changes.size()):
-                                   (coordinated->shared_deletions.empty() &&
+                                    coordinated->shared_deletions.size()+
+                                        coordinated->shared_replacements.size()==changes.size()):
+                                   (coordinated->shared_replacements.empty() &&
+                                    coordinated->shared_deletions.empty() &&
                                     (fixed_tree || coordinated->shared_directories.empty()) &&
                                     coordinated->shared_additions.size()+
                                         coordinated->shared_directories.size()==changes.size()))):

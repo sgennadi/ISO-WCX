@@ -39,10 +39,11 @@ struct CoordinatedIsoUpdate {
     std::set<std::string> shared_deletions;
     std::set<std::string> shared_additions;
     std::set<std::string> shared_directories;
-    // Fixed-size writable physical Type-1 shared regular-file unlink.
-    // Reclaim uniquely owned blocks, but retain the old payload bytes
-    // through the optical byte-preservation check before ISO compaction.
-    bool type1_fixed_shared_delete=false;
+    // Fixed-size writable physical Type-1 shared regular-file edits.
+    // Replace in newly allocated blocks or unlink; retain the old
+    // payload bytes through the optical byte-preservation check.
+    // An existing FE survives replacement, but not deletion.
+    bool type1_fixed_shared_existing=false;
     // Fixed-size shared file/directory creation. Reuse existing optical
     // directory capacity, or reserve fresh ISO metadata in the UDF map.
     bool type1_fixed_shared_add=false;
