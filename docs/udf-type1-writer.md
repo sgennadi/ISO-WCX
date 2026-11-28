@@ -853,3 +853,22 @@ fixtures check alias rejection, staged cancellation, reclamation,
 independent extraction and a subsequent allocation. Shared writable
 creation, relocation, multi-extent unlink and partitioned variants are
 not enabled by this first fixed-size profile.
+
+### Fixed-size writable Type-1 shared creation
+
+A nonpartitioned plain ISO/Joliet bridge with a proven identical
+shared namespace and a validated writable Type-1 allocator can add
+regular, nonempty shared files of at most 0xffffffff bytes in existing
+ISO directories. The full original directory allocations are bounded,
+checked against other optical extents, boot/path-table/VRS resources,
+and independently against UDF live objects. The allocation map reserves
+external file data even for small files; newly allocated ShortAD runs
+must be physically contiguous. Only the affected original directory
+spans are rewritten after byte-exact UDF staging protection. PVD/SVD,
+path tables, unaffected directories, old payloads and physical image
+size remain unchanged. Both namespaces and the final mappings are
+verified before commit. Tests cover bitmap/table, primary/Joliet,
+small and external data, multiple additions, directory capacity failure
+and staged cancellation. This profile does not yet grow optical directory
+allocations, allocate new optical directories (F7), mirror a split or
+empty namespace, or support partitioned writable shared creation.

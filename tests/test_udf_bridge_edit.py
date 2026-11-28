@@ -333,6 +333,41 @@ def main(editor,inspector):
                     jr=iso_record(22,B,2,b'\0')+iso_record(22,B,2,b'\1')
                     jr+=iso_record(303,5,0,'hello;1'.encode('utf-16-be'))
                     raw[22*B:23*B]=jr.ljust(B,b'\0')
+                # Existing optical directory capacity permits mirrored
+                # F5 without growing or rewriting volume descriptors.
+                image.write_bytes(raw)
+                source.write_bytes(b'SMALL SHARED')
+                large=root/'writable-shared-large.bin'
+                large.write_bytes(b'WRITABLE SHARED PAYLOAD'*200)
+                result=run([editor,str(image),'batchcancelstagedfixed',
+                            'add','ADDED.BIN',str(source)],expected=1)
+                assert result.returncode==3,result.stderr
+                assert image.read_bytes()==raw
+                many=[editor,str(image),'batch']
+                for i in range(80):
+                    many+=['add',f'OVERFLOW{i:03d}.BIN',str(source)]
+                run(many,expected=1)
+                assert image.read_bytes()==raw
+                run([editor,str(image),'batch','add','ADDED.BIN',str(source),
+                     'add','LARGE.BIN',str(large)])
+                added=image.read_bytes()
+                assert len(added)==len(raw)
+                assert added[16*B:19*B]==raw[16*B:19*B]
+                assert added[24*B:26*B]==raw[24*B:26*B]
+                assert added[303*B:304*B]==raw[303*B:304*B]
+                wanted={'hello':b'world','ADDED.BIN':source.read_bytes(),
+                        'LARGE.BIN':large.read_bytes()}
+                assert read_image(image)==wanted
+                if joliet:assert read_image(image,True)==wanted
+                target=root/f'writable-shared-added-{use_table}-{joliet}'
+                run([inspector,str(image),'--extract',str(target)])
+                for name,body in wanted.items():
+                    assert (target/name).read_bytes()==body
+                from test_iso_over4gb import records as optical_records
+                for name in ('ADDED.BIN','LARGE.BIN'):
+                    section,=optical_records(image,name)
+                    assert section[0]>=257 and section[1]==len(wanted[name])
+                assert not list(root.glob('.iso-wcx-edit-*'))
                 # Another optical filename sharing the same sector must
                 # prevent reclamation, even though UDF has no such alias.
                 bad=bytearray(raw)

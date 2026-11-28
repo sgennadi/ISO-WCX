@@ -2504,9 +2504,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         record_allocation(1);
         const bool shared=coordinated &&
             coordinated->shared_additions.count(p.key)!=0;
-        need(!shared || (mastering && !p.change.directory &&
-                         p.length>0 && (p.length<=0xffffffffull ||
-                                        coordinated->iso_metadata_blocks)),
+        need(!shared || ((mastering || coordinated->type1_fixed_shared_add) &&
+                         !p.change.directory && p.length>0 &&
+                         (p.length<=0xffffffffull || coordinated->iso_metadata_blocks)),
              "shared ISO/UDF creation requires external ISO-compatible data and Level-3 tree");
         const auto embedded=!shared && p.length<=block-fe_header;
         const auto file_blocks=embedded?
@@ -2516,6 +2516,10 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         if(file_blocks) {
             child.runs=volume.allocate_file_data(
                 p.length,(block-fe_header)/8u);
+            if(shared && coordinated->type1_fixed_shared_add)
+                for(std::size_t i=1;i<child.runs.size();++i)
+                    need(child.runs[i].at==child.runs[i-1].at+child.runs[i-1].recorded,
+                         "fixed shared addition requires contiguous UDF payload");
             record_allocation(file_blocks);
         }
         child.fe.assign(block,0);
@@ -4597,8 +4601,9 @@ void edit_udf(const std::filesystem::path& image,
     try {
         owner=std::make_unique<Type1>(image,allow_bridge,bounded_partitioned_bridge);
     } catch(const VatWriteRequired&) {
-        need(!coordinated || !coordinated->type1_fixed_shared_delete,
-             "fixed Type-1 unlink cannot use VAT");
+        need(!coordinated || (!coordinated->type1_fixed_shared_delete &&
+                              !coordinated->type1_fixed_shared_add),
+             "fixed Type-1 coordination cannot use VAT");
         // The VAT bridge provides the external ISO validator and
         // immutable ranges. Shared-file coordination may only change
         // the explicitly checked pre-anchor ISO metadata fields.
@@ -4651,23 +4656,27 @@ void edit_udf(const std::filesystem::path& image,
     volume.protect_external_ranges(protected_ranges);
     need(!changes.empty(),"no UDF changes");
     if(coordinated) {
-        const bool fixed=coordinated->type1_fixed_shared_delete;
-        need(allow_bridge && validate_stage &&
+        const bool fixed_delete=coordinated->type1_fixed_shared_delete;
+        const bool fixed_add=coordinated->type1_fixed_shared_add;
+        const bool fixed=fixed_delete || fixed_add;
+        need(allow_bridge && validate_stage && !(fixed_delete && fixed_add) &&
              (fixed?(!bounded_partitioned_bridge &&
                      volume.has_allocation_map() &&
                      (volume.partition_access_type()==3 || volume.partition_access_type()==4) &&
                      !coordinated->iso_metadata_blocks &&
                      coordinated->shared_replacements.empty() &&
-                     coordinated->shared_additions.empty() &&
                      coordinated->shared_directories.empty() &&
-                     coordinated->shared_deletions.size()==changes.size()):
+                     (fixed_delete?(coordinated->shared_additions.empty() &&
+                                    coordinated->shared_deletions.size()==changes.size()):
+                                   (coordinated->shared_deletions.empty() &&
+                                    coordinated->shared_additions.size()==changes.size()))):
                     (volume.partition_access_type()==1 && !volume.has_allocation_map())) &&
              coordinated->shared_replacements.size()+
                  coordinated->shared_deletions.size()+
                  coordinated->shared_additions.size()+
                  coordinated->shared_directories.size()==changes.size() &&
              !coordinated->metadata_writes.empty(),
-             "shared ISO/UDF edit requires read-only mastering or validated fixed Type-1 unlink");
+             "shared ISO/UDF edit requires read-only mastering or validated fixed Type-1 edit");
         for(const auto& change:changes) {
             const auto key=edit_path(change.path);
             const bool existing=volume.files().count(key)!=0;

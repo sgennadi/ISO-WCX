@@ -37,6 +37,9 @@ struct CoordinatedIsoUpdate {
     // Reclaim uniquely owned blocks, but retain the old payload bytes
     // through the optical byte-preservation check before ISO compaction.
     bool type1_fixed_shared_delete=false;
+    // Fixed-size shared file creation within existing optical directories.
+    // Only preflighted directory spans may be rewritten.
+    bool type1_fixed_shared_add=false;
     // Only for sequential mirrored-tree mastering: independently
     // expanded, canonical directory/file removals, including roots.
     // shared_deletions retains the explicit user selections.
