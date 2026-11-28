@@ -3421,8 +3421,10 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     vat_need(iso_payload_proof?
                  (changes.empty() && !coordinated && !mbr_alignment &&
                   !iso_payload_proof->empty() && iso_payload_proof->size()<=4096):
-                 (!changes.empty() && changes.size()<=4096),
-             "VAT transaction requires 1..4096 changes or a read-only ISO proof");
+                 ((!changes.empty() && changes.size()<=4096) ||
+                  (changes.empty() && coordinated && coordinated->vat_iso_only_remaster &&
+                   coordinated->iso_metadata_blocks && (mbr_alignment || gpt_trailer))),
+             "VAT transaction requires changes, an ISO-only remaster or a read-only ISO proof");
     auto plan=std::make_unique<VatAppendPlan>();
     struct Request {
         std::string key;
@@ -3457,7 +3459,10 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     vat_need(bool(in),"cannot open sequential image");
     if(coordinated) {
         const bool remaster=coordinated->iso_metadata_blocks!=0;
-        vat_need(coordinated->iso_metadata_blocks<=32768 &&
+        vat_need((!coordinated->vat_iso_only_remaster ||
+                  (changes.empty() && remaster && (mbr_alignment || gpt_trailer) &&
+                   coordinated->vat_tree_deletions.empty())) &&
+                 coordinated->iso_metadata_blocks<=32768 &&
                  (remaster || (coordinated->shared_additions.empty() &&
                                coordinated->shared_directories.empty() &&
                                coordinated->vat_tree_deletions.empty())) &&
@@ -4533,8 +4538,9 @@ void edit_udf(const std::filesystem::path& image,
     }
     // A mirrored sequential deletion contract cannot be interpreted
     // by the physical Type-1 allocator if the mapping family changed.
-    need(!coordinated || coordinated->vat_tree_deletions.empty(),
-         "VAT-only recursive coordination plan cannot use Type-1");
+    need(!coordinated || (!coordinated->vat_iso_only_remaster &&
+                           coordinated->vat_tree_deletions.empty()),
+         "VAT-only coordination plan cannot use Type-1");
     auto& volume=*owner;
     if(bounded_partitioned_bridge) {
         const bool rom=(mbr_append_alignment_blocks || gpt_append_trailer_blocks) &&

@@ -586,3 +586,31 @@ Regression tests exercise MBR/GPT, primary/Joliet, embedded/external
 VAT, exact byte preservation, repeated shared remastering after an
 ISO-only patch, cancellation and protected extent rejection. Physical
 boot and Total Commander host behavior require separate verification.
+
+### ISO-only subtree removal in mixed sequential MBR/GPT bridges
+
+A pure removal batch may unlink existing independent ISO-only regular
+files or recursively remove independent ISO-only directories. A shared
+directory is not an independent target, even when it contains private
+ISO children. Each explicit removal must exist, and overlapping parent
+and child selections are coalesced after checking every selected path.
+The input namespace and physical shared extents must meet the existing
+partial VAT remaster profile. Any shared UDF descendant, alias of live
+UDF data, or protected boot/partition target is rejected.
+
+A VAT-only remaster contract passes zero UDF changes to the strict
+sequential writer and reserves space for the new ISO/Joliet directories
+and path tables. All UDF file layouts and virtual-to-physical mappings
+remain unchanged; the new VAT ICB records the previous VAT. Historical
+sectors and removed payload bytes remain intact, with the established
+exceptions for relocated GPT/MBR metadata and planned ISO descriptor
+fields. This is logical removal, not secure erasure or space reclamation.
+The staged ISO namespace, both path-table orders, VAT layouts and
+historical byte ranges are independently validated before commit.
+The contract is rejected by the Type-1 writer.
+
+The regression matrix adds nested/overlapping ISO-only removals,
+removal under a shared directory, cancellation after append, ambiguous
+mixed batches, aliases, unchanged VAT mappings, and a subsequent shared
+append. ISO-only creation and resizing remain unsupported, as do mixed
+ISO-only/UDF/shared mutation batches and unsupported map families.

@@ -37,6 +37,9 @@ struct CoordinatedIsoUpdate {
     // expanded, canonical directory/file removals, including roots.
     // shared_deletions retains the explicit user selections.
     std::set<std::string> vat_tree_deletions;
+    // VAT-only remaster with no UDF namespace mutations. The reservation
+    // is used exclusively for a new ISO directory tree/path tables.
+    bool vat_iso_only_remaster=false;
     std::uint64_t iso_metadata_blocks=0;
     EditProtectedRanges metadata_writes;
 };

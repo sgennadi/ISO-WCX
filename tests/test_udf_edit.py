@@ -1654,8 +1654,8 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             if iso_only:
                 for args in (
                     ('add','ISO_ROOT.BIN',replacement),
-                    ('delete','ISO_ROOT.BIN'),
-                    ('delete','ONLY'),
+                    ('batch','delete','ISO_ROOT.BIN','delete','COMMON/BASE.BIN'),
+                    ('batch','delete','ONLY','delete','hello'),
                     ('add','ONLY/NEW.BIN',replacement),
                     ('add','COMMON/ISOSUB/KEEP.BIN',replacement),
                     ('delete','COMMON/ISOSUB'),
@@ -1848,6 +1848,13 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     bridge.write_bytes(bad)
                     run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
                     assert bridge.read_bytes()==bad
+                # The ISO-only removal route must also reject a
+                # different name for the live shared file extent.
+                bad=bytearray(raw)
+                for field in alias_fields:both(bad,field,at//B)
+                bridge.write_bytes(bad)
+                run(editor,bridge,'delete','ISO_ROOT.BIN',success=False)
+                assert bridge.read_bytes()==bad
                 bridge.write_bytes(sixth)
             if not gpt:
                 for defect in ('chs','partition','length','efi-alias'):
@@ -1861,6 +1868,64 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     assert bridge.read_bytes()==bad
                     assert not list(root.glob('.iso-wcx-edit-*'))
                 bridge.write_bytes(sixth)
+            if iso_only:
+                def vat_mapping(data):
+                    icb=len(data)//B-(10 if gpt else 1)
+                    fe=data[icb*B:(icb+1)*B]
+                    assert struct.unpack_from('<H',fe)[0]==261 and fe[27]==248
+                    size=struct.unpack_from('<Q',fe,56)[0]
+                    mode=struct.unpack_from('<H',fe,34)[0]
+                    if mode==3:table=fe[176:176+size]
+                    else:
+                        assert mode==0
+                        start=PARTITION+struct.unpack_from('<I',fe,180)[0]
+                        table=data[start*B:start*B+size]
+                    assert len(table)==size and len(table)>=152
+                    return icb-PARTITION,table
+
+                def verify_iso_delete(before,number):
+                    after=verify(before,number)
+                    old_icb,old_table=vat_mapping(before)
+                    new_icb,new_table=vat_mapping(after)
+                    assert new_icb>old_icb
+                    assert struct.unpack_from('<I',new_table,132)[0]==old_icb
+                    # All mappings and logical volume contents stay
+                    # identical: only the VAT predecessor changes.
+                    assert new_table[:132]==old_table[:132]
+                    assert new_table[136:]==old_table[136:]
+                    return after
+
+                for args in (
+                    ('batch','delete','ONLY','delete','ONLY/MISSING.BIN'),
+                    ('batch','delete','ISO_ROOT.BIN','delete','iso_root.bin'),
+                    ('batch','delete','ISO_ROOT.BIN','delete','COMMON/BASE.BIN'),
+                    ('batch','delete','ISO_ROOT.BIN','delete','hello'),
+                    ('delete','COMMON/ISOSUB')):
+                    run(editor,bridge,*args,success=False)
+                    assert bridge.read_bytes()==sixth
+                result=run(editor,bridge,'batchcancelstaged','delete','ONLY',
+                           'delete','ISO_ROOT.BIN',success=False)
+                assert result.returncode==3 and bridge.read_bytes()==sixth
+                assert not list(root.glob('.iso-wcx-edit-*'))
+
+                # Coalesce overlapping explicit selections while
+                # preserving every original UDF path and payload.
+                run(editor,bridge,'batch','delete','ONLY','delete','ONLY/KEEP.BIN',
+                    'delete','ISO_ROOT.BIN')
+                for key in ('ONLY/','ONLY/KEEP.BIN','ISO_ROOT.BIN'):
+                    del iso_expected[key]
+                removed=verify_iso_delete(sixth,12)
+                # An ISO-only child under a shared directory is also
+                # removable without unlinking its shared siblings.
+                run(editor,bridge,'delete','COMMON/ISOSUB/KEEP.BIN')
+                del iso_expected['COMMON/ISOSUB/KEEP.BIN']
+                removed=verify_iso_delete(removed,13)
+                run(editor,bridge,'delete','ISO_ROOT.BIN',success=False)
+                assert bridge.read_bytes()==removed
+                replacement.write_bytes(b'shared after ISO-only deletion')
+                run(editor,bridge,'add','COMMON/ISOSUB/LAST.BIN',replacement)
+                expected['COMMON/ISOSUB/LAST.BIN']=replacement.read_bytes()
+                verify(removed,14)
             assert not list(root.glob('.iso-wcx-edit-*'))
 
 
