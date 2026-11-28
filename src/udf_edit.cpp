@@ -2503,8 +2503,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         const bool shared=coordinated &&
             coordinated->shared_additions.count(p.key)!=0;
         need(!shared || (mastering && !p.change.directory &&
-                         p.length>0 && p.length<=0xffffffffull),
-             "shared ISO/UDF creation requires external ISO-compatible data");
+                         p.length>0 && (p.length<=0xffffffffull ||
+                                        coordinated->iso_metadata_blocks)),
+             "shared ISO/UDF creation requires external ISO-compatible data and Level-3 tree");
         const auto embedded=!shared && p.length<=block-fe_header;
         const auto file_blocks=embedded?
             0ull:(p.length+block-1u)/block;
@@ -2611,8 +2612,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                   plan.fe.end(),std::uint8_t{0});
         const bool shared=coordinated &&
             coordinated->shared_replacements.count(edit_path(change.path))!=0;
-        need(!shared || (plan.length>0 && plan.length<=0xffffffffull),
-             "shared replacement exceeds single ISO record size");
+        need(!shared || (plan.length>0 && (plan.length<=0xffffffffull ||
+                                         coordinated->iso_metadata_blocks)),
+             "shared replacement requires an ISO-compatible size and Level-3 tree");
         const bool embedded=!shared && plan.length<=block-header;
         const auto blocks=embedded?0ull:(plan.length+block-1u)/block;
         if(!embedded) {

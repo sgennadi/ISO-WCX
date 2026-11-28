@@ -515,10 +515,107 @@ def vat_main(editor, inspector, xorriso, kind, scope="iso-only"):
               "unchanged historical extents and independent UDF operations",flush=True)
 
 
+def type1_main(editor, inspector, xorriso, kind):
+    """A true >4 GiB shared payload, created or replaced in read-only Type-1."""
+    from test_udf_bridge_edit import descriptor_bridge
+    from test_udf_allocator import INTEGRITY_LBA, update_tag
+    from test_iso_edit import fixture, both
+    from test_images import iso_record
+    assert kind in ("MBR","GPT")
+    with tempfile.TemporaryDirectory(prefix="iso-wcx-type1-level3-") as tmp:
+        root=pathlib.Path(tmp)
+        if shutil.disk_usage(root).free<10*1024**3:
+            raise RuntimeError("Type-1 Level-3 test requires 10 GiB free")
+        raw=descriptor_bridge(boot=True,boot_count=4,writable=True)
+        struct.pack_into("<I",raw,260*B+184,1)
+        raw[260*B+56:260*B+96]=bytes(40)
+        update_tag(raw,260*B,512)
+        struct.pack_into("<I",raw,INTEGRITY_LBA*B+80,0)
+        update_tag(raw,INTEGRITY_LBA*B,88,INTEGRITY_LBA)
+        fe=302*B
+        struct.pack_into("<H",raw,fe+34,0)
+        struct.pack_into("<III",raw,fe+172,8,5,3)
+        struct.pack_into("<Q",raw,fe+64,1)
+        update_tag(raw,fe,184,2)
+        raw[303*B:303*B+5]=b"world"
+        # Same validated Joliet/El Torito layout as the small ROM suite.
+        raw[23*B:24*B]=raw[19*B:20*B]
+        raw[19*B:20*B]=raw[18*B:19*B]
+        raw[18*B:19*B]=raw[17*B:18*B]
+        raw[17*B:18*B]=fixture(joliet=True)[17*B:18*B]
+        both(raw,17*B+80,len(raw)//B)
+        jr=iso_record(22,B,2,b"\0")+iso_record(22,B,2,b"\1")
+        jr+=iso_record(303,5,0,"hello;1".encode("utf-16-be"))
+        raw[22*B:23*B]=jr.ljust(B,b"\0")
+        esp=307*B
+        raw[esp:esp+B]=b"E"*B
+        image=root/"type1-level3.iso"
+        image.write_bytes(raw)
+        (add_mbr if kind=="MBR" else add_gpt)(image,esp//SECTOR,B//SECTOR)
+        original_size=image.stat().st_size
+        mbr=read_at(image,0,SECTOR)
+        entries=read_at(image,2*SECTOR,128*128) if kind=="GPT" else b""
+        spans=[(esp,b"E"*B),(24*B,bytes(raw[24*B:26*B])),(303*B,b"world")]
+        source=root/"large-sparse.bin"
+        with source.open("wb") as f:f.truncate(SIZE)
+        with source.open("r+b") as f:
+            for at in (0,1024**3,2*1024**3,3*1024**3,MAX_SECTION-32,
+                       MAX_SECTION,4*1024**3,SIZE-64):
+                f.seek(at)
+                f.write(f"WCX-TYPE1-LEVEL3:{at:016X}".encode("ascii"))
+        expected=digest(source)
+        # MBR creates a file; GPT grows the original one-record file.
+        name=NAME if kind=="MBR" else "hello"
+        run(editor,image,"add",name,source)
+        sections=records(image,name)
+        assert sections==records(image,name,True)
+        assert [n for _,n in sections]==[MAX_SECTION,SIZE-MAX_SECTION]
+        assert sections[0][0]*B>=original_size
+        assert sections[1][0]==sections[0][0]+MAX_SECTION//B
+        assert hash_sections(image,sections)==expected
+        assert f"FILE {SIZE} {name}" in run(inspector,image)
+        verify_envelope(image,kind,mbr,entries,spans)
+        out=root/"independent-type1-extracted.bin"
+        extract(xorriso,image,name,out)
+        assert out.stat().st_size==SIZE and digest(out)==expected
+        out.unlink()
+        target=root/"udf-extracted"
+        run(inspector,image,"--extract",target)
+        assert (target/name).stat().st_size==SIZE and digest(target/name)==expected
+        if kind=="MBR":assert (target/"hello").read_bytes()==b"world"
+        shutil.rmtree(target)
+        # Cancel on staged output and compare the whole committed image.
+        small=root/"small.bin";small.write_bytes(b"small replacement")
+        before=digest(image)
+        run(editor,image,"batchcancelstaged","delete",name,expected=3)
+        assert digest(image)==before
+        if kind=="MBR":
+            run(editor,image,"add",name,small)
+            section,=records(image,name)
+            assert section[1]==small.stat().st_size
+            extract(xorriso,image,name,out)
+            assert out.read_bytes()==small.read_bytes()
+            out.unlink()
+        else:
+            run(editor,image,"delete",name)
+            assert not records(image,name)
+        assert records(image,name)==records(image,name,True)
+        assert hash_sections(image,sections)==expected
+        verify_envelope(image,kind,mbr,entries,spans)
+        run(inspector,image,"--extract",target)
+        if kind=="MBR":assert (target/name).read_bytes()==small.read_bytes()
+        else:assert not (target/name).exists()
+        assert not list(root.glob(".iso-wcx-edit-*"))
+        print(f"PASS: {kind} read-only Type-1 shared Level-3, create/replace, "
+              "ISO/UDF hashes, preserved old extents and rollback",flush=True)
+
+
 if __name__ == "__main__":
     args=(pathlib.Path(sys.argv[1]).resolve(),
           pathlib.Path(sys.argv[2]).resolve(),sys.argv[3])
-    if len(sys.argv) in (5,6):
+    if len(sys.argv)==6 and sys.argv[4]=="type1":
+        type1_main(*args,sys.argv[5])
+    elif len(sys.argv) in (5,6):
         vat_main(*args,*sys.argv[4:])
     else:
         main(*args)

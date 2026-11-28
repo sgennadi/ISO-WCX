@@ -817,10 +817,16 @@ are present.
 The complete logical-to-physical mapping must agree across both
 optical views and UDF, and the staged namespace and every shared
 mapping are checked before commit. Original continuation records and
-payload bytes are retained. New shared data remains contiguous and
-within the existing single-record size limit. Replacements regenerate
-a single optical file record; removals unlink all continuation records
-without reclaiming the original payload. Fragmented originals require
+payload bytes are retained. New shared data remains contiguous. For read-only Type-1 remastering,
+files above the 32-bit ISO record size limit use a preplanned Level-3
+record chain over the contiguous logical sequence of UDF ShortADs.
+Replacements regenerate all necessary optical records; removals unlink
+all continuation records without reclaiming the original payload.
+The Level-3 route also permits growing an existing single-record file.
+The staged UDF mapping must match every planned optical section.
+Dedicated MBR-create and GPT-grow >4 GiB CI cases check payload hashes
+through independent xorriso extraction and the UDF reader, old extents,
+small replacement/deletion, and rollback. Fragmented originals require
 matching primary/Joliet names, rather than new primary-name aliases.
 Recursive directory deletion, writable allocation-map and Rock Ridge
 layouts retain their existing policy. The small fixture exercises
