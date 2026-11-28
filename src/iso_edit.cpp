@@ -158,29 +158,45 @@ bool iso_item_matches_sections(const Item& item,const Node& node) {
     }
     return !node.sections.empty();
 }
-// ISO sections and UDF long_ad runs need not have identical boundaries.
-// Require the same nonempty, fully contiguous physical byte sequence in
-// logical order. Never accept sparse, inline, overlapping or gapped data.
-bool shared_contiguous_mapping(const Item& item,const Node& node) {
+// Compare complete logical-to-physical mappings, not allocation
+// descriptor boundaries. Merge adjacent runs in logical order, never
+// sort the mapping itself (sorting would accept reordered file bytes).
+// Newly allocated shared VAT data still requires one contiguous run.
+bool shared_physical_mapping(const Item& item,const Node& node,
+                             bool require_contiguous=false) {
     if(node.directory || item.directory || !node.size ||
        item.size!=node.size || !item.inline_data.empty() ||
        !item.direct_source.empty() || node.sections.empty() ||
-       item.extents.empty())return false;
-    const auto start=std::uint64_t(node.lba)*block;
-    auto remaining=node.size,at=start;
-    for(const auto& section:node.sections) {
-        if(!section.length || section.length>remaining ||
-           std::uint64_t(section.lba)*block!=at)return false;
-        remaining-=section.length;at+=section.length;
-    }
-    if(remaining)return false;
-    remaining=node.size;at=start;
-    for(const auto& extent:item.extents) {
-        if(extent.sparse || !extent.length || extent.length>remaining ||
-           extent.offset!=at)return false;
-        remaining-=extent.length;at+=extent.length;
-    }
-    return remaining==0;
+       item.extents.empty() || node.lba!=node.sections.front().lba)return false;
+    using Runs=std::vector<std::pair<std::uint64_t,std::uint64_t>>;
+    auto append=[](Runs& runs,std::uint64_t at,std::uint64_t length,
+                   std::uint64_t& remaining) {
+        if(!length || length>remaining ||
+           length>std::numeric_limits<std::uint64_t>::max()-at)return false;
+        remaining-=length;
+        if(!runs.empty() && runs.back().first+runs.back().second==at)
+            runs.back().second+=length;
+        else runs.emplace_back(at,length);
+        return true;
+    };
+    Runs optical,udf;
+    auto remaining=node.size;
+    for(const auto& section:node.sections)
+        if(!append(optical,std::uint64_t(section.lba)*block,
+                   section.length,remaining))return false;
+    if(remaining || (require_contiguous && optical.size()!=1))return false;
+    remaining=node.size;
+    for(const auto& extent:item.extents)
+        if(extent.sparse || !append(udf,extent.offset,extent.length,remaining))
+            return false;
+    if(remaining || optical!=udf)return false;
+    // Equality proves both namespaces have identical mappings. Reject
+    // self-aliases even if both describe the same overlapping ranges.
+    // Sort only a separate physical protection check after equality.
+    std::sort(optical.begin(),optical.end());
+    for(std::size_t i=1;i<optical.size();++i)
+        if(optical[i-1].second>optical[i].first-optical[i-1].first)return false;
+    return true;
 }
 std::string iso_alias(const std::string& name,bool directory,unsigned salt=0);
 class Image {
@@ -2859,7 +2875,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
             ++common_count;
             if(item.directory)continue;
             const auto* n=at->second;
-            if(!shared_contiguous_mapping(item,*n) ||
+            if(!shared_physical_mapping(item,*n) ||
                (!sequential_vat && (n->sections.size()!=1 ||
                                     item.extents.size()!=1)))return false;
             common_data=true;
@@ -3575,7 +3591,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
             need(next-start==found->size,"shared addition extent size mismatch");
             if(sequential_vat) {
                 assign_vat_iso_sections(*n,start/block,first);
-                need(shared_contiguous_mapping(*found,*n),
+                need(shared_physical_mapping(*found,*n,true),
                      "new shared VAT mapping differs from ISO sections");
             } else {
                 n->lba=static_cast<std::uint32_t>(start/block);
@@ -3809,7 +3825,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
                  "VAT mirrored namespace differs from ISO plan");
             if(item.directory)continue;
             const auto* n=found->second;
-            need(shared_contiguous_mapping(item,*n),
+            need(shared_physical_mapping(item,*n),
                  "VAT mirrored file is not the planned complete ISO mapping");
         }
     }
@@ -4441,7 +4457,7 @@ bool try_edit_iso_vat_independent_udf(const std::filesystem::path& path,
             need(n->directory==item->directory,
                  "shared VAT path has conflicting type");
             if(!item->directory)
-                need(shared_contiguous_mapping(*item,*n),
+                need(shared_physical_mapping(*item,*n),
                      "shared VAT path has conflicting physical mapping");
         }
         for(const auto& e:item->extents) {

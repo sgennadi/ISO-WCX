@@ -731,10 +731,12 @@ shared files exceeding 4 GiB. The UDF writer allocates and streams the
 data once using its existing bounded long_ad chain. The ISO/Joliet
 planner sizes its directory records in advance and maps consecutive
 Level-3 records onto the same physical data, not a second copy.
-Different ISO and UDF allocation boundaries are valid only when the
-entire nonempty logical payload maps to the same contiguous physical
-byte sequence, with no holes, sparse extents, inline data, overlap or
-reordering. Existing shared Level-3 raw continuation records remain
+Different ISO and UDF allocation boundaries are valid when the entire
+nonempty logical payload maps to the same ordered physical byte runs.
+Existing fragmented runs can be preserved, replaced or unlinked;
+new shared allocations still use contiguous append storage. Sparse,
+inline, overlapping or inconsistently ordered mappings are rejected.
+Existing shared Level-3 raw continuation records remain
 unchanged for unrelated edits. Later replacements may shrink the
 chain or delete it from both views. The original-record coordinator
 and non-VAT Type-1 path retain their single-record bounds.
@@ -750,11 +752,13 @@ UDF regression matrix is 600 seconds rather than the job default
 180 seconds; no sanitizer checks or test cases are disabled.
 
 This profile requires the existing write-once VAT contract, nonempty
-shared payloads, contiguous physical allocation, remaining partition
-capacity and bounded UDF FE long_ad capacity. It does not generalize
-to arbitrary fragmented shared physical mappings, mixed mutation
-scopes, sparable or metadata partitions, or prove bootability on
-physical systems.
+shared payloads, remaining partition capacity and bounded UDF FE
+long_ad capacity. New shared allocations remain contiguous. Existing
+fragmented mappings are supported by the full sequential tree remaster
+only when each optical view and UDF independently prove the complete
+same logical byte mapping. The original-record coordinator and Type-1
+writer retain their narrower bounds. Sparable and metadata partitions
+and physical boot validation remain separate.
 
 ### Mixed ISO-only, UDF-only and shared VAT transactions
 
@@ -784,7 +788,14 @@ consume descendants of another ownership scope. Duplicate names,
 ambiguous new root paths, creation below deleted or missing parents,
 incompatible types and inconsistent physical mappings fail closed.
 This profile does not change Type-1, sparable or metadata partition
-writing, or unsupported fragmented shared physical mappings.
+writing. The full sequential tree remaster compares existing shared
+fragmented physical mappings in logical order, coalescing adjacent
+ranges only; overlap, holes and different physical mappings fail
+closed. New shared data remains allocated contiguously.
+The fragmented regression fixtures use two physical UDF long_ad runs
+and three ISO continuation records, with the second physical run
+located before the first. They cover three-scope edits, private-UDF
+follow-up, shared shrink, cancellation and a later-run ISO alias.
 
 Regression coverage adds shared/private-UDF and three-scope nested
 creation, mixed replacement and recursive deletion, private ISO/UDF

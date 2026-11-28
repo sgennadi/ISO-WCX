@@ -1534,6 +1534,35 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             raw=bytearray(seed_path.read_bytes())
             at=raw.find(base_payload)
             assert at>=0 and at%B==0 and raw.find(base_payload,at+1)==-1
+            fragmented=iso_only and external
+            tail_lba=at//B+1
+            if fragmented:
+                # Build two genuine physical long_ad runs independently.
+                # The tail goes to an unused sector range in the seed
+                # partition, *before* the first run in physical order.
+                import binascii
+                tail_lba=400
+                tail=base_payload[B:]
+                rounded=(len(tail)+B-1)//B*B
+                assert raw[tail_lba*B:tail_lba*B+rounded]==bytes(rounded)
+                raw[tail_lba*B:tail_lba*B+len(tail)]=tail
+                matches=[pos for pos in range(550*B,len(raw),B)
+                         if struct.unpack_from('<H',raw,pos)[0]==261
+                         and raw[pos+27]==5
+                         and struct.unpack_from('<H',raw,pos+34)[0]==1
+                         and struct.unpack_from('<Q',raw,pos+56)[0]==len(base_payload)
+                         and struct.unpack_from('<I',raw,pos+172)[0]==16
+                         and struct.unpack_from('<II',raw,pos+176)==
+                             (len(base_payload),at//B-PARTITION)]
+                fe_at,=matches
+                p32(raw,fe_at+172,32)
+                p32(raw,fe_at+176,B)
+                raw[fe_at+192:fe_at+208]=bytes(16)
+                p32(raw,fe_at+192,len(tail))
+                p32(raw,fe_at+196,tail_lba-PARTITION)
+                p16(raw,fe_at+10,208-16)
+                p16(raw,fe_at+8,binascii.crc_hqx(raw[fe_at+16:fe_at+208],0))
+                checksum(raw,fe_at)
             optical=fixture(joliet=joliet,boot=not joliet,boot_efi=not joliet)
             raw[16*B:19*B]=optical[16*B:19*B]
             if not joliet:
@@ -1578,11 +1607,15 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 raw[parent*B:(parent+1)*B]=directory.ljust(B,b'\0')
                 directory=iso_record(child,B,2,b'\0')+iso_record(parent,B,2,b'\1')
                 if iso_only:
-                    # Different descriptor boundaries, identical data:
-                    # one UDF allocation and two contiguous ISO records.
+                    # Different descriptor boundaries are legal when the
+                    # complete logical mapping agrees with UDF.
                     directory+=iso_record(at//B,B,0x80,name('BASE.BIN;1'))
                     shared_chain_fields.append(child*B+len(directory)+2)
-                    directory+=iso_record(at//B+1,len(base_payload)-B,0,name('BASE.BIN;1'))
+                    if fragmented:
+                        directory+=iso_record(tail_lba,B,0x80,name('BASE.BIN;1'))
+                        directory+=iso_record(tail_lba+1,len(base_payload)-2*B,0,name('BASE.BIN;1'))
+                    else:
+                        directory+=iso_record(tail_lba,len(base_payload)-B,0,name('BASE.BIN;1'))
                 else:
                     directory+=iso_record(at//B,len(base_payload),0,name('BASE.BIN;1'))
                 if iso_only:
@@ -1601,8 +1634,13 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             assert read_image(bridge)=={**expected,**iso_expected}
             if joliet:assert read_image(bridge,True)=={**expected,**iso_expected}
             if iso_only:
+                shared_sections=[(at//B,B)]
+                if fragmented:
+                    shared_sections.extend([(tail_lba,B),(tail_lba+1,len(base_payload)-2*B)])
+                else:
+                    shared_sections.append((tail_lba,len(base_payload)-B))
                 for view in ((False,True) if joliet else (False,)):
-                    assert records(bridge,'COMMON/BASE.BIN',view)==[(at//B,B),(at//B+1,len(base_payload)-B)]
+                    assert records(bridge,'COMMON/BASE.BIN',view)==shared_sections
                 # Matching ISO and Joliet chains must not authorize an
                 # inconsistent physical mapping with UDF.
                 for sector in (at//B,at//B+2):
@@ -1675,11 +1713,43 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 return after
 
             initial=raw
+            if fragmented:
+                # Exercise three scopes while the original fragmented
+                # file remains live. Keep the rest of the regression
+                # matrix independent by restoring the original snapshot.
+                old_expected=expected.copy()
+                old_private=private_expected.copy()
+                old_iso=iso_expected.copy()
+                neighbor=root/'vat-fragment-neighbor.bin'
+                neighbor.write_bytes(b'fragmented shared neighbor')
+                run(editor,bridge,'batch','add','COMMON/FRAG.BIN',neighbor,
+                    'add','COMMON/PRIVATE.BIN',neighbor,'add','ONLY/FRAG.BIN',neighbor)
+                expected['COMMON/FRAG.BIN']=neighbor.read_bytes()
+                private_expected['COMMON/PRIVATE.BIN']=neighbor.read_bytes()
+                iso_expected['ONLY/FRAG.BIN']=neighbor.read_bytes()
+                fragmented_after=verify(raw,31)
+                neighbor.write_bytes(b'private follow-up')
+                run(editor,bridge,'add','COMMON/PRIVATE.BIN',neighbor)
+                private_expected['COMMON/PRIVATE.BIN']=neighbor.read_bytes()
+                fragmented_after=verify(fragmented_after,32,udf_only=True)
+                for view in ((False,True) if joliet else (False,)):
+                    assert records(bridge,'COMMON/BASE.BIN',view)==shared_sections
+                result=run(editor,bridge,'batchcancelstaged','delete','COMMON/BASE.BIN',
+                           success=False)
+                assert result.returncode==3 and bridge.read_bytes()==fragmented_after
+                assert not list(root.glob('.iso-wcx-edit-*'))
+                run(editor,bridge,'delete','COMMON/BASE.BIN')
+                del expected['COMMON/BASE.BIN']
+                verify(fragmented_after,33)
+                expected=old_expected
+                private_expected=old_private
+                iso_expected=old_iso
+                bridge.write_bytes(raw)
             if not gpt or iso_only:
                 replacement.write_bytes(b'first partial shared replacement')
                 run(editor,bridge,'add','COMMON/BASE.BIN',replacement)
                 expected['COMMON/BASE.BIN']=replacement.read_bytes()
-                initial=verify(raw,0)
+                initial=verify(initial,0)
                 if iso_only:
                     for view in ((False,True) if joliet else (False,)):
                         section,=records(bridge,'COMMON/BASE.BIN',view)
@@ -1993,7 +2063,7 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     assert bridge.read_bytes()==bad
                 # Reject later-section UDF aliases, self-overlaps,
                 # and a different section address in the Joliet view.
-                for sector in (at//B,39):
+                for sector in ((at//B,tail_lba,39) if fragmented else (at//B,39)):
                     bad=bytearray(raw)
                     for field in chain_fields:both(bad,field,sector)
                     bridge.write_bytes(bad)
