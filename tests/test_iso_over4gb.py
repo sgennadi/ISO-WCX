@@ -317,6 +317,191 @@ def main(editor, inspector, xorriso):
                   "boot/partition preservation and rollback", flush=True)
 
 
+def vat_snapshot(path, kind):
+    """Read only the final VAT ICB and its bounded mapping table."""
+    from test_udf_edit import PARTITION
+    icb = path.stat().st_size//B - (10 if kind == "GPT" else 1)
+    fe = read_at(path, icb*B, B)
+    assert struct.unpack_from("<H", fe)[0] == 261 and fe[27] == 248
+    size, = struct.unpack_from("<Q", fe, 56)
+    mode, = struct.unpack_from("<H", fe, 34)
+    assert 152 <= size <= 4*1024**2
+    if mode == 3:
+        data = fe[176:176+size]
+    else:
+        assert mode == 0
+        start = PARTITION+struct.unpack_from("<I", fe, 180)[0]
+        data = read_at(path, start*B, size)
+    assert len(data) == size
+    return icb-PARTITION, data
+
+
+def same_vat_mapping(before, after):
+    old_icb, old = before
+    new_icb, new = after
+    assert new_icb > old_icb
+    assert struct.unpack_from("<I", new, 132)[0] == old_icb
+    assert new[:132] == old[:132] and new[136:] == old[136:]
+
+
+def hash_sections(path, sections):
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for lba, length in sections:
+            f.seek(lba*B)
+            while length:
+                data = f.read(min(length, CHUNK))
+                assert data
+                h.update(data)
+                length -= len(data)
+    return h.hexdigest()
+
+
+def make_vat_bridge(editor, root, kind):
+    from test_udf_edit import vat_append_image, vat_gpt_envelope, p16, p32
+    from test_iso_edit import fixture, both
+    from test_images import iso_record
+    # Plenty of declared write-once capacity for one real Level-3
+    # payload plus multiple metadata-only VAT sessions.
+    raw = vat_append_image(capacity=2500000, external_table=(kind=="GPT"))
+    seed = root / ("seed.udf" if kind=="GPT" else "seed.iso")
+    if kind == "MBR":
+        optical = fixture(boot=True, boot_efi=True)
+        raw[16*B:19*B] = optical[16*B:19*B]
+        raw[20*B:22*B] = optical[20*B:22*B]
+        raw[24*B:27*B] = optical[24*B:27*B]
+        both(raw, 16*B+80, len(raw)//B)
+        p16(raw,24*B+38,4); p16(raw,24*B+102,4)
+        assert len(raw)==550*B
+        raw[0:32]=bytes(range(32))
+        raw[446:454]=bytes((0x80,0,1,0,0x17,9,4,54))
+        p32(raw,454,0);p32(raw,458,len(raw)//512)
+        raw[466]=0xef
+        p32(raw,470,26*4);p32(raw,474,4)
+        raw[510:512]=b'\x55\xaa'
+    seed.write_bytes(raw)
+    shared = root/"shared.bin"
+    payload = b'VERIFIED SHARED VAT PAYLOAD!'*400
+    shared.write_bytes(payload)
+    run(editor, seed, "batch", "mkdir", "COMMON", "add", "COMMON/BASE.BIN", shared)
+    raw = bytearray(seed.read_bytes())
+    at = raw.find(payload)
+    assert at>=0 and at%B==0 and raw.find(payload,at+1)==-1
+    optical = fixture(joliet=True)
+    raw[16*B:19*B]=optical[16*B:19*B]
+    raw[26*B:27*B]=b'E'*B
+    raw[38*B:38*B+8]=b'ISO only'
+    for vd in (16,17):
+        view=vd==17
+        parent=22 if view else 20
+        child=31 if view else 30
+        private=37 if view else 36
+        def name(v):return v.encode('utf-16-be' if view else 'ascii')
+        directory=iso_record(parent,B,2,b'\0')+iso_record(parent,B,2,b'\1')
+        directory+=iso_record(child,B,2,name('COMMON'))
+        directory+=iso_record(private,B,2,name('ONLY'))
+        raw[parent*B:(parent+1)*B]=directory.ljust(B,b'\0')
+        directory=iso_record(child,B,2,b'\0')+iso_record(parent,B,2,b'\1')
+        directory+=iso_record(at//B,len(payload),0,name('BASE.BIN;1'))
+        raw[child*B:(child+1)*B]=directory.ljust(B,b'\0')
+        directory=iso_record(private,B,2,b'\0')+iso_record(parent,B,2,b'\1')
+        directory+=iso_record(38,8,0,name('KEEP.BIN;1'))
+        raw[private*B:(private+1)*B]=directory.ljust(B,b'\0')
+        both(raw,vd*B+80,len(raw)//B)
+    if kind=="GPT":vat_gpt_envelope(raw)
+    else:assert len(raw)%(10*B)==0
+    image=root/"vat-level3.iso"
+    image.write_bytes(raw)
+    return image,payload
+
+
+def vat_main(editor, inspector, xorriso, kind):
+    assert kind in ("MBR","GPT")
+    with tempfile.TemporaryDirectory(prefix="iso-wcx-vat-level3-") as tmp:
+        root=pathlib.Path(tmp)
+        free=shutil.disk_usage(root).free
+        if free<10*1024**3:
+            raise RuntimeError(f"VAT >4 GiB test requires 10 GiB free; found {free}")
+        source=root/"large-sparse.bin"
+        with source.open("wb") as f:f.truncate(SIZE)
+        with source.open("r+b") as f:
+            for at in (0,1024**3,MAX_SECTION-32,MAX_SECTION,4*1024**3,SIZE-64):
+                f.seek(at)
+                f.write(f"WCX-VAT-LEVEL3:{at:016X}".encode("ascii"))
+        expected=digest(source)
+        image,shared=make_vat_bridge(editor,root,kind)
+        before=vat_snapshot(image,kind)
+        original_size=image.stat().st_size
+        initial_mbr=read_at(image,0,SECTOR)
+        entries=read_at(image,2*SECTOR,128*128) if kind=="GPT" else b""
+        private_name="ONLY/BIG.BIN"
+        def check_envelope():
+            assert read_at(image,26*B,B)==b'E'*B
+            mbr=read_at(image,0,SECTOR)
+            assert mbr[:451]==initial_mbr[:451] and mbr[454:458]==initial_mbr[454:458]
+            assert mbr[462:]==initial_mbr[462:]
+            if kind=="GPT":validate_gpt(image,entries)
+            else:
+                sectors=image.stat().st_size//SECTOR
+                assert sectors%40==0
+                assert struct.unpack_from("<I",mbr,458)[0]==sectors
+                c=min(sectors//40-1,1023)
+                assert mbr[451:454]==bytes((9,4|((c>>2)&0xc0),c&255))
+        def check_udf(private):
+            target=root/"udf-extracted"
+            shutil.rmtree(target,ignore_errors=True)
+            run(inspector,image,"--extract",target)
+            assert (target/"COMMON"/"BASE.BIN").read_bytes()==shared
+            assert (target/"hello").read_bytes()==private
+            assert (target/"keep").read_bytes()==b'keep me'
+            assert not (target/"ONLY").exists()
+            shutil.rmtree(target)
+        run(editor,image,"add",private_name,source)
+        sections=records(image,private_name)
+        assert sections==records(image,private_name,True)
+        assert [length for _,length in sections]==[MAX_SECTION,SIZE-MAX_SECTION]
+        assert sections[0][0]*B>=original_size
+        assert sections[1][0]==sections[0][0]+MAX_SECTION//B
+        same_vat_mapping(before,vat_snapshot(image,kind))
+        check_envelope()
+        check_udf(b'world')
+        out=root/"independent-vat-extracted.bin"
+        extract(xorriso,image,private_name,out)
+        assert out.stat().st_size==SIZE and digest(out)==expected
+        out.unlink()
+        # A separate UDF-only operation may not change any ISO record.
+        small=root/"small.bin";small.write_bytes(b'updated private data')
+        run(editor,image,"add","hello",small)
+        assert records(image,private_name)==sections
+        assert records(image,private_name,True)==sections
+        assert hash_sections(image,sections)==expected
+        check_udf(small.read_bytes())
+        check_envelope()
+        # Replace the long chain with one record, or unlink it entirely.
+        before=vat_snapshot(image,kind)
+        if kind=="MBR":
+            run(editor,image,"add",private_name,small)
+            assert len(records(image,private_name))==1
+            extract(xorriso,image,private_name,out)
+            assert out.read_bytes()==small.read_bytes()
+            out.unlink()
+        else:
+            run(editor,image,"delete",private_name)
+            assert not records(image,private_name)
+        assert records(image,private_name)==records(image,private_name,True)
+        same_vat_mapping(before,vat_snapshot(image,kind))
+        check_udf(small.read_bytes())
+        check_envelope()
+        assert hash_sections(image,sections)==expected
+        assert not list(root.glob(".iso-wcx-edit-*"))
+        print(f"PASS: {kind} VAT >4 GiB ISO-only Level-3, xorriso SHA256, "
+              "unchanged historical extents and independent UDF operations",flush=True)
+
+
 if __name__ == "__main__":
-    main(pathlib.Path(sys.argv[1]).resolve(),
-         pathlib.Path(sys.argv[2]).resolve(), sys.argv[3])
+    args=(pathlib.Path(sys.argv[1]).resolve(),
+          pathlib.Path(sys.argv[2]).resolve(),sys.argv[3])
+    if len(sys.argv)==5:
+        vat_main(*args,sys.argv[4])
+    else:
+        main(*args)

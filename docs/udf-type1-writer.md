@@ -694,3 +694,33 @@ cases cover empty creation, truncation, repeated empty replacement,
 refilling a formerly empty file, insufficient partition capacity,
 and >64 MiB payloads in MBR and GPT variants with preserved VAT maps.
 Physical boot and host behavior remain separately unverified.
+
+### Independent ISO Level-3 multi-extent files in mixed VAT bridges
+
+The independent ISO-only append remaster supports files larger than
+one 32-bit ISO record length. It plans block-aligned nonfinal sections
+(up to 0xfffff800 bytes each) and a final section before computing
+directory sizes, and assigns their physical addresses inside the
+unmapped ISO reservation. Both primary ISO and Joliet serialize
+consecutive records with the continuation flag set on nonfinal
+sections only. Data and padding are streamed and read back under the
+existing VAT-only contract.
+
+Existing independent ISO-only chains, including noncontiguous sections,
+retain their original raw continuation records in each view when
+unrelated files are edited. Independent namespace checks compare every
+section against the public reader; overlapping sections and aliases
+of live UDF payloads are rejected. Replacement may shrink a chain to
+one record, and recursive removal may unlink the entire chain. Shared
+ISO/UDF files retain the existing single-extent policy. Existing
+capacity, address-space, metadata budget, boot and partition protection
+and historical byte checks remain mandatory.
+
+The small regression matrix covers fragmented input chains, subsequent
+shared and independent transactions, chain replacement, mismatched
+Joliet records and later-section aliases. Separate Linux jobs exercise
+a real payload exceeding 4 GiB in MBR and GPT sequential VAT bridges,
+including primary and Joliet section records, independent xorriso
+SHA-256 extraction, preserved UDF files and VAT mappings, subsequent
+private-UDF replacement and ISO-only shrink or deletion. Physical boot
+and Total Commander host behavior still require separate validation.

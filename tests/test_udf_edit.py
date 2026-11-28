@@ -1489,6 +1489,7 @@ def test_vat_mirrored_tree(editor,inspector,root,image,replacement):
 def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replacement):
     from test_iso_edit import fixture, both, read_image, validate_path_tables
     from test_images import iso_record
+    from test_iso_over4gb import records
     import zlib
     bridge=root/'vat-partial-partitioned.iso'
     private=root/'vat-private-source.bin'
@@ -1542,11 +1543,15 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             descriptors=[16,17] if joliet else [16]
             iso_expected={}
             alias_fields=[]
+            chain_fields=[]
             if iso_only:
                 raw[34*B:34*B+8]=b'ISO only'
                 raw[35*B:35*B+9]=b'ISO root!'
                 raw[38*B:38*B+8]=b'ISO tree'
-                iso_expected={'COMMON/ISOSUB/KEEP.BIN':b'ISO only',
+                raw[39*B:40*B]=b'M'*B
+                raw[41*B:41*B+7]=b'last AD'
+                iso_expected={'ONLY/CHAIN.BIN':b'M'*B+b'last AD',
+                              'COMMON/ISOSUB/KEEP.BIN':b'ISO only',
                               'ISO_ROOT.BIN':b'ISO root!',
                               'ONLY/':None,'ONLY/KEEP.BIN':b'ISO tree'}
             for vd in descriptors:
@@ -1562,6 +1567,11 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     only=37 if view else 36
                     directory+=iso_record(only,B,2,name('ONLY'))
                     only_data=iso_record(only,B,2,b'\0')+iso_record(parent,B,2,b'\1')
+                    only_data+=iso_record(39,B,0x80,name('CHAIN.BIN;1'))
+                    chain_fields.append(only*B+len(only_data)+2)
+                    continuation=iso_record(41,7,0,name('CHAIN.BIN;1'))
+                    continuation[18]=125
+                    only_data+=continuation
                     only_data+=iso_record(38,8,0,name('KEEP.BIN;1'))
                     raw[only*B:(only+1)*B]=only_data.ljust(B,b'\0')
                 raw[parent*B:(parent+1)*B]=directory.ljust(B,b'\0')
@@ -1852,6 +1862,23 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     bridge.write_bytes(bad)
                     run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
                     assert bridge.read_bytes()==bad
+                # Reject later-section UDF aliases, self-overlaps,
+                # and a different section address in the Joliet view.
+                for sector in (at//B,39):
+                    bad=bytearray(raw)
+                    for field in chain_fields:both(bad,field,sector)
+                    bridge.write_bytes(bad)
+                    replacement.write_bytes(b'new independent payload')
+                    run(editor,bridge,'add','ONLY/CHAIN.BIN',replacement,success=False)
+                    assert bridge.read_bytes()==bad
+                    run(editor,bridge,'delete','ONLY/CHAIN.BIN',success=False)
+                    assert bridge.read_bytes()==bad
+                if joliet:
+                    bad=bytearray(raw)
+                    both(bad,chain_fields[1],42)
+                    bridge.write_bytes(bad)
+                    run(editor,bridge,'delete','ONLY/CHAIN.BIN',success=False)
+                    assert bridge.read_bytes()==bad
                 # The ISO-only removal route must also reject a
                 # different name for the live shared file extent.
                 bad=bytearray(raw)
@@ -1998,6 +2025,17 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     'ONLY/NEST/NEXT/':None,
                     'ONLY/NEST/NEXT/LAST.BIN':replacement.read_bytes()})
                 sixth=verify_iso_remaster(created,19)
+                # Preserve original noncontiguous records through shared,
+                # private-UDF and private-ISO transactions.
+                for view in ((False,True) if joliet else (False,)):
+                    assert records(bridge,'ONLY/CHAIN.BIN',view)==[(39,B),(41,7)]
+                replacement.write_bytes(b'shrunk fragmented chain')
+                run(editor,bridge,'add','ONLY/CHAIN.BIN',replacement)
+                iso_expected['ONLY/CHAIN.BIN']=replacement.read_bytes()
+                sixth=verify_iso_remaster(sixth,26)
+                for view in ((False,True) if joliet else (False,)):
+                    chain=records(bridge,'ONLY/CHAIN.BIN',view)
+                    assert len(chain)==1 and chain[0][1]==len(replacement.read_bytes())
                 for args in (
                     ('add','ROOT.BIN',replacement),
                     ('mkdir','ROOTDIR'),

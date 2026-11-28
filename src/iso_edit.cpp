@@ -17,6 +17,7 @@
 namespace iso_wcx { namespace {
 using Bytes=std::vector<unsigned char>;
 constexpr std::uint32_t block=2048;
+constexpr std::uint64_t iso_max_section=0xfffff800ull;
 // Defined below Image; needed while validating hidden El Torito extents.
 bool intersect(std::uint64_t a,std::uint64_t a_bytes,
                std::uint64_t b,std::uint64_t b_bytes) noexcept;
@@ -129,6 +130,9 @@ struct Node {
     std::uint32_t lba=0;
     std::uint64_t size=0;
     std::vector<FileSection> sections;
+    // Retain all original continuation records, not just their extents.
+    // The primary and Joliet records may carry distinct attributes.
+    std::vector<Bytes> continuation_records,joliet_continuation_records;
     std::filesystem::path source;
     Node* parent=nullptr;
     std::vector<std::unique_ptr<Node>> children;
@@ -140,6 +144,16 @@ template<class F> void each_extent(const Node& n,F&& visit) {
         visit(std::uint64_t(n.lba)*block,n.size);
     else for(const auto& part:n.sections)
         visit(std::uint64_t(part.lba)*block,std::uint64_t(part.length));
+}
+bool iso_item_matches_sections(const Item& item,const Node& node) {
+    if(item.size!=node.size || item.extents.size()!=node.sections.size())return false;
+    for(std::size_t part=0;part<node.sections.size();++part) {
+        const auto& e=item.extents[part];
+        const auto& section=node.sections[part];
+        if(e.sparse || e.offset!=std::uint64_t(section.lba)*block ||
+           e.length!=section.length)return false;
+    }
+    return !node.sections.empty();
 }
 std::string iso_alias(const std::string& name,bool directory,unsigned salt=0);
 class Image {
@@ -943,6 +957,7 @@ public:
                     need(c->size<=size-pending->size,
                          "ISO multi-extent size exceeds image");
                     pending->sections.push_back(c->sections.front());
+                    pending->continuation_records.push_back(std::move(c->record));
                     pending->size+=c->size;
                     if(!more)pending=nullptr;
                 } else {
@@ -963,6 +978,7 @@ public:
     void pair(Node& a,const Node& b) {
         a.joliet_identifier=b.identifier;
         a.joliet_record=b.record;
+        a.joliet_continuation_records=b.continuation_records;
         a.joliet_record_at=b.record_at;
         if(!rr_rebuild)a.logical=b.logical;
         need(a.children.size()==b.children.size(),"ISO and Joliet trees differ");std::set<const Node*> used;
@@ -2455,14 +2471,60 @@ Bytes directory_identifier(const Bytes& r) {
 const Bytes& view_id(const Node& n,unsigned view) {
     return view?n.joliet_identifier:n.identifier;
 }
-Bytes shared_tree_record(const Node& n,unsigned view) {
+Bytes shared_tree_record(const Node& n,unsigned view,std::size_t part=0) {
     const auto& old=view?n.joliet_record:n.record;
-    if(old.empty())return record(n,view_id(n,view),view);
-    auto result=old;
+    const auto& continuation=view?n.joliet_continuation_records:n.continuation_records;
     if(n.directory) {
+        need(!part,"directory cannot have multiple ISO records");
+        if(old.empty())return record(n,view_id(n,view),view);
+        auto result=old;
         both(result,2,n.new_lba[view]);both(result,10,n.new_size[view]);
+        return result;
     }
-    return result;
+    // Independent payloads have their section count planned before
+    // directory sizing and their LBAs assigned only after VAT staging.
+    if(!n.source.empty()) {
+        need(part<n.sections.size(),"missing planned ISO-only section");
+        const auto& section=n.sections[part];
+        const bool more=part+1<n.sections.size();
+        if(old.empty())return record(n,view_id(n,view),view,nullptr,&section,more);
+        auto result=old;
+        both(result,2,section.lba);both(result,10,section.length);
+        result[25]=static_cast<unsigned char>((result[25]&0x7fu)|(more?0x80u:0u));
+        return result;
+    }
+    // Unchanged Level-3 chains must retain every original raw record.
+    // Shared additions still use the existing single-extent path.
+    if(part) {
+        need(part< n.sections.size() && part<=continuation.size(),
+             "missing original ISO continuation record");
+        return continuation[part-1];
+    }
+    if(old.empty())return record(n,view_id(n,view),view);
+    return old;
+}
+void plan_independent_iso_payload(SharedTreePlan& tree,Node& n,
+        const std::string& key,const std::filesystem::path& source) {
+    constexpr auto limit=0xffffffffull*block;
+    need(n.size<limit,"ISO-only payload exceeds optical address space");
+    n.source=source;
+    const auto blocks=(n.size+block-1)/block;
+    need(tree.iso_payload_blocks<=0xffffffffull &&
+         blocks<=0xffffffffull-tree.iso_payload_blocks,
+         "ISO-only payloads exceed optical block address space");
+    tree.iso_payload_blocks+=blocks;
+    n.sections.clear();
+    // The nonfinal lengths are block aligned. Plan one record even
+    // for an empty file; the section consumes no payload blocks.
+    auto left=n.size;
+    do {
+        const auto bytes=static_cast<std::uint32_t>(std::min(left,iso_max_section));
+        n.sections.push_back({0,bytes});
+        left-=bytes;
+    } while(left);
+    need(n.sections.size()<=65536 &&
+         tree.iso_only_payloads.emplace(upper(key),&n).second,
+         "duplicate or excessive independent ISO payload sections");
 }
 Bytes shared_tree_directory(const SharedTreePlan& tree,const Node& dir,
                             unsigned view) {
@@ -2489,7 +2551,12 @@ Bytes shared_tree_directory(const SharedTreePlan& tree,const Node& dir,
     std::sort(sorted.begin(),sorted.end(),[&](const Node* a,const Node* b){
         return iso_identifier_less(view_id(*a,view),view_id(*b,view));
     });
-    for(const auto* child:sorted)append(shared_tree_record(*child,view));
+    for(const auto* child:sorted) {
+        const auto count=child->directory?std::size_t{1}:
+            std::max(std::size_t{1},child->sections.size());
+        for(std::size_t part=0;part<count;++part)
+            append(shared_tree_record(*child,view,part));
+    }
     data.resize((data.size()+block-1)/block*block,0);
     return data;
 }
@@ -2584,9 +2651,11 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
             for(const auto& key:independent_iso) {
                 const auto* node=iso_files.at(key);
                 if(node->directory)continue;
+                EditProtectedRanges sections;
                 each_extent(*node,[&](auto at,auto length) {
                     need(at<=image.size && length<=image.size-at,
                          "independent ISO extent outside source");
+                    if(length)sections.emplace_back(at,length);
                     if(!length)return;
                     const auto overlap=std::lower_bound(merged.begin(),merged.end(),at,
                         [](const auto& range,std::uint64_t offset) {
@@ -2595,6 +2664,10 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                     need(overlap==merged.end() || overlap->first>=at+length,
                          "independent ISO file aliases live VAT data");
                 });
+                std::sort(sections.begin(),sections.end());
+                for(std::size_t part=1;part<sections.size();++part)
+                    need(sections[part-1].second<=sections[part].first-sections[part-1].first,
+                         "independent ISO file has overlapping physical sections");
             }
         }
     }
@@ -2773,11 +2846,8 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                 const auto at=iso_files.find(key);
                 if(!seen.insert(key).second || at==iso_files.end() ||
                    item.directory!=at->second->directory)return false;
-                if(!item.directory &&
-                   (item.size!=at->second->size || item.extents.size()!=1 ||
-                    item.extents[0].sparse ||
-                    item.extents[0].offset!=std::uint64_t(at->second->lba)*block ||
-                    item.extents[0].length!=item.size))return false;
+                if(!item.directory && !iso_item_matches_sections(item,*at->second))
+                    return false;
             }
             if(seen.size()!=iso_files.size())return false;
         }
@@ -2858,6 +2928,13 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         n->parent=parent;n->record=old.record;n->joliet_record=old.joliet_record;
         n->identifier=old.identifier;n->joliet_identifier=old.joliet_identifier;
         n->lba=old.lba;n->size=old.size;n->sections=old.sections;
+        n->continuation_records=old.continuation_records;
+        n->joliet_continuation_records=old.joliet_continuation_records;
+        if(!old.directory && old.sections.size()>1)
+            need(partial_partitioned && !udf_names.count(upper(key)) &&
+                 old.continuation_records.size()+1==old.sections.size() &&
+                 (!image.joliet || old.joliet_continuation_records.size()+1==old.sections.size()),
+                 "only independent VAT ISO files may retain multi-extent records");
         need(index.emplace(upper(key),n.get()).second,"duplicate mirrored ISO path");
         if(n->directory) {
             tree.dirs.push_back(n.get());
@@ -2895,7 +2972,10 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                     }
                     ++count;p+=length;
                 }
-                need(count==old.children.size()+2,
+                std::size_t expected_records=2;
+                for(const auto& child:old.children)
+                    expected_records+=child->directory?1:child->sections.size();
+                need(count==expected_records,
                      "old mirrored ISO directory has unsupported extra records");
             }
         }
@@ -2984,17 +3064,10 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                              std::filesystem::symlink_status(c->source)),
                          "VAT shared replacement source must be a regular file");
                     n->size=std::filesystem::file_size(c->source);
-                    need((iso_only_remaster || n->size>0) && n->size<=0xffffffffull,
+                    need(iso_only_remaster || (n->size>0 && n->size<=0xffffffffull),
                          "VAT mirrored replacement exceeds single ISO extent");
                     if(iso_only_remaster) {
-                        n->source=c->source;
-                        const auto blocks=(n->size+block-1)/block;
-                        need(tree.iso_payload_blocks<=0xffffffffull &&
-                             blocks<=0xffffffffull-tree.iso_payload_blocks,
-                             "ISO-only replacement exceeds optical block address space");
-                        tree.iso_payload_blocks+=blocks;
-                        need(tree.iso_only_payloads.emplace(upper(key),n).second,
-                             "duplicate ISO-only replacement");
+                        plan_independent_iso_payload(tree,*n,key,c->source);
                     } else {
                         plan.shared_replacements.insert(key);
                         tree.replaced.emplace(key,n);
@@ -3014,8 +3087,8 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                      std::filesystem::symlink_status(c->source)),
                  "shared addition source must be a regular file");
             n->size=std::filesystem::file_size(c->source);
-            need((iso_only_remaster || n->size>0) && n->size<=0xffffffffull,
-                 "ISO addition exceeds single-extent bounds");
+            need(iso_only_remaster || (n->size>0 && n->size<=0xffffffffull),
+                 "shared ISO addition exceeds single-extent bounds");
         }
         auto collision=[&](const Bytes& id,unsigned view) {
             const auto name=upper(decode(id,view!=0,n->directory));
@@ -3054,14 +3127,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
             tree.dirs.push_back(n.get());
             tree.dots[n.get()]={};
         } else if(iso_only_remaster) {
-            n->source=c->source;
-            const auto blocks=(n->size+block-1)/block;
-            need(tree.iso_payload_blocks<=0xffffffffull &&
-                 blocks<=0xffffffffull-tree.iso_payload_blocks,
-                 "ISO-only addition exceeds optical block address space");
-            tree.iso_payload_blocks+=blocks;
-            need(tree.iso_only_payloads.emplace(upper(key),n.get()).second,
-                 "duplicate independent ISO payload");
+            plan_independent_iso_payload(tree,*n,key,c->source);
         } else plan.shared_additions.insert(key);
         need(index.emplace(upper(key),n.get()).second &&
              tree.added.emplace(iso_only_remaster?upper(key):key,n.get()).second,
@@ -3247,25 +3313,25 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
          (sequential_vat && plan.vat_iso_only_remaster),
          "independent ISO payloads require the VAT-only remaster contract");
     for(const auto& [key,n]:tree.iso_only_payloads) {
-        need(tree.independent_iso_paths.count(key) &&
-             n->size<=0xffffffffull && next<=main &&
-             (n->size+block-1)/block<=main-next,
+        need(tree.independent_iso_paths.count(key) && !n->sections.empty() &&
+             next<=main && (n->size+block-1)/block<=main-next,
              "independent ISO replacement outside reservation");
-        // A zero-length record names a valid optical LBA but consumes
-        // no physical sectors; it cannot alias a nonempty data extent.
         n->lba=static_cast<std::uint32_t>(next);
-        n->sections={{n->lba,static_cast<std::uint32_t>(n->size)}};
-        // Existing records retain all fields except address/length.
-        // New records are emitted by shared_tree_record after allocation.
-        if(!n->record.empty()) {
-            both(n->record,2,n->lba);
-            both(n->record,10,static_cast<std::uint32_t>(n->size));
-            if(image.joliet) {
-                both(n->joliet_record,2,n->lba);
-                both(n->joliet_record,10,static_cast<std::uint32_t>(n->size));
-            }
+        std::uint64_t remaining=n->size;
+        for(std::size_t part=0;part<n->sections.size();++part) {
+            auto& section=n->sections[part];
+            const bool more=part+1<n->sections.size();
+            need(section.length<=remaining && next<=main &&
+                 (std::uint64_t(section.length)+block-1)/block<=main-next &&
+                 (!more || (section.length && section.length%block==0)),
+                 "invalid planned independent ISO section");
+            section.lba=static_cast<std::uint32_t>(next);
+            next+=(std::uint64_t(section.length)+block-1)/block;
+            remaining-=section.length;
         }
-        next+=(n->size+block-1)/block;
+        need(!remaining,"independent ISO sections do not cover payload");
+        // Keep original record templates intact: each generated
+        // continuation gets its own checked LBA, length and flag.
     }
     need(next-first==tree.iso_payload_blocks &&
          next<=main && main-next==plan.iso_metadata_blocks,
@@ -3390,6 +3456,14 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
                 (got->lba==n->new_lba[0] && got->size==n->new_size[0]):
                 (got->lba==n->lba && got->size==n->size && got->sections==n->sections)),
              "remastered shared ISO entry differs from plan");
+        if(!n->directory)for(unsigned view=0;view<views;++view) {
+            const auto& records=view?got->joliet_continuation_records:got->continuation_records;
+            need(!n->sections.empty() && records.size()+1==n->sections.size(),
+                 "remastered ISO section record count differs");
+            for(std::size_t part=1;part<n->sections.size();++part)
+                need(records[part-1]==shared_tree_record(*n,view,part),
+                     "remastered ISO continuation record differs");
+        }
     }
     for(unsigned view=0;view<views;++view) {
         for(const auto* dir:tree.dirs) {
@@ -4057,10 +4131,7 @@ bool try_edit_iso_vat_independent_udf(const std::filesystem::path& path,
                  "independent VAT edit requires matching ISO/Joliet paths");
             if(!item.directory) {
                 const auto* n=old->second;
-                need(item.size==n->size && n->sections.size()==1 &&
-                     item.extents.size()==1 && !item.extents[0].sparse &&
-                     item.extents[0].offset==std::uint64_t(n->lba)*block &&
-                     item.extents[0].length==n->size,
+                need(iso_item_matches_sections(item,*n),
                      "independent VAT edit requires matching ISO/Joliet extents");
             }
             for(const auto& e:item.extents)
@@ -4152,7 +4223,8 @@ bool try_edit_iso_vat_independent_iso_payloads(const std::filesystem::path& path
             // payload needs a fresh tree and reserved data sectors.
             if(!std::filesystem::is_regular_file(std::filesystem::symlink_status(c.source)) ||
                std::filesystem::file_size(c.source)!=found->second->size ||
-               !found->second->size || found->second->lba>=256)return false;
+               !found->second->size || found->second->sections.size()!=1 ||
+               found->second->lba>=256)return false;
         }
     }
     // Pin the source before the authoritative preflight and never
@@ -4245,10 +4317,7 @@ bool try_edit_iso_vat_independent_iso_payloads(const std::filesystem::path& path
                      "ISO-only VAT patch requires matching ISO/Joliet paths");
                 const auto* node=original->second;
                 if(!item.directory) {
-                    need(item.size==node->size && node->sections.size()==1 &&
-                         item.extents.size()==1 && !item.extents[0].sparse &&
-                         item.extents[0].offset==std::uint64_t(node->lba)*block &&
-                         item.extents[0].length==node->size,
+                    need(iso_item_matches_sections(item,*node),
                          "ISO-only VAT patch requires matching ISO/Joliet extents");
                 }
                 if(collect && !selected.count(key))
@@ -4436,7 +4505,6 @@ void edit_iso_udf_bridge_metadata(const std::filesystem::path& path,
 // full ISO authoring function. MSVC x64 ASan reported use-after-poison
 // at its invocation in ordinary multi-file F5 batches. No sanitizer
 // instrumentation or validation is disabled.
-static constexpr std::uint64_t iso_max_section=0xfffff800ull;
 static void check_iso_capacity(std::uint64_t next,std::uint64_t blocks,
                                const std::optional<HybridTailPlan>& hybrid_tail) {
     need(next<0xffffffffu && blocks<0xffffffffull-next,"ISO size limit");
