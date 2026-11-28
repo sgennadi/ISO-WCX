@@ -869,6 +869,30 @@ path tables, unaffected directories, old payloads and physical image
 size remain unchanged. Both namespaces and the final mappings are
 verified before commit. Tests cover bitmap/table, primary/Joliet,
 small and external data, multiple additions, directory capacity failure
-and staged cancellation. This profile does not yet grow optical directory
-allocations, allocate new optical directories (F7), mirror a split or
-empty namespace, or support partitioned writable shared creation.
+and staged cancellation. The in-place route is used only while existing optical directory
+capacity suffices; the fixed-size tree reservation described below
+handles directory growth and F7. Split or empty namespaces and
+partitioned writable shared creation retain their previous policy.
+
+### Fixed-size writable Type-1 directory creation and optical expansion
+
+When the common namespace already satisfies the fixed writable profile,
+F7 and batches containing new directories allocate a fresh ISO/Joliet
+directory tree and both path-table byte orders. An F5 batch that exceeds
+an existing optical directory's capacity uses the same fresh-tree path.
+The strict Type-1 allocator reserves one contiguous run within the common
+PVD/SVD volume limit, excluding all original optical/boot and UDF objects,
+marks those sectors allocated in the existing bitmap or tag-263 table,
+updates LVID free counts, and zero-initializes them in the private stage.
+The coordinator receives the exact reservation from that allocator;
+no zero-sector scan or guessed address authorizes writes. The reservation
+is independently checked against the persistent allocation map and every
+live UDF object before and after the optical callback. Only root and path
+table descriptor fields and new metadata are written; original volume
+sizes, payloads, old optical directory bytes and El Torito remain intact.
+Tests cover both free-space formats and optical views, nested F7/F5,
+root overflow, insufficient space, persistent allocation, subsequent
+F5 and staged cancellation. Superseded optical metadata is deliberately
+not reclaimed, so repeated full tree remasters consume additional space.
+This extension is limited to the already-proven nonpartitioned shared
+namespace, available contiguous metadata capacity and portable names.

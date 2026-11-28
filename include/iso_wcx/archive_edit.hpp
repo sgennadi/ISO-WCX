@@ -27,6 +27,12 @@ using EditStageValidator = std::function<void(const std::filesystem::path&)>;
 // image validator remains mandatory independently of this preflight.
 using EditProtectedRanges =
     std::vector<std::pair<std::uint64_t,std::uint64_t>>;
+// Result of the synchronous fixed-size Type-1 allocator reservation.
+// The ISO plan owns this object until its staged-image callback returns.
+struct FixedIsoMetadataReservation {
+    std::uint64_t limit_lba=0; // exclusive common optical volume boundary
+    std::uint64_t first_lba=0; // allocator-selected absolute sector
+};
 // Explicit coordinator contract: old shared data remains immutable.
 struct CoordinatedIsoUpdate {
     std::set<std::string> shared_replacements;
@@ -37,9 +43,10 @@ struct CoordinatedIsoUpdate {
     // Reclaim uniquely owned blocks, but retain the old payload bytes
     // through the optical byte-preservation check before ISO compaction.
     bool type1_fixed_shared_delete=false;
-    // Fixed-size shared file creation within existing optical directories.
-    // Only preflighted directory spans may be rewritten.
+    // Fixed-size shared file/directory creation. Reuse existing optical
+    // directory capacity, or reserve fresh ISO metadata in the UDF map.
     bool type1_fixed_shared_add=false;
+    FixedIsoMetadataReservation* type1_fixed_metadata=nullptr;
     // Only for sequential mirrored-tree mastering: independently
     // expanded, canonical directory/file removals, including roots.
     // shared_deletions retains the explicit user selections.

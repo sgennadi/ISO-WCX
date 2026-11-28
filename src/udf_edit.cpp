@@ -694,16 +694,19 @@ public:
     // A single ShortAD requires one contiguous allocation. Reserve a
     // validated run before writing any staged file content; bitmap changes
     // stay in memory until the entire image transaction is committed.
-    [[nodiscard]] std::uint32_t allocate_blocks(std::uint32_t count) {
+    [[nodiscard]] std::uint32_t allocate_blocks(std::uint32_t count,
+            std::uint64_t limit_lba=std::numeric_limits<std::uint64_t>::max()) {
         need(bitmap_.has_value(),
              "UDF creation requires a validated bitmap or Unallocated Space Table");
         need(count>0 && count<=partition_blocks_,
              "UDF requested allocation exceeds partition");
         auto& bitmap=*bitmap_;
-        for(std::uint32_t start=allocation_start_;start<bitmap.bits;) {
+        const auto end=static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            bitmap.bits,limit_lba>partition_?limit_lba-partition_:0));
+        for(std::uint32_t start=allocation_start_;start<end;) {
             if(!allocatable_block(start)){++start;continue;}
             std::uint32_t run=0;
-            while(run<count && run<bitmap.bits-start &&
+            while(run<count && run<end-start &&
                   allocatable_block(start+run))++run;
             if(run==count) {
                 const Location candidate{
@@ -717,6 +720,7 @@ public:
                 reserved_.push_back({candidate,0});
                 return start;
             }
+            if(run==end-start)break;
             start+=run+1;
         }
         throw EditUnsupported(external_blocks_.empty()?
@@ -2319,6 +2323,29 @@ void validate_udf_existing_change(const Type1& volume,
         }
 }
 
+// Independent strict-parse proof that the fixed ISO metadata allocation
+// is persistent in the free-space map and not owned by any UDF object.
+void validate_fixed_iso_metadata(const Type1& volume,
+                                 const CoordinatedIsoUpdate& plan) {
+    const auto* reservation=plan.type1_fixed_metadata;
+    need(reservation && plan.iso_metadata_blocks && reservation->first_lba>=257 &&
+         reservation->first_lba<=reservation->limit_lba &&
+         plan.iso_metadata_blocks<=reservation->limit_lba-reservation->first_lba &&
+         reservation->limit_lba<=volume.image_size()/block,
+         "invalid fixed ISO metadata reservation readback");
+    const Location range{reservation->first_lba*block,plan.iso_metadata_blocks*block};
+    const auto start=volume.logical_of(range.at);
+    const auto last=volume.logical_of(range.at+range.bytes-block);
+    need(std::uint64_t(last)-start+1==plan.iso_metadata_blocks,
+         "fixed ISO reservation outside UDF allocation map");
+    for(std::uint64_t i=0;i<plan.iso_metadata_blocks;++i)
+        need(!volume.is_free(start+static_cast<std::uint32_t>(i)),
+             "fixed ISO metadata sector was not reserved in UDF map");
+    for(const auto& object:volume.intervals())
+        need(!intersects(range,object.range),
+             "fixed ISO metadata reservation aliases a UDF object");
+}
+
 // Plan every new child FE, file run and parent FID before editing a single
 // byte of the source. Each modified parent is relocated at most once.
 // The staged image is copied once, validated once and atomically committed
@@ -2467,6 +2494,20 @@ void create_udf_type1_batch(const std::filesystem::path& image,
              "UDF batch block counter overflow");
         allocated+=count;
     };
+    if(coordinated && coordinated->type1_fixed_metadata) {
+        auto& reservation=*coordinated->type1_fixed_metadata;
+        need(!mastering && coordinated->type1_fixed_shared_add &&
+             !reservation.first_lba && coordinated->iso_metadata_blocks &&
+             coordinated->iso_metadata_blocks<=32768 &&
+             reservation.limit_lba<=volume.image_size()/block,
+             "invalid fixed Type-1 ISO metadata allocation request");
+        const auto count=static_cast<std::uint32_t>(coordinated->iso_metadata_blocks);
+        const auto logical=volume.allocate_blocks(count,reservation.limit_lba);
+        reservation.first_lba=volume.absolute(logical)/block;
+        need(reservation.first_lba>=257,
+             "fixed ISO metadata reservation precedes optical data area");
+        record_allocation(count);
+    }
     for(const auto& p:prepared) {
         edit_tick(progress);
         auto parent_it=parents.find(p.parent);
@@ -2891,6 +2932,9 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                      std::ios::out);
     need(bool(out),"cannot open prepared UDF transaction stage");
     volume.close();
+    if(coordinated && coordinated->type1_fixed_metadata)
+        staged_zero(out,coordinated->type1_fixed_metadata->first_lba*block,
+                    coordinated->iso_metadata_blocks*block,progress);
     for(const auto& child:children) {
         edit_tick(progress);
         staged_write(out,volume.absolute(child.lba),child.fe);
@@ -3008,6 +3052,8 @@ void create_udf_type1_batch(const std::filesystem::path& image,
     // file through Disc extents and compare its complete source stream.
     {
         Type1 strict(tx.output,allow_bridge,volume.bounded_partitioned_bridge());
+        if(coordinated && coordinated->type1_fixed_metadata)
+            validate_fixed_iso_metadata(strict,*coordinated);
         // A mastered ROM intentionally has no persistent free-space map.
         // Its deletion is checked by namespace and data verification below.
         if(!mastering)for(const auto& region:deleted_regions) {
@@ -3072,6 +3118,10 @@ void create_udf_type1_batch(const std::filesystem::path& image,
         }
     }
     if(validate_stage)validate_stage(tx.output);
+    if(coordinated && coordinated->type1_fixed_metadata) {
+        Type1 final_volume(tx.output,allow_bridge,volume.bounded_partitioned_bridge());
+        validate_fixed_iso_metadata(final_volume,*coordinated);
+    }
     tx.commit(progress);
 }
 
@@ -4659,17 +4709,25 @@ void edit_udf(const std::filesystem::path& image,
         const bool fixed_delete=coordinated->type1_fixed_shared_delete;
         const bool fixed_add=coordinated->type1_fixed_shared_add;
         const bool fixed=fixed_delete || fixed_add;
+        const bool fixed_tree=fixed_add && coordinated->iso_metadata_blocks!=0;
+        need((coordinated->type1_fixed_metadata!=nullptr)==fixed_tree &&
+             (!fixed_tree || (!coordinated->type1_fixed_metadata->first_lba &&
+                             coordinated->type1_fixed_metadata->limit_lba<=volume.image_size()/block &&
+                             coordinated->iso_metadata_blocks<=32768)),
+             "invalid fixed Type-1 metadata reservation contract");
         need(allow_bridge && validate_stage && !(fixed_delete && fixed_add) &&
              (fixed?(!bounded_partitioned_bridge &&
                      volume.has_allocation_map() &&
                      (volume.partition_access_type()==3 || volume.partition_access_type()==4) &&
-                     !coordinated->iso_metadata_blocks &&
+                     (!coordinated->iso_metadata_blocks || fixed_tree) &&
                      coordinated->shared_replacements.empty() &&
-                     coordinated->shared_directories.empty() &&
                      (fixed_delete?(coordinated->shared_additions.empty() &&
+                                    coordinated->shared_directories.empty() &&
                                     coordinated->shared_deletions.size()==changes.size()):
                                    (coordinated->shared_deletions.empty() &&
-                                    coordinated->shared_additions.size()==changes.size()))):
+                                    (fixed_tree || coordinated->shared_directories.empty()) &&
+                                    coordinated->shared_additions.size()+
+                                        coordinated->shared_directories.size()==changes.size()))):
                     (volume.partition_access_type()==1 && !volume.has_allocation_map())) &&
              coordinated->shared_replacements.size()+
                  coordinated->shared_deletions.size()+

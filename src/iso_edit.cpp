@@ -2506,6 +2506,7 @@ struct SharedTreePlan {
     // mirrored file requires the same full readback proof as VAT.
     bool verify_full_udf_mapping=false;
     std::map<const Node*,std::array<Bytes,2>> fixed_original_dirs;
+    FixedIsoMetadataReservation fixed_metadata;
     std::size_t removed=0;
     std::array<std::vector<Node*>,2> path_dirs;
     std::array<std::uint32_t,2> table_size{};
@@ -3151,8 +3152,14 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
             // This route has already proven complete shared namespace identity.
             if(image.hybrid_system_area || type1_existing || type1_level3 ||
                !std::all_of(changes.begin(),changes.end(),[](const ArchiveChange& c) {
-                   return !c.remove && !c.directory;
+                   return !c.remove;
                }))return false;
+            for(const auto& change:changes) {
+                const auto key=edit_path(change.path);
+                need(image.boot_descriptor_lbas.empty() ||
+                     upper(key.substr(0,key.find('/')))!="BOOT.IMAGES",
+                     "writable shared addition conflicts with virtual boot namespace");
+            }
             plan.type1_fixed_shared_add=true;
         } else if(!inspection.parser_compatible || inspection.partition_access_type!=1 ||
                   inspection.allocation_bitmap || inspection.allocation_table)return false;
@@ -3515,7 +3522,29 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         need(index.size()<=200000 && tree.dirs.size()<=65535,
              "mirrored directory tree exceeds entry limit");
     }
+    bool fixed_tree=false;
     if(plan.type1_fixed_shared_add) {
+        fixed_tree=!plan.shared_directories.empty();
+        if(!fixed_tree) {
+            std::set<const Node*> parents;
+            for(const auto& [key,node]:tree.added) {
+                (void)key;
+                const auto* parent=node->parent;
+                need(parent && parent->directory,
+                     "fixed shared addition lacks a parent directory");
+                parents.insert(parent);
+            }
+            // Measure each affected directory only once, rather than
+            // serializing a large directory once per newly added file.
+            for(const auto* parent:parents) {
+                for(unsigned view=0;view<views;++view)
+                    if(shared_tree_directory(tree,*parent,view).size()>
+                       parent->new_size[view])fixed_tree=true;
+                if(fixed_tree)break;
+            }
+        }
+    }
+    if(plan.type1_fixed_shared_add && !fixed_tree) {
         // Fixed authoring only changes existing parent directory sectors.
         // A second set of physical spans includes the supplementary
         // directories (paired file extents are identical in both views).
@@ -3617,6 +3646,14 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
          "ISO payload and metadata exceed optical block address space");
     plan.iso_metadata_blocks=blocks;
     plan.iso_payload_blocks=tree.iso_payload_blocks;
+    if(fixed_tree) {
+        // Preserve the original optical volume sizes, even if the UDF
+        // partition or physical container extends beyond either view.
+        tree.fixed_metadata.limit_lba=image.joliet?
+            std::min(image.primary_volume_blocks,image.supplementary_volume_blocks):
+            image.primary_volume_blocks;
+        plan.type1_fixed_metadata=&tree.fixed_metadata;
+    }
     for(const auto& [lba,vd]:image.descriptors) {
         (void)vd;
         plan.metadata_writes.emplace_back(std::uint64_t(lba)*block+132,58);
@@ -3641,10 +3678,14 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
     } else protect_iso_udf_stage(path,staged,image,progress,mbr_growth,gpt_growth);
     const auto size=std::filesystem::file_size(staged);
     const bool fixed=plan.type1_fixed_shared_add;
+    const bool fixed_tree=fixed && plan.iso_metadata_blocks!=0;
+    const bool in_place=fixed && !fixed_tree;
     need(size%block==0 && size/block<0xffffffffu &&
          (fixed?(size==image.size && !sequential_vat && !mbr_growth &&
-                 !gpt_growth && !plan.iso_metadata_blocks &&
-                 !plan.iso_payload_blocks && tree.replaced.empty()):
+                 !gpt_growth && !plan.iso_payload_blocks &&
+                 tree.replaced.empty() &&
+                 (fixed_tree?plan.type1_fixed_metadata==&tree.fixed_metadata:
+                             plan.type1_fixed_metadata==nullptr)):
                 size>image.size),
          "shared addition has unplanned stage geometry");
     const auto volume_blocks=gpt_growth?
@@ -3652,10 +3693,20 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         size/block;
     const unsigned views=image.joliet?2u:1u;
     std::uint64_t first=0,main=0;
-    if(fixed) {
-        first=image.joliet?std::min(image.primary_volume_blocks,
-                                    image.supplementary_volume_blocks):
-                           image.primary_volume_blocks;
+    const auto fixed_limit=image.joliet?std::min(image.primary_volume_blocks,
+                                                image.supplementary_volume_blocks):
+                                       image.primary_volume_blocks;
+    if(fixed_tree) {
+        first=tree.fixed_metadata.first_lba;
+        need(tree.fixed_metadata.limit_lba==fixed_limit && first>=257 &&
+             first<=fixed_limit && plan.iso_metadata_blocks<=fixed_limit-first,
+             "fixed ISO metadata reservation exceeds optical volume");
+        main=first+plan.iso_metadata_blocks;
+        for(const auto& [at,bytes]:bridge_metadata_protected_ranges(image))
+            need(!intersect(first*block,(main-first)*block,at,bytes),
+                 "fixed ISO metadata reservation overlaps original optical data");
+    } else if(in_place) {
+        first=fixed_limit;
         main=first;
     } else if(sequential_vat) {
         // The VAT planner places an unmapped, zero-filled ISO metadata
@@ -3719,6 +3770,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         }
         need(pd,"missing remastered physical UDF partition");
     }
+    const auto payload_limit=fixed?std::uint64_t(fixed_limit):first;
     {
         const Disc udf(staged);
         need(udf.format()=="UDF","cannot read staged UDF additions");
@@ -3736,8 +3788,8 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
                  !found->extents.empty(),"shared UDF addition has no ISO extent");
             const auto start=found->extents.front().offset;
             need(start>=(fixed?257ull*block:image.size) &&
-                 start%block==0 && start<=first*block &&
-                 found->size<=first*block-start,
+                 start%block==0 && start<=payload_limit*block &&
+                 found->size<=payload_limit*block-start,
                  "shared addition outside authorized optical payload area");
             auto next=start;
             for(const auto& e:found->extents) {
@@ -3748,7 +3800,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
             }
             need(next-start==found->size,"shared addition extent size mismatch");
             if(n->regenerate_sections) {
-                assign_shared_iso_sections(*n,start/block,first);
+                assign_shared_iso_sections(*n,start/block,payload_limit);
                 need(shared_physical_mapping(*found,*n,true),
                      "new shared mapping differs from ISO sections");
             } else {
@@ -3766,14 +3818,14 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
                 }
             }
         }
-        if(sequential_vat)for(const auto& item:udf.items())
+        if(sequential_vat || fixed_tree)for(const auto& item:udf.items())
             for(const auto& e:item.extents)
                 need(e.sparse || !intersect(e.offset,e.length,first*block,
                                             (main-first)*block),
-                     "sequential ISO reservation overlaps live UDF extent");
+                     "ISO metadata reservation overlaps live UDF extent");
     }
     auto expected=image.descriptors;
-    if(fixed) {
+    if(in_place) {
         std::fstream out(staged,std::ios::binary|std::ios::in|std::ios::out);
         need(bool(out),"cannot open fixed shared ISO stage");
         for(const auto& [dir,original_dirs]:tree.fixed_original_dirs)
@@ -3878,7 +3930,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
     for(auto& [lba,vd]:expected) {
         const auto old=vd;
         const unsigned view=vd[0]==2?1u:0u;
-        both(vd,80,static_cast<std::uint32_t>(volume_blocks));
+        if(!fixed)both(vd,80,static_cast<std::uint32_t>(volume_blocks));
         both(vd,132,tree.table_size[view]);
         put(vd,140,tree.table_lba[view][0]);put(vd,144,0);
         put(vd,148,tree.table_lba[view][1],4,true);put(vd,152,0);
@@ -3888,6 +3940,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         both(root,2,tree.root->new_lba[view]);both(root,10,tree.root->new_size[view]);
         std::copy(root.begin(),root.end(),vd.begin()+156);
         for(const auto& [offset,length]:{std::pair<std::size_t,std::size_t>{80,8},{132,58}}) {
+            if(fixed && offset==80)continue;
             const auto at=std::uint64_t(lba)*block+offset;
             need(std::find(plan.metadata_writes.begin(),plan.metadata_writes.end(),
                     std::pair<std::uint64_t,std::uint64_t>{at,length})!=
@@ -3948,13 +4001,13 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
     }
     for(unsigned view=0;view<views;++view) {
         for(const auto* dir:tree.dirs) {
-            if(fixed && !tree.fixed_original_dirs.count(dir))continue;
+            if(in_place && !tree.fixed_original_dirs.count(dir))continue;
             auto data=shared_tree_directory(tree,*dir,view);
             data.resize(dir->new_size[view],0);
             need(checked.read(std::uint64_t(dir->new_lba[view])*block,data.size())==data,
                  "remastered ISO directory readback differs from plan");
         }
-        if(!fixed)for(unsigned big=0;big<2;++big) {
+        if(!in_place)for(unsigned big=0;big<2;++big) {
             auto data=shared_tree_path_table(tree,view,big!=0);
             data.resize((data.size()+block-1)/block*block,0);
             need(checked.read(std::uint64_t(tree.table_lba[view][big])*block,data.size())==data,

@@ -346,8 +346,109 @@ def main(editor,inspector):
                 many=[editor,str(image),'batch']
                 for i in range(80):
                     many+=['add',f'OVERFLOW{i:03d}.BIN',str(source)]
-                run(many,expected=1)
+                # Directory overflow now allocates a new optical tree
+                # inside the existing writable UDF partition.
+                run(many)
+                expanded=image.read_bytes()
+                expanded_wanted={'hello':b'world'}
+                expanded_wanted.update({f'OVERFLOW{i:03d}.BIN':source.read_bytes()
+                                        for i in range(80)})
+                assert len(expanded)==len(raw)
+                assert read_image(image)==expanded_wanted
+                if joliet:assert read_image(image,True)==expanded_wanted
+                from test_iso_edit import validate_path_tables
+                validate_path_tables(image)
+                for view in ((False,True) if joliet else (False,)):
+                    vd=(17 if view else 16)*B
+                    assert expanded[vd:vd+132]==raw[vd:vd+132]
+                    assert expanded[vd+190:vd+B]==raw[vd+190:vd+B]
+                    new_root,new_size=struct.unpack_from('<I4xI',expanded,vd+158)
+                    assert new_root>=PARTITION and new_size>B
+                assert expanded[24*B:26*B]==raw[24*B:26*B]
+                assert expanded[303*B:304*B]==raw[303*B:304*B]
+                assert expanded[20*B:21*B]==raw[20*B:21*B]
+                image.write_bytes(raw)
+                # A metadata reservation needs real free blocks, not
+                # arbitrary zeros. A single free sector cannot hold it.
+                cramped=bytearray(raw)
+                if use_table:
+                    cramped[bm+40:bm+B]=bytes(B-40)
+                    struct.pack_into('<III',cramped,bm+36,8,0x40000000|B,4)
+                    update_tag(cramped,bm,48,BITMAP_LOGICAL)
+                else:
+                    cramped[bm+24:bm+24+bitmap_bytes]=bytes(bitmap_bytes)
+                    cramped[bm+24]=1<<4
+                    update_tag(cramped,bm,24+bitmap_bytes,BITMAP_LOGICAL)
+                struct.pack_into('<I',cramped,INTEGRITY_LBA*B+80,1)
+                update_tag(cramped,INTEGRITY_LBA*B,88,INTEGRITY_LBA)
+                image.write_bytes(cramped)
+                run([editor,str(image),'mkdir','NOSPACE'],expected=1)
+                assert image.read_bytes()==cramped
+                image.write_bytes(raw)
+                nested_args=['mkdir','DIR','mkdir','DIR/DEEP',
+                             'add','DIR/DEEP/FILE.BIN',str(large)]
+                result=run([editor,str(image),'batchcancelstagedfixed',*nested_args],expected=1)
+                assert result.returncode==3,result.stderr
                 assert image.read_bytes()==raw
+                run([editor,str(image),'batch',*nested_args])
+                nested=image.read_bytes()
+                wanted_tree={'hello':b'world','DIR/':None,'DIR/DEEP/':None,
+                             'DIR/DEEP/FILE.BIN':large.read_bytes()}
+                assert len(nested)==len(raw)
+                assert read_image(image)==wanted_tree
+                if joliet:assert read_image(image,True)==wanted_tree
+                validate_path_tables(image)
+                assert nested[24*B:26*B]==raw[24*B:26*B]
+                assert nested[303*B:304*B]==raw[303*B:304*B]
+                def free_blocks(data):
+                    if use_table:
+                        assert struct.unpack_from('<H',data,bm)[0]==263
+                        n=struct.unpack_from('<I',data,bm+36)[0]
+                        result=set()
+                        for at in range(bm+40,bm+40+n,8):
+                            length,start=struct.unpack_from('<II',data,at)
+                            result.update(range(start,start+(length&0x3fffffff)//B))
+                        return result
+                    return {i for i in range(250)
+                            if data[bm+24+i//8]&(1<<(i%8))}
+                free=free_blocks(nested)
+                assert len(free)==struct.unpack_from('<I',nested,INTEGRITY_LBA*B+80)[0]
+                # The new optical directory and both path table copies
+                # must be persistently unavailable to the UDF allocator.
+                reserved_iso=set()
+                for view in ((False,True) if joliet else (False,)):
+                    vd=(17 if view else 16)*B
+                    assert nested[vd:vd+132]==raw[vd:vd+132]
+                    table_size=struct.unpack_from('<I',nested,vd+132)[0]
+                    little=struct.unpack_from('<I',nested,vd+140)[0]
+                    big=struct.unpack_from('>I',nested,vd+148)[0]
+                    for lba in (little,big):
+                        reserved_iso.update(range(lba,lba+(table_size+B-1)//B))
+                    pos=little*B
+                    end=pos+table_size
+                    while pos<end:
+                        count=nested[pos]
+                        lba=struct.unpack_from('<I',nested,pos+2)[0]
+                        length=struct.unpack_from('<I',nested,lba*B+10)[0]
+                        reserved_iso.update(range(lba,lba+(length+B-1)//B))
+                        pos+=8+count+(count&1)
+                    assert pos==end
+                assert reserved_iso and all(PARTITION<=lba<PARTITION+250
+                                            for lba in reserved_iso)
+                assert not ({lba-PARTITION for lba in reserved_iso}&free)
+                target=root/f'writable-shared-nested-{use_table}-{joliet}'
+                run([inspector,str(image),'--extract',str(target)])
+                assert (target/'DIR'/'DEEP'/'FILE.BIN').read_bytes()==large.read_bytes()
+                # Subsequent F5 into a new directory must respect the
+                # optical metadata reservation written by the last F7.
+                run([editor,str(image),'add','DIR/DEEP/NEXT.BIN',str(source)])
+                wanted_tree['DIR/DEEP/NEXT.BIN']=source.read_bytes()
+                assert read_image(image)==wanted_tree
+                if joliet:assert read_image(image,True)==wanted_tree
+                assert not ({lba-PARTITION for lba in reserved_iso}&
+                            free_blocks(image.read_bytes()))
+                validate_path_tables(image)
+                image.write_bytes(raw)
                 run([editor,str(image),'batch','add','ADDED.BIN',str(source),
                      'add','LARGE.BIN',str(large)])
                 added=image.read_bytes()
