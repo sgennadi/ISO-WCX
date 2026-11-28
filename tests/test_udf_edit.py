@@ -1656,7 +1656,7 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     ('batch','add','ISO_ROOT.BIN',replacement,'add','COMMON/BASE.BIN',replacement),
                     ('batch','delete','ISO_ROOT.BIN','delete','COMMON/BASE.BIN'),
                     ('batch','delete','ONLY','delete','hello'),
-                    ('add','ONLY/NEW.BIN',replacement),
+                    ('add','ONLY/MISSING/NEW.BIN',replacement),
                     ('batch','add','COMMON/ISOSUB/KEEP.BIN',replacement,
                      'add','COMMON/BASE.BIN',replacement),
                     ('delete','COMMON/ISOSUB'),
@@ -1925,7 +1925,7 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     ('batch','add','ISO_ROOT.BIN',replacement,'add','hello',replacement),
                     ('batch','add','ISO_ROOT.BIN',replacement,'add','COMMON/BASE.BIN',replacement),
                     ('batch','delete','ONLY','add','ONLY/KEEP.BIN',replacement),
-                    ('add','ONLY/NEW.BIN',replacement)):
+                    ('add','ONLY/MISSING/NEW.BIN',replacement)):
                     run(editor,bridge,*args,success=False)
                     assert bridge.read_bytes()==sixth
                 replacement.write_bytes(b'')
@@ -1936,6 +1936,50 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 with replacement.open('wb') as oversized:oversized.truncate(64*1024*1024)
                 run(editor,bridge,'add','ISO_ROOT.BIN',replacement,success=False)
                 assert bridge.read_bytes()==sixth
+                assert not list(root.glob('.iso-wcx-edit-*'))
+                replacement.write_bytes(b'ISO-only new subtree payload'*700)
+                iso_source.write_bytes(b'new short file')
+                # Add nested files/directories only below a proven
+                # independent ISO parent. Both orderings are valid:
+                # the planner sorts explicitly created parents first.
+                run(editor,bridge,'batch','add','ONLY/NEST/DEEP/NEW.BIN',replacement,
+                    'mkdir','ONLY/NEST/DEEP','mkdir','ONLY/NEST',
+                    'mkdir','ONLY/EMPTY','add','ONLY/NEW.BIN',iso_source)
+                iso_expected.update({
+                    'ONLY/NEST/':None,'ONLY/NEST/DEEP/':None,
+                    'ONLY/NEST/DEEP/NEW.BIN':replacement.read_bytes(),
+                    'ONLY/EMPTY/':None,'ONLY/NEW.BIN':iso_source.read_bytes()})
+                created=verify_iso_remaster(sixth,18)
+                # A newly created private subtree stays ISO-only in
+                # the next transaction, even when other ISO files are
+                # replaced or unlinked at the same time.
+                replacement.write_bytes(b'ISO-only follow-up'*200)
+                run(editor,bridge,'batch','delete','ONLY/EMPTY',
+                    'add','ONLY/NEST/DEEP/NEW.BIN',iso_source,
+                    'mkdir','ONLY/NEST/NEXT','add','ONLY/NEST/NEXT/LAST.BIN',replacement)
+                del iso_expected['ONLY/EMPTY/']
+                iso_expected.update({
+                    'ONLY/NEST/DEEP/NEW.BIN':iso_source.read_bytes(),
+                    'ONLY/NEST/NEXT/':None,
+                    'ONLY/NEST/NEXT/LAST.BIN':replacement.read_bytes()})
+                sixth=verify_iso_remaster(created,19)
+                for args in (
+                    ('add','ROOT.BIN',replacement),
+                    ('mkdir','ROOTDIR'),
+                    ('add','ONLY/MISSING/NEW.BIN',replacement),
+                    ('add','ONLY/KEEP.BIN/NEW.BIN',replacement),
+                    ('batch','mkdir','ONLY/CASE','mkdir','only/case'),
+                    ('batch','mkdir','ONLY/NEW.BIN','add','ONLY/NEW.BIN/X',replacement),
+                    ('batch','delete','ONLY/NEST','add','ONLY/NEST/ABORT.BIN',replacement),
+                    ('batch','add','ONLY/OTHER.BIN',replacement,
+                     'add','COMMON/OTHER.BIN',replacement),
+                    ('batch','add','ONLY/OTHER.BIN',replacement,
+                     'add','hello',replacement)):
+                    run(editor,bridge,*args,success=False)
+                    assert bridge.read_bytes()==sixth
+                result=run(editor,bridge,'batchcancelstaged','mkdir','ONLY/CANCEL',
+                           'add','ONLY/CANCEL/ABORT.BIN',replacement,success=False)
+                assert result.returncode==3 and bridge.read_bytes()==sixth
                 assert not list(root.glob('.iso-wcx-edit-*'))
                 replacement.write_bytes(b'next')
 
@@ -1956,8 +2000,9 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 # preserving every original UDF path and payload.
                 run(editor,bridge,'batch','delete','ONLY','delete','ONLY/KEEP.BIN',
                     'delete','ISO_ROOT.BIN')
-                for key in ('ONLY/','ONLY/KEEP.BIN','ISO_ROOT.BIN'):
-                    del iso_expected[key]
+                for key in list(iso_expected):
+                    if key.startswith('ONLY/') or key=='ISO_ROOT.BIN':
+                        del iso_expected[key]
                 removed=verify_iso_remaster(sixth,12)
                 # An ISO-only child under a shared directory is also
                 # removable without unlinking its shared siblings.

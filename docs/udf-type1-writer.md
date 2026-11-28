@@ -644,3 +644,24 @@ data, multiple independent replacements in one batch, unchanged VAT
 mapping, capacity and budget failure, conflicting operations, and
 cancellation, using both MBR/GPT and ISO/Joliet with embedded or external
 VAT. These are image-level tests, not physical boot validation.
+
+### Independent ISO-only file and directory creation
+
+The sequential MBR/GPT remaster can also create nonempty files and
+directories below an existing directory proven to be ISO-only in the
+original namespace. Newly requested nested directories must have an
+explicitly requested or existing parent. A pure ISO-only batch can
+combine creation, replacement and recursive removal. Parent and child
+selections are checked for conflicts before mutation; case-folded name
+collisions, missing parents, shared or UDF-only targets, new root names
+and descendants of deleted directories are rejected or routed through
+the existing shared/UDF-only policy as appropriate. New files occupy
+fresh unmapped reservation sectors and receive independently verified
+primary and Joliet directory records. No UDF objects or virtual
+mappings are created. The combined 64 MiB reservation limit and all
+existing staged readback, partition and rollback checks remain.
+Regression coverage adds nested creation, empty directories,
+out-of-order parent selections, subsequent private edits, cancellation,
+mixed-operation rejection and recursive deletion of newly created
+ISO-only subtrees. Zero-length payloads and larger reservations remain
+outside this profile.

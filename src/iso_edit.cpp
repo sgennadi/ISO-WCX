@@ -2432,7 +2432,7 @@ struct SharedTreePlan {
     std::map<std::string,Node*> added;
     std::map<std::string,Node*> replaced;
     // Independent ISO payloads have no corresponding VAT mapping.
-    std::map<std::string,Node*> iso_only_replacements;
+    std::map<std::string,Node*> iso_only_payloads;
     std::uint64_t iso_payload_blocks=0;
     // Preserve independent paths on both sides of a partial bridge.
     std::map<std::string,bool> independent_udf_paths;
@@ -2600,18 +2600,31 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
     }
     std::set<std::string> iso_removals;
     if(iso_only_remaster) {
-        // Only explicit, existing ISO-only entries may be selected.
-        // Expand deletions and reserve independent replacement payloads
-        // without synthesizing any UDF changes.
+        // Existing independent ISO paths and genuinely new entries
+        // beneath a proven independent ISO directory can be edited
+        // without synthesizing UDF changes. New root names and new
+        // children of shared directories retain their existing policy.
         if(independent_iso.empty() || changes.size()>4096)return false;
         std::set<std::string> requests;
+        std::map<std::string,bool> additions;
         for(const auto& change:changes) {
             const auto key=upper(edit_path(change.path));
             const auto found=iso_files.find(key);
-            if(found==iso_files.end() || !independent_iso.count(key))return false;
-            need(requests.insert(key).second &&
-                 (!change.directory || (change.remove && found->second->directory)),
-                 "duplicate or invalid independent ISO request");
+            if(udf_names.count(key))return false;
+            need(requests.insert(key).second,
+                 "duplicate or case-colliding independent ISO request");
+            if(found==iso_files.end()) {
+                if(change.remove)return false;
+                const auto prefix=key+"/";
+                const auto udf_child=udf_names.lower_bound(prefix);
+                need(udf_child==udf_names.end() || !udf_child->starts_with(prefix),
+                     "new independent ISO path would shadow UDF entries");
+                additions.emplace(key,change.directory);
+                continue;
+            }
+            if(!independent_iso.count(key))return false;
+            need(!change.directory || (change.remove && found->second->directory),
+                 "invalid independent ISO request type");
             if(!change.remove) {
                 need(!found->second->directory &&
                      std::filesystem::is_regular_file(std::filesystem::symlink_status(change.source)),
@@ -2633,11 +2646,44 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                          "independent ISO removal exceeds namespace limit");
                 }
         }
-        for(const auto& change:changes)
-            if(!change.remove)
-                need(!iso_removals.count(upper(edit_path(change.path))),
-                     "ISO-only replacement conflicts with removed subtree");
+        // Prove parent membership against the original namespaces,
+        // not merely against the absence of the new name in UDF.
+        for(const auto& [key,directory]:additions) {
+            (void)directory;
+            auto ancestor=key;
+            for(;;) {
+                const auto slash=ancestor.rfind('/');
+                if(slash==std::string::npos)return false;
+                ancestor.resize(slash);
+                if(udf_names.count(ancestor))return false;
+                const auto existing=iso_files.find(ancestor);
+                if(existing!=iso_files.end()) {
+                    if(!existing->second->directory || !independent_iso.count(ancestor))
+                        return false;
+                    protect_boot(*existing->second,image.boot_lbas);
+                    protect_hybrid_target(*existing->second,image);
+                    break;
+                }
+                const auto created=additions.find(ancestor);
+                if(created==additions.end() || !created->second)return false;
+            }
+        }
+        for(const auto& change:changes) {
+            if(change.remove)continue;
+            auto ancestor=upper(edit_path(change.path));
+            for(;;) {
+                need(!iso_removals.count(ancestor),
+                     "ISO-only addition/replacement conflicts with removed subtree");
+                const auto slash=ancestor.rfind('/');
+                if(slash==std::string::npos)break;
+                ancestor.resize(slash);
+            }
+        }
         for(const auto& key:iso_removals)independent_iso.erase(key);
+        for(const auto& [key,directory]:additions) {
+            (void)directory;
+            need(independent_iso.insert(key).second,"duplicate ISO-only addition");
+        }
         tree.independent_iso_paths=std::move(independent_iso);
         tree.independent_udf_paths=std::move(independent);
         plan.vat_iso_only_remaster=true;
@@ -2946,7 +2992,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                         need(blocks<=32768-tree.iso_payload_blocks,
                              "ISO-only replacement exceeds reserved 64 MiB budget");
                         tree.iso_payload_blocks+=blocks;
-                        need(tree.iso_only_replacements.emplace(upper(key),n).second,
+                        need(tree.iso_only_payloads.emplace(upper(key),n).second,
                              "duplicate ISO-only replacement");
                     } else {
                         plan.shared_replacements.insert(key);
@@ -2998,13 +3044,25 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         } else n->logical=n->name;
         // Generated record() uses this minimal header for timestamps.
         // Leave the raw-record members empty until serialization.
+        if(iso_only_remaster)
+            need(tree.independent_iso_paths.count(upper(key)) &&
+                 !udf_names.count(upper(key)),
+                 "new ISO-only entry differs from independent namespace plan");
         if(n->directory) {
-            plan.shared_directories.insert(key);
+            if(!iso_only_remaster)plan.shared_directories.insert(key);
             tree.dirs.push_back(n.get());
             tree.dots[n.get()]={};
+        } else if(iso_only_remaster) {
+            n->source=c->source;
+            const auto blocks=(n->size+block-1)/block;
+            need(blocks<=32768-tree.iso_payload_blocks,
+                 "ISO-only addition exceeds reserved 64 MiB budget");
+            tree.iso_payload_blocks+=blocks;
+            need(tree.iso_only_payloads.emplace(upper(key),n.get()).second,
+                 "duplicate independent ISO payload");
         } else plan.shared_additions.insert(key);
         need(index.emplace(upper(key),n.get()).second &&
-             tree.added.emplace(key,n.get()).second,
+             tree.added.emplace(iso_only_remaster?upper(key):key,n.get()).second,
              "duplicate new mirrored entry");
         parent->children.push_back(std::move(n));
         need(index.size()<=200000 && tree.dirs.size()<=65535,
@@ -3136,6 +3194,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         auto changed=tree.added;
         changed.insert(tree.replaced.begin(),tree.replaced.end());
         for(const auto& [key,n]:changed) {
+            if(plan.vat_iso_only_remaster && tree.independent_iso_paths.count(upper(key)))continue;
             const auto found=std::find_if(udf.items().begin(),udf.items().end(),
                 [&](const Item& item){return item.path==key;});
             need(found!=udf.items().end() && found->directory==n->directory,
@@ -3176,21 +3235,25 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
     // unmapped reservation, before the newly mastered ISO metadata.
     // UDF never maps these sectors or changes its existing file layouts.
     auto next=first;
-    need(tree.iso_only_replacements.empty() ||
+    need(tree.iso_only_payloads.empty() ||
          (sequential_vat && plan.vat_iso_only_remaster),
          "independent ISO payloads require the VAT-only remaster contract");
-    for(const auto& [key,n]:tree.iso_only_replacements) {
+    for(const auto& [key,n]:tree.iso_only_payloads) {
         need(tree.independent_iso_paths.count(key) && n->size &&
              n->size<=0xffffffffull && next<=main &&
              (n->size+block-1)/block<=main-next,
              "independent ISO replacement outside reservation");
         n->lba=static_cast<std::uint32_t>(next);
         n->sections={{n->lba,static_cast<std::uint32_t>(n->size)}};
-        both(n->record,2,n->lba);
-        both(n->record,10,static_cast<std::uint32_t>(n->size));
-        if(image.joliet) {
-            both(n->joliet_record,2,n->lba);
-            both(n->joliet_record,10,static_cast<std::uint32_t>(n->size));
+        // Existing records retain all fields except address/length.
+        // New records are emitted by shared_tree_record after allocation.
+        if(!n->record.empty()) {
+            both(n->record,2,n->lba);
+            both(n->record,10,static_cast<std::uint32_t>(n->size));
+            if(image.joliet) {
+                both(n->joliet_record,2,n->lba);
+                both(n->joliet_record,10,static_cast<std::uint32_t>(n->size));
+            }
         }
         next+=(n->size+block-1)/block;
     }
@@ -3223,7 +3286,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
              "reserved ISO metadata space is not empty");
         out.clear();out.seekp(static_cast<std::streamoff>(at));write(out,data);
     };
-    for(const auto& [key,n]:tree.iso_only_replacements) {
+    for(const auto& [key,n]:tree.iso_only_payloads) {
         (void)key;
         std::ifstream source(n->source,std::ios::binary);
         need(bool(source),"cannot open independent ISO replacement source");
@@ -3331,7 +3394,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
                  "remastered ISO path table readback differs from plan");
         }
     }
-    for(const auto& [key,n]:tree.iso_only_replacements) {
+    for(const auto& [key,n]:tree.iso_only_payloads) {
         (void)key;
         std::ifstream source(n->source,std::ios::binary);
         need(bool(source),"cannot reopen independent ISO replacement source");
@@ -3360,8 +3423,10 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
                                  tree.independent_udf_paths.size(),
              "VAT coordinated namespace size differs");
         for(const auto& key:tree.independent_iso_paths)
-            need(wanted.count(key) && original.count(key),
-                 "independent ISO path disappeared during remaster");
+            need(wanted.count(key) &&
+                 (original.count(key) ||
+                  (plan.vat_iso_only_remaster && tree.added.count(key))),
+                 "independent ISO path differs from remaster plan");
         std::set<std::string> seen;
         for(const auto& item:udf.items()) {
             const auto key=upper(item.path);
@@ -3395,6 +3460,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
     auto changed=tree.added;
     changed.insert(tree.replaced.begin(),tree.replaced.end());
     for(const auto& [key,n]:changed) {
+        if(plan.vat_iso_only_remaster && tree.independent_iso_paths.count(upper(key)))continue;
         const auto found=std::find_if(udf.items().begin(),udf.items().end(),
             [&](const Item& item){return item.path==key;});
         need(found!=udf.items().end() && found->directory==n->directory &&
@@ -4279,7 +4345,7 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
         const bool independent=std::all_of(changes.begin(),changes.end(),
             [&](const ArchiveChange& c) {
                 const auto key=upper(edit_path(c.path));
-                return index.count(key) && !udf_names.count(key);
+                return !udf_names.count(key) && (index.count(key) || !c.remove);
             });
         if(independent && try_edit_iso_vat_mirrored_tree(path,image,changes,progress,true))return;
     }
