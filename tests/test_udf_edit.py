@@ -1696,12 +1696,13 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             second=verify(first,2)
             if iso_only:
                 for args in (
-                    ('batch','add','ISO_ROOT.BIN',replacement,'add','COMMON/BASE.BIN',replacement),
-                    ('batch','delete','ISO_ROOT.BIN','delete','COMMON/BASE.BIN'),
-                    ('batch','delete','ONLY','delete','hello'),
+                    ('batch','add','ISO_ROOT.BIN',replacement,'add','COMMON/BASE.BIN',replacement,
+                     'add','ROOT.BIN',replacement),
+                    ('batch','delete','ISO_ROOT.BIN','delete','COMMON/BASE.BIN','delete','MISSING'),
+                    ('batch','delete','ONLY','delete','hello','delete','MISSING'),
                     ('add','ONLY/MISSING/NEW.BIN',replacement),
                     ('batch','add','COMMON/ISOSUB/KEEP.BIN',replacement,
-                     'add','COMMON/BASE.BIN',replacement),
+                     'add','COMMON/BASE.BIN',replacement,'add','ROOT.BIN',replacement),
                     ('delete','COMMON/ISOSUB'),
                     ('batch','delete','COMMON/ISOSUB','add','COMMON/NEW.BIN',replacement)):
                     run(editor,bridge,*args,success=False)
@@ -1750,14 +1751,16 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 assert bridge.read_bytes()==second
                 replacement.write_bytes(b'ROOT-EDIT')
                 run(editor,bridge,'batch','add','ISO_ROOT.BIN',replacement,
-                    'add','COMMON/PRIVATE.BIN',replacement,success=False)
+                    'add','COMMON/PRIVATE.BIN',replacement,
+                    'delete','MISSING',success=False)
                 assert bridge.read_bytes()==second
                 assert not list(root.glob('.iso-wcx-edit-*'))
                 replacement.write_bytes(b'next')
             for args in (
                 ('add','ROOT.BIN',replacement),
                 ('batch','add','COMMON/OK.BIN',replacement,'add','ROOT.BIN',replacement),
-                ('batch','add','COMMON/OK.BIN',replacement,'add','COMMON/PRIVATE.BIN',replacement),
+                ('batch','add','COMMON/OK.BIN',replacement,'add','COMMON/PRIVATE.BIN',replacement,
+                 'delete','MISSING'),
                 ('batch','mkdir','COMMON/PRIVATE.BIN','add','COMMON/PRIVATE.BIN/X',replacement)):
                 run(editor,bridge,*args,success=False)
                 assert bridge.read_bytes()==second
@@ -1795,7 +1798,8 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 ('batch','delete','COMMON/NEST','add','COMMON/NEST/X.BIN',replacement),
                 ('batch','delete','COMMON/NEST','delete','COMMON/NEST/MISSING'),
                 ('batch','delete','COMMON/NEST','delete','common/nest'),
-                ('batch','delete','COMMON/BASE.BIN','add','OTHER/NEW.BIN',replacement)):
+                ('batch','delete','COMMON/BASE.BIN','add','OTHER/NEW.BIN',replacement,
+                 'delete','OTHER/MISSING')):
                 run(editor,bridge,*args,success=False)
                 assert bridge.read_bytes()==fourth
             result=run(editor,bridge,'batchcancelstaged','delete','COMMON/NEST',
@@ -1839,7 +1843,8 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             ninth=verify(eighth,9,udf_only=True)
             for args in (
                 ('add','ROOT.BIN',replacement),
-                ('batch','add','OTHER/NEW.BIN',replacement,'add','COMMON/BASE.BIN',replacement),
+                ('batch','add','OTHER/NEW.BIN',replacement,'add','COMMON/BASE.BIN',replacement,
+                 'add','ROOT.BIN',replacement),
                 ('batch','delete','OTHER','add','OTHER/NEW.BIN',replacement),
                 ('batch','delete','OTHER','delete','OTHER/MISSING.BIN'),
                 ('add','other/NEXT.BIN',replacement),
@@ -1849,9 +1854,103 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
             result=run(editor,bridge,'batchcancelstaged','delete','OTHER',
                        'add','hello',replacement,success=False)
             assert result.returncode==3 and bridge.read_bytes()==ninth
+
+            # Mixed ownership is resolved from the original tree, not
+            # from the order in which the requests happen to arrive.
+            # Preserve the byte-exact historical prefix and verify all
+            # three namespaces with the usual independent readers.
+            mixed_source=root/'vat-mixed-source.bin'
+            mixed_source.write_bytes(b'mixed independent payload'*200)
+            replacement.write_bytes(b'mixed shared payload')
+            args=['batch','add','COMMON/MIX/NEW.BIN',replacement,
+                  'mkdir','COMMON/MIX',
+                  'add','OTHER/MIX/NEW.BIN',mixed_source,
+                  'mkdir','OTHER/MIX']
+            if iso_only:
+                args+=['add','ONLY/MIX/NEW.BIN',mixed_source,
+                       'mkdir','ONLY/MIX']
+            run(editor,bridge,*args)
+            expected.update({'COMMON/MIX/':None,
+                             'COMMON/MIX/NEW.BIN':replacement.read_bytes()})
+            private_expected.update({'OTHER/MIX/':None,
+                                     'OTHER/MIX/NEW.BIN':mixed_source.read_bytes()})
+            if iso_only:
+                iso_expected.update({'ONLY/MIX/':None,
+                                     'ONLY/MIX/NEW.BIN':mixed_source.read_bytes()})
+            mixed=verify(ninth,27)
+            trailer=10 if gpt else 1
+            def predecessor(data):
+                fe=len(data)-trailer*B
+                assert struct.unpack_from('<H',data,fe)[0]==261
+                size=struct.unpack_from('<Q',data,fe+56)[0]
+                mode=struct.unpack_from('<H',data,fe+34)[0]
+                if mode==3:table=fe+176
+                else:
+                    assert mode==0
+                    table=(PARTITION+struct.unpack_from('<I',data,fe+180)[0])*B
+                assert size>=152
+                return struct.unpack_from('<I',data,table+132)[0]
+            assert predecessor(mixed)==len(ninth)//B-trailer-PARTITION
+
+            # Even in a mixed request, recursive deletion may not
+            # consume private descendants of a shared directory.
+            for args in (
+                (('batch','delete','COMMON','add','OTHER/ABORT.BIN',replacement)
+                 if iso_only else
+                 ('batch','delete','COMMON','add','OTHER/ABORT.BIN',replacement,
+                  'delete','MISSING')),
+                ('batch','add','COMMON/MIX/ABORT.BIN',replacement,
+                 'add','OTHER/MISSING/ABORT.BIN',mixed_source),
+                ('batch','delete','COMMON/MIX','add','COMMON/MIX/ABORT.BIN',replacement,
+                 'add','OTHER/ABORT.BIN',mixed_source),
+                ('batch','add','COMMON/MIX/ABORT.BIN',replacement,
+                 'add','other/MIX/NEW.BIN',mixed_source)):
+                run(editor,bridge,*args,success=False)
+                assert bridge.read_bytes()==mixed
+            cancel_args=['batchcancelstaged','delete','COMMON/MIX',
+                         'add','OTHER/MIX/NEW.BIN',replacement]
+            if iso_only:cancel_args+=['delete','ONLY/MIX']
+            result=run(editor,bridge,*cancel_args,success=False)
+            assert result.returncode==3 and bridge.read_bytes()==mixed
+            assert not list(root.glob('.iso-wcx-edit-*'))
+
+            # Replace and recursively delete across all scopes in
+            # one session. Explicit overlapping selections coalesce.
+            args=['batch','delete','COMMON/MIX','delete','COMMON/MIX/NEW.BIN',
+                  'delete','OTHER/MIX','delete','OTHER/MIX/NEW.BIN',
+                  'add','COMMON/BASE.BIN',replacement,'add','hello',mixed_source]
+            if iso_only:
+                args+=['delete','ONLY/MIX','delete','ONLY/MIX/NEW.BIN',
+                       'add','ISO_ROOT.BIN',mixed_source]
+            run(editor,bridge,*args)
+            del expected['COMMON/MIX/'],expected['COMMON/MIX/NEW.BIN']
+            expected['COMMON/BASE.BIN']=replacement.read_bytes()
+            del private_expected['OTHER/MIX/'],private_expected['OTHER/MIX/NEW.BIN']
+            private_expected['hello']=mixed_source.read_bytes()
+            if iso_only:
+                del iso_expected['ONLY/MIX/'],iso_expected['ONLY/MIX/NEW.BIN']
+                iso_expected['ISO_ROOT.BIN']=mixed_source.read_bytes()
+            ninth=verify(mixed,28)
+            assert predecessor(ninth)==len(mixed)//B-trailer-PARTITION
+            if iso_only:
+                # Mixed private-only batch: no shared request is
+                # necessary when both independent scopes are proven.
+                run(editor,bridge,'batch','add','ONLY/PAIR.BIN',replacement,
+                    'add','OTHER/PAIR.BIN',mixed_source)
+                iso_expected['ONLY/PAIR.BIN']=replacement.read_bytes()
+                private_expected['OTHER/PAIR.BIN']=mixed_source.read_bytes()
+                pair=verify(ninth,29)
+                assert predecessor(pair)==len(ninth)//B-trailer-PARTITION
+                # ISO-only plus shared, without private-UDF mutations.
+                run(editor,bridge,'batch','delete','ONLY/PAIR.BIN',
+                    'add','COMMON/BASE.BIN',mixed_source)
+                del iso_expected['ONLY/PAIR.BIN']
+                expected['COMMON/BASE.BIN']=mixed_source.read_bytes()
+                ninth=verify(pair,30)
+                assert predecessor(ninth)==len(pair)//B-trailer-PARTITION
             run(editor,bridge,'delete','OTHER')
-            del private_expected['OTHER/']
-            del private_expected['OTHER/NEXT.BIN']
+            for key in list(private_expected):
+                if key.startswith('OTHER/'):del private_expected[key]
             tenth=verify(ninth,10,udf_only=True)
             # A coordinated shared append after independent updates
             # must still observe the exact current UDF namespace.
@@ -1982,8 +2081,10 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                            replacement,success=False)
                 assert result.returncode==3 and bridge.read_bytes()==sixth
                 for args in (
-                    ('batch','add','ISO_ROOT.BIN',replacement,'add','hello',replacement),
-                    ('batch','add','ISO_ROOT.BIN',replacement,'add','COMMON/BASE.BIN',replacement),
+                    ('batch','add','ISO_ROOT.BIN',replacement,'add','hello',replacement,
+                     'delete','MISSING'),
+                    ('batch','add','ISO_ROOT.BIN',replacement,'add','COMMON/BASE.BIN',replacement,
+                     'add','ROOT.BIN',replacement),
                     ('batch','delete','ONLY','add','ONLY/KEEP.BIN',replacement),
                     ('add','ONLY/MISSING/NEW.BIN',replacement)):
                     run(editor,bridge,*args,success=False)
@@ -2075,9 +2176,9 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                     ('batch','mkdir','ONLY/NEW.BIN','add','ONLY/NEW.BIN/X',replacement),
                     ('batch','delete','ONLY/NEST','add','ONLY/NEST/ABORT.BIN',replacement),
                     ('batch','add','ONLY/OTHER.BIN',replacement,
-                     'add','COMMON/OTHER.BIN',replacement),
+                     'add','COMMON/OTHER.BIN',replacement,'add','ROOT.BIN',replacement),
                     ('batch','add','ONLY/OTHER.BIN',replacement,
-                     'add','hello',replacement)):
+                     'add','hello',replacement,'delete','MISSING')):
                     run(editor,bridge,*args,success=False)
                     assert bridge.read_bytes()==sixth
                 result=run(editor,bridge,'batchcancelstaged','mkdir','ONLY/CANCEL',
@@ -2089,8 +2190,8 @@ def test_vat_partial_partitioned_transactions(editor,inspector,root,image,replac
                 for args in (
                     ('batch','delete','ONLY','delete','ONLY/MISSING.BIN'),
                     ('batch','delete','ISO_ROOT.BIN','delete','iso_root.bin'),
-                    ('batch','delete','ISO_ROOT.BIN','delete','COMMON/BASE.BIN'),
-                    ('batch','delete','ISO_ROOT.BIN','delete','hello'),
+                    ('batch','delete','ISO_ROOT.BIN','delete','COMMON/BASE.BIN','delete','MISSING'),
+                    ('batch','delete','ISO_ROOT.BIN','delete','hello','delete','MISSING'),
                     ('delete','COMMON/ISOSUB')):
                     run(editor,bridge,*args,success=False)
                     assert bridge.read_bytes()==sixth

@@ -3459,31 +3459,44 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
     vat_need(bool(in),"cannot open sequential image");
     if(coordinated) {
         const bool remaster=coordinated->iso_metadata_blocks!=0;
-        vat_need((!coordinated->vat_iso_only_remaster ||
+        const auto private_count=coordinated->vat_private_replacements.size()+
+            coordinated->vat_private_deletions.size()+
+            coordinated->vat_private_additions.size()+
+            coordinated->vat_private_directories.size();
+        vat_need((!coordinated->vat_mixed_remaster ||
+                  (remaster && !coordinated->vat_iso_only_remaster &&
+                   (mbr_alignment || gpt_trailer))) &&
+                 (coordinated->vat_mixed_remaster || !private_count) &&
+                 (!coordinated->vat_iso_only_remaster ||
                   (changes.empty() && remaster && (mbr_alignment || gpt_trailer) &&
                    coordinated->vat_tree_deletions.empty())) &&
                  coordinated->iso_metadata_blocks<=32768 &&
                  coordinated->iso_payload_blocks<=0xffffffffull-coordinated->iso_metadata_blocks &&
                  (!coordinated->iso_payload_blocks ||
-                  (coordinated->vat_iso_only_remaster && remaster)) &&
+                  ((coordinated->vat_iso_only_remaster || coordinated->vat_mixed_remaster) &&
+                   remaster)) &&
                  (remaster || (coordinated->shared_additions.empty() &&
                                coordinated->shared_directories.empty() &&
                                coordinated->vat_tree_deletions.empty())) &&
                  coordinated->shared_replacements.size()+
                  coordinated->shared_deletions.size()+
                  coordinated->shared_additions.size()+
-                 coordinated->shared_directories.size()==changes.size() &&
+                 coordinated->shared_directories.size()+private_count==changes.size() &&
                  !coordinated->metadata_writes.empty(),
                  "unsupported VAT shared ISO coordination plan");
         for(const auto& request:requests) {
             const auto& change=*request.change;
             const auto& key=request.key;
-            const bool match=change.remove?
-                ((remaster || !change.directory) && coordinated->shared_deletions.count(key)):
+            const auto shared=change.remove?
+                std::size_t((remaster || !change.directory) && coordinated->shared_deletions.count(key)):
                 (change.directory?coordinated->shared_directories.count(key):
                  (coordinated->shared_replacements.count(key)+
                   coordinated->shared_additions.count(key)));
-            vat_need(match,"VAT shared ISO request differs from plan");
+            const auto private_match=change.remove?coordinated->vat_private_deletions.count(key):
+                (change.directory?coordinated->vat_private_directories.count(key):
+                 coordinated->vat_private_replacements.count(key)+
+                 coordinated->vat_private_additions.count(key));
+            vat_need(shared+private_match==1,"VAT coordinated request differs from plan");
         }
         std::uint64_t end=16ull*block;
         // The only mutable historical bytes are ISO record fields
@@ -3985,11 +3998,16 @@ std::unique_ptr<VatAppendPlan> prepare_vat_append(
             const bool authorized_remove=coordinated->iso_metadata_blocks?
                 coordinated->vat_tree_deletions.count(key)!=0:
                 (!target_directory && coordinated->shared_deletions.count(key));
-            vat_need(change.remove?
-                     (!creating && authorized_remove):
-                     (creating?(making_directory?coordinated->shared_directories.count(key):
-                                                 coordinated->shared_additions.count(key)):
-                               coordinated->shared_replacements.count(key)),
+            const auto shared_write=creating?
+                (making_directory?coordinated->shared_directories.count(key):
+                                  coordinated->shared_additions.count(key)):
+                coordinated->shared_replacements.count(key);
+            const auto private_write=creating?
+                (making_directory?coordinated->vat_private_directories.count(key):
+                                  coordinated->vat_private_additions.count(key)):
+                coordinated->vat_private_replacements.count(key);
+            vat_need(change.remove?(!creating && authorized_remove):
+                     (shared_write+private_write==1),
                      "VAT coordinated target state differs from ISO plan");
         }
         if(change.remove) {
@@ -4580,6 +4598,11 @@ void edit_udf(const std::filesystem::path& image,
     // A mirrored sequential deletion contract cannot be interpreted
     // by the physical Type-1 allocator if the mapping family changed.
     need(!coordinated || (!coordinated->vat_iso_only_remaster &&
+                           !coordinated->vat_mixed_remaster &&
+                           coordinated->vat_private_replacements.empty() &&
+                           coordinated->vat_private_deletions.empty() &&
+                           coordinated->vat_private_additions.empty() &&
+                           coordinated->vat_private_directories.empty() &&
                            !coordinated->iso_payload_blocks &&
                            coordinated->vat_tree_deletions.empty()),
          "VAT-only coordination plan cannot use Type-1");

@@ -41,6 +41,14 @@ struct CoordinatedIsoUpdate {
     // reservation contains a new ISO directory tree/path tables and,
     // for this mode only, independent ISO replacement payloads.
     bool vat_iso_only_remaster=false;
+    // Mixed VAT mastering uses one UDF append plan plus one ISO tree.
+    // Private UDF requests have separate exact authorizations; they
+    // must not be marked shared (which would force external payloads).
+    bool vat_mixed_remaster=false;
+    std::set<std::string> vat_private_replacements;
+    std::set<std::string> vat_private_deletions;
+    std::set<std::string> vat_private_additions;
+    std::set<std::string> vat_private_directories;
     std::uint64_t iso_metadata_blocks=0;
     // Independently bounded ISO-only payload sectors, not counted
     // against the directory/path-table memory budget.

@@ -755,3 +755,42 @@ capacity and bounded UDF FE long_ad capacity. It does not generalize
 to arbitrary fragmented shared physical mappings, mixed mutation
 scopes, sparable or metadata partitions, or prove bootability on
 physical systems.
+
+### Mixed ISO-only, UDF-only and shared VAT transactions
+
+For the supported sequential MBR/GPT profiles, one batch may now
+contain operations in more than one namespace. Existing paths are
+classified from the original ISO and UDF namespaces. New paths inherit
+their scope from an existing directory or explicitly created parents
+in the same batch; an unassigned root name is not sufficient proof.
+The full shared-mapping and independent ISO/Joliet preflight still
+applies, and independent UDF payloads must avoid protected optical
+and partition ranges.
+
+The coordinator builds a separate optical mutation plan and a UDF
+mutation plan. ISO-only payloads are streamed into the unmapped
+reservation, shared payloads are allocated once through UDF, and
+private UDF files retain their ordinary allocation policy, including
+embedded data where supported. Explicit private UDF requests have
+separate authorizations from shared requests. The UDF writer verifies
+the exact request classifications and independently expanded deletion
+set, while the ISO coordinator verifies the complete staged namespace
+in both views. All source-byte, VAT-history, partition-envelope,
+capacity, payload and cancellation checks remain mandatory. There is
+one appended VAT session and one atomic replacement of the image.
+
+Recursive removal still rejects a directory that would implicitly
+consume descendants of another ownership scope. Duplicate names,
+ambiguous new root paths, creation below deleted or missing parents,
+incompatible types and inconsistent physical mappings fail closed.
+This profile does not change Type-1, sparable or metadata partition
+writing, or unsupported fragmented shared physical mappings.
+
+Regression coverage adds shared/private-UDF and three-scope nested
+creation, mixed replacement and recursive deletion, private ISO/UDF
+and ISO/shared pairs, the VAT predecessor pointing directly to the
+original session, cancellation, conflicts, and independent readback
+across MBR/GPT, primary/Joliet and embedded/external VAT. Previous
+single-scope rejection cases are retained where the input remains
+invalid; formerly valid mixed combinations are exercised positively.
+Physical boot and Total Commander host testing remain separate.

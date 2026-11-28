@@ -2485,6 +2485,198 @@ struct SharedTreePlan {
     std::array<std::uint32_t,2> table_size{};
     std::array<std::array<std::uint32_t,2>,2> table_lba{};
 };
+enum class VatEditScope { iso_only,udf_only,shared };
+using VatEditScopes=std::map<std::string,VatEditScope>;
+
+// New entries inherit their namespace only from an existing directory
+// or explicitly created ancestors. Never infer a scope for a new root
+// name. Preserve the old single-scope routes for ordinary batches.
+VatEditScopes classify_mixed_vat(const IsoNodeIndex& iso,const Disc& udf,
+        const std::vector<ArchiveChange>& changes,bool boot_namespace) {
+    if(changes.size()<2 || changes.size()>4096)return {};
+    std::map<std::string,const Item*> ud;
+    for(const auto& item:udf.items())
+        if(!ud.emplace(upper(item.path),&item).second)return {};
+    std::map<std::string,const ArchiveChange*> requests;
+    for(const auto& c:changes) {
+        const auto key=upper(edit_path(c.path));
+        if(!requests.emplace(key,&c).second ||
+           (boot_namespace && (key=="BOOT.IMAGES" || key.starts_with("BOOT.IMAGES/"))))
+            return {};
+    }
+    VatEditScopes scopes;
+    std::set<VatEditScope> distinct;
+    for(const auto& [key,c]:requests) {
+        auto ancestor=key;
+        for(;;) {
+            const auto a=iso.find(ancestor);
+            const auto b=ud.find(ancestor);
+            if(a!=iso.end() || b!=ud.end()) {
+                const bool optical=a!=iso.end(),virtual_udf=b!=ud.end();
+                if(optical && virtual_udf && a->second->directory!=b->second->directory)
+                    return {};
+                if(ancestor!=key &&
+                   ((optical && !a->second->directory) ||
+                    (virtual_udf && !b->second->directory)))return {};
+                if(ancestor==key && virtual_udf && b->second->path!=edit_path(c->path))
+                    return {};
+                const auto scope=optical?(virtual_udf?VatEditScope::shared:VatEditScope::iso_only):
+                                           VatEditScope::udf_only;
+                scopes.emplace(key,scope);
+                distinct.insert(scope);
+                break;
+            }
+            if(ancestor==key) {
+                if(c->remove)return {};
+            } else {
+                const auto parent=requests.find(ancestor);
+                if(parent==requests.end() || parent->second->remove ||
+                   !parent->second->directory)return {};
+            }
+            const auto slash=ancestor.rfind('/');
+            if(slash==std::string::npos)return {};
+            ancestor.resize(slash);
+        }
+    }
+    return distinct.size()>1?scopes:VatEditScopes{};
+}
+
+EditProtectedRanges bridge_metadata_protected_ranges(const Image&);
+EditProtectedRanges merge_vat_bridge_ranges(EditProtectedRanges,std::uint64_t);
+bool vat_bridge_range_disjoint(const EditProtectedRanges&,std::uint64_t,std::uint64_t);
+
+// Independently expand both sides against the original namespaces.
+// A directory removal cannot implicitly consume another scope, even
+// when that descendant is explicitly selected elsewhere in the batch.
+void plan_mixed_vat_changes(const IsoNodeIndex& iso_files,
+        const std::map<std::string,bool>& original_udf_paths,
+        const VatEditScopes& scopes,const std::vector<ArchiveChange>& changes,
+        CoordinatedIsoUpdate& plan,SharedTreePlan& tree,
+        std::set<std::string>& independent_iso,
+        std::map<std::string,bool>& independent_udf,
+        std::set<std::string>& iso_removals,
+        std::vector<ArchiveChange>& expanded,
+        std::vector<ArchiveChange>& udf_changes) {
+    std::map<std::string,std::string> udf_exact;
+    for(const auto& [key,directory]:original_udf_paths) {
+        (void)directory;
+        need(udf_exact.emplace(upper(key),key).second,"ambiguous mixed VAT UDF name");
+    }
+    auto original_scope=[&](const std::string& folded) {
+        const bool optical=iso_files.count(folded)!=0,udf=udf_exact.count(folded)!=0;
+        need(optical || udf,"mixed VAT target missing from original namespaces");
+        return optical?(udf?VatEditScope::shared:VatEditScope::iso_only):VatEditScope::udf_only;
+    };
+    std::map<std::string,ArchiveChange> iso_deleted;
+    auto remove_iso=[&](const std::string& folded,VatEditScope scope) {
+        need(original_scope(folded)==scope,
+             "mixed VAT directory removal crosses namespace ownership");
+        const auto* n=iso_files.at(folded);
+        const auto key=scope==VatEditScope::shared?udf_exact.at(folded):folded;
+        iso_deleted.emplace(folded,ArchiveChange{key,{},true,n->directory});
+        need(iso_deleted.size()<=200000,"mixed VAT ISO deletion exceeds namespace limit");
+        if(scope==VatEditScope::iso_only)iso_removals.insert(folded);
+    };
+    auto remove_udf=[&](const std::string& key,VatEditScope scope) {
+        need(original_scope(upper(key))==scope,
+             "mixed VAT directory removal crosses namespace ownership");
+        plan.vat_tree_deletions.insert(key);
+        need(plan.vat_tree_deletions.size()<=200000,"mixed VAT UDF deletion exceeds namespace limit");
+    };
+    for(const auto& change:changes) {
+        auto c=change;
+        c.path=edit_path(c.path);
+        const auto key=upper(c.path);
+        const auto scope=scopes.at(key);
+        const bool optical=scope!=VatEditScope::udf_only;
+        const bool virtual_udf=scope!=VatEditScope::iso_only;
+        const auto a=iso_files.find(key);
+        const auto b=udf_exact.find(key);
+        const bool exists=a!=iso_files.end() || b!=udf_exact.end();
+        if(exists) {
+            need(original_scope(key)==scope &&
+                 (!virtual_udf || (b!=udf_exact.end() && b->second==c.path)),
+                 "mixed VAT request differs from original namespace");
+            const bool directory=optical?a->second->directory:original_udf_paths.at(c.path);
+            need(c.remove?(!c.directory || directory):(!directory && !c.directory),
+                 "mixed VAT request has incompatible target type");
+        } else need(!c.remove,"mixed VAT deletion target does not exist");
+        if(virtual_udf) {
+            udf_changes.push_back(c);
+            if(scope==VatEditScope::udf_only) {
+                auto& set=c.remove?plan.vat_private_deletions:
+                    (exists?plan.vat_private_replacements:
+                     (c.directory?plan.vat_private_directories:plan.vat_private_additions));
+                need(set.insert(c.path).second,"duplicate private UDF request");
+            } else if(c.remove)plan.shared_deletions.insert(c.path);
+        }
+        if(c.remove) {
+            const auto prefix=key+"/";
+            if(optical) {
+                remove_iso(key,scope);
+                if(a->second->directory)
+                    for(auto it=iso_files.lower_bound(prefix);
+                        it!=iso_files.end() && it->first.starts_with(prefix);++it)
+                        remove_iso(it->first,scope);
+            }
+            if(virtual_udf) {
+                remove_udf(c.path,scope);
+                if(original_udf_paths.at(c.path)) {
+                    const auto exact_prefix=c.path+"/";
+                    for(auto it=original_udf_paths.lower_bound(exact_prefix);
+                        it!=original_udf_paths.end() && it->first.starts_with(exact_prefix);++it)
+                        remove_udf(it->first,scope);
+                }
+            }
+            continue;
+        }
+        if(optical) {
+            if(scope==VatEditScope::iso_only) {
+                c.path=key;
+                if(!exists)independent_iso.insert(key);
+            }
+            expanded.push_back(c);
+        } else if(!exists) {
+            need(independent_udf.emplace(c.path,c.directory).second,
+                 "new private UDF name collides with expected namespace");
+        }
+    }
+    need(!expanded.empty() || !iso_deleted.empty(),"mixed VAT requires an ISO operation");
+    for(const auto& [key,change]:iso_deleted) {
+        if(!iso_removals.count(key))
+            need(plan.vat_tree_deletions.count(change.path),
+                 "mixed VAT shared ISO/UDF removal sets differ");
+        expanded.push_back(change);
+    }
+    for(const auto& key:plan.vat_tree_deletions) {
+        if(independent_udf.erase(key))continue;
+        const auto at=iso_deleted.find(upper(key));
+        need(at!=iso_deleted.end() && at->second.path==key && !iso_removals.count(upper(key)),
+             "mixed VAT shared UDF/ISO removal sets differ");
+    }
+    for(const auto& key:iso_removals)
+        need(independent_iso.erase(key)==1,"mixed VAT ISO removal lost namespace proof");
+    // Explicitly reject replacements/creation below any deleted path.
+    // The public edit entry point also checks this; retain the local
+    // proof because both expanded plans are consumed independently.
+    std::set<std::string> removed;
+    for(const auto& [key,c]:iso_deleted) { (void)c;removed.insert(key); }
+    for(const auto& key:plan.vat_tree_deletions)removed.insert(upper(key));
+    for(const auto& c:changes) {
+        if(c.remove)continue;
+        auto key=upper(edit_path(c.path));
+        for(;;) {
+            need(!removed.count(key),"mixed VAT edit conflicts with deleted subtree");
+            const auto slash=key.rfind('/');
+            if(slash==std::string::npos)break;
+            key.resize(slash);
+        }
+    }
+    tree.independent_iso_paths=std::move(independent_iso);
+    tree.independent_udf_paths=std::move(independent_udf);
+    plan.vat_mixed_remaster=true;
+}
+
 bool iso_identifier_less(const Bytes& a,const Bytes& b) {
     const auto n=std::min(a.size(),b.size());
     for(std::size_t i=0;i<n;++i)if(a[i]!=b[i])return a[i]<b[i];
@@ -2632,7 +2824,9 @@ Bytes shared_tree_path_table(const SharedTreePlan& tree,unsigned view,bool big) 
 bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         const IsoNodeIndex& iso_files,const std::vector<ArchiveChange>& changes,
         CoordinatedIsoUpdate& plan,SharedTreePlan& tree,bool sequential_vat=false,
-        bool iso_only_remaster=false) {
+        bool iso_only_remaster=false,const VatEditScopes* mixed_scopes=nullptr,
+        std::vector<ArchiveChange>* mixed_udf_changes=nullptr) {
+    const bool mixed=mixed_scopes!=nullptr;
     if(image.iso_system_use || changes.empty() ||
        (!sequential_vat && !std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
            return !c.remove && !iso_files.count(upper(edit_path(c.path)));
@@ -2641,7 +2835,9 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
     std::set<std::string> udf_names,independent_iso;
     const bool partial_partitioned=sequential_vat && image.hybrid_system_area;
     bool shared_multi_mapping=false;
-    if(iso_only_remaster && !partial_partitioned)return false;
+    if((iso_only_remaster || mixed) && !partial_partitioned)return false;
+    need(!mixed || (!iso_only_remaster && mixed_udf_changes),
+         "invalid mixed VAT coordinator contract");
     {
         const Disc udf(path);
         if(udf.format()!="UDF" ||
@@ -2683,6 +2879,22 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         if(!common_data && (!sequential_vat || !independent.empty() ||
                             !independent_iso.empty()))return false;
         if(sequential_vat && !udf.udf_has_virtual_partition())return false;
+        if(mixed) {
+            need(classify_mixed_vat(iso_files,udf,changes,
+                     !image.boot_descriptor_lbas.empty())==*mixed_scopes,
+                 "mixed VAT namespace classification changed");
+            const auto ranges=merge_vat_bridge_ranges(
+                bridge_metadata_protected_ranges(image),image.size);
+            for(const auto& item:udf.items()) {
+                if(!independent.count(item.path))continue;
+                for(const auto& e:item.extents) {
+                    if(e.sparse || !e.length)continue;
+                    need(e.offset<=image.size && e.length<=image.size-e.offset &&
+                         vat_bridge_range_disjoint(ranges,e.offset,e.length),
+                         "mixed VAT private UDF extent overlaps protected ISO/boot data");
+                }
+            }
+        }
         if(!independent_iso.empty()) {
             // An ISO-only alias of a live UDF extent is not independent.
             // Build a bounded, sorted union of actual UDF payload ranges.
@@ -2725,7 +2937,12 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         }
     }
     std::set<std::string> iso_removals;
-    if(iso_only_remaster) {
+    std::vector<ArchiveChange> expanded;
+    if(mixed) {
+        plan_mixed_vat_changes(iso_files,original_udf_paths,*mixed_scopes,
+            changes,plan,tree,independent_iso,independent,iso_removals,expanded,
+            *mixed_udf_changes);
+    } else if(iso_only_remaster) {
         // Existing independent ISO paths and genuinely new entries
         // beneath a proven independent ISO directory can be edited
         // without synthesizing UDF changes. New root names and new
@@ -2916,8 +3133,9 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
     // removals independently from the strict UDF mutation planner.
     // Keep the original exact requests as a distinct contract, so a
     // case alias or a missing descendant cannot be silently coalesced.
-    std::vector<ArchiveChange> expanded;
-    if(iso_only_remaster) {
+    if(mixed) {
+        // The independently classified plans have already been expanded.
+    } else if(iso_only_remaster) {
         for(const auto& key:iso_removals)
             expanded.push_back({key,{},true,iso_files.at(key)->directory});
         for(const auto& change:changes)
@@ -3054,6 +3272,9 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
     });
     for(const auto* c:sorted) {
         const auto key=edit_path(c->path);
+        const auto folded=upper(key);
+        const bool private_iso=iso_only_remaster ||
+            (mixed && (tree.independent_iso_paths.count(folded) || iso_removals.count(folded)));
         const auto slash=key.rfind('/');
         const auto parent_key=slash==std::string::npos?std::string{}:key.substr(0,slash);
         const auto component=slash==std::string::npos?key:key.substr(slash+1);
@@ -3079,7 +3300,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                         need(!intersect(start,length,at,bytes),
                              "VAT mirrored file overlaps protected boot data");
                 });
-                if(iso_only_remaster && !n->directory)
+                if(private_iso && !n->directory)
                     each_extent(*n,[&](auto start,auto length) {
                         need(start>=std::uint64_t(image.terminator_lba+1)*block,
                              "independent ISO target aliases volume descriptors");
@@ -3090,7 +3311,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                                      "independent ISO target aliases UDF or ISO metadata");
                     });
                 if(c->remove) {
-                    need(iso_only_remaster?iso_removals.count(upper(key))!=0:
+                    need(private_iso?iso_removals.count(upper(key))!=0:
                                          plan.vat_tree_deletions.count(key)!=0,
                          "VAT mirrored removal differs from expanded contract");
                     if(n->directory) {
@@ -3120,10 +3341,10 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                              std::filesystem::symlink_status(c->source)),
                          "VAT shared replacement source must be a regular file");
                     n->size=std::filesystem::file_size(c->source);
-                    need(iso_only_remaster || (n->size>0 &&
+                    need(private_iso || (n->size>0 &&
                          (sequential_vat || n->size<=0xffffffffull)),
                          "shared replacement requires a nonempty ISO-compatible file");
-                    if(iso_only_remaster) {
+                    if(private_iso) {
                         plan_independent_iso_payload(tree,*n,key,c->source);
                     } else {
                         if(sequential_vat)plan_vat_iso_sections(*n);
@@ -3145,7 +3366,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                      std::filesystem::symlink_status(c->source)),
                  "shared addition source must be a regular file");
             n->size=std::filesystem::file_size(c->source);
-            need(iso_only_remaster || (n->size>0 &&
+            need(private_iso || (n->size>0 &&
                  (sequential_vat || n->size<=0xffffffffull)),
                  "shared ISO addition requires a nonempty ISO-compatible file");
         }
@@ -3177,22 +3398,22 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         } else n->logical=n->name;
         // Generated record() uses this minimal header for timestamps.
         // Leave the raw-record members empty until serialization.
-        if(iso_only_remaster)
+        if(private_iso)
             need(tree.independent_iso_paths.count(upper(key)) &&
                  !udf_names.count(upper(key)),
                  "new ISO-only entry differs from independent namespace plan");
         if(n->directory) {
-            if(!iso_only_remaster)plan.shared_directories.insert(key);
+            if(!private_iso)plan.shared_directories.insert(key);
             tree.dirs.push_back(n.get());
             tree.dots[n.get()]={};
-        } else if(iso_only_remaster) {
+        } else if(private_iso) {
             plan_independent_iso_payload(tree,*n,key,c->source);
         } else {
             if(sequential_vat)plan_vat_iso_sections(*n);
             plan.shared_additions.insert(key);
         }
         need(index.emplace(upper(key),n.get()).second &&
-             tree.added.emplace(iso_only_remaster?upper(key):key,n.get()).second,
+             tree.added.emplace(private_iso?upper(key):key,n.get()).second,
              "duplicate new mirrored entry");
         parent->children.push_back(std::move(n));
         need(index.size()<=200000 && tree.dirs.size()<=65535,
@@ -3229,7 +3450,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
     }
     need(blocks && blocks<=32768,"ISO metadata exceeds 64 MiB budget");
     need(tree.iso_payload_blocks<=0xffffffffull-blocks &&
-         (iso_only_remaster || !tree.iso_payload_blocks),
+         (iso_only_remaster || mixed || !tree.iso_payload_blocks),
          "ISO payload and metadata exceed optical block address space");
     plan.iso_metadata_blocks=blocks;
     plan.iso_payload_blocks=tree.iso_payload_blocks;
@@ -3281,7 +3502,8 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
              plan.iso_metadata_blocks<=volume_blocks-1-count &&
              plan.iso_payload_blocks<=volume_blocks-1-count-plan.iso_metadata_blocks &&
              plan.iso_payload_blocks==tree.iso_payload_blocks &&
-             (!plan.iso_payload_blocks || plan.vat_iso_only_remaster),
+             (!plan.iso_payload_blocks || plan.vat_iso_only_remaster ||
+                                         plan.vat_mixed_remaster),
              "invalid sequential ISO metadata/payload reservation");
         main=volume_blocks-1-count;
         first=main-plan.iso_metadata_blocks-plan.iso_payload_blocks;
@@ -3330,7 +3552,8 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         auto changed=tree.added;
         changed.insert(tree.replaced.begin(),tree.replaced.end());
         for(const auto& [key,n]:changed) {
-            if(plan.vat_iso_only_remaster && tree.independent_iso_paths.count(upper(key)))continue;
+            if((plan.vat_iso_only_remaster || plan.vat_mixed_remaster) &&
+               tree.independent_iso_paths.count(upper(key)))continue;
             const auto found=std::find_if(udf.items().begin(),udf.items().end(),
                 [&](const Item& item){return item.path==key;});
             need(found!=udf.items().end() && found->directory==n->directory,
@@ -3378,7 +3601,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
     // UDF never maps these sectors or changes its existing file layouts.
     auto next=first;
     need(tree.iso_only_payloads.empty() ||
-         (sequential_vat && plan.vat_iso_only_remaster),
+         (sequential_vat && (plan.vat_iso_only_remaster || plan.vat_mixed_remaster)),
          "independent ISO payloads require the VAT-only remaster contract");
     for(const auto& [key,n]:tree.iso_only_payloads) {
         need(tree.independent_iso_paths.count(key),
@@ -3565,7 +3788,8 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         for(const auto& key:tree.independent_iso_paths)
             need(wanted.count(key) &&
                  (original.count(key) ||
-                  (plan.vat_iso_only_remaster && tree.added.count(key))),
+                  ((plan.vat_iso_only_remaster || plan.vat_mixed_remaster) &&
+                   tree.added.count(key))),
                  "independent ISO path differs from remaster plan");
         std::set<std::string> seen;
         for(const auto& item:udf.items()) {
@@ -3577,8 +3801,8 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
             if(independent!=tree.independent_udf_paths.end()) {
                 need(found==wanted.end() && independent->second==item.directory,
                      "independent VAT entry became a shared ISO entry");
-                // The VAT backend subsequently verifies its complete
-                // original layout and checks the protected old prefix.
+                // The VAT backend subsequently verifies its expected
+                // layout, replacement payload and protected old prefix.
                 continue;
             }
             need(found!=wanted.end() && found->second->directory==item.directory,
@@ -3592,7 +3816,8 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
     auto changed=tree.added;
     changed.insert(tree.replaced.begin(),tree.replaced.end());
     for(const auto& [key,n]:changed) {
-        if(plan.vat_iso_only_remaster && tree.independent_iso_paths.count(upper(key)))continue;
+        if((plan.vat_iso_only_remaster || plan.vat_mixed_remaster) &&
+               tree.independent_iso_paths.count(upper(key)))continue;
         const auto found=std::find_if(udf.items().begin(),udf.items().end(),
             [&](const Item& item){return item.path==key;});
         need(found!=udf.items().end() && found->directory==n->directory &&
@@ -3616,12 +3841,13 @@ struct BridgeMetadataEdit {
     std::optional<MbrGrowthPlan> mbr_append;
     std::optional<GptGrowthPlan> gpt_append;
     bool adding_shared=false;
+    std::vector<ArchiveChange> mixed_udf_changes;
 };
 
 std::unique_ptr<BridgeMetadataEdit> prepare_bridge_metadata_edit(
         const std::filesystem::path& path,Image& image,
         const std::vector<ArchiveChange>& changes,bool sequential_vat=false,
-        bool iso_only_remaster=false) {
+        bool iso_only_remaster=false,const VatEditScopes* mixed_scopes=nullptr) {
     auto edit=std::make_unique<BridgeMetadataEdit>();
     need(image.udf_bridge && image.boot_regions_bounded,
          "ISO/UDF metadata edit requires bounded El Torito boot images");
@@ -3645,7 +3871,8 @@ std::unique_ptr<BridgeMetadataEdit> prepare_bridge_metadata_edit(
     auto& add_tree=edit->add_tree;
     auto& shared=edit->shared;
     edit->adding_shared=plan_shared_additions(path,image,iso_files,changes,
-                                              plan,add_tree,sequential_vat,iso_only_remaster);
+                                              plan,add_tree,sequential_vat,iso_only_remaster,
+                                              mixed_scopes,&edit->mixed_udf_changes);
     const bool adding_shared=edit->adding_shared;
     if(sequential_vat && !adding_shared)return nullptr;
     const bool existing_shared=!adding_shared && std::any_of(changes.begin(),changes.end(),
@@ -3992,8 +4219,8 @@ std::uint64_t vat_mbr_alignment(Image& image,const EditProtectedRanges& immutabl
 }
 bool try_edit_iso_vat_mirrored_tree(const std::filesystem::path& path,Image& image,
         const std::vector<ArchiveChange>& changes,const EditProgress& progress,
-        bool iso_only_remaster=false) {
-    auto edit=prepare_bridge_metadata_edit(path,image,changes,true,iso_only_remaster);
+        bool iso_only_remaster=false,const VatEditScopes* mixed_scopes=nullptr) {
+    auto edit=prepare_bridge_metadata_edit(path,image,changes,true,iso_only_remaster,mixed_scopes);
     if(!edit)return false;
     const auto immutable=bridge_metadata_protected_ranges(image);
     std::optional<GptGrowthPlan> gpt;
@@ -4008,7 +4235,9 @@ bool try_edit_iso_vat_mirrored_tree(const std::filesystem::path& path,Image& ima
         };
     image.file.close();
     const std::vector<ArchiveChange> no_udf_changes;
-    edit_udf(path,iso_only_remaster?no_udf_changes:changes,progress,true,validate,
+    const auto& udf_changes=mixed_scopes?edit->mixed_udf_changes:
+        (iso_only_remaster?no_udf_changes:changes);
+    edit_udf(path,udf_changes,progress,true,validate,
              immutable,&edit->plan,alignment!=0 || gpt_plan!=nullptr,alignment,
              gpt_plan?gpt_plan->trailer_blocks:0);
     return true;
@@ -4459,6 +4688,15 @@ void edit_iso_vat_bridge(const std::filesystem::path& path,Image& image,
     need(!image.iso_system_use &&
          image.boot_regions_bounded && udf.udf_has_virtual_partition(),
          "VAT bridge requires bounded plain ISO/Joliet");
+    if(image.hybrid_system_area) {
+        const auto mixed=classify_mixed_vat(index_iso_tree(*image.root),udf,changes,
+                                             !image.boot_descriptor_lbas.empty());
+        if(!mixed.empty()) {
+            need(try_edit_iso_vat_mirrored_tree(path,image,changes,progress,false,&mixed),
+                 "mixed VAT batch requires a fully validated common namespace");
+            return;
+        }
+    }
     if(try_edit_iso_vat_independent_iso_payloads(path,image,udf,changes,progress))return;
     if(try_edit_iso_vat_independent_udf(path,image,udf,changes,progress))return;
     if(image.hybrid_system_area && !changes.empty()) {
