@@ -394,6 +394,51 @@ def main(editor,inspector):
             assert (extracted/'DATA'/'NEW.BIN').read_bytes()==source.read_bytes()
             run([editor,str(frag_image),'cancel','CANCEL.BIN',str(source)],expected=1)
             assert frag_image.read_bytes()==after
+            # A failed member must not unlink a valid fragmented file.
+            run([editor,str(frag_image),'batch','delete','hello',
+                 'delete','MISSING.BIN'],expected=1)
+            assert frag_image.read_bytes()==after
+            run([editor,str(frag_image),'batchcancelstaged','delete','hello'],
+                expected=1)
+            assert frag_image.read_bytes()==after
+            # Replace a three-record chain with one record while removing
+            # another shared entry and adding a new file atomically.
+            replacement_bytes=b'short fragmented replacement'
+            source.write_bytes(replacement_bytes)
+            run([editor,str(frag_image),'batch','add','hello',str(source),
+                 'delete','keep','add','DATA/SECOND.BIN',str(source)])
+            replaced=frag_image.read_bytes()
+            assert replaced[308*B:311*B]==fragmented[308*B:311*B]
+            assert replaced[24*B:26*B]==fragmented[24*B:26*B]
+            changed_wanted=dict(frag_wanted)
+            del changed_wanted['keep']
+            changed_wanted.update({'hello':replacement_bytes,
+                                   'DATA/SECOND.BIN':replacement_bytes})
+            for view in ((False,True) if j else (False,)):
+                assert read_image(frag_image,view)==changed_wanted
+                section,=records(frag_image,'hello',view)
+                assert section[1]==len(replacement_bytes)
+            validate_path_tables(frag_image)
+            extracted=root/f'fragmented-type1-replace-{j}'
+            run([inspector,str(frag_image),'--extract',str(extracted)])
+            assert (extracted/'hello').read_bytes()==replacement_bytes
+            assert not (extracted/'keep').exists()
+            assert (extracted/'DATA'/'SECOND.BIN').read_bytes()==replacement_bytes
+            # Delete the original fragmented chain, not its replacement.
+            frag_image.write_bytes(after)
+            run([editor,str(frag_image),'delete','hello'])
+            deleted=frag_image.read_bytes()
+            assert deleted[308*B:311*B]==fragmented[308*B:311*B]
+            assert deleted[24*B:26*B]==fragmented[24*B:26*B]
+            del frag_wanted['hello']
+            for view in ((False,True) if j else (False,)):
+                assert read_image(frag_image,view)==frag_wanted
+                assert not records(frag_image,'hello',view)
+            validate_path_tables(frag_image)
+            extracted=root/f'fragmented-type1-delete-{j}'
+            run([inspector,str(frag_image),'--extract',str(extracted)])
+            assert not (extracted/'hello').exists()
+            assert (extracted/'keep').read_bytes()==b'KEEP!'
             assert not list(root.glob('.iso-wcx-edit-*'))
 
             # Test the same fully mirrored ROM on both partition schemes.

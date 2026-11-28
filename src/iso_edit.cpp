@@ -2496,8 +2496,8 @@ struct SharedTreePlan {
     // Preserve independent paths on both sides of a partial bridge.
     std::map<std::string,bool> independent_udf_paths;
     std::set<std::string> independent_iso_paths;
-    // Read-only Type-1 additions with an existing multi-extent
-    // mirrored file require the same full readback proof as VAT.
+    // Read-only Type-1 remastering with an existing multi-extent
+    // mirrored file requires the same full readback proof as VAT.
     bool verify_full_udf_mapping=false;
     std::size_t removed=0;
     std::array<std::vector<Node*>,2> path_dirs;
@@ -2719,8 +2719,8 @@ Bytes shared_tree_record(const Node& n,unsigned view,std::size_t part=0) {
         both(result,2,n.new_lba[view]);both(result,10,n.new_size[view]);
         return result;
     }
-    // Changed VAT payloads have their section count planned before
-    // directory sizing and their LBAs assigned only after VAT staging.
+    // Changed mirrored payloads have their section count planned
+    // before directory sizing and their LBAs assigned after UDF staging.
     if(n.regenerate_sections) {
         need(part<n.sections.size(),"missing planned ISO section");
         const auto& section=n.sections[part];
@@ -2846,10 +2846,14 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         bool iso_only_remaster=false,const VatEditScopes* mixed_scopes=nullptr,
         std::vector<ArchiveChange>* mixed_udf_changes=nullptr) {
     const bool mixed=mixed_scopes!=nullptr;
-    if(image.iso_system_use || changes.empty() ||
-       (!sequential_vat && !std::all_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
-           return !c.remove && !iso_files.count(upper(edit_path(c.path)));
-       })))return false;
+    if(image.iso_system_use || changes.empty())return false;
+    // Preserve the established single-record coordinator for ordinary
+    // Type-1 mutations. Only a proven fragmented mirrored namespace
+    // needs the fresh tree remaster for existing-file changes.
+    const bool type1_existing=!sequential_vat &&
+        std::any_of(changes.begin(),changes.end(),[&](const ArchiveChange& c){
+            return c.remove || iso_files.count(upper(edit_path(c.path)));
+        });
     std::map<std::string,bool> original_udf_paths,independent;
     std::set<std::string> udf_names,independent_iso;
     const bool partial_partitioned=sequential_vat && image.hybrid_system_area;
@@ -2867,8 +2871,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
             const auto key=upper(item.path);
             const auto at=iso_files.find(key);
             if(!udf_names.insert(key).second)return false;
-            if(sequential_vat &&
-               !original_udf_paths.emplace(item.path,item.directory).second)return false;
+            if(!original_udf_paths.emplace(item.path,item.directory).second)return false;
             if(at==iso_files.end()) {
                 if(!partial_partitioned)return false;
                 independent.emplace(item.path,item.directory);
@@ -2901,6 +2904,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         if(!common_data && (!sequential_vat || !independent.empty() ||
                             !independent_iso.empty()))return false;
         if(sequential_vat && !udf.udf_has_virtual_partition())return false;
+        if(type1_existing && !shared_multi_mapping)return false;
         if(mixed) {
             need(classify_mixed_vat(iso_files,udf,changes,
                      !image.boot_descriptor_lbas.empty())==*mixed_scopes,
@@ -3131,6 +3135,27 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         need(!multi_mapping_conflict,
              "fragmented Type-1 shared path has conflicting physical mapping");
         tree.verify_full_udf_mapping=shared_multi_mapping;
+        if(type1_existing) {
+            // Do not use the VAT recursive-deletion contract for ROM
+            // mastering. Require exact UDF paths and regular-file edits.
+            std::set<std::string> requests;
+            for(const auto& change:changes) {
+                const auto key=edit_path(change.path);
+                const auto folded=upper(key);
+                need(requests.insert(folded).second,
+                     "duplicate fragmented Type-1 request");
+                const auto old=iso_files.find(folded);
+                if(old==iso_files.end()) {
+                    need(!change.remove && !udf_names.count(folded),
+                         "fragmented Type-1 target is missing or ambiguous");
+                    continue;
+                }
+                const auto udf=original_udf_paths.find(key);
+                need(!old->second->directory && !change.directory &&
+                     udf!=original_udf_paths.end() && !udf->second,
+                     "fragmented Type-1 edits require exact regular-file paths");
+            }
+        }
     }
     if(sequential_vat || tree.verify_full_udf_mapping) {
         const auto matching_views=[&]() {
@@ -3159,7 +3184,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         };
         if(!matching_views()) {
             need(sequential_vat,
-                 "fragmented Type-1 shared additions require matching ISO/Joliet views");
+                 "fragmented Type-1 edits require matching ISO/Joliet views");
             return false;
         }
     }
@@ -3316,7 +3341,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         need(found!=index.end() && found->second->directory,
              "new shared entry requires an existing or explicitly created parent");
         auto* parent=found->second;
-        if(sequential_vat) {
+        if(sequential_vat || type1_existing) {
             const auto existing=index.find(upper(key));
             if(existing!=index.end()) {
                 auto* n=existing->second;
@@ -3345,9 +3370,14 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                                      "independent ISO target aliases UDF or ISO metadata");
                     });
                 if(c->remove) {
-                    need(private_iso?iso_removals.count(upper(key))!=0:
-                                         plan.vat_tree_deletions.count(key)!=0,
-                         "VAT mirrored removal differs from expanded contract");
+                    if(type1_existing) {
+                        need(!n->directory && plan.shared_deletions.insert(key).second,
+                             "invalid fragmented Type-1 deletion");
+                    } else {
+                        need(private_iso?iso_removals.count(upper(key))!=0:
+                                             plan.vat_tree_deletions.count(key)!=0,
+                             "VAT mirrored removal differs from expanded contract");
+                    }
                     if(n->directory) {
                         // No path tables have been assigned yet. Remove
                         // all non-owning references before freeing Node.
@@ -3382,6 +3412,13 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                         plan_independent_iso_payload(tree,*n,key,c->source);
                     } else {
                         if(sequential_vat)plan_vat_iso_sections(*n);
+                        else {
+                            // The Type-1 replacement fits a single ISO
+                            // record. Regenerate it to clear the former
+                            // continuation flag and discard old LBAs.
+                            n->regenerate_sections=true;
+                            n->sections={{0,static_cast<std::uint32_t>(n->size)}};
+                        }
                         plan.shared_replacements.insert(key);
                         tree.replaced.emplace(key,n);
                     }
@@ -3615,7 +3652,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
             } else {
                 n->lba=static_cast<std::uint32_t>(start/block);
                 n->sections={{n->lba,static_cast<std::uint32_t>(n->size)}};
-                if(tree.replaced.count(key)) {
+                if(tree.replaced.count(key) && !n->regenerate_sections) {
                     both(n->record,2,n->lba);
                     both(n->record,10,static_cast<std::uint32_t>(n->size));
                     if(image.joliet) {
