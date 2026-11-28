@@ -2496,6 +2496,9 @@ struct SharedTreePlan {
     // Preserve independent paths on both sides of a partial bridge.
     std::map<std::string,bool> independent_udf_paths;
     std::set<std::string> independent_iso_paths;
+    // Read-only Type-1 additions with an existing multi-extent
+    // mirrored file require the same full readback proof as VAT.
+    bool verify_full_udf_mapping=false;
     std::size_t removed=0;
     std::array<std::vector<Node*>,2> path_dirs;
     std::array<std::uint32_t,2> table_size{};
@@ -2729,7 +2732,7 @@ Bytes shared_tree_record(const Node& n,unsigned view,std::size_t part=0) {
         return result;
     }
     // Unchanged Level-3 chains retain every original raw record.
-    // Non-VAT shared additions retain the single-extent path.
+    // New non-VAT shared additions retain the single-extent path.
     if(part) {
         need(part< n.sections.size() && part<=continuation.size(),
              "missing original ISO continuation record");
@@ -2850,7 +2853,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
     std::map<std::string,bool> original_udf_paths,independent;
     std::set<std::string> udf_names,independent_iso;
     const bool partial_partitioned=sequential_vat && image.hybrid_system_area;
-    bool shared_multi_mapping=false;
+    bool shared_multi_mapping=false,multi_mapping_conflict=false;
     if((iso_only_remaster || mixed) && !partial_partitioned)return false;
     need(!mixed || (!iso_only_remaster && mixed_udf_changes),
          "invalid mixed VAT coordinator contract");
@@ -2875,12 +2878,15 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
             ++common_count;
             if(item.directory)continue;
             const auto* n=at->second;
-            if(!shared_physical_mapping(item,*n) ||
-               (!sequential_vat && (n->sections.size()!=1 ||
-                                    item.extents.size()!=1)))return false;
+            const bool multi=n->sections.size()>1 || item.extents.size()>1;
+            if(!shared_physical_mapping(item,*n)) {
+                if(sequential_vat || !multi)return false;
+                // Defer this conflict until the entire mirrored Type-1
+                // namespace and read-only mastering profile are proven.
+                multi_mapping_conflict=true;
+            }
             common_data=true;
-            shared_multi_mapping=shared_multi_mapping ||
-                n->sections.size()>1 || item.extents.size()>1;
+            shared_multi_mapping=shared_multi_mapping || multi;
         }
         // A fully mirrored directory-only namespace remains writable
         // after its last regular file is removed. Type-1 keeps its
@@ -3118,32 +3124,44 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         tree.independent_udf_paths=std::move(independent);
         tree.independent_iso_paths=std::move(independent_iso);
     }
-    if(sequential_vat) {
-        // Do not infer a mirrored tree from the merged Joliet listing.
-        // Independently confirm the same names and extents in BOTH views.
-        // parse_iso can append a synthetic boot.images folder; it is not
-        // an on-disc namespace entry when the ISO tree has no such root.
-        for(bool primary:{true,false}) {
-            const auto view=inspect_iso_namespace(path,primary);
-            if(view.format!="ISO 9660" && view.format!="Joliet")return false;
-            std::set<std::string> seen;
-            for(const auto& item:view.items) {
-                const auto key=upper(item.path);
-                if(!image.boot_descriptor_lbas.empty() &&
-                   !iso_files.count("BOOT.IMAGES") &&
-                   (key=="BOOT.IMAGES" || key.starts_with("BOOT.IMAGES/")))continue;
-                const auto at=iso_files.find(key);
-                if(!seen.insert(key).second || at==iso_files.end() ||
-                   item.directory!=at->second->directory)return false;
-                if(!item.directory && !iso_item_matches_sections(item,*at->second))
-                    return false;
-            }
-            if(seen.size()!=iso_files.size())return false;
-        }
-    } else {
+    if(!sequential_vat) {
         const auto inspection=inspect_udf_edit(path,true,image.hybrid_system_area);
         if(!inspection.parser_compatible || inspection.partition_access_type!=1 ||
            inspection.allocation_bitmap || inspection.allocation_table)return false;
+        need(!multi_mapping_conflict,
+             "fragmented Type-1 shared path has conflicting physical mapping");
+        tree.verify_full_udf_mapping=shared_multi_mapping;
+    }
+    if(sequential_vat || tree.verify_full_udf_mapping) {
+        const auto matching_views=[&]() {
+            // Do not infer a mirrored tree from the merged Joliet listing.
+            // Independently confirm the same names and extents in BOTH views.
+            // parse_iso can append a synthetic boot.images folder; it is not
+            // an on-disc namespace entry when the ISO tree has no such root.
+            for(bool primary:{true,false}) {
+                const auto view=inspect_iso_namespace(path,primary);
+                if(view.format!="ISO 9660" && view.format!="Joliet")return false;
+                std::set<std::string> seen;
+                for(const auto& item:view.items) {
+                    const auto key=upper(item.path);
+                    if(!image.boot_descriptor_lbas.empty() &&
+                       !iso_files.count("BOOT.IMAGES") &&
+                       (key=="BOOT.IMAGES" || key.starts_with("BOOT.IMAGES/")))continue;
+                    const auto at=iso_files.find(key);
+                    if(!seen.insert(key).second || at==iso_files.end() ||
+                       item.directory!=at->second->directory)return false;
+                    if(!item.directory && !iso_item_matches_sections(item,*at->second))
+                        return false;
+                }
+                if(seen.size()!=iso_files.size())return false;
+            }
+            return true;
+        };
+        if(!matching_views()) {
+            need(sequential_vat,
+                 "fragmented Type-1 shared additions require matching ISO/Joliet views");
+            return false;
+        }
     }
     // For a proven mirrored VAT namespace, expand selected directory
     // removals independently from the strict UDF mutation planner.
@@ -3221,10 +3239,10 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         n->continuation_records=old.continuation_records;
         n->joliet_continuation_records=old.joliet_continuation_records;
         if(!old.directory && old.sections.size()>1)
-            need(sequential_vat &&
+            need((sequential_vat || tree.verify_full_udf_mapping) &&
                  old.continuation_records.size()+1==old.sections.size() &&
                  (!image.joliet || old.joliet_continuation_records.size()+1==old.sections.size()),
-                 "VAT ISO multi-extent continuation records missing");
+                 "shared ISO multi-extent continuation records missing");
         need(index.emplace(upper(key),n.get()).second,"duplicate mirrored ISO path");
         if(n->directory) {
             tree.dirs.push_back(n.get());
@@ -3396,7 +3414,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         };
         try {n->identifier=identifier(component,false,n->directory);}
         catch(const EditUnsupported&) {
-            need(!sequential_vat && image.joliet,
+            need(!sequential_vat && !tree.verify_full_udf_mapping && image.joliet,
                  "shared name cannot be represented in ISO9660 without an alias");
             for(unsigned salt=0;salt<128;++salt) {
                 n->identifier=identifier(iso_alias(component,n->directory,salt),
@@ -3406,8 +3424,9 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         }
         need(!collision(n->identifier,0),"shared primary ISO name collision");
         n->name=decode(n->identifier,false,n->directory);
-        need(!sequential_vat || upper(n->name)==upper(component),
-             "VAT mirrored primary identifier must match the UDF component");
+        need(!(sequential_vat || tree.verify_full_udf_mapping) ||
+             upper(n->name)==upper(component),
+             "mirrored primary identifier must match the UDF component");
         if(image.joliet) {
             n->joliet_identifier=identifier(component,true,n->directory);
             need(!collision(n->joliet_identifier,1),"shared Joliet name collision");
@@ -3796,11 +3815,11 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
     need(udf.format()=="UDF" &&
          (!sequential_vat || udf.udf_has_virtual_partition()),
          "mirrored remaster lost UDF namespace");
-    if(sequential_vat) {
+    if(sequential_vat || tree.verify_full_udf_mapping) {
         need(tree.independent_iso_paths.size()<=wanted.size() &&
              udf.items().size()==wanted.size()-tree.independent_iso_paths.size()+
                                  tree.independent_udf_paths.size(),
-             "VAT coordinated namespace size differs");
+             "coordinated namespace size differs");
         for(const auto& key:tree.independent_iso_paths)
             need(wanted.count(key) &&
                  (original.count(key) ||
@@ -3822,11 +3841,11 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
                 continue;
             }
             need(found!=wanted.end() && found->second->directory==item.directory,
-                 "VAT mirrored namespace differs from ISO plan");
+                 "mirrored UDF namespace differs from ISO plan");
             if(item.directory)continue;
             const auto* n=found->second;
             need(shared_physical_mapping(item,*n),
-                 "VAT mirrored file is not the planned complete ISO mapping");
+                 "mirrored file is not the planned complete ISO mapping");
         }
     }
     auto changed=tree.added;
@@ -3837,8 +3856,7 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
         const auto found=std::find_if(udf.items().begin(),udf.items().end(),
             [&](const Item& item){return item.path==key;});
         need(found!=udf.items().end() && found->directory==n->directory &&
-             (n->directory || (found->size==n->size && !found->extents.empty() &&
-                found->extents.front().offset==std::uint64_t(n->lba)*block)),
+             (n->directory || shared_physical_mapping(*found,*n,true)),
              "final shared ISO/Joliet/UDF mapping differs");
     }
 }

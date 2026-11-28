@@ -340,6 +340,62 @@ def main(editor,inspector):
                 jr+=iso_record(303,5,0,'hello;1'.encode('utf-16-be'))
                 jr+=iso_record(305,5,0,'keep;1'.encode('utf-16-be'))
                 common[22*B:23*B]=jr.ljust(B,b'\0')
+            # Existing fragmented shared files must survive a Type-1
+            # tree remaster. Two UDF ShortADs and three optical records
+            # describe the same ordered, physically nonmonotonic data.
+            from test_iso_over4gb import records
+            from test_iso_edit import validate_path_tables
+            fragmented=bytearray(common)
+            payload=b'A'*B+b'B'*B+b'TAIL!'
+            assert fragmented[308*B:311*B]==bytes(3*B)
+            fragmented[310*B:311*B]=payload[:B]
+            fragmented[308*B:308*B+len(payload)-B]=payload[B:]
+            struct.pack_into('<Q',fragmented,fe+56,len(payload))
+            struct.pack_into('<Q',fragmented,fe+64,3)
+            struct.pack_into('<IIIII',fragmented,fe+172,16,B,10,B+5,8)
+            update_tag(fragmented,fe,192,2)
+            second_fields=[]
+            for view in ((False,True) if j else (False,)):
+                directory_lba=22 if view else 20
+                def enc(name):return name.encode('utf-16-be' if view else 'ascii')
+                tree=(iso_record(directory_lba,B,2,b'\0')+
+                      iso_record(directory_lba,B,2,b'\1'))
+                tree+=iso_record(310,B,0x80,enc('hello;1'))
+                second_fields.append(directory_lba*B+len(tree)+2)
+                tree+=iso_record(308,B,0x80,enc('hello;1'))
+                tree+=iso_record(309,5,0,enc('hello;1'))
+                tree+=iso_record(305,5,0,enc('keep;1'))
+                fragmented[directory_lba*B:(directory_lba+1)*B]=tree.ljust(B,b'\0')
+            frag_image=root/f'fragmented-type1-{j}.iso'
+            frag_image.write_bytes(fragmented)
+            assert read_image(frag_image)=={'hello':payload,'keep':b'KEEP!'}
+            source.write_bytes(b'new shared file beside a fragmented file')
+            for field_lba in (310,309):
+                bad=bytearray(fragmented)
+                for field in second_fields:both(bad,field,field_lba)
+                frag_image.write_bytes(bad)
+                run([editor,str(frag_image),'add','NEW.BIN',str(source)],expected=1)
+                assert frag_image.read_bytes()==bad
+            frag_image.write_bytes(fragmented)
+            run([editor,str(frag_image),'batch','mkdir','DATA',
+                 'add','DATA/NEW.BIN',str(source)])
+            frag_wanted={'hello':payload,'keep':b'KEEP!',
+                         'DATA/':None,'DATA/NEW.BIN':source.read_bytes()}
+            after=frag_image.read_bytes()
+            assert after[308*B:311*B]==fragmented[308*B:311*B]
+            assert after[24*B:26*B]==fragmented[24*B:26*B]
+            for view in ((False,True) if j else (False,)):
+                assert read_image(frag_image,view)==frag_wanted
+                assert records(frag_image,'hello',view)==[(310,B),(308,B),(309,5)]
+            validate_path_tables(frag_image)
+            extracted=root/f'fragmented-type1-out-{j}'
+            run([inspector,str(frag_image),'--extract',str(extracted)])
+            assert (extracted/'hello').read_bytes()==payload
+            assert (extracted/'DATA'/'NEW.BIN').read_bytes()==source.read_bytes()
+            run([editor,str(frag_image),'cancel','CANCEL.BIN',str(source)],expected=1)
+            assert frag_image.read_bytes()==after
+            assert not list(root.glob('.iso-wcx-edit-*'))
+
             # Test the same fully mirrored ROM on both partition schemes.
             # The ESP is a separate inert block, not an edited file.
             from test_iso_over4gb import verify_envelope

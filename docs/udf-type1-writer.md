@@ -805,3 +805,21 @@ across MBR/GPT, primary/Joliet and embedded/external VAT. Previous
 single-scope rejection cases are retained where the input remains
 invalid; formerly valid mixed combinations are exercised positively.
 Physical boot and Total Commander host testing remain separate.
+
+### Read-only Type-1 additions beside fragmented mirrored files
+
+For fully mirrored, read-only physical Type-1 bridges without an
+allocation map, adding new shared files and directories can preserve
+existing fragmented ISO Level-3 records and UDF ShortAD mappings.
+The complete logical-to-physical mapping must agree across both
+optical views and UDF, and the staged namespace and every shared
+mapping are checked before commit. Original continuation records and
+payload bytes are retained. New shared data remains contiguous and
+within the existing single-record size limit. Fragmented originals
+require matching primary/Joliet names in this profile, rather than
+new primary-name aliases. Replacing or deleting an existing fragmented
+Type-1 shared file is not enabled by this addition-only extension.
+Writable allocation-map and Rock Ridge layouts retain their existing
+policy. The small fixture exercises nonmonotonic physical order,
+different descriptor boundaries, malformed mappings, independent
+extraction, path tables and cancellation for primary and Joliet ROMs.
