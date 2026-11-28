@@ -529,6 +529,97 @@ def main(editor,inspector):
                 assert (target/'hello').read_bytes()==large.read_bytes()
                 assert (target/'LARGE.BIN').read_bytes()==large.read_bytes()
                 assert not (target/'ADDED.BIN').exists()
+                # Two nonmonotonic UDF ShortADs describe the same
+                # data as three ISO records, with distinct boundaries.
+                fragmented=bytearray(raw)
+                payload=b'A'*B+b'B'*B+b'TAIL!'
+                assert fragmented[308*B:311*B]==bytes(3*B)
+                fragmented[310*B:311*B]=payload[:B]
+                fragmented[308*B:308*B+len(payload)-B]=payload[B:]
+                struct.pack_into('<Q',fragmented,fe+56,len(payload))
+                struct.pack_into('<Q',fragmented,fe+64,3)
+                struct.pack_into('<IIIII',fragmented,fe+172,16,B,10,B+5,8)
+                update_tag(fragmented,fe,192,2)
+                if use_table:
+                    fragmented[bm+40:bm+B]=bytes(B-40)
+                    struct.pack_into('<IIIIIII',fragmented,bm+36,24,
+                                     0x40000000|3*B,3,0x40000000|B,7,
+                                     0x40000000|239*B,11)
+                    update_tag(fragmented,bm,64,BITMAP_LOGICAL)
+                else:
+                    fragmented[bm+24]|=1<<3
+                    fragmented[bm+25]&=~7
+                    update_tag(fragmented,bm,24+bitmap_bytes,BITMAP_LOGICAL)
+                struct.pack_into('<I',fragmented,INTEGRITY_LBA*B+80,original_free-2)
+                update_tag(fragmented,INTEGRITY_LBA*B,88,INTEGRITY_LBA)
+                fields=[]
+                for view in ((False,True) if joliet else (False,)):
+                    sector=22 if view else 20
+                    def enc(name):return name.encode('utf-16-be' if view else 'ascii')
+                    records=(iso_record(sector,B,2,b'\0')+
+                             iso_record(sector,B,2,b'\1')+
+                             iso_record(310,B,0x80,enc('hello;1')))
+                    fields.append(sector*B+len(records)+2)
+                    records+=iso_record(308,B,0x80,enc('hello;1'))
+                    records+=iso_record(309,5,0,enc('hello;1'))
+                    fragmented[sector*B:(sector+1)*B]=records.ljust(B,b'\0')
+                assert len(free_blocks(fragmented))==original_free-2
+                image.write_bytes(fragmented)
+                assert read_image(image)=={'hello':payload}
+                assert optical_records(image,'hello')==[(310,B),(308,B),(309,5)]
+                # A conflicting later optical extent must not authorize
+                # reclamation of any of the three old data sectors.
+                conflict=bytearray(fragmented)
+                for field in fields:both(conflict,field,311)
+                image.write_bytes(conflict)
+                run([editor,str(image),'delete','hello'],expected=1)
+                assert image.read_bytes()==conflict
+                run([editor,str(image),'add','hello',str(large)],expected=1)
+                assert image.read_bytes()==conflict
+                image.write_bytes(fragmented)
+                result=run([editor,str(image),'batchcancelstagedfixed',
+                            'delete','hello'],expected=1)
+                assert result.returncode==3,result.stderr
+                assert image.read_bytes()==fragmented
+                result=run([editor,str(image),'batchcancelstagedfixed',
+                            'add','hello',str(large)],expected=1)
+                assert result.returncode==3,result.stderr
+                assert image.read_bytes()==fragmented
+                # Allocation must not reuse any released payload during
+                # remaster. The new common file fits one optical record.
+                run([editor,str(image),'add','hello',str(large)])
+                relocated=image.read_bytes()
+                new_lba,new_size=optical_records(image,'hello')[0]
+                assert len(optical_records(image,'hello'))==1
+                assert new_size==large.stat().st_size
+                assert not set(range(new_lba,new_lba+(new_size+B-1)//B))&{308,309,310}
+                assert relocated[308*B:311*B]==fragmented[308*B:311*B]
+                assert {8,9,10}<=free_blocks(relocated)
+                assert len(relocated)==len(fragmented)
+                assert relocated[24*B:26*B]==fragmented[24*B:26*B]
+                assert read_image(image)=={'hello':large.read_bytes()}
+                if joliet:assert read_image(image,True)=={'hello':large.read_bytes()}
+                validate_path_tables(image)
+                target=root/f'writable-fragmented-replaced-{use_table}-{joliet}'
+                run([inspector,str(image),'--extract',str(target)])
+                assert (target/'hello').read_bytes()==large.read_bytes()
+                assert relocated[fe+160:fe+168]==fragmented[fe+160:fe+168]
+                # Independently unlink the original fragmented chain.
+                image.write_bytes(fragmented)
+                run([editor,str(image),'delete','hello'])
+                removed=image.read_bytes()
+                assert {2,8,9,10}<=free_blocks(removed)
+                assert removed[fe:fe+B]==bytes(B)
+                assert removed[308*B:311*B]==fragmented[308*B:311*B]
+                assert removed[24*B:26*B]==fragmented[24*B:26*B]
+                assert read_image(image)=={}
+                if joliet:assert read_image(image,True)=={}
+                validate_path_tables(image)
+                target=root/f'writable-fragmented-deleted-{use_table}-{joliet}'
+                run([inspector,str(image),'--extract',str(target)])
+                assert not (target/'hello').exists()
+                assert not list(root.glob('.iso-wcx-edit-*'))
+
                 # Another optical filename sharing the same sector must
                 # prevent reclamation, even though UDF has no such alias.
                 bad=bytearray(raw)

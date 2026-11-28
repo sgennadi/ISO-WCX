@@ -46,6 +46,8 @@ struct CoordinatedIsoUpdate {
     bool type1_fixed_shared_existing=false;
     // Fixed-size shared file/directory creation. Reuse existing optical
     // directory capacity, or reserve fresh ISO metadata in the UDF map.
+    // Combined with fixed_shared_existing only in a reserved tree
+    // remaster for existing fragmented regular files.
     bool type1_fixed_shared_add=false;
     FixedIsoMetadataReservation* type1_fixed_metadata=nullptr;
     // Only for sequential mirrored-tree mastering: independently

@@ -2418,11 +2418,15 @@ void create_udf_type1_batch(const std::filesystem::path& image,
                      fe.recorded==fe.size &&
                      fe.capacity==(fe.size+block-1)/block*block,
                      "fixed shared edit has excess or nonexternal UDF allocation");
+                const bool fragmented_tree=coordinated->type1_fixed_shared_add &&
+                    coordinated->type1_fixed_metadata;
                 auto next=fe.runs.front().at;
-                for(const auto& run:fe.runs) {
-                    need(run.at==next,
-                         "fixed shared edit requires contiguous original allocation");
-                    next+=run.recorded;
+                for(std::size_t i=0;i<fe.runs.size();++i) {
+                    const auto& run=fe.runs[i];
+                    need((i+1==fe.runs.size() || run.recorded%block==0) &&
+                         (fragmented_tree || run.at==next),
+                         "fixed shared edit has unaligned or unauthorized fragmented allocation");
+                    next=run.at+run.recorded;
                 }
             }
             validate_udf_existing_change(volume,change,mastering!=nullptr ||
@@ -4748,7 +4752,8 @@ void edit_udf(const std::filesystem::path& image,
                              coordinated->type1_fixed_metadata->limit_lba<=volume.image_size()/block &&
                              coordinated->iso_metadata_blocks<=32768)),
              "invalid fixed Type-1 metadata reservation contract");
-        need(allow_bridge && validate_stage && !(fixed_existing && fixed_add) &&
+        need(allow_bridge && validate_stage &&
+             (!(fixed_existing && fixed_add) || fixed_tree) &&
              (fixed?(!bounded_partitioned_bridge &&
                      volume.has_allocation_map() &&
                      (volume.partition_access_type()==3 || volume.partition_access_type()==4) &&

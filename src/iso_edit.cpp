@@ -2854,6 +2854,48 @@ Bytes shared_tree_path_table(const SharedTreePlan& tree,unsigned view,bool big) 
     }
     return table;
 }
+// Authorize reclamation by physical sectors, not just logical file
+// length. The strict UDF writer separately proves that every original
+// ShortAD covers exactly this mapping and has one owner.
+void validate_writable_shared_reclaim(const Image& image,
+        const IsoNodeIndex& iso_files,const Node& node) {
+    need(!node.directory && !node.sections.empty(),
+         "writable shared reclamation requires an optical file");
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> ranges;
+    for(std::size_t i=0;i<node.sections.size();++i) {
+        const auto& part=node.sections[i];
+        const auto start=std::uint64_t(part.lba)*block;
+        const auto length=(std::uint64_t(part.length)+block-1)/block*block;
+        need(part.length && (i+1==node.sections.size() || part.length%block==0) &&
+             start>=257ull*block && start<=image.size && length<=image.size-start,
+             "writable shared reclamation exceeds optical extent bounds");
+        for(const auto& [at,bytes]:ranges)
+            need(!intersect(start,length,at,bytes),
+                 "writable shared allocation overlaps itself");
+        ranges.emplace_back(start,length);
+    }
+    const auto exclusive=[&](std::uint64_t at,std::uint64_t bytes) {
+        for(const auto& [start,length]:ranges)
+            need(!intersect(start,length,at,bytes),
+                 "writable shared edit aliases protected optical data");
+    };
+    for(const auto* protected_ranges:{&image.boot_regions,&image.udf_metadata_regions,
+                                      &image.iso_auxiliary_regions,
+                                      &image.hybrid_protected_regions})
+        for(const auto& [at,bytes]:*protected_ranges)exclusive(at,bytes);
+    auto check_other=[&](const Node& other) {
+        if(&other==&node)return;
+        each_extent(other,exclusive);
+        if(other.directory && image.joliet)
+            exclusive(std::uint64_t(le(other.joliet_record,2))*block,
+                      le(other.joliet_record,10));
+    };
+    check_other(*image.root);
+    for(const auto& [key,other]:iso_files) {
+        (void)key;
+        check_other(*other);
+    }
+}
 bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         const IsoNodeIndex& iso_files,const std::vector<ArchiveChange>& changes,
         CoordinatedIsoUpdate& plan,SharedTreePlan& tree,bool sequential_vat=false,
@@ -3156,10 +3198,20 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
         if(writable) {
             // Do not silently extend the optical tree for a split bridge.
             // This route has already proven complete shared namespace identity.
-            if(image.hybrid_system_area || type1_existing || type1_level3 ||
-               !std::all_of(changes.begin(),changes.end(),[](const ArchiveChange& c) {
-                   return !c.remove;
-               }))return false;
+            if(image.hybrid_system_area || type1_level3)return false;
+            // Existing-only fragmented edits need a fresh optical tree.
+            // Keep mixed new/existing requests outside this initial profile.
+            if(type1_existing) {
+                if(!shared_multi_mapping)return false;
+                for(const auto& change:changes) {
+                    const auto found=iso_files.find(upper(edit_path(change.path)));
+                    if(found==iso_files.end() || found->second->directory ||
+                       change.directory)return false;
+                }
+                plan.type1_fixed_shared_existing=true;
+            } else if(!std::all_of(changes.begin(),changes.end(),[](const ArchiveChange& c) {
+                return !c.remove;
+            }))return false;
             for(const auto& change:changes) {
                 const auto key=edit_path(change.path);
                 need(image.boot_descriptor_lbas.empty() ||
@@ -3192,6 +3244,8 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
                 need(!old->second->directory && !change.directory &&
                      udf!=original_udf_paths.end() && !udf->second,
                      "fragmented Type-1 edits require exact regular-file paths");
+                if(plan.type1_fixed_shared_existing)
+                    validate_writable_shared_reclaim(image,iso_files,*old->second);
             }
         }
     }
@@ -3530,7 +3584,7 @@ bool plan_shared_additions(const std::filesystem::path& path,Image& image,
     }
     bool fixed_tree=false;
     if(plan.type1_fixed_shared_add) {
-        fixed_tree=!plan.shared_directories.empty();
+        fixed_tree=plan.type1_fixed_shared_existing || !plan.shared_directories.empty();
         if(!fixed_tree) {
             std::set<const Node*> parents;
             for(const auto& [key,node]:tree.added) {
@@ -3689,7 +3743,8 @@ void coordinate_shared_add_stage(const std::filesystem::path& path,
     need(size%block==0 && size/block<0xffffffffu &&
          (fixed?(size==image.size && !sequential_vat && !mbr_growth &&
                  !gpt_growth && !plan.iso_payload_blocks &&
-                 tree.replaced.empty() &&
+                 (tree.replaced.empty() || (fixed_tree && plan.type1_fixed_shared_existing)) &&
+                 (!tree.removed || (fixed_tree && plan.type1_fixed_shared_existing)) &&
                  (fixed_tree?plan.type1_fixed_metadata==&tree.fixed_metadata:
                              plan.type1_fixed_metadata==nullptr)):
                 size>image.size),
@@ -4192,38 +4247,8 @@ std::unique_ptr<BridgeMetadataEdit> prepare_bridge_metadata_edit(
             for(const auto& [at,bytes]:image.boot_regions)
                 need(!intersect(item->extents[0].offset,item->size,at,bytes),
                      "shared replacement overlaps boot data");
-            if(plan.type1_fixed_shared_existing) {
-                // Reclamation is sector-based. Check the full allocation,
-                // including the final sector's padding, against every
-                // other optical file, directory, boot and metadata span.
-                const auto start=item->extents[0].offset;
-                const auto length=(item->size+block-1)/block*block;
-                need(start>=257ull*block && start<=image.size &&
-                     length<=image.size-start,
-                     "writable shared edit exceeds payload bounds");
-                const auto exclusive=[&](std::uint64_t at,std::uint64_t bytes) {
-                    need(!intersect(start,length,at,bytes),
-                         "writable shared edit aliases protected optical data");
-                };
-                for(const auto* ranges:{&image.boot_regions,&image.udf_metadata_regions,
-                                        &image.iso_auxiliary_regions,
-                                        &image.hybrid_protected_regions})
-                    for(const auto& [at,bytes]:*ranges)exclusive(at,bytes);
-                auto check_other=[&](const Node& other) {
-                    if(&other==node)return;
-                    each_extent(other,exclusive);
-                    if(other.directory && image.joliet)
-                        exclusive(std::uint64_t(le(other.joliet_record,2))*block,
-                                  le(other.joliet_record,10));
-                };
-                check_other(*image.root);
-                for(const auto& [other_key,other]:iso_files) {
-                    (void)other_key;
-                    check_other(*other);
-                }
-                // The strict UDF allocator independently checks every
-                // allocated run and FE for unique ownership.
-            }
+            if(plan.type1_fixed_shared_existing)
+                validate_writable_shared_reclaim(image,iso_files,*node);
             need(node->record_at && (!image.joliet || node->joliet_record_at),
                  "missing shared ISO directory record location");
             shared.emplace(key,node);

@@ -919,3 +919,26 @@ bitmap/table and primary/Joliet fixtures. Equal-length existing-file
 patching retains its prior route. Shared writable relocation of
 fragmented ISO chains, >4 GiB, partitioned bridges, and batches also
 containing new files/directories remain separate work.
+
+### Writable Type-1 existing fragmented common files
+
+For fully mirrored, nonpartitioned bitmap/table bridges, existing
+regular-file-only batches may relocate or unlink fragmented shared
+files via the fixed-size fresh optical tree reservation. Original
+ISO Level-3 sections and UDF ShortADs must agree for the entire ordered
+physical mapping, including nonmonotonic runs. Each original optical
+section's sector-rounded extent is independently checked for aliases
+and protected boot, descriptor, directory and path-table ranges.
+The UDF writer requires exact recorded size, sector-aligned non-final
+runs, no excess allocation and uniquely owned FE/data extents.
+The existing FE/FID survives replacement; all former payload blocks
+are released only after new allocation planning and their bytes remain
+unchanged. A deleted FE is cleared. New replacement payloads still
+require contiguous allocation and the existing 32-bit file size limit.
+The regenerated optical tree removes or replaces every continuation
+record and reserves its metadata through the persistent allocator.
+Bitmap/table and primary/Joliet regression cases exercise two ShortADs
+and three optical sections, conflicting later extents, growth/replace,
+unlink, readback and staged rollback. New fragmented payload authoring,
+>4 GiB writable authoring, mixed new/existing batches and partitioned
+bridges remain outside this extension.
